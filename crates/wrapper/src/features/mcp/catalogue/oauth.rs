@@ -39,6 +39,23 @@ fn form(url: &str, fields: &[(String, String)]) -> Result<Value, ApiError> {
             .map_err(|_| fail())?,
     )
 }
+/// Atlassian's token endpoint takes a JSON body, as its documentation shows; the others a form.
+fn token_post(m: Manifest, url: &str, fields: &[(String, String)]) -> Result<Value, ApiError> {
+    if m.id != "jira" {
+        return form(url, fields);
+    }
+    let body: serde_json::Map<String, Value> = fields
+        .iter()
+        .map(|(key, value)| (key.clone(), json!(value)))
+        .collect();
+    read_json(
+        agent()
+            .post(url)
+            .set("Accept", "application/json")
+            .send_json(Value::Object(body))
+            .map_err(|_| fail())?,
+    )
+}
 fn random() -> Result<String, ApiError> {
     let mut bytes = [0u8; 32];
     getrandom::getrandom(&mut bytes)
@@ -48,6 +65,16 @@ fn random() -> Result<String, ApiError> {
 /// What identifies the client at the token and revocation endpoints. Gmail's, Slack's, Linear's and Microsoft's is
 /// the public client of the build and nothing else: no secret is read, so none can be sent.
 fn token_fields(m: Manifest, env: &HashMap<String, String>) -> Vec<(String, String)> {
+    if m.id == "jira" {
+        // Atlassian's flow needs a client secret: it comes from the process environment
+        // and goes to the token endpoint only, never into the vault.
+        return match (jira::client_id(), jira::client_secret()) {
+            (Some(id), Some(secret)) => {
+                vec![("client_id".into(), id), ("client_secret".into(), secret)]
+            }
+            _ => Vec::new(),
+        };
+    }
     let public = match m.id {
         "gmail" => Some(gmail::client_id()),
         "slack" => Some(slack::client_id()),
@@ -106,6 +133,9 @@ fn validate_scopes(m: Manifest, scopes: Option<&str>) -> Result<(), ApiError> {
             !granted.contains(scope)
                 && !(scope == "email"
                     && granted.contains("https://www.googleapis.com/auth/userinfo.email"))
+                // Atlassian grants offline access by answering a refresh token, and does not
+                // always list the scope among those granted.
+                && !(scope == "offline_access" && m.id == "jira")
         }) {
             return Err(invalid("Certaines autorisations nécessaires n’ont pas été accordées. Reconnectez le service et vérifiez les portées demandées."));
         }
@@ -187,7 +217,23 @@ fn accept_token(
             .ok_or_else(fail)?;
         env.insert("EMAIL".into(), email.into());
     }
-    if m.id == "microsoft365" {
+    if m.id == "jira" {
+        // The account and the site are the ones shown on the card; a renewal keeps those it had.
+        let identity = if env.contains_key("EMAIL") {
+            None
+        } else {
+            let identity = jira::identity(access).ok_or_else(fail)?;
+            env.insert("EMAIL".into(), identity.display.clone());
+            Some(identity)
+        };
+        // The client is the build's: nothing of it is carried into the new secret.
+        env.remove("CLIENT_ID");
+        env.remove("CLIENT_SECRET");
+        jira::write_tokens(ctx, server, env)?;
+        if let Some(identity) = identity {
+            jira::bind_site(ctx, &server.id, &identity)?;
+        }
+    } else if m.id == "microsoft365" {
         // The account is the mailbox address; a renewal keeps the one it had.
         if !env.contains_key("EMAIL") {
             env.insert(
@@ -262,7 +308,7 @@ pub(super) fn refresh(
         "refresh_token".into(),
         env.get("REFRESH_TOKEN").ok_or_else(fail)?.clone(),
     ));
-    let raw = form(&endpoint(m, "token"), &fields)?;
+    let raw = token_post(m, &endpoint(m, "token"), &fields)?;
     let mut renewed = env.clone();
     accept_token(ctx, server, m, &mut renewed, raw)?;
     *env = renewed;
@@ -277,6 +323,7 @@ pub(super) fn begin(
     let fixed_port = match m.id {
         "slack" => 52187,
         "linear" => linear::REDIRECT_PORT,
+        "jira" => jira::REDIRECT_PORT,
         _ => 0,
     };
     let listener = HttpServer::http(("127.0.0.1",if fake_base().is_none() {fixed_port} else {0})).map_err(|_|invalid("Le port de retour OAuth est occupé. Fermez l’autre connexion en cours, puis réessayez."))?;
@@ -298,19 +345,20 @@ pub(super) fn begin(
         save(ctx, &server.id, &env)?;
     }
     if fake_base().is_some()
-        && !matches!(m.id, "gmail" | "slack" | "linear" | "microsoft365")
+        && !matches!(m.id, "gmail" | "slack" | "linear" | "jira" | "microsoft365")
         && !env.contains_key("CLIENT_ID")
     {
         env.insert("CLIENT_ID".into(), "ezerbot-factice".into());
         save(ctx, &server.id, &env)?;
     }
-    // Gmail's, Slack's and Linear's client is the build's, never read from the vault.
+    // Gmail's, Slack's, Linear's and Jira's client is the build's, never read from the vault.
     // A dynamic client is registered for this exact redirect URI. Notion assigns
     // a new loopback port on every attempt, so register anew after restart too.
     let client = match m.id {
         "gmail" => gmail::client_id().ok_or_else(gmail::not_configured)?,
         "slack" => slack::client_id().ok_or_else(slack::not_configured)?,
         "linear" => linear::client_id().ok_or_else(linear::not_configured)?,
+        "jira" => jira::client_id().ok_or_else(jira::not_configured)?,
         "microsoft365" => microsoft::client_id().ok_or_else(microsoft::not_configured)?,
         _ => env.get("CLIENT_ID").ok_or_else(fail)?.clone(),
     };
@@ -321,21 +369,25 @@ pub(super) fn begin(
             .append_pair("response_type", "code")
             .append_pair("client_id", &client)
             .append_pair("redirect_uri", &redirect)
-            .append_pair("state", &state)
-            .append_pair(
-                "code_challenge",
-                &URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
-            )
-            .append_pair("code_challenge_method", "S256")
-            .append_pair(
-                "scope",
-                // Linear takes its scopes separated by commas.
-                &if m.id == "linear" {
-                    m.scopes.replace(' ', ",")
-                } else {
-                    m.scopes.to_owned()
-                },
-            );
+            .append_pair("state", &state);
+        // Atlassian's 3LO flow documents no PKCE: it is bound by its state and its secret.
+        if m.id != "jira" {
+            query
+                .append_pair(
+                    "code_challenge",
+                    &URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+                )
+                .append_pair("code_challenge_method", "S256");
+        }
+        query.append_pair(
+            "scope",
+            // Linear takes its scopes separated by commas.
+            &if m.id == "linear" {
+                m.scopes.replace(' ', ",")
+            } else {
+                m.scopes.to_owned()
+            },
+        );
         if m.id == "microsoft365" {
             query.append_pair("prompt", "select_account");
         }
@@ -348,6 +400,11 @@ pub(super) fn begin(
                     "consent"
                 },
             );
+        }
+        if m.id == "jira" {
+            query
+                .append_pair("audience", "api.atlassian.com")
+                .append_pair("prompt", "consent");
         }
         if m.id == "notion" {
             query.append_pair("resource", m.endpoint);
@@ -445,9 +502,11 @@ pub(super) fn begin(
                         ("grant_type".into(), "authorization_code".into()),
                         ("code".into(), code.into()),
                         ("redirect_uri".into(), redirect.clone()),
-                        ("code_verifier".into(), verifier.clone()),
                     ]);
-                    let raw = form(&endpoint(m, "token"), &fields)?;
+                    if m.id != "jira" {
+                        fields.push(("code_verifier".into(), verifier.clone()));
+                    }
+                    let raw = token_post(m, &endpoint(m, "token"), &fields)?;
                     // A new login must not retain a refresh token from another account.
                     env.remove("ACCESS_TOKEN");
                     env.remove("REFRESH_TOKEN");
@@ -565,9 +624,11 @@ pub(super) fn revoke(m: Manifest, env: &HashMap<String, String>) -> bool {
     if m.id == "github" {
         return super::github::revoke(m, env);
     }
+    // Atlassian documents no revocation for a 3LO token: nothing is asked, and the
+    // disconnection says that the remote access remains to be removed by hand.
     // Microsoft has no revocation endpoint for a public client: the token goes from this Mac
     // only, and the message says the remote side was not confirmed.
-    if m.id == "microsoft365" {
+    if matches!(m.id, "jira" | "microsoft365") {
         return false;
     }
     let Some(token) = token else { return true };

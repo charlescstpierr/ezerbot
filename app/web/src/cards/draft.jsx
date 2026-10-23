@@ -21,7 +21,7 @@ export function DraftCard({ message, input, disabled, expired }) {
   const issue = draft.titre !== undefined;
   const slack = draft.espace !== undefined;
   const meeting = draft.reunion !== undefined;
-  const linear = draft.service === "Linear";
+  const tracker = draft.service === "Linear" || draft.service === "Jira Cloud";
   const titled = issue || email;
   const [edited, setEdited] = useState(null);
   const [editedTitle, setEditedTitle] = useState(null);
@@ -40,7 +40,7 @@ export function DraftCard({ message, input, disabled, expired }) {
   const failed = result?.status === "failed" && !denied;
   const published = result?.status === "done";
   const nothing = email || meeting ? "envoyé" : "publié";
-  const failure = meeting ? MEETING_FAILURES[draft.etat] : slack || linear ? SLACK_FAILURES[draft.etat] : undefined;
+  const failure = meeting ? MEETING_FAILURES[draft.etat] : slack || tracker ? SLACK_FAILURES[draft.etat] : undefined;
   const statusText = denied ? `Annulé · rien n’a été ${nothing}` : published ? (email ? "Courriel envoyé" : meeting ? "Message envoyé" : issue ? "Issue créée" : "Publié")
     : failed ? (email ? EMAIL_FAILURES[draft.etat] || "Non envoyé" : failure || (meeting ? "Non envoyé" : "Non publié"))
     : status === "resolved" ? "Envoi validé" : status === "pending" ? "En attente de vous" : `Rien n’a été ${nothing}`;
@@ -52,7 +52,7 @@ export function DraftCard({ message, input, disabled, expired }) {
           <div className="min-w-0"><dt className="text-xs text-muted-foreground">Réunion</dt><dd className="mt-1 ml-0 break-words">{draft.reunion}</dd></div>
           <div className="min-w-0"><dt className="text-xs text-muted-foreground">Envoyé au nom de</dt><dd className="mt-1 ml-0 break-words">{draft.bot}</dd></div>
         </dl>
-        : linear
+        : tracker
         ? <dl className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3 text-sm" aria-label="Cible du brouillon">
           <div className="min-w-0"><dt className="text-xs text-muted-foreground">Publié sous le compte</dt><dd className="mt-1 ml-0 break-words">{draft.compte}</dd></div>
           <div className="min-w-0"><dt className="text-xs text-muted-foreground">{issue ? "Équipe" : "Issue"}</dt><dd className="mt-1 ml-0 break-words">{issue ? draft.equipe : draft.issue}</dd></div>

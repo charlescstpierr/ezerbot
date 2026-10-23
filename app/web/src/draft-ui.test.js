@@ -256,6 +256,40 @@ test("une issue Linear créée nomme son identifiant, et un envoi refusé ou non
   }
 });
 
+function renderJiraDraft({ status, etat, publication_result }) {
+  const request = {
+    entry_id: "jira", status: { status }, route: { requesting_bot_id: "grokbot" },
+    kind: { kind: "approval", tool: "jira_comment_issue" },
+    arguments: { brouillon: { service: "Jira Cloud", action: "Commenter une issue Jira", compte: "charles@atelier.test · Atelier Ezerbot", issue: "ENG-12", texte: "Texte proposé", empreinte: "abc", ...(etat ? { etat } : {}) } },
+    ...(publication_result ? { publication_result } : {}),
+  };
+  const input = { request, status, pending: status === "pending", busy: false, error: "", act: async () => true };
+  globalThis.window = { GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } } };
+  try {
+    return renderToStaticMarkup(React.createElement(DraftCard, { message: { id: "jira", kind: "approval", payload: request }, input, disabled: false, expired: false }));
+  } finally { delete globalThis.window; }
+}
+
+test("la carte brouillon d’un commentaire Jira montre le compte et le site, l’issue et le texte exact, sans titre ni « Toujours »", () => {
+  const html = renderJiraDraft({ status: "pending" });
+  for (const label of [">Publié sous le compte<", ">Issue<", "Texte exact du commentaire (modifiable)", ">Envoyer<", ">Annuler<"]) assert.ok(html.includes(label), label);
+  for (const value of ["charles@atelier.test · Atelier Ezerbot", ">ENG-12<", ">Texte proposé</textarea>"]) assert.ok(html.includes(value), value);
+  assert.ok(!html.includes("Titre de l’issue"));
+  assert.ok(!html.includes("Toujours"));
+});
+
+test("un commentaire Jira publié donne son adresse, et un envoi refusé ou non confirmé ne prétend rien avoir publié", () => {
+  const sent = renderJiraDraft({ status: "resolved", etat: "sent", publication_result: { status: "done", output: { compte: "charles@atelier.test · Atelier Ezerbot", url: "https://atelier.atlassian.net/browse/ENG-12?focusedCommentId=10042" } } });
+  assert.ok(sent.includes("Commentaire publié sous charles@atelier.test · Atelier Ezerbot"));
+  assert.ok(sent.includes("https://atelier.atlassian.net/browse/ENG-12?focusedCommentId=10042"));
+  for (const etat of ["refused", "rate_limited", "unconfirmed"]) {
+    const html = renderJiraDraft({ status: "resolved", etat, publication_result: { status: "failed", reason: "Raison du refus." } });
+    assert.ok(html.includes("Raison du refus."), etat);
+    assert.ok(!html.includes("Commentaire publié"), etat);
+    assert.ok(!html.includes(">Envoyer<"), etat);
+  }
+});
+
 test("la carte brouillon d’un courriel Outlook montre De, À, Cc, Objet et Corps, Envoyer et Annuler, sans « Toujours », et dit ce qui est parti", () => {
   const outlook = { service: "Microsoft 365", tool: "outlook_send_mail" };
   const html = renderEmailDraft({ ...outlook, status: "pending" });

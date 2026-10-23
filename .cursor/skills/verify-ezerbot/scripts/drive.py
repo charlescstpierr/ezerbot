@@ -201,7 +201,11 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               const microsoft = panel.querySelector('[data-connector="microsoft365"]');
               const microsoftFree = !!microsoft && !microsoft.querySelector("form") && microsoft.querySelectorAll('input:not([type="checkbox"])').length === 0;
               const microsoftActions = !!microsoft && /Outlook/.test(microsoft.textContent) && /carte brouillon/i.test(microsoft.textContent);
-              return heading === "Connecteurs" && add && reunions && gmailFree && gmailReads && linearFree && linearActions && microsoftFree && microsoftActions ? {ok: true, heading, reunions, gmailFree, gmailReads, linearFree, linearActions, microsoftFree, microsoftActions} : null;
+              // Jira Cloud non plus, et sa fiche sépare la lecture de l'effet par carte brouillon.
+              const jira = panel.querySelector('[data-connector="jira"]');
+              const jiraFree = !!jira && !jira.querySelector("form") && jira.querySelectorAll('input:not([type="checkbox"])').length === 0;
+              const jiraActions = !!jira && /issues/i.test(jira.textContent) && /carte brouillon/i.test(jira.textContent);
+              return heading === "Connecteurs" && add && reunions && gmailFree && gmailReads && linearFree && linearActions && microsoftFree && microsoftActions && jiraFree && jiraActions ? {ok: true, heading, reunions, gmailFree, gmailReads, linearFree, linearActions, microsoftFree, microsoftActions, jiraFree, jiraActions} : null;
             }""",
             "connecteurs non prêts",
         )
@@ -2039,7 +2043,7 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
     if sphere == "dictee":
         return [f"microphone-{theme}-{size}.png", f"repli-{theme}-{size}.png", f"ecoute-{theme}-{size}.png", f"brouillon-{theme}-{size}.png"]
     if sphere == "parametres-connecteurs":
-        return [f"{theme}-{size}.png", f"linear-{theme}-{size}.png", f"microsoft-{theme}-{size}.png"]
+        return [f"{theme}-{size}.png", f"linear-{theme}-{size}.png", f"microsoft-{theme}-{size}.png", f"jira-{theme}-{size}.png"]
     return [f"{theme}-{size}.png"]
 
 
@@ -2056,9 +2060,9 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
                   return true;
                 }""",
             )
-        if sphere == "parametres-connecteurs" and index in (1, 2):
-            # Un plan par fiche ajoutée au catalogue, que le titre Connecteurs en haut du premier laisse hors cadre.
-            service = "linear" if index == 1 else "microsoft365"
+        if sphere == "parametres-connecteurs" and index in (1, 2, 3):
+            # Un plan par fiche ajoutée au catalogue (Linear, Microsoft 365, Jira Cloud), que le titre Connecteurs en haut du premier laisse hors cadre.
+            service = ["linear", "microsoft365", "jira"][index - 1]
             eval_js(
                 evidence,
                 f"""() => {{

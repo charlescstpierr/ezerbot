@@ -350,6 +350,22 @@ test("copying a JPEG, GIF, WebP or BMP in the browser writes a PNG drawn on a ca
   });
 });
 
+test("a fence opened on a list item closes on its own indented fence and spares the image after it", () => {
+  const sample = "![x](/api/attachments/abc)";
+  const images = (body) => gallery.galleryImages({ body }, { markdown: true });
+  const result = "![result](/api/generated/result.png)";
+  const listed = `- \`\`\`text\n  ${sample}\n  \`\`\`\n\n${result}`;
+  assert.deepEqual(images(listed).map((entry) => entry.url), ["/api/generated/result.png"]);
+  assert.equal(gallery.proseWithoutGallery(listed, images(listed)), `- \`\`\`text\n  ${sample}\n  \`\`\``);
+  const numbered = `1. \`\`\`\n   ${sample}\n   \`\`\`\n2. suite ${result}`;
+  assert.deepEqual(images(numbered).map((entry) => entry.url), ["/api/generated/result.png"]);
+  const nested = `- a\n  - ~~~\n    ${sample}\n    ~~~\n\n${result}`;
+  assert.deepEqual(images(nested).map((entry) => entry.url), ["/api/generated/result.png"]);
+  const quoted = `> \`\`\`\n> ${sample}\n> \`\`\`\n\n${result}`;
+  assert.deepEqual(images(quoted).map((entry) => entry.url), ["/api/generated/result.png"]);
+  assert.equal(images(`- \`\`\`\n  ${sample}`).length, 0, "a list fence still streaming is code to the end");
+});
+
 const memoMessage = (words, extra = {}) => ({
   id: "memo-msg",
   body: "Écoute ceci.",

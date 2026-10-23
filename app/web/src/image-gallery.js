@@ -67,12 +67,12 @@ function codeRanges(body) {
   for (const line of body.split("\n")) {
     const end = start + line.length + 1;
     if (!fence) {
-      const opening = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      const opening = line.match(/^[ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)*(`{3,}|~{3,})(.*)$/);
       if (opening && !(opening[1][0] === "`" && opening[2].includes("`"))) {
         inlineCodeRanges(body.slice(textStart, start), textStart, ranges);
         fence = { char: opening[1][0], size: opening[1].length, start };
       }
-    } else if (new RegExp(`^ {0,3}\\${fence.char}{${fence.size},}[ \\t]*$`).test(line)) {
+    } else if (new RegExp(`^[ \\t]*(?:>[ \\t]*)*\\${fence.char}{${fence.size},}[ \\t]*$`).test(line)) {
       ranges.push([fence.start, end]);
       textStart = end;
       fence = null;

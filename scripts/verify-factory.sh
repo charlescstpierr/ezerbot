@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Barrière de preuve de l'usine.
-# Usage : scripts/verify-factory.sh [--comment N] <issue> [sha] [fichier]
+# Usage : scripts/verify-factory.sh [--comment N] [--release-size] <issue> [sha] [fichier]
 #
 # Imprime un résumé markdown : le SHA vérifié (git rev-parse HEAD), une ligne
-# par étape (code de sortie et ligne de résultat), puis le journal complet
+# par étape (code de sortie, résultat et durée en secondes), puis le journal complet
 # replié dans <details>. Le même texte est écrit dans
 # target/verify-factory/<issue>-<sha>.log. Si un SHA est donné, HEAD doit
 # être exactement ce commit. Rust stable requis : 1.99.1.
@@ -12,6 +12,11 @@
 # commentaire qui contient déjà <!-- factory-proof -->. GitHub refuse un
 # commentaire de plus de 65536 caractères : dans ce cas le commentaire garde
 # le résumé, le début et la fin du journal. Le fichier local reste complet.
+#
+# --release-size construit aussi grokbot-wrapper en release et consigne sa taille
+# en octets. Les mesures sont comparées au dernier journal local dont le SHA
+# appartient à origin/main ; une comparaison indisponible est notée « — ».
+# Aucune mesure n'impose de seuil de réussite.
 #
 # Enchaîne ensuite, depuis la racine du dépôt :
 #   cargo build --workspace --locked
@@ -35,11 +40,12 @@ set -euo pipefail
 export CARGO_TERM_COLOR=never
 
 usage() {
-  printf '%s\n' 'Usage: scripts/verify-factory.sh [--comment N] <issue> [sha] [fichier]' >&2
+  printf '%s\n' 'Usage: scripts/verify-factory.sh [--comment N] [--release-size] <issue> [sha] [fichier]' >&2
   exit 2
 }
 
 comment_pr=""
+release_size=0
 positional=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,6 +55,10 @@ while [[ $# -gt 0 ]]; do
       fi
       comment_pr=$2
       shift 2
+      ;;
+    --release-size)
+      release_size=1
+      shift
       ;;
     --)
       shift
@@ -100,6 +110,11 @@ head_sha=""
 step_cmd=()
 step_code=()
 step_result=()
+step_duration=()
+comparison_cmd=()
+comparison_duration=()
+comparison_bytes="—"
+release_bytes="—"
 
 finish() {
   local status=$?
@@ -169,7 +184,7 @@ shorten() {
 }
 
 record_step() {
-  local cmd=$1 code=$2 result=$3
+  local cmd=$1 code=$2 result=$3 duration=$4
   cmd=${cmd//\`/\'}
   result=${result//$'\n'/ }
   result=${result//\`/\'}
@@ -178,6 +193,67 @@ record_step() {
   step_cmd+=("$cmd")
   step_code+=("$code")
   step_result+=("$result")
+  step_duration+=("$duration")
+}
+
+# Ne lit que le résumé, jamais le journal brut (qui peut contenir de faux
+# en-têtes). Toute erreur de lecture ou de comparaison reste non bloquante.
+load_comparison() {
+  local duration cmd
+  while IFS=$'\t' read -r duration cmd; do
+    if [[ "$duration" == size ]]; then
+      comparison_bytes="${cmd} octets"
+    else
+      comparison_cmd+=("$cmd")
+      comparison_duration+=("$duration")
+    fi
+  done < <(python3 - "$root/target/verify-factory" <<'PY' 2>/dev/null || true
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+try:
+    main = set(subprocess.check_output(["git", "rev-list", "origin/main"], text=True).splitlines())
+    candidates = []
+    for path in Path(sys.argv[1]).glob("*.log"):
+        match = re.fullmatch(r"[0-9]+-([0-9a-f]{40})\.log", path.name)
+        if match and match[1] in main:
+            try:
+                candidates.append((path.stat().st_mtime_ns, path, match[1]))
+            except OSError:
+                pass
+    for _, path, sha in sorted(candidates, reverse=True):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if not text.startswith("<!-- factory-proof -->\n\nSHA `%s`\n" % sha):
+            continue
+        summary = text.partition("\n<details>\n")[0]
+        for line in summary.splitlines():
+            step = re.fullmatch(r"- `([^\t]*)` — exit [0-9]+ — .* — ([0-9]+) s — origin/main : (?:[0-9]+ s|—)", line)
+            size = re.fullmatch(r"- binaire release : ([0-9]+) octets — origin/main : (?:[0-9]+ octets|—)", line)
+            if step:
+                print("%s\t%s" % (step[2], step[1]))
+            elif size:
+                print("size\t%s" % size[1])
+        break
+except (OSError, subprocess.SubprocessError):
+    pass
+PY
+  )
+}
+
+previous_duration() {
+  local cmd=$1 i
+  for i in "${!comparison_cmd[@]}"; do
+    if [[ "${comparison_cmd[$i]}" == "$cmd" ]]; then
+      printf '%s s' "${comparison_duration[$i]}"
+      return
+    fi
+  done
+  printf '%s' '—'
 }
 
 result_line() {
@@ -252,8 +328,11 @@ render_markdown() {
     if [[ ${#step_cmd[@]} -gt 0 ]]; then
       printf '\n'
       for i in "${!step_cmd[@]}"; do
-        printf -- '- `%s` — exit %s — %s\n' "${step_cmd[$i]}" "${step_code[$i]}" "${step_result[$i]}"
+        printf -- '- `%s` — exit %s — %s — %s s — origin/main : %s\n' "${step_cmd[$i]}" "${step_code[$i]}" "${step_result[$i]}" "${step_duration[$i]}" "$(previous_duration "${step_cmd[$i]}")"
       done
+    fi
+    if [[ "$release_size" -eq 1 ]]; then
+      printf -- '- binaire release : %s — origin/main : %s\n' "$release_bytes" "$comparison_bytes"
     fi
     printf '\n<details>\n<summary>Journal complet</summary>\n\n%s\n' "$fence"
     cat "$raw"
@@ -503,21 +582,25 @@ if ! git rev-parse --verify --quiet 'origin/main^{commit}' >/dev/null; then
   exit 1
 fi
 
+load_comparison
 captured_status=0
 
 run_captured() {
-  local display=$1 status out line
-  shift
+  local display=$1 consume=$2 status out line started duration
+  shift 2
   emit "+ ${display}"
   out=$(mktemp)
+  started=$SECONDS
   set +e
   "$@" >"$out" 2>&1
   status=$?
   set -e
+  duration=$((SECONDS - started))
   cat "$out" >>"$RAW"
   emit "exit:${status}"
   line=$(result_line "$out" "$status")
-  record_step "$display" "$status" "$line"
+  record_step "$display" "$status" "$line" "$duration"
+  "$consume" "$out" "$status" || true
   rm -f "$out"
   captured_status=$status
 }
@@ -528,7 +611,7 @@ run_strict() {
     display+="${arg} "
   done
   display=${display% }
-  run_captured "$display" "$@"
+  run_captured "$display" : "$@"
   if [[ "$captured_status" -ne 0 ]]; then
     exit 1
   fi
@@ -536,7 +619,7 @@ run_strict() {
 
 run_shell() {
   local cmd=$1
-  run_captured "$cmd" env -u BASH_ENV bash --noprofile --norc -o pipefail -c "$cmd"
+  run_captured "$cmd" : env -u BASH_ENV bash --noprofile --norc -o pipefail -c "$cmd"
   if [[ "$captured_status" -ne 0 ]]; then
     fail=1
   fi
@@ -547,6 +630,46 @@ run_strict cargo fmt --check
 run_strict cargo test --workspace --locked
 run_strict cargo clippy --workspace --all-targets --locked -- -D warnings
 run_strict gitleaks detect --redact --log-opts=origin/main..HEAD
+
+measure_release_size() {
+  # L'artefact annoncé par ce build est la référence, même avec un répertoire
+  # cible personnalisé ou une compilation croisée. Ne pas mesurer un ancien
+  # target/release/grokbot-wrapper par accident.
+  [[ "$2" -eq 0 ]] || return 0
+  release_bytes=$(python3 - "$1" <<'PY' 2>/dev/null
+import json
+from pathlib import Path
+import sys
+
+size = "—"
+try:
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+        try:
+            artifact = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(artifact, dict):
+            continue
+        target = artifact.get("target") or {}
+        if (artifact.get("reason") == "compiler-artifact"
+                and target.get("name") == "grokbot-wrapper"
+                and "bin" in target.get("kind", [])
+                and artifact.get("executable")):
+            size = "%s octets" % Path(artifact["executable"]).stat().st_size
+except (OSError, UnicodeError, TypeError, AttributeError):
+    pass
+print(size)
+PY
+  ) || release_bytes="—"
+}
+
+if [[ "$release_size" -eq 1 ]]; then
+  run_captured 'cargo build --release --locked -p grokbot-wrapper --message-format=json' measure_release_size \
+    cargo build --release --locked -p grokbot-wrapper --message-format=json
+  if [[ "$captured_status" -ne 0 ]]; then
+    exit 1
+  fi
+fi
 
 emit "critères: ${criteria_source}"
 

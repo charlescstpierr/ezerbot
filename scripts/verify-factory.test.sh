@@ -18,7 +18,7 @@ trap cleanup EXIT
 # PATH sans le vrai gh : seuls les outils du test et les doublures sont visibles.
 SAFE=$(mktemp -d)
 keep+=("$SAFE")
-for tool in git tee date mktemp sed awk dirname basename mkdir cp rm env bash grep diff head tail chmod cat python3; do
+for tool in git tee date mktemp sed awk dirname basename mkdir cp rm env bash grep diff head tail chmod cat python3 sleep; do
   if [[ -x "/usr/bin/$tool" ]]; then
     ln -s "/usr/bin/$tool" "$SAFE/$tool"
   elif [[ -x "/bin/$tool" ]]; then
@@ -45,7 +45,7 @@ setup_repo() {
   CARGO_STUB_LOG="$REPO/cargo-invocations"
   : >"$CARGO_STUB_LOG"
   export CARGO_STUB_LOG
-  unset RUSTC_STUB_VERSION GH_ISSUE_BODY GH_STUB_FAIL || true
+  unset RUSTC_STUB_VERSION GH_ISSUE_BODY GH_STUB_FAIL RELEASE_STUB_SIZE RELEASE_STUB_FAIL RELEASE_STUB_MISSING CARGO_TARGET_DIR || true
 
   cat >"$BIN/cargo" <<'EOF'
 #!/bin/bash
@@ -53,6 +53,22 @@ printf 'cargo %s\n' "$*" >>"${CARGO_STUB_LOG:?}"
 if [[ "${CARGO_STUB_FAIL:-}" == "${1:-}" ]]; then
   printf '%s\n' 'echec volontaire' >&2
   exit 1
+fi
+if [[ "${1:-}" == build && "${2:-}" == --release ]]; then
+  if [[ "${RELEASE_STUB_FAIL:-}" == 1 ]]; then
+    exit 1
+  fi
+  target="${CARGO_TARGET_DIR:-$PWD/target}/cross-target/release"
+  mkdir -p "$target"
+  python3 - "$target/grokbot-wrapper" "${RELEASE_STUB_SIZE:-12345}" <<'PY'
+import json, os, sys
+executable = sys.argv[1]
+if os.environ.get("RELEASE_STUB_MISSING"):
+    executable += ".absent"
+else:
+    open(executable, "wb").truncate(int(sys.argv[2]))
+print(json.dumps({"reason": "compiler-artifact", "target": {"name": "grokbot-wrapper", "kind": ["bin"]}, "executable": executable}))
+PY
 fi
 case "${1:-}" in
   test)
@@ -71,7 +87,11 @@ printf '%s\n' "${RUSTC_STUB_VERSION:-rustc 1.99.1 (test)}"
 EOF
   cat >"$BIN/gitleaks" <<'EOF'
 #!/bin/bash
-printf '%s\n' '1:00AM INF no leaks found'
+if [[ " $* " != *' --redact '* ]]; then
+  printf '%s\n' 'SECRET-STUB-NEVER-PUBLISH'
+else
+  printf '%s\n' '1:00AM INF no leaks found'
+fi
 exit 0
 EOF
   chmod +x "$BIN/cargo" "$BIN/rustc" "$BIN/gitleaks"
@@ -240,6 +260,7 @@ require_grep "critères: fichier ${REPO}/criteres.md" "source fichier"
 require_grep "+ echo critere-ok" "commande verify"
 require_grep "critere-ok" "sortie verify"
 require_grep "verify-factory: ok" "verdict ok"
+require_absent 'SECRET-STUB-NEVER-PUBLISH' "gitleaks reste rédigé"
 require_grep '- `cargo build --workspace --locked` — exit 0 — Finished '"'"'dev'"'"' profile [unoptimized + debuginfo] target(s) in 0.01s' "résultat build"
 require_grep '- `cargo fmt --check` — exit 0 — ok' "résultat fmt"
 require_grep '- `cargo test --workspace --locked` — exit 0 — test result: ok. 12 passed; 0 failed; 1 ignored; 0 measured' "résultat tests"
@@ -255,6 +276,27 @@ if printf '%s\n' "$OUTPUT" | grep -Eq '^horodatage=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0
   ok "horodatage UTC"
 else
   bad "horodatage UTC"
+fi
+
+# Chaque étape du contrat markdown porte sa durée et sa comparaison, sans
+# perdre le compte des tests. Pas de coût release sans demande explicite.
+if printf '%s\n' "$OUTPUT" | python3 -c '
+import re, sys
+summary = sys.stdin.read().partition("\n<details>\n")[0]
+steps = [line for line in summary.splitlines() if line.startswith("- `")]
+assert len(steps) == 6
+assert all(re.search(r" — [0-9]+ s — origin/main : —$", line) for line in steps)
+assert any("cargo test" in line and "12 passed" in line for line in steps)
+'; then
+  ok "durée et comparaison de chaque étape, compte de tests conservé"
+else
+  bad "durée et comparaison de chaque étape, compte de tests conservé"
+fi
+require_absent 'binaire release' "aucune ligne de taille par défaut"
+if grep -F -q -- '--release' "$CARGO_STUB_LOG"; then
+  bad "aucun build release par défaut"
+else
+  ok "aucun build release par défaut"
 fi
 
 # 3. Sans commande verify : la barrière fixe suffit.
@@ -520,12 +562,12 @@ python3 -c 'print("x"*70000)'
 false
 ```
 EOF
-run_script --comment 138 33 "$REPO/criteres.md"
+run_script --release-size --comment 138 33 "$REPO/criteres.md"
 expect_status 1 "ligne géante puis échec"
 if python3 -c '
 import json, sys
 body = json.load(open(sys.argv[1], encoding="utf-8"))["body"]
-need = ("<!-- factory-proof -->", "- `false` — exit 1", "verify-factory: échec", "python3 -c")
+need = ("<!-- factory-proof -->", "- `false` — exit 1", "verify-factory: échec", "python3 -c", "binaire release : 12345 octets", " s — origin/main : —")
 raise SystemExit(0 if len(body) <= 65536 and all(part in body for part in need) else 1)
 ' "$GH_STATE/last.json"; then
   ok "étapes et verdict publiés"
@@ -533,6 +575,123 @@ else
   bad "étapes et verdict publiés"
 fi
 unset GH_STATE
+
+# 23. Build release opt-in, taille exacte et répertoire cible effectif.
+setup_repo
+printf '```verify\nsleep 1\n```\n' >"$REPO/criteres.md"
+export CARGO_TARGET_DIR="$REPO/cible avec espaces"
+run_script --release-size 248 "$REPO/criteres.md"
+expect_status 0 "mesure release demandée"
+require_grep '- binaire release : 12345 octets — origin/main : —' "taille en octets"
+require_grep '+ cargo build --release --locked -p grokbot-wrapper' "build release lancé"
+if printf '%s\n' "$OUTPUT" | python3 -c '
+import re, sys
+summary = sys.stdin.read().partition("\n<details>\n")[0]
+steps = [line for line in summary.splitlines() if line.startswith("- `")]
+assert len(steps) == 7
+assert all(re.search(r" — [0-9]+ s — origin/main : —$", line) for line in steps)
+sleep = next(line for line in steps if "`sleep 1`" in line)
+assert int(re.search(r" — ([0-9]+) s — origin/main", sleep)[1]) >= 1
+'; then
+  ok "durée mesurée pendant la commande et présente pour le build release"
+else
+  bad "durée mesurée pendant la commande et présente pour le build release"
+fi
+
+# 24. Dernier journal de main (y compris un ancêtre), pas un journal de branche
+# plus récent ; toutes les issues sont des références possibles.
+main_sha=$(git -C "$REPO" rev-parse origin/main)
+git -C "$REPO" checkout --quiet --detach "$main_sha"
+run_script --release-size 100 "$REPO/criteres.md"
+expect_status 0 "première référence main"
+export RELEASE_STUB_SIZE=23456
+run_script --release-size 101 "$REPO/criteres.md"
+expect_status 0 "dernière référence main"
+reference="$REPO/target/verify-factory/101-${main_sha}.log"
+# Ordre déterministe même sur un système de fichiers à faible résolution.
+python3 - "$REPO/target/verify-factory" "$reference" <<'PY'
+from pathlib import Path
+import os, sys
+for path in Path(sys.argv[1]).glob("*.log"):
+    os.utime(path, (100, 100))
+os.utime(sys.argv[2], (200, 200))
+PY
+printf 'main suivant\n' >>"$REPO/readme"
+git -C "$REPO" add readme
+git -C "$REPO" commit -m 'main suivant' >/dev/null
+git -C "$REPO" update-ref refs/remotes/origin/main HEAD
+git -C "$REPO" checkout --quiet --detach "$SHA"
+export RELEASE_STUB_SIZE=34567
+run_script --release-size 248 "$REPO/criteres.md"
+expect_status 0 "comparaison avec dernière référence main"
+require_grep '- binaire release : 34567 octets — origin/main : 23456 octets' "taille précédente de main"
+if printf '%s\n' "$OUTPUT" | python3 -c '
+import re, sys
+summary = sys.stdin.read().partition("\n<details>\n")[0]
+reference = open(sys.argv[1], encoding="utf-8").read().partition("\n<details>\n")[0]
+pattern = r"^- `(.+)` — exit [0-9]+ — .* — ([0-9]+) s — origin/main : "
+previous = dict(re.findall(pattern, reference, re.M))
+steps = [line for line in summary.splitlines() if line.startswith("- `")]
+assert len(steps) == 7
+for line in steps:
+    cmd, duration = re.match(pattern, line).groups()
+    assert line.endswith(" — origin/main : %s s" % previous[cmd])
+' "$reference"; then
+  ok "durées précédentes de main pour chaque étape"
+else
+  bad "durées précédentes de main pour chaque étape"
+fi
+
+# 25. La comparaison est purement informative, même si le dernier journal est
+# absent ou illisible. Un échec réel reste aussi un échec.
+for state in absent illisible; do
+  python3 - "$REPO/target/verify-factory" "$state" <<'PY'
+from pathlib import Path
+import sys
+for path in Path(sys.argv[1]).glob("100-*.log"):
+    path.unlink()
+for path in Path(sys.argv[1]).glob("101-*.log"):
+    if sys.argv[2] == "absent":
+        path.unlink()
+    else:
+        path.write_bytes(b"\xff\xfe")
+PY
+  # Recrée une référence illisible après le cas absent.
+  if [[ "$state" == illisible ]]; then
+    python3 -c 'import sys; open(sys.argv[1], "wb").write(b"\xff\xfe")' "$reference"
+  fi
+  run_script --release-size 248 "$REPO/criteres.md"
+  expect_status 0 "comparaison $state non bloquante"
+  require_grep '- binaire release : 34567 octets — origin/main : —' "référence $state remplacée par tiret"
+  export CARGO_STUB_FAIL=fmt
+  run_script 248 "$REPO/criteres.md"
+  expect_status 1 "échec fmt inchangé si comparaison $state"
+  unset CARGO_STUB_FAIL
+done
+
+# 26. L'échec du build optionnel est un échec de build, pas un seuil de taille.
+export RELEASE_STUB_FAIL=1
+run_script --release-size 248 "$REPO/criteres.md"
+expect_status 1 "échec du build release demandé"
+require_grep '- binaire release : — — origin/main : —' "pas de taille périmée après échec de build"
+unset RELEASE_STUB_FAIL
+
+# 27. Un artefact absent ne mesure pas un ancien binaire et ne modifie pas le
+# verdict ; seule la mesure est indisponible.
+export RELEASE_STUB_MISSING=1
+run_script --release-size 248 "$REPO/criteres.md"
+expect_status 0 "taille indisponible non bloquante"
+require_grep '- binaire release : — — origin/main : —' "taille absente, sans reprise d'un binaire périmé"
+unset RELEASE_STUB_MISSING
+
+# 28. Une exécution répétée sur main compare avec le journal avant de l'écraser.
+git -C "$REPO" checkout --quiet --detach origin/main
+run_script --release-size 248 "$REPO/criteres.md"
+expect_status 0 "référence même issue et même SHA"
+export RELEASE_STUB_SIZE=45678
+run_script --release-size 248 "$REPO/criteres.md"
+expect_status 0 "comparaison avant remplacement du journal"
+require_grep '- binaire release : 45678 octets — origin/main : 34567 octets' "référence avant écrasement"
 
 if [[ "$fail_count" -ne 0 ]]; then
   printf '%s échec(s)\n' "$fail_count" >&2

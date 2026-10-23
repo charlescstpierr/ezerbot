@@ -709,6 +709,16 @@ def prepare_topics(evidence: Path) -> dict:
 
 def topics_step(evidence: Path, index: int) -> None:
     """Avant chaque capture : 0 la barre latérale, 1 « Nouveau fil » vient de créer un fil rangé, 2 la page du sujet."""
+    if index == 0:
+        # Une fenêtre basse fait défiler la barre latérale : la capture se cale sur la section CONVERSATIONS.
+        eval_js(
+            evidence,
+            """() => {
+              const sidebar = document.getElementById("sidebar");
+              sidebar.scrollTop = innerHeight < 700 ? sidebar.scrollHeight : 0;
+              return true;
+            }""",
+        )
     if index == 1:
         eval_js(evidence, """() => { document.querySelector('#topic-list .topic-name').click(); return true; }""")
         wait_js(evidence, """() => { const page = document.getElementById("topic-page"); return page && !page.hidden && page.querySelector(".topic-new-thread") ? {ok: true} : null; }""", "la page du sujet ne s'ouvre pas")

@@ -25,7 +25,7 @@ THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
 # EZERBOT_VERIFY_BASELINE=1 rejoue la sphère approbation-rappel sur un produit sans le rappel : mêmes gestes, aucune attente des éléments nouveaux, seules les captures « avant » comptent.
 BASELINE = os.environ.get("EZERBOT_VERIFY_BASELINE") == "1"
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive", "approbation-rappel", "sujets", "mode-yolo")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive", "approbation-rappel", "sujets", "mode-yolo", "sources-citees")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -536,6 +536,45 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
             timeout=40,
         )
         return {"ok": True}
+    if sphere == "sources-citees":
+        # Trois fichiers de bibliothèque (redéposés sous le même nom : un seul fichier par nom), puis une conversation neuve
+        # dont la réponse cite [1], [2], [3] et un [7] sans source.
+        eval_js(evidence, close_overlays_js())
+        eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              const bot = panels.state.bots[0];
+              const files = [
+                ["loyer.md", "# Loyer\\nLe loyer est de 1 200 dollars par mois."],
+                ["budget.md", "# Budget\\nLe budget prévoit 1 200 dollars de loyer par mois."],
+                ["bail.txt", "Bail\\nLe loyer se paie le premier du mois."],
+              ];
+              for (const [name, text] of files) {
+                const data = btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+                await panels.api("/api/library", {bot_id: bot.id, name, data});
+              }
+              window.__srcBot = bot.id;
+              const { conversation } = await panels.api("/api/conversations", {});
+              window.__srcConv = conversation.id;
+              await panels.api("/api/send", {conversation_id: conversation.id, message_id: "sources-" + Date.now(), body: "Cite tes sources : que disent mes fichiers sur le loyer ?"});
+              await panels.refresh();
+              panels.openConversation(conversation.id);
+              return true;
+            }""",
+        )
+        return wait_js(
+            evidence,
+            """() => {
+              const pills = document.querySelectorAll(".gb-assistant .gb-cite-pill");
+              const missing = document.querySelectorAll(".gb-assistant .gb-cite-missing");
+              const line = document.querySelector(".gb-assistant .gb-sources");
+              if (pills.length !== 3 || missing.length !== 1 || !line) return null;
+              return {ok: true, pills: pills.length, missing: missing[0].getAttribute("title"), sources: line.querySelector(".gb-sources-count").textContent};
+            }""",
+            "pastilles de sources absentes de la réponse",
+            timeout=40,
+        )
     if sphere == "memo-vocal":
         # Un mémo de vingt secondes déjà envoyé, ouvert dans son fil. Il n’est créé qu’une fois par passage complet.
         eval_js(evidence, close_overlays_js())
@@ -1741,6 +1780,84 @@ def reply_in_thread_step(evidence: Path, index: int) -> None:
         )
 
 
+def sources_step(evidence: Path, index: int) -> None:
+    """Avant chaque capture : 0 trois pastilles et « Sources 3 » dépliée, 1 la carte d'une source, 2 le [7] barré, 3 la bibliothèque vidée puis « Ouvrir la source »."""
+    if index == 0:
+        eval_js(
+            evidence,
+            """() => {
+              const line = document.querySelector(".gb-assistant .gb-sources");
+              line.open = true;
+              line.scrollIntoView({block: "end"});
+              return line.querySelectorAll("li").length;
+            }""",
+        )
+    if index == 1:
+        card = wait_js(
+            evidence,
+            """() => {
+              const pill = document.querySelector(".gb-assistant .gb-cite-pill");
+              if (!document.querySelector(".gb-source-card")) pill.click();
+              const card = document.querySelector(".gb-source-card");
+              if (!card) return null;
+              card.scrollIntoView({block: "center"});
+              return {ok: true, text: card.innerText, expanded: pill.getAttribute("aria-expanded")};
+            }""",
+            "carte de la source absente",
+        )
+        if "Ouvrir la source" not in card["text"] or "Fermer" not in card["text"] or card["expanded"] != "true":
+            raise SystemExit(f"la carte de la source est incomplète: {card}")
+    if index == 2:
+        state = eval_js(
+            evidence,
+            """() => {
+              document.querySelector(".gb-source-card .gb-source-close")?.click();
+              const missing = document.querySelector(".gb-assistant .gb-cite-missing");
+              missing.scrollIntoView({block: "center"});
+              missing.focus();
+              return {title: missing.getAttribute("title"), decoration: getComputedStyle(missing).textDecorationLine, text: missing.textContent};
+            }""",
+        )
+        if state["title"] != "Source introuvable" or state["decoration"] != "line-through" or state["text"] != "[7]":
+            raise SystemExit(f"le [7] n'est pas barré avec son infobulle: {state}")
+    if index == 3:
+        eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              const library = await panels.api("/api/library?bot_id=" + encodeURIComponent(window.__srcBot));
+              for (const file of library.files) await panels.api("/api/library/remove", {bot_id: window.__srcBot, id: file.id});
+              document.querySelector(".gb-source-close")?.click();
+              return true;
+            }""",
+        )
+        shown = wait_js(
+            evidence,
+            """() => {
+              const pills = [...document.querySelectorAll(".gb-assistant .gb-cite-pill")];
+              const last = pills[pills.length - 1];
+              if (!document.querySelector(".gb-source-card")) last.click();
+              const open = document.querySelector(".gb-source-card .gb-source-open");
+              if (!open) return null;
+              open.click();
+              return {ok: true};
+            }""",
+            "bouton « Ouvrir la source » absent",
+        )
+        problem = wait_js(
+            evidence,
+            """() => {
+              const problem = document.querySelector(".gb-source-card .gb-source-problem");
+              if (!problem) return null;
+              problem.scrollIntoView({block: "center"});
+              return {ok: true, text: problem.textContent};
+            }""",
+            "message de source inaccessible absent",
+        )
+        if problem["text"] != "Ce fichier n’est plus dans la bibliothèque.":
+            raise SystemExit(f"message inattendu pour la source retirée: {problem} / {shown}")
+
+
 def dictation_step(evidence: Path, index: int) -> None:
     """Avant chaque capture : 0 choix du micro USB, 1 micro retiré, 2 dictée en cours, 3 texte dans le brouillon."""
     if index == 0:
@@ -1818,6 +1935,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"barre-{theme}-{size}.png", f"nouveau-fil-{theme}-{size}.png", f"sujet-{theme}-{size}.png"]
     if sphere == "approbation-non-bloquante":
         return [f"actif-{theme}-{size}.png", f"inactif-{theme}-{size}.png"]
+    if sphere == "sources-citees":
+        return [f"pastilles-{theme}-{size}.png", f"carte-{theme}-{size}.png", f"introuvable-{theme}-{size}.png", f"inaccessible-{theme}-{size}.png"]
     if sphere == "approbation-tardive":
         return [f"approuvee-{theme}-{size}.png", f"reprise-{theme}-{size}.png", f"expiree-{theme}-{size}.png"]
     if sphere == "approbation-rappel":
@@ -1894,6 +2013,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             topics_step(evidence, index)
         if sphere == "dictee":
             dictation_step(evidence, index)
+        if sphere == "sources-citees":
+            sources_step(evidence, index)
         if sphere == "voix-bots":
             voice_bots_step(evidence, index)
         if sphere == "voix-appel":

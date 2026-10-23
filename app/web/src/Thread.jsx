@@ -17,6 +17,8 @@ import { clearFindMarks, findInRendered, highlightOccurrence, shouldRecenterFind
 import { collapseMemoryReceipts } from "./memory-presentation.js";
 import { splitMentionText } from "./mentions.js";
 import { isTeachMessage, isDemonstrationMessage } from "./teach.js";
+import { citeMarkdown, hasSources, textWithSources } from "./sources.js";
+import { SourcesContext, SourcesLine, citeComponents, citeTags } from "./sources.jsx";
 import { signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
 
 // A capability adds only cards/<name>.jsx exporting `kind` and `Card`.
@@ -219,8 +221,12 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
   const toolPreparing = preparingTool(message);
   const queued = message.payload?.turn_status === "queued";
   const group = Boolean(message.payload?.turn_id || actions.isGroup);
-  const copyText = "copyText" in message ? message.copyText : message.body;
-  const prose = proseWithoutGallery(message.body, galleryImages(message, { markdown: true }));
+  const cited = hasSources(message);
+  const base = "copyText" in message ? message.copyText : message.body;
+  const copyText = cited && base ? textWithSources(message, base) : base;
+  const plain = proseWithoutGallery(message.body, galleryImages(message, { markdown: true }));
+  const prose = cited ? citeMarkdown(plain) : plain;
+  const sourcesValue = useMemo(() => ({ message, onOpenSource: actions.onOpenSource }), [message, actions.onOpenSource]);
   useEffect(() => {
     const root = content.current;
     if (!root) return;
@@ -253,13 +259,16 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
         {prose?.trim()
           ? (
             <div data-find-body>
-              <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal}>
-                {prose}
-              </Streamdown>
+              <SourcesContext.Provider value={sourcesValue}>
+                <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal} {...(cited ? { allowedTags: citeTags, components: citeComponents } : {})}>
+                  {prose}
+                </Streamdown>
+              </SourcesContext.Provider>
             </div>
           )
           : queued && message.payload?.wait_reason === "signin" ? <SignInCard message={message} actions={actions} /> : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : "En attente"}</span> : streaming && !toolPreparing && <Dots />}
         <MessageAttachments message={message} align="start" markdown />
+        {!streaming && <SourcesLine message={message} onOpenSource={actions.onOpenSource} />}
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
         {visibleNotice(message) && (!queued || message.payload?.parent_turn_id) && (toolPreparing ? <div className="gb-pending" role="status"><Clock /><div className="gb-pending-copy"><strong>Préparation d’un outil</strong><p>Aucune action n’a encore été exécutée.</p></div></div> : <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>)}
         {!streaming && (copyText || message.state === "stopped") && (
@@ -286,7 +295,7 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed, onOpenSource }) {
   const [openMenuId, setOpenMenuId] = useState(null);
   const onMenuOpenChange = (messageId, open) => setOpenMenuId((current) => messageMenuOpenId(current, messageId, open));
   const appearance = useAppearance();
@@ -295,7 +304,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThr
   const portal = useRef(() => overlay.current).current;
   const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
   const threadAction = isGroup || isTask ? undefined : onThread;
-  const actions = useMemo(() => ({ onCopy, onReact, onThread: threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected }), [onCopy, onReact, threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected]);
+  const actions = useMemo(() => ({ onCopy, onReact, onThread: threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource }), [onCopy, onReact, threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource]);
   const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);
   const last = ordered[ordered.length - 1];
   const findAnchor = useRef(null);

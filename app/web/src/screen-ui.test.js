@@ -90,3 +90,52 @@ test("scoped consent keeps shell input active; outside input pauses; resume and 
   for(const fn of f.listeners.keydown)fn({key:"Escape",preventDefault(){}});await new Promise(r=>setImmediate(r));assert.equal(f.calls.at(-1)[0],"/api/screen/revoke");assert.equal(f.registration.wantsPolling(),false);
   assert.doesNotMatch(preview.className,/screen-preview-active/);
 });
+test("le Mode YOLO ouvre l’écran au bot sans réglage, la session et l’entrée restent à accorder", async () => {
+  const f = fixture();
+  const entry = all(f.top).find(e => e.className.includes("screen-button"));
+  f.state.yolo = { mode: "yolo", bots: [{ bot_id: "grokbot", mode: "inherit", effective: "yolo" }] };
+  await f.host.refresh();
+  const input = all(f.settings).find(e => e.tagName === "input");
+  assert.equal(input.checked, true);
+  assert.equal(input.disabled, true);
+  assert.equal(input.title, "Ouvert par le Mode YOLO");
+  assert.match(f.settings.textContent, /Le Mode YOLO ouvre l’écran/);
+  assert.equal(f.state.screen.bots.length, 0, "aucun réglage n’a été écrit");
+  // Retour à « Demander » : le réglage d’avant (éteint) reprend effet.
+  f.state.yolo = { mode: "ask", bots: [{ bot_id: "grokbot", mode: "inherit", effective: "ask" }] };
+  await f.host.refresh();
+  const asked = all(f.settings).find(e => e.tagName === "input");
+  assert.equal(asked.checked, false);
+  assert.equal(asked.disabled, false);
+  assert.match(f.settings.textContent, /Désactivé par défaut/);
+});
+test("un consentement d’écran périmé ne sert plus : le dialogue suit le mode YOLO et refuse l’ancien accord", async () => {
+  const f = fixture();
+  f.state.screen.bots = [{ bot_id: "grokbot", enabled: true }];
+  f.state.yolo = { mode: "ask", bots: [{ bot_id: "grokbot", mode: "inherit", effective: "ask" }] };
+  await f.host.refresh();
+  byText(f.top, "Écran du Mac").onclick();
+  const dialog = all(f.panels).find(e => e.className.includes("screen-dialog"));
+  const old = all(dialog).find(e => e.name === "screen-consent");
+  assert.match(dialog.textContent, /chacun soumis à ma confirmation/);
+  old.checked = true; old.onchange();
+  const staleForm = all(dialog).find(e => e.tagName === "form");
+  // Dans une autre fenêtre, le mode passe à YOLO : seul `state.yolo` change, pas `state.screen`.
+  f.state.yolo = { mode: "yolo", bots: [{ bot_id: "grokbot", mode: "inherit", effective: "yolo" }] };
+  await f.host.refresh();
+  assert.match(dialog.textContent, /sans carte \(Mode YOLO\)/);
+  assert.doesNotMatch(dialog.textContent, /chacun soumis à ma confirmation/);
+  const fresh = all(dialog).find(e => e.name === "screen-consent");
+  assert.notEqual(fresh, old);
+  assert.equal(fresh.checked, undefined, "la case est à refaire");
+  assert.equal(byText(dialog, "Accorder cette session").disabled, true);
+  // Le formulaire d'avant, soumis quand même, n'accorde rien.
+  const before = f.calls.length;
+  await staleForm.onsubmit({ preventDefault() {} });
+  assert.equal(f.calls.slice(before).some(([path]) => path.endsWith("/grant")), false);
+  // Retour à « Demander » : le dialogue redit la confirmation par geste.
+  f.state.yolo = { mode: "ask", bots: [{ bot_id: "grokbot", mode: "inherit", effective: "ask" }] };
+  await f.host.refresh();
+  assert.match(dialog.textContent, /chacun soumis à ma confirmation/);
+});
+

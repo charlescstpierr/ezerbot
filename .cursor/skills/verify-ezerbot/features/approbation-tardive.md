@@ -19,7 +19,7 @@ Preconditions:
 
 - `doctor: ok`.
 - Badge `ChatGPT`.
-- La préparation de la sphère permet le shell du bot et règle `/api/approvals/waiting` sur `{task:true, chat:true, validity:"24h", reminder:"1h"}`.
+- La préparation de la sphère repasse en « Demander avant d'agir » (`/api/yolo/mode` sur `ask`, le Mode YOLO actif par défaut lèverait la carte), permet le shell du bot et règle `/api/approvals/waiting` sur `{task:true, chat:true, validity:"24h", reminder:"1h"}`.
 
 - **Demander.** Nouvelle conversation (`#new-chat`), texte « Envoie le résumé ». La page contient « J’attends son accord pour envoyer le résumé. » et une carte `[data-card-kind="approval"][data-request-status="pending"]` avec « Autoriser une fois ». Le texte « Résumé envoyé » est absent.
 - **Approuver tard.** Cliquer « Autoriser une fois ». Attendre `[data-request-status="resolved"]`, « Tu as approuvé : envoyer le résumé » et une seule carte `[data-card-kind="tool"]` contenant « Résumé envoyé ».

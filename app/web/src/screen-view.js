@@ -12,7 +12,7 @@ export const screenWarnings = {
   computer_type: "Vérifiez le texte et la cible. Les champs de mot de passe sont refusés : saisissez-les vous-même. Les sauts de ligne peuvent valider ou envoyer le texte.",
   computer_key: "Cette touche peut valider un achat, envoyer un message ou supprimer des données. Vérifiez la cible avant de confirmer.",
 };
-export function screenActionState({ outcome, approval_status: approval, run_status: run }) {
+export function screenActionState({ outcome, approval_status: approval, run_status: run, authorized_by: authority }) {
   if (approval === "pending" && !outcome) return { hidden: true };
   if (approval === "denied") return { label: "Refusée", reason: "L’action a été refusée.", error: true };
   if (approval === "cancelled") return { label: "Arrêtée", reason: "Session arrêtée — action non exécutée.", error: true };
@@ -23,7 +23,7 @@ export function screenActionState({ outcome, approval_status: approval, run_stat
   }
   if (outcome) return { label: "Terminée" };
   if (runView(run).stopped) return { label: "Arrêtée", reason: "Action interrompue — aucun résultat enregistré.", error: true };
-  if (approval !== "resolved") return { hidden: true };
+  if (approval !== "resolved" && authority?.kind !== "yolo") return { hidden: true };
   return { label: "En cours…" };
 }
 export function screenDecisionLabel(approval) {

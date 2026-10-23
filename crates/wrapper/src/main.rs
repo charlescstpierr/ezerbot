@@ -469,6 +469,10 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
     if port == grokbot_wrapper::features::iphone::port() {
         return Err("Le port 47863 est réservé à l’accès iPhone.".into());
     }
+    grokbot_wrapper::features::yolo::register_control_port(port);
+    grokbot_wrapper::features::yolo::register_control_port(
+        grokbot_wrapper::features::iphone::port(),
+    );
     let mut remote_server: Option<Server> = None;
     let mut hook_server: Option<Server> = None;
     let mut hook_retry = std::time::Instant::now();

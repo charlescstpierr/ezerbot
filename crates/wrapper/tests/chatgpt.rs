@@ -48,6 +48,7 @@ fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
     };
     let provider = Provider::with_endpoints(&db, endpoints, false);
     let mut app = App::open_with(&db, provider.clone()).unwrap();
+    support::ask_before_acting(&mut app);
     assert_eq!(
         app.api("GET", "/api/state", b"").unwrap()["mode"],
         "simulated"

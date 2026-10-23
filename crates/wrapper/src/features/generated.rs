@@ -322,6 +322,7 @@ fn verify_admitted(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
             Some(
                 grokbot_engine::contracts::AuthorizedBy::AllowOnce { .. }
                     | grokbot_engine::contracts::AuthorizedBy::Rule { .. }
+                    | grokbot_engine::contracts::AuthorizedBy::Yolo { .. }
             )
         )
     {

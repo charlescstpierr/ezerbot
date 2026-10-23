@@ -7787,6 +7787,53 @@ fn linear_disabled_tools_are_not_invocable_and_nothing_works_after_disconnect() 
 }
 
 #[test]
+fn linear_stays_closed_in_yolo_for_a_bot_whose_tools_are_off_and_keeps_yolo_for_one_whose_tools_are_on(
+) {
+    let mut f = Fixture::new();
+    f.linear_connect();
+    let server = f.item("linear")["server"]["id"].clone();
+    f.post("/api/yolo/mode", json!({"mode":"yolo"}));
+    let scoped = |f: &Fixture| {
+        grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+            connection: &f.db(),
+            provider: &f.provider,
+            db_path: &f.path,
+            now_ms: 0,
+            bot_id: Some("grokbot"),
+            conversation_id: None,
+            run_id: None,
+        })
+        .into_iter()
+        .filter(|t| t.name.starts_with("linear_"))
+        .count()
+    };
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server,"bot_id":"grokbot","enabled":false}),
+    );
+    assert_eq!(scoped(&f), 0);
+    let reads = f.linear_requests("/linear/api").len();
+    let run = f.github_call("linear-yolo-off", LINEAR_TEAMS, json!({}));
+    assert!(failed(&f, &run).contains("Linear n’est pas activé pour ce bot"));
+    let run = f.linear_prepare_refused(
+        "linear-yolo-off-draft",
+        LINEAR_COMMENT,
+        json!({"issue":"ENG-12","text":"Bonjour"}),
+    );
+    assert!(failed(&f, &run).contains("Linear n’est pas activé pour ce bot"));
+    assert_eq!(f.linear_requests("/linear/api").len(), reads);
+    assert_eq!(f.linear_mutations(), 0);
+
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server,"bot_id":"grokbot","enabled":true}),
+    );
+    assert_eq!(scoped(&f), 5);
+    let run = f.github_call("linear-yolo-on", LINEAR_TEAMS, json!({}));
+    assert_eq!(done(&f, &run)["compte"], LINEAR_ACCOUNT);
+}
+
+#[test]
 fn linear_disconnect_says_whether_linear_confirmed_the_revocation() {
     let mut f = Fixture::new();
     f.oauth.seen.lock().unwrap().linear.revoke_error = true;
@@ -8756,6 +8803,53 @@ fn microsoft_disabled_tools_are_not_invocable_and_nothing_works_after_disconnect
         reads,
         "no call after disconnect"
     );
+}
+
+#[test]
+fn microsoft_stays_closed_in_yolo_for_a_bot_whose_tools_are_off_and_keeps_yolo_for_one_whose_tools_are_on(
+) {
+    let mut f = Fixture::new();
+    f.microsoft_connect();
+    let server = f.item("microsoft365")["server"]["id"].clone();
+    f.post("/api/yolo/mode", json!({"mode":"yolo"}));
+    let scoped = |f: &Fixture| {
+        grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+            connection: &f.db(),
+            provider: &f.provider,
+            db_path: &f.path,
+            now_ms: 0,
+            bot_id: Some("grokbot"),
+            conversation_id: None,
+            run_id: None,
+        })
+        .into_iter()
+        .filter(|t| t.name.starts_with("outlook_"))
+        .count()
+    };
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server,"bot_id":"grokbot","enabled":false}),
+    );
+    assert_eq!(scoped(&f), 0);
+    let reads = f.microsoft_requests("/api/").len();
+    let run = f.github_call("outlook-yolo-off", MICROSOFT_MESSAGES, json!({}));
+    assert!(failed(&f, &run).contains("Microsoft 365 n’est pas activé pour ce bot"));
+    let run = f.microsoft_prepare_refused(
+        "outlook-yolo-off-draft",
+        json!({"to":["bruno@atelier.test"],"subject":"Bonjour"}),
+    );
+    assert!(failed(&f, &run).contains("Microsoft 365 n’est pas activé pour ce bot"));
+    assert_eq!(f.microsoft_requests("/api/").len(), reads);
+    assert_eq!(f.microsoft_sends(), 0);
+
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server,"bot_id":"grokbot","enabled":true}),
+    );
+    assert_eq!(scoped(&f), 3);
+    let run = f.github_call("outlook-yolo-on", MICROSOFT_MESSAGES, json!({}));
+    done(&f, &run);
+    assert!(f.microsoft_requests("/api/").len() > reads);
 }
 
 #[test]

@@ -236,7 +236,7 @@ pub(super) fn error_code(reply: &Reply) -> &str {
         .unwrap_or("")
 }
 /// What Linear's answer means for Charles. A dead token also moves the card to reconnect.
-pub(super) fn refusal(ctx: &Context<'_>, server: &Server, reply: &Reply, what: &str) -> ApiError {
+fn refusal(ctx: &Context<'_>, account: &Account, reply: &Reply, what: &str) -> ApiError {
     let code = error_code(reply);
     if reply.status == 429 || code == "RATELIMITED" {
         let wait = reply
@@ -247,8 +247,13 @@ pub(super) fn refusal(ctx: &Context<'_>, server: &Server, reply: &Reply, what: &
         return ApiError::new(429, format!("Linear limite le débit des requêtes.{wait}"));
     }
     if reply.status == 401 || code == "AUTHENTICATION_ERROR" {
+        // Only the connection that was refused moves to reconnect: a sign-in that began or
+        // finished since belongs to another generation and is left as it is.
         let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = phase(ctx, &server.id, "reconnect", RECONNECT);
+        let _ = ctx.connection.execute(
+            "UPDATE wrapper_connector_catalogue SET phase='reconnect',message=?3,authorization_url=NULL,device_user_code=NULL,device_expires_at=0 WHERE server_id=?1 AND generation=?2 AND phase='connected'",
+            params![account.server.id, account.generation, RECONNECT],
+        );
         return invalid(RECONNECT);
     }
     if code == "FORBIDDEN" {
@@ -274,7 +279,7 @@ pub(super) fn refusal(ctx: &Context<'_>, server: &Server, reply: &Reply, what: &
 /// The `data` of an answer that carries no error.
 fn checked(
     ctx: &Context<'_>,
-    server: &Server,
+    account: &Account,
     reply: Reply,
     what: &str,
 ) -> Result<Value, ApiError> {
@@ -284,7 +289,7 @@ fn checked(
     if reply.status == 200 && !failed && reply.body["data"].is_object() {
         Ok(reply.body["data"].clone())
     } else {
-        Err(refusal(ctx, server, &reply, what))
+        Err(refusal(ctx, account, &reply, what))
     }
 }
 
@@ -316,7 +321,7 @@ fn query(
     what: &str,
 ) -> Result<Value, ApiError> {
     let reply = graphql(access, document, variables).map_err(|_| unreachable_linear())?;
-    checked(ctx, &account.server, reply, what)
+    checked(ctx, account, reply, what)
 }
 
 struct Team {
@@ -412,12 +417,7 @@ fn issue_id(
     {
         return Err(missing());
     }
-    let data = checked(
-        ctx,
-        &account.server,
-        reply,
-        &format!("l’issue {identifier}"),
-    )?;
+    let data = checked(ctx, account, reply, &format!("l’issue {identifier}"))?;
     data["issue"]["id"]
         .as_str()
         .map(str::to_owned)
@@ -595,7 +595,7 @@ fn get_issue(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> {
     {
         return Err(missing());
     }
-    let data = checked(ctx, &account.server, reply, &format!("l’issue {wanted}"))?;
+    let data = checked(ctx, &account, reply, &format!("l’issue {wanted}"))?;
     let issue = &data["issue"];
     if !issue.is_object() {
         return Err(missing());

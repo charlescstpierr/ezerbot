@@ -548,7 +548,7 @@ fn send(
         });
     }
     if rejected(&reply) {
-        return Err(not_published(refusal(ctx, &account.server, &reply, &what)));
+        return Err(not_published(refusal(ctx, account, &reply, &what)));
     }
     // An outage, or an answer that says nothing: the effect may exist.
     Err((Failure::Unconfirmed, unconfirmed()))

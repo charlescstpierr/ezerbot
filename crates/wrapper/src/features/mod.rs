@@ -113,6 +113,7 @@ pub mod routines_background;
 pub mod screen;
 mod shell_tasks;
 pub mod skills;
+pub mod sources;
 pub mod storage;
 pub mod templates;
 pub mod threads;
@@ -166,6 +167,7 @@ registry!(
     delegation,
     attachments,
     library,
+    sources,
     generated,
     pages,
     images,

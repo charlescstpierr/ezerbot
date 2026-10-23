@@ -11,6 +11,15 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+const MINUTE: u64 = 60_000;
+const HOUR: u64 = 60 * MINUTE;
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Fixture {
     app: App,
@@ -94,6 +103,27 @@ impl Fixture {
     }
     fn request(&self, id: &str, kind: &str) {
         self.conn.execute("INSERT INTO forms_requests(id,run_id,entry_id,kind_json,route_json) VALUES (?1,'source',?1,?2,?3)", params![id,json!({"kind":kind,"name":"NE_JAMAIS_NOTIFIER_CE_SECRET"}).to_string(),json!({"target_conversation_id":self.conversation}).to_string()]).unwrap();
+    }
+    /// An approval card still waiting, created `age_ms` ago and valid for 24 h more.
+    fn waiting_approval(&self, id: &str, age_ms: u64) {
+        let now = now_ms();
+        self.conn.execute("INSERT INTO forms_requests(id,run_id,entry_id,kind_json,route_json) VALUES (?1,'source',?1,?2,?3)", params![id,json!({"kind":"approval","tool":"NE_JAMAIS_NOTIFIER_CET_OUTIL","expires_at":now+24*HOUR}).to_string(),json!({"target_conversation_id":self.conversation}).to_string()]).unwrap();
+        self.conn.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,created_at,kind) VALUES ('local-workspace',?1,?2,?3,'approval')",params![self.conversation,id,now-age_ms]).unwrap();
+    }
+    /// Moves the clock of the card forward without waiting: the card is `age_ms` old now.
+    fn age(&self, id: &str, age_ms: u64) {
+        self.conn
+            .execute(
+                "UPDATE wrapper_messages SET created_at=?2 WHERE message_id=?1",
+                params![id, now_ms() - age_ms],
+            )
+            .unwrap();
+    }
+    fn reminder(&mut self, choice: &str) {
+        self.post(
+            "/api/approvals/waiting",
+            json!({"task":true,"chat":false,"validity":"24h","reminder":choice}),
+        );
     }
     fn routine(&self, id: &str, status: &str, run: Option<&str>) {
         self.conn.execute("INSERT OR IGNORE INTO scheduler_routines(routine_id,bot_id,conversation_id,name,body,trigger,time_zone,enabled,origin,untrusted,schedule_version,modified_at,last_served_at,materialized_after,active_since) VALUES ('routine','grokbot',?1,'Routine','{}','{}','UTC',0,'user',0,1,0,NULL,0,0)",[&self.conversation]).unwrap();
@@ -563,5 +593,161 @@ fn storage_error_does_not_claim_or_lose_source() {
         f.poll(false, false)["deliveries"].as_array().unwrap().len(),
         1
     );
+    assert_eq!(f.poll(false, false)["deliveries"], json!([]));
+}
+
+fn titles(result: &Value) -> Vec<String> {
+    result["deliveries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["title"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_waiting_approval_is_reminded_exactly_once_after_the_delay() {
+    let mut f = Fixture::new();
+    f.settings(json!({"enabled":true}));
+    f.waiting_approval("a", 10 * MINUTE);
+    assert_eq!(titles(&f.poll(false, false)), ["Autorisation demandée"]);
+    // 59 minutes: too early. 1 h 01: exactly one reminder, then nothing more.
+    f.age("a", 59 * MINUTE);
+    assert_eq!(f.poll(false, false)["deliveries"], json!([]));
+    f.age("a", 61 * MINUTE);
+    let result = f.poll(false, false);
+    assert_eq!(
+        titles(&result),
+        ["Une demande attend votre décision depuis 1 h"]
+    );
+    let reminder = &result["deliveries"][0];
+    assert_eq!(reminder["kind"], "approval");
+    assert_eq!(reminder["conversation_id"], f.conversation);
+    assert_eq!(reminder["card_id"], "a");
+    assert!(!result.to_string().contains("NE_JAMAIS"));
+    f.conn
+        .execute(
+            "UPDATE wrapper_notification_throttle SET attempted_at=0",
+            [],
+        )
+        .unwrap();
+    assert_eq!(f.poll(false, false)["deliveries"], json!([]));
+    f.age("a", 5 * HOUR);
+    f.restart();
+    assert_eq!(f.poll(false, false)["deliveries"], json!([]));
+}
+
+#[test]
+fn the_reminder_delay_accepts_30_minutes_1_hour_and_3_hours_and_never_stays_silent() {
+    for (choice, phrase, age) in [
+        ("30min", "30 min", 31 * MINUTE),
+        ("1h", "1 h", 61 * MINUTE),
+        ("3h", "3 h", 181 * MINUTE),
+    ] {
+        let mut f = Fixture::new();
+        f.settings(json!({"enabled":true}));
+        f.reminder(choice);
+        f.waiting_approval("a", MINUTE);
+        assert_eq!(
+            titles(&f.poll(false, false)),
+            ["Autorisation demandée"],
+            "{choice}"
+        );
+        f.age("a", age - 2 * MINUTE);
+        assert_eq!(
+            f.poll(false, false)["deliveries"],
+            json!([]),
+            "{choice} trop tôt"
+        );
+        f.age("a", age);
+        assert_eq!(
+            titles(&f.poll(false, false)),
+            [format!("Une demande attend votre décision depuis {phrase}")],
+            "{choice}"
+        );
+    }
+    let mut f = Fixture::new();
+    f.settings(json!({"enabled":true}));
+    f.reminder("never");
+    f.waiting_approval("a", MINUTE);
+    assert_eq!(titles(&f.poll(false, false)), ["Autorisation demandée"]);
+    f.age("a", 10 * HOUR);
+    assert_eq!(f.poll(false, false)["deliveries"], json!([]));
+    assert_eq!(f.get()["unread"], 1);
+}
+
+#[test]
+fn do_not_disturb_or_disabled_notifications_send_no_reminder_but_the_card_keeps_waiting() {
+    for change in [
+        json!({"dnd":true}),
+        json!({"enabled":false}),
+        json!({"approval":false}),
+    ] {
+        let mut f = Fixture::new();
+        f.settings(json!({"enabled":true}));
+        f.waiting_approval("a", MINUTE);
+        assert_eq!(titles(&f.poll(false, false)), ["Autorisation demandée"]);
+        f.settings(change.clone());
+        f.age("a", 2 * HOUR);
+        assert_eq!(f.poll(false, false)["deliveries"], json!([]), "{change}");
+        // Switching alerts back on never replays the muted reminder.
+        f.settings(json!({"enabled":true,"dnd":false,"approval":true}));
+        assert_eq!(f.poll(false, false)["deliveries"], json!([]), "{change}");
+        let pending: String = f
+            .conn
+            .query_row("SELECT status FROM forms_requests WHERE id='a'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(pending, "pending");
+    }
+}
+
+#[test]
+fn an_approval_decided_or_expired_before_the_delay_sends_no_reminder() {
+    let mut f = Fixture::new();
+    f.settings(json!({"enabled":true}));
+    f.waiting_approval("decided", MINUTE);
+    f.waiting_approval("expired", MINUTE);
+    // The throttle spaces two notices of one conversation: one per poll.
+    for _ in 0..2 {
+        assert_eq!(
+            f.poll(false, false)["deliveries"].as_array().unwrap().len(),
+            1
+        );
+        f.conn
+            .execute(
+                "UPDATE wrapper_notification_throttle SET attempted_at=0",
+                [],
+            )
+            .unwrap();
+    }
+    f.conn
+        .execute(
+            "UPDATE forms_requests SET status='resolved' WHERE id='decided'",
+            [],
+        )
+        .unwrap();
+    f.conn.execute("UPDATE forms_requests SET kind_json=json_set(kind_json,'$.expires_at',?1) WHERE id='expired'", [now_ms() - 1]).unwrap();
+    f.age("decided", 2 * HOUR);
+    f.age("expired", 2 * HOUR);
+    assert_eq!(f.poll(false, false)["deliveries"], json!([]));
+    // A reminder projected just before the decision is not posted either.
+    f.waiting_approval("late", MINUTE);
+    f.poll(false, false);
+    f.age("late", 2 * HOUR);
+    f.get();
+    f.conn
+        .execute(
+            "UPDATE forms_requests SET status='denied' WHERE id='late'",
+            [],
+        )
+        .unwrap();
+    f.conn
+        .execute(
+            "UPDATE wrapper_notification_throttle SET attempted_at=0",
+            [],
+        )
+        .unwrap();
     assert_eq!(f.poll(false, false)["deliveries"], json!([]));
 }

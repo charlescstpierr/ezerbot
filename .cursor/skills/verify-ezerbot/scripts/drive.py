@@ -23,7 +23,9 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive", "mode-yolo")
+# EZERBOT_VERIFY_BASELINE=1 rejoue la sphère approbation-rappel sur un produit sans le rappel : mêmes gestes, aucune attente des éléments nouveaux, seules les captures « avant » comptent.
+BASELINE = os.environ.get("EZERBOT_VERIFY_BASELINE") == "1"
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive", "approbation-rappel", "mode-yolo")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -633,7 +635,171 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               return { ok: true, waiting: panels.state.forms.waiting };
             }""",
         )
+    if sphere == "approbation-rappel":
+        eval_js(evidence, close_overlays_js())
+        settle_waiting_cards(evidence)
+        # Même préparation que la décision tardive : la carte survit au tour du bot et reste en attente.
+        return eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              await panels.api("/api/local/bot", { bot_id: "grokbot", shell: true });
+              await panels.api("/api/approvals/waiting", { task: true, chat: true, validity: "24h", reminder: "1h" });
+              await panels.refresh();
+              return { ok: true, waiting: panels.state.forms.waiting };
+            }""",
+        )
     raise SystemExit(f"sphère inconnue: {sphere}")
+
+
+def settle_waiting_cards(evidence: Path) -> None:
+    """Le temps passe sur une base jetable : les cartes laissées par la combinaison précédente expirent, pour que chaque combinaison ait sa seule carte."""
+    run = load_run(evidence)
+    with sqlite3.connect(run["db"], timeout=15) as conn:
+        conn.execute(
+            "UPDATE forms_requests SET kind_json=json_set(kind_json,'$.expires_at',?) WHERE status='pending' AND json_extract(kind_json,'$.kind')='approval'",
+            (int(time.time() * 1000) - 1000,),
+        )
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        with sqlite3.connect(run["db"], timeout=15) as conn:
+            if not conn.execute("SELECT COUNT(*) FROM forms_requests WHERE status='pending' AND json_extract(kind_json,'$.kind')='approval'").fetchone()[0]:
+                return
+        time.sleep(0.3)
+    raise SystemExit("des cartes d'approbation restent en attente après leur échéance")
+
+
+def age_waiting_card(evidence: Path, hours: int = 2, validity_hours: int = 24) -> None:
+    """La seule carte en attente a été posée il y a `hours` h et vaut `validity_hours` h : l'horloge de la sphère, jamais celle de la base du capitaine."""
+    run = load_run(evidence)
+    created = int(time.time() * 1000) - hours * 3_600_000
+    with sqlite3.connect(run["db"], timeout=15) as conn:
+        pending = "status='pending' AND json_extract(kind_json,'$.kind')='approval'"
+        moved = conn.execute(
+            f"UPDATE wrapper_messages SET created_at=? WHERE kind='approval' AND message_id IN (SELECT entry_id FROM forms_requests WHERE {pending})",
+            (created,),
+        ).rowcount
+        changed = conn.execute(
+            f"UPDATE forms_requests SET kind_json=json_set(kind_json,'$.expires_at',?) WHERE {pending}",
+            (created + validity_hours * 3_600_000,),
+        ).rowcount
+    if moved != 1 or changed != 1:
+        raise SystemExit(f"{moved} message(s) et {changed} carte(s) en attente au lieu d'une")
+
+
+WAIT_LINE = r"^En attente de vous depuis 2 h( 0\d)? · expire dans (22 h|21 h \d\d)$"
+
+
+def reminder_step(evidence: Path, index: int) -> None:
+    """rappel : la notification du rappel dans la liste, depuis un autre fil ; attente : sa carte avec la ligne d'ancienneté ; bandeau : la reprise de l'app."""
+    if index == 0:
+        late_ask(evidence)
+        eval_js(
+            evidence,
+            """() => {
+              const request = window.GrokbotPanels.state.forms.requests.find((item) => item.status?.status === "pending" && item.kind?.kind === "approval");
+              window.__verifyWaitingConversation = request.route.target_conversation_id;
+              return request.route.target_conversation_id;
+            }""",
+        )
+        # Un autre fil est à l'écran avant que la carte vieillisse : le rappel n'est pas lu d'avance par un sondage du fil visible.
+        eval_js(evidence, """() => { document.getElementById("new-chat").click(); return true; }""")
+        wait_js(
+            evidence,
+            """() => {
+              const editor = document.querySelector('.gb-editor[aria-label="Votre message"]');
+              return editor && !document.querySelector('[data-card-kind="approval"]') ? {ok: true} : null;
+            }""",
+            "conversation neuve non prête",
+        )
+        age_waiting_card(evidence)
+        eval_js(evidence, """() => { document.querySelector(".notifications-button").click(); return true; }""")
+        if BASELINE:
+            time.sleep(2)
+            return
+        state = wait_js(
+            evidence,
+            """async () => {
+              await window.GrokbotPanels.refresh();
+              const items = [...document.querySelectorAll("dialog.notifications-dialog[open] .notification-item")];
+              const row = items.find((node) => node.innerText.includes("Une demande attend votre décision depuis 1 h"));
+              return row ? {ok: true, count: items.length, text: row.innerText} : null;
+            }""",
+            "le rappel n'est pas dans la liste des notifications",
+            timeout=40,
+        )
+        if "NE_JAMAIS" in state["text"] or "run_shell" in state["text"] or "printf" in state["text"]:
+            raise SystemExit(f"le rappel dit autre chose que le temps: {state}")
+        return
+    if index == 1:
+        if BASELINE:
+            eval_js(evidence, close_overlays_js())
+            eval_js(
+                evidence,
+                """() => { window.GrokbotPanels.openConversation(window.__verifyWaitingConversation); return true; }""",
+            )
+            wait_js(
+                evidence,
+                """() => {
+                  const card = document.querySelector('[data-card-kind="approval"][data-request-status="pending"]');
+                  if (!card) return null;
+                  card.scrollIntoView({block: "center"});
+                  return {ok: true};
+                }""",
+                "la carte en attente n'est pas à l'écran",
+            )
+            return
+        eval_js(
+            evidence,
+            """() => {
+              const row = [...document.querySelectorAll("dialog.notifications-dialog[open] .notification-item")].find((node) => node.innerText.includes("Une demande attend votre décision depuis 1 h"));
+              row.click();
+              return true;
+            }""",
+        )
+        state = wait_js(
+            evidence,
+            f"""() => {{
+              const line = document.querySelector("[data-approval-wait]");
+              const card = document.querySelector('[data-card-kind="approval"][data-request-status="pending"]');
+              if (!line || !card) return null;
+              line.scrollIntoView({{block: "center"}});
+              return {{ok: true, line: line.textContent, card: card.innerText, order: !!(line.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING), buttons: [...card.querySelectorAll("button")].map((node) => node.textContent)}};
+            }}""",
+            "la carte n'a pas sa ligne d'ancienneté",
+            timeout=30,
+        )
+        if not re.match(WAIT_LINE, state["line"]) or not state["order"] or "Autoriser une fois" not in state["buttons"] or "En attente de vous" in state["card"]:
+            raise SystemExit(f"la ligne d'ancienneté n'est pas celle attendue: {state}")
+        return
+    # Le bandeau ne naît qu'à la première lecture de l'état : la page est rechargée, comme une reprise de l'app.
+    eval_js(evidence, close_overlays_js())
+    eval_js(evidence, """() => { setTimeout(() => location.reload(), 50); return true; }""")
+    wait_js(
+        evidence,
+        """() => {
+          const editor = document.querySelector(".gb-editor");
+          const badge = document.getElementById("mode-badge-text")?.textContent || "";
+          return editor && badge === "ChatGPT" ? {badge} : null;
+        }""",
+        "Ezerbot n'est pas revenu après le rechargement",
+        timeout=30,
+    )
+    if BASELINE:
+        time.sleep(2)
+        return
+    state = wait_js(
+        evidence,
+        """() => {
+          const banner = document.getElementById("approval-banner");
+          if (!banner || banner.hidden) return null;
+          return {ok: true, text: banner.innerText, close: banner.querySelector("button")?.getAttribute("aria-label"), link: !!banner.querySelector("a")};
+        }""",
+        "le bandeau de reprise n'est pas là",
+        timeout=30,
+    )
+    if state["text"].strip() != "1 demande attend votre décision" or state["link"]:
+        raise SystemExit(f"le bandeau n'est pas celui attendu: {state}")
 
 
 def task_request(evidence: Path, text: str, prompt: str) -> dict:
@@ -1504,6 +1670,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"actif-{theme}-{size}.png", f"inactif-{theme}-{size}.png"]
     if sphere == "approbation-tardive":
         return [f"approuvee-{theme}-{size}.png", f"reprise-{theme}-{size}.png", f"expiree-{theme}-{size}.png"]
+    if sphere == "approbation-rappel":
+        return [f"rappel-{theme}-{size}.png", f"attente-{theme}-{size}.png", f"bandeau-{theme}-{size}.png"]
     if sphere == "voix-bots":
         return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
     if sphere == "voix-appel":
@@ -1565,6 +1733,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             waiting_step(evidence, index)
         if sphere == "approbation-tardive":
             late_step(evidence, index)
+        if sphere == "approbation-rappel":
+            reminder_step(evidence, index)
         if sphere == "taches-de-fond":
             background_task_step(evidence, index)
         if sphere == "reponse-fil":

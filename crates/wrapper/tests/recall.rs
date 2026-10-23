@@ -1223,7 +1223,7 @@ fn the_background_tick_alone_brings_the_lines_and_then_the_summary() {
     // Le suivi de fond reprend : seul le tick de l'app interroge Recall.
     recall::pause_background(false);
     f.recall.said(&[("Alice", 12.0, "Bonjour à tous")]);
-    let mut tick = |f: &mut Fixture, until: &dyn Fn(&mut Fixture) -> bool| {
+    let tick = |f: &mut Fixture, until: &dyn Fn(&mut Fixture) -> bool| {
         for _ in 0..300 {
             f.app.tick(0);
             if until(f) {

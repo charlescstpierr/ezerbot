@@ -1371,16 +1371,28 @@ fn shell(
             .map(|home| PathBuf::from(home).join("Library/Application Support/Grokbot"))
             .map(|root| root.canonicalize().unwrap_or(root))
             .unwrap_or_else(|| data.clone());
+        // Le trousseau garde la clé du coffre et les jetons : le noyau en refuse l'accès
+        // au shell et à ses enfants, quelle que soit la façon d'écrire la commande
+        // (`S=security; "$S" …`, un script, un autre outil).
+        let keychains = std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join("Library/Keychains"))
+            .unwrap_or_else(|| PathBuf::from("/var/empty"));
         command = Command::new("/usr/bin/sandbox-exec");
         command
             .arg("-D")
             .arg(format!("DATA={}", data.display()))
             .arg("-D")
             .arg(format!("SUPPORT={}", support.display()))
+            .arg("-D")
+            .arg(format!("KEYCHAINS={}", keychains.display()))
             .arg("-p")
             .arg(concat!(
                 "(version 1)(allow default)",
-                "(deny file-read* file-write* (subpath (param \"DATA\")) (subpath (param \"SUPPORT\")))"
+                "(deny file-read* file-write* (subpath (param \"DATA\")) (subpath (param \"SUPPORT\"))",
+                " (subpath (param \"KEYCHAINS\")) (subpath \"/Library/Keychains\"))",
+                "(deny mach-lookup (global-name-prefix \"com.apple.security\")",
+                " (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.secd\")",
+                " (global-name \"com.apple.securityd\"))"
             ))
             .arg("/bin/sh");
     }

@@ -916,3 +916,44 @@ fn forgotten_text_is_redacted_from_the_yolo_activity_log() {
     assert!(!after.contains("avenue Alpha"), "{after}");
     assert!(after.contains("[redacted]"), "{after}");
 }
+
+#[test]
+fn a_forgotten_fact_with_newlines_or_past_the_summary_cut_leaves_no_trace_in_the_activity_log() {
+    let mut f = Fixture::new();
+    let c = f.conversation("grokbot");
+    // Un saut de ligne et des espaces doubles : la ligne affichée les normalise.
+    let multiline = "Private address:\n123  Sensitive Street";
+    let id = f.learn(&c, "learn", multiline);
+    f.events(vec![
+        call(
+            "multi",
+            "run_shell",
+            json!({"command":format!("printf '{multiline}'"),"cwd":std::env::temp_dir(),"timeout_ms":2000,"output_limit":1024}),
+        ),
+        complete(),
+    ]);
+    f.send(&c, "multi", "Rappelle-le.");
+    let log = f.state()["yolo"]["log"].to_string();
+    assert!(log.contains("123 Sensitive Street"), "{log}");
+    f.forget("grokbot", &id);
+    let after = f.state()["yolo"]["log"].to_string();
+    assert!(!after.contains("Sensitive Street"), "{after}");
+    assert!(!after.contains("Private address"), "{after}");
+    // Un fait loin dans une commande longue : la coupe de la ligne affichée ne laisse pas un début du fait.
+    let long = "Private inference: lives near avenue Beta.";
+    let id = f.learn(&c, "learn-long", long);
+    let padding = "x".repeat(150);
+    f.events(vec![
+        call(
+            "long",
+            "run_shell",
+            json!({"command":format!("printf '{padding} {long}'"),"cwd":std::env::temp_dir(),"timeout_ms":2000,"output_limit":1024}),
+        ),
+        complete(),
+    ]);
+    f.send(&c, "long", "Rappelle-le encore.");
+    f.forget("grokbot", &id);
+    let after = f.state()["yolo"]["log"].to_string();
+    assert!(!after.contains("avenue"), "{after}");
+    assert!(!after.contains("Private inference"), "{after}");
+}

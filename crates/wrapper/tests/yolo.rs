@@ -525,6 +525,45 @@ fn a_command_that_reaches_the_data_without_naming_it_reads_nothing() {
     );
 }
 
+/// Le trousseau est refusé par le noyau au shell YOLO, même quand le texte de la
+/// commande ne nomme jamais l'exécutable (`S=security; "$S" …`).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_keychain_is_refused_by_the_kernel_however_the_command_is_spelled() {
+    let mut f = Fixture::new();
+    // Hors YOLO le même texte lit le trousseau de l'utilisateur : c'est la référence.
+    let plain = std::process::Command::new("/bin/sh")
+        .args(["-c", r#"S=security; "$S" default-keychain"#])
+        .output()
+        .unwrap();
+    if !plain.status.success() {
+        return; // aucun trousseau lisible ici (ex. session sans trousseau) : rien à comparer
+    }
+    assert!(String::from_utf8_lossy(&plain.stdout).contains("keychain"));
+    for (id, command) in [
+        ("var", r#"S=security; "$S" default-keychain"#),
+        (
+            "script",
+            r#"printf '#!/bin/sh\nexec /usr/bin/security list-keychains\n' > lk.sh; sh lk.sh"#,
+        ),
+        (
+            "lien",
+            r#"ln -s /usr/bin/security sec; ./sec default-keychain"#,
+        ),
+    ] {
+        let out = f.runs_without_a_card(id, "run_shell", f.shell(command));
+        assert_eq!(out["status"], "done", "{id}: {out}");
+        let shown = out["output"]["stdout"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase();
+        assert!(
+            !shown.contains("login.keychain") && !shown.contains("system.keychain"),
+            "{id} a lu le trousseau : {out}"
+        );
+    }
+}
+
 #[test]
 fn a_global_refusal_of_the_shell_also_stops_commands_no_always_rule_could_cover() {
     let mut f = Fixture::new();

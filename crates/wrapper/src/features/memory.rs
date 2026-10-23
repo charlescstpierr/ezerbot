@@ -962,21 +962,7 @@ fn redact_run(conn: &Connection, run_id: &str, texts: &BTreeSet<String>) -> Resu
         index += 1;
     }
     // Le journal du Mode YOLO recopie la commande ou l'objectif : il s'oublie avec le reste.
-    let mut logged = conn.prepare("SELECT id,summary FROM wrapper_yolo_log WHERE run_id=?1")?;
-    let rows = logged
-        .query_map([run_id], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id, summary) in rows {
-        let redacted = redact_string(&summary, texts);
-        if redacted != summary {
-            conn.execute(
-                "UPDATE wrapper_yolo_log SET summary=?2 WHERE id=?1",
-                params![id, redacted],
-            )?;
-        }
-    }
+    super::yolo::redact_log(conn, run_id, &|text| redact_string(text, texts))?;
     let mut run = store::required(conn, run_id)?;
     if let Some(TaskStatus::Done { summary }) = &mut run.task_status {
         let redacted = redact_string(summary, texts);

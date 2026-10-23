@@ -43,6 +43,7 @@ pub const ASK: &str = "ask";
 const INHERIT: &str = "inherit";
 const LOG_LIMIT: usize = 100;
 const LOG_KEEP: i64 = 2000;
+const DETAIL_CHARS: usize = 20_000;
 pub const PROTECTED: &str =
     "Mode YOLO : les données et les identifiants d’Ezerbot restent hors de portée des outils.";
 
@@ -66,10 +67,22 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             call_id TEXT NOT NULL,
             tool TEXT NOT NULL,
             summary TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL,
             UNIQUE(run_id, call_id));
         INSERT OR IGNORE INTO wrapper_yolo_settings(singleton, mode) VALUES (1, 'yolo');",
     )?;
+    // Table créée par une version d'avant la colonne `detail` : on l'ajoute.
+    let has_detail: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_yolo_log') WHERE name='detail')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_detail {
+        conn.execute_batch(
+            "ALTER TABLE wrapper_yolo_log ADD COLUMN detail TEXT NOT NULL DEFAULT ''",
+        )?;
+    }
     Ok(())
 }
 
@@ -189,14 +202,16 @@ fn text(arguments: &Value, key: &str) -> String {
         .to_owned()
 }
 
-/// Une ligne qui dit ce qui a été fait. Le texte est masqué par le coffre avant
-/// d'être écrit : un secret saisi dans une commande n'entre pas dans le journal.
-pub fn describe(ctx: &Context<'_>, call: &ToolCall) -> String {
+/// Le texte complet de ce qui a été fait, tel que l'appel l'a écrit. Le coffre le
+/// masque avant l'écriture : un secret saisi dans une commande n'entre pas dans le
+/// journal. Ce texte exact est ce que l'oubli d'un souvenir efface ; la ligne
+/// affichée n'en est qu'un résumé recalculé (voir [`summary`]).
+fn detail(ctx: &Context<'_>, call: &ToolCall) -> String {
     let args = &call.arguments;
     let raw = match call.name.as_str() {
         "run_shell" => format!(
             "Commande « {} » dans {}",
-            policy::shorten_summary(&text(args, "command")),
+            text(args, "command"),
             text(args, "cwd")
         ),
         "read_file" => format!("Lecture de {}", text(args, "path")),
@@ -206,10 +221,7 @@ pub fn describe(ctx: &Context<'_>, call: &ToolCall) -> String {
             text(args, "path"),
             text(args, "content").len()
         ),
-        "delegate" => format!(
-            "Délégation : {}",
-            policy::background_summary(&call.name, args)
-        ),
+        "delegate" => format!("Délégation : {}", text(args, "objective")),
         name if super::screen::is_tool(name) => format!("Écran du Mac : {name}"),
         name if name.starts_with("mcp_") => super::mcp::display(ctx, name)
             .map(|label| {
@@ -222,18 +234,63 @@ pub fn describe(ctx: &Context<'_>, call: &ToolCall) -> String {
             .unwrap_or_else(|| format!("Connecteur : {name}")),
         name => format!("Outil {name}"),
     };
-    let shown = policy::shorten_summary(&raw);
+    let raw: String = raw.chars().take(DETAIL_CHARS).collect();
     super::forms::vault(ctx)
         .ok()
-        .and_then(|vault| redact_value(&vault, &json!(shown)).ok())
+        .and_then(|vault| redact_value(&vault, &json!(raw)).ok())
         .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or(shown)
+        .unwrap_or(raw)
+}
+
+/// La ligne affichée : le texte complet, espaces ramenés à un seul et raccourci.
+pub fn summary(detail: &str) -> String {
+    policy::shorten_summary(detail)
+}
+
+/// Efface d'un run, dans le texte complet comme dans la ligne affichée, ce que
+/// `redact` retire : l'oubli d'un souvenir passe ici avec les mêmes règles que pour
+/// les arguments d'outil. La ligne est recalculée depuis le texte déjà effacé, donc
+/// ni la normalisation des espaces ni le raccourcissement ne gardent une trace.
+pub fn redact_log(
+    conn: &Connection,
+    run_id: &str,
+    redact: &dyn Fn(&str) -> String,
+) -> Result<(), ApiError> {
+    let mut statement =
+        conn.prepare("SELECT id,summary,detail FROM wrapper_yolo_log WHERE run_id=?1")?;
+    let rows = statement
+        .query_map([run_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, shown, detail) in rows {
+        // Une ligne sans texte complet (base d'avant cette colonne) s'efface comme elle est.
+        let (new_detail, new_shown) = if detail.is_empty() {
+            (String::new(), redact(&shown))
+        } else {
+            let cleaned = redact(&detail);
+            let line = summary(&cleaned);
+            (cleaned, line)
+        };
+        if new_detail != detail || new_shown != shown {
+            conn.execute(
+                "UPDATE wrapper_yolo_log SET detail=?2, summary=?3 WHERE id=?1",
+                params![id, new_detail, new_shown],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn record(ctx: &Context<'_>, run: &Run, call: &ToolCall, source: &str) -> Result<(), ApiError> {
+    let detail = detail(ctx, call);
     ctx.connection.execute(
-        "INSERT OR IGNORE INTO wrapper_yolo_log(at,bot_id,conversation_id,run_id,call_id,tool,summary,source)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        "INSERT OR IGNORE INTO wrapper_yolo_log(at,bot_id,conversation_id,run_id,call_id,tool,summary,detail,source)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         params![
             ctx.now_ms as i64,
             run.bot_id,
@@ -241,7 +298,8 @@ fn record(ctx: &Context<'_>, run: &Run, call: &ToolCall, source: &str) -> Result
             run.run_id,
             call.call_id,
             call.name,
-            describe(ctx, call),
+            summary(&detail),
+            detail,
             source
         ],
     )?;

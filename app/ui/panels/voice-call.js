@@ -22,7 +22,7 @@
     ending: "Fin de l’appel…",
   };
   let ctx, callId = "", scopeKey = "", conversationId = "", epoch = 0, timer, ticking = false;
-  let button, bar, label, notice, transcriptToggle, interrupt, leave, transcript;
+  let button, menuItem, bar, label, notice, transcriptToggle, interrupt, leave, transcript;
   let phase = "idle", detail = "", lines = [], partial = "", written = 0, shown = false, paused = false, speaking = false;
   let lastActive = false, drawn = "";
   const active = () => Boolean(callId);
@@ -49,6 +49,9 @@
       : blocked ? "Indisponible pendant le mode voix, la dictée ou l’enregistrement d’une réunion"
       : button.disabled ? "Ouvrez une conversation pour lancer un appel vocal"
       : "Appel vocal · conversation en direct, l’audio est transmis au fournisseur de voix";
+    menuItem.disabled = button.disabled;
+    menuItem.setAttribute("aria-pressed", String(active()));
+    menuItem.title = button.title;
     bar.hidden = phase === "idle";
     bar.dataset.phase = phase;
     bar.dataset.tone = detail ? "danger" : "";
@@ -185,6 +188,16 @@
         // A conversation action in the header: the composer row has no room for a fourth voice control.
         const actions = document.querySelector(".topbar-actions");
         actions.insertBefore(button, document.getElementById("conversation-menu-button"));
+        // Under 900 px the header has no width to spare for the title: the same action moves to the conversation menu.
+        menuItem = el("button", "voice-call-menu-item"); menuItem.type = "button";
+        menuItem.onclick = () => {
+          document.getElementById("conversation-menu").hidden = true;
+          document.getElementById("conversation-menu-button").setAttribute("aria-expanded", "false");
+          start().catch(error => panels.notify(error.message));
+        };
+        const menuIcon = el("span", "voice-call-icon"); menuIcon.setAttribute("aria-hidden", "true"); menuIcon.innerHTML = icon.innerHTML;
+        menuItem.append(menuIcon, el("span", "", "Appel vocal"));
+        document.getElementById("rename-button").before(menuItem);
         bar = el("section", "voice-call-bar"); bar.setAttribute("aria-label", "Appel vocal");
         const row = el("div", "voice-call-row");
         label = el("strong", "voice-call-state"); label.setAttribute("role", "status");

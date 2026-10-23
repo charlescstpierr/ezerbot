@@ -4,6 +4,9 @@
 .voice-call-toggle:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
 .voice-call-toggle:disabled { opacity: .45; cursor: default; }
 .voice-call-icon { display: flex; }
+.popover .voice-call-menu-item { display: none; }
+.popover .voice-call-menu-item[aria-pressed="true"], .popover .voice-call-menu-item[aria-pressed="true"] .icon { color: var(--accent-ink); }
+.popover .voice-call-menu-item:disabled { opacity: .45; cursor: default; }
 .voice-call-icon .icon { width: 16px; height: 16px; }
 .voice-call-label { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .voice-call-bar { margin: 0 16px 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--pane); font-size: 11px; }
@@ -25,5 +28,5 @@
 .voice-call-empty { margin: 0; color: var(--muted); }
 .voice-call-bar .attachment-retry { font-size: 11px; }
 @media (prefers-reduced-motion: reduce) { .voice-call-state::before { animation: none !important; } }
-@media (max-width: 900px) { .voice-call-bar { margin-left: 10px; margin-right: 10px; } }
+@media (max-width: 900px) { .topbar-actions .voice-call-toggle { display: none; } .popover .voice-call-menu-item { display: flex; } .voice-call-bar { margin-left: 10px; margin-right: 10px; } }
 @media (max-height: 640px) { .voice-call-bar { padding: 6px 10px; margin-bottom: 6px; } .voice-call-transcript { max-height: 4.5em; } .voice-call-notice { margin-top: 3px; } }

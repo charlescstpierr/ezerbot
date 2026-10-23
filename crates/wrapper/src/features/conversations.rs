@@ -173,6 +173,10 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             let tx = super::write_transaction(&app.connection)?;
             tx.execute("INSERT INTO wrapper_conversations (account_id, id, title, title_customized, created_at, updated_at, bot_id, group_description, group_avatar) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8)", params![ACCOUNT, id, title, input.title.is_some(), timestamp, bot_id, description, avatar])?;
             super::multibot::initialize(&tx, &id, &bots)?;
+            if let Some(topic) = input.topic_id.as_deref() {
+                // Le fil naît déjà classé : un sujet introuvable annule la création.
+                super::topics::assign(&tx, &id, Some(topic))?;
+            }
             tx.commit()?;
             app.conversation_response(&id)
         }

@@ -221,6 +221,15 @@ test("la carte se pose en fixe, sous la pastille ou au-dessus en bas de fenêtre
   assert.match(open, /class="gb-source-card"/, "sans page, la carte reste dans le fil");
 });
 
+test("un lien de référence n’est pas une citation, mais [1][4] en reste deux", () => {
+  const body = "Voir [1][documentation] et [guide][2], puis [3] et [3][4].\n\n[documentation]: https://exemple.test/doc\n[2]: https://exemple.test/guide\n";
+  assert.deepEqual(sources.citedNumbers(body), [3, 4]);
+  const marked = sources.citeMarkdown(body);
+  assert.ok(marked.includes("[1][documentation]") && marked.includes("[guide][2]"));
+  assert.equal((marked.match(/<sourcepill /g) || []).length, 3);
+  assert.deepEqual(sources.citedNumbers("Voir [1][4]. Et [7]\n\n[7]: https://x.test"), [1, 4]);
+});
+
 test("la carte et la ligne restent lisibles en clair comme en sombre, au clavier", () => {
   const css = readFileSync(new URL("./chat.css", import.meta.url), "utf8");
   const block = css.slice(css.indexOf("/* Sources citées"));

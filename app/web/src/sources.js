@@ -54,7 +54,10 @@ function afterCode(chars, start) {
   return start + open;
 }
 
-function citationAt(chars, start) {
+const NUMBERS_ONLY = /^[\s0-9,;]+$/;
+
+// `links` : les numéros définis comme liens de référence (`[1]: https://…`), qui ne citent rien.
+function citationAt(chars, start, links = new Set()) {
   const before = chars[start - 1];
   if (start > 0 && (/[\p{L}\p{N}]/u.test(before) || before === "_" || before === ")")) return null;
   const close = chars.indexOf("]", start + 1);
@@ -66,6 +69,16 @@ function citationAt(chars, start) {
     numbers.push(Number(digits));
   }
   if (chars[close + 1] === "(" || chars[close + 1] === ":") return null;
+  if (numbers.some((n) => links.has(n))) return null;
+  // `[1][label]` et `[texte][1]` : un lien de référence, pas une citation suivie d'une autre (`[1][4]`).
+  if (chars[close + 1] === "[") {
+    const next = chars.indexOf("]", close + 2);
+    if (next >= 0 && !NUMBERS_ONLY.test(chars.slice(close + 2, next).join("")) ) return null;
+  }
+  if (before === "]") {
+    const open = chars.lastIndexOf("[", start - 2);
+    if (open >= 0 && !NUMBERS_ONLY.test(chars.slice(open + 1, start - 1).join(""))) return null;
+  }
   return { numbers, next: close + 1 };
 }
 
@@ -73,6 +86,7 @@ function citationAt(chars, start) {
 // Le code n'est pas de la prose : clôtures ``` ou ~~~ (fermées par la même marque, au moins aussi longue),
 // et bloc indenté de quatre espaces après une ligne vide, sauf sous un élément de liste.
 function scan(body, onCitation) {
+  const links = new Set([...String(body ?? "").matchAll(/^ {0,3}\[(\d{1,4})\]:/gm)].map((match) => Number(match[1])));
   let fence = null;
   let indentedCode = false;
   let previousBlank = true;
@@ -106,7 +120,7 @@ function scan(body, onCitation) {
         out += chars.slice(index, next).join("");
         index = next;
       } else if (chars[index] === "[") {
-        const found = citationAt(chars, index);
+        const found = citationAt(chars, index, links);
         if (found) { out += onCitation(found.numbers, chars.slice(index, found.next).join("")); index = found.next; }
         else { out += chars[index]; index++; }
       } else { out += chars[index]; index++; }

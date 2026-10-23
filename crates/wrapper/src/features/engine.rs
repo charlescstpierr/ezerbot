@@ -1756,7 +1756,8 @@ impl RunServices for Services<'_> {
             .and_then(|v| redact::redact_value(&v, &serde_json::to_value(outcome)?))
             .and_then(|value| Ok(serde_json::from_value(value)?))
         {
-            Ok(outcome) => outcome,
+            // The registry is written from the redacted output, never from the raw one.
+            Ok(outcome) => super::sources::annotate(&ctx, call, outcome),
             Err(_) => ToolOutcome::Failed {
                 reason: "Sortie locale indisponible.".into(),
             },
@@ -2783,7 +2784,8 @@ fn run_reply(
     proposals: Vec<Proposal>,
 ) -> Result<Message, ApiError> {
     let parts = projected_parts(conn, run)?;
-    let body = parts.iter().map(|part| part.body.as_str()).collect();
+    let body: String = parts.iter().map(|part| part.body.as_str()).collect();
+    let citations = super::sources::citations(conn, &run.run_id, &body)?;
     let mut metadata: (Option<String>, Option<String>, Option<String>) = conn.query_row(
         "SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1",
         [&run.run_id],
@@ -2812,7 +2814,8 @@ fn run_reply(
         notice: metadata.2,
         proposals,
         kind: "message".into(),
-        payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":store::token_usage(conn, &run.run_id)?}),
+        payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":store::token_usage(conn, &run.run_id)?,
+            "sources":redact::redact_value(&event_vault(conn)?, &json!(super::sources::registry(conn, &run.run_id)?))?,"citations":citations}),
         attachments: vec![],
     })
 }

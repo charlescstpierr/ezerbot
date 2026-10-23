@@ -282,6 +282,62 @@ fn owner_cites_the_library_file_and_the_other_bot_does_not() {
 }
 
 #[test]
+fn a_library_file_given_to_the_model_is_a_numbered_source_of_the_turn() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.bot("bot-a", "Alpha");
+    f.deposit("bot-a", FILE_NAME, TARIFF.as_bytes());
+    f.server.seen.lock().unwrap().reply_for = Some(Arc::new(|body: &Value| {
+        let instructions = body["instructions"].as_str().unwrap_or("");
+        if instructions.starts_with("Extraction de mémoire automatique.")
+            || instructions.contains("Tu écris le titre")
+        {
+            return None;
+        }
+        Some(ScriptedResponse::events(&[
+            json!({"type": "response.created"}),
+            json!({"type": "response.output_text.delta", "delta": "D’après tarifs.md, le tarif X est de 42 euros [1], sans rapport avec [3]."}),
+            json!({"type": "response.completed"}),
+        ]))
+    }));
+    let conversation = f.conversation("bot-a");
+    f.ask(&conversation, "question-source");
+    f.reply(&conversation, "question-source");
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let reply = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == conversation)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "reply-question-source")
+        .cloned()
+        .unwrap();
+    let sources = reply["payload"]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0]["n"], 1);
+    assert_eq!(sources[0]["type"], "bibliotheque");
+    assert_eq!(sources[0]["titre"], FILE_NAME);
+    assert_eq!(
+        reply["payload"]["citations"],
+        json!([{"n":1,"etat":"verifiee"},{"n":3,"etat":"introuvable","libelle":"source introuvable"}])
+    );
+    // The model was told the number with the file, and the citation contract came with it.
+    let seen = f.server.seen.lock().unwrap();
+    let instructions = seen
+        .bodies
+        .iter()
+        .filter_map(|body| body["instructions"].as_str())
+        .find(|text| text.contains(FILE_NAME) && text.contains("42 euros"))
+        .expect("the request carrying the file");
+    assert!(instructions.contains("\\\"source\\\":1"));
+    assert!(instructions.contains("Sources citées"));
+}
+
+#[test]
 fn overflow_recalls_the_matching_file_and_leaves_the_noise_out() {
     let mut f = Fixture::new();
     f.connect();

@@ -36,12 +36,16 @@ use sha2::{Digest, Sha256};
 const STALE_FORM: &str = "Ce formulaire n\u{2019}a pas \u{00e9}t\u{00e9} accept\u{00e9}.";
 
 empty_hooks!(context, link_attachments);
+mod late;
 mod reviewer;
+mod waiting;
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     // Needed before cutover too: the forms HTTP receipt already reads engine wakes.
     store::migrate(conn)?;
     grokbot_forms::migrate(conn)?;
+    waiting::migrate(conn)?;
+    late::migrate(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS wrapper_forms_calls (
             request_id TEXT PRIMARY KEY REFERENCES forms_requests(id), digest TEXT NOT NULL,
@@ -490,7 +494,20 @@ fn guarded_identity(
     if active_run(ctx, call)? != *run {
         return Err(ApiError::new(409, "Approval does not match the active run"));
     }
-    approval_identity(&run.run_id, call)
+    approval_identity_in(ctx.connection, &run.run_id, call)
+}
+/// The identity of a call inside its run. The follow-up turn of a late decision
+/// runs the very call a card approved: it answers to that card, not to a new one.
+pub(crate) fn approval_identity_in(
+    conn: &Connection,
+    run_id: &str,
+    call: &ToolCall,
+) -> Result<(String, String), ApiError> {
+    let (id, digest) = approval_identity(run_id, call)?;
+    Ok((
+        late::approved_card(conn, run_id, call, &digest)?.unwrap_or(id),
+        digest,
+    ))
 }
 pub(crate) fn approval_identity(
     run_id: &str,
@@ -506,7 +523,7 @@ pub(crate) fn tool_approval_status(
     run_id: &str,
     call: &ToolCall,
 ) -> Option<Value> {
-    let (id, _) = approval_identity(run_id, call).ok()?;
+    let (id, _) = approval_identity_in(ctx.connection, run_id, call).ok()?;
     requests::get(ctx.connection, &id)
         .ok()?
         .map(|r| json!(r.status)["status"].clone())
@@ -521,6 +538,7 @@ pub fn request_tool_approval(
     call: &ToolCall,
 ) -> Result<SuspendCause, ApiError> {
     let (id, digest) = guarded_identity(ctx, run, call)?;
+    let detached = waiting::continues(ctx.connection, run)?;
     if existing_request(ctx, &id, &digest)?.is_none() {
         let mut display = if super::generated::is_external(&call.name) {
             super::generated::approval_display(ctx, call)?
@@ -548,14 +566,26 @@ pub fn request_tool_approval(
             InputKind::Approval {
                 tool: call.name.clone(),
                 args_digest: digest.clone(),
-                expires_at: clock(ctx).saturating_add(if call.name == "propose_skill" {
+                expires_at: clock(ctx).saturating_add(if detached {
+                    let validity = waiting::load(ctx.connection)?.validity_ms();
+                    // A skill proposal never lives shorter than it always did.
+                    if call.name == "propose_skill" {
+                        validity.max(86_400_000)
+                    } else {
+                        validity
+                    }
+                } else if call.name == "propose_skill" {
                     86_400_000
                 } else {
-                    600_000
+                    waiting::BLOCKING_VALIDITY_MS
                 }),
             },
             display,
         )?;
+    }
+    if detached {
+        // The run goes on without this card: its end must not cancel the request.
+        requests::detach(ctx.connection, &id)?;
     }
     Ok(SuspendCause::HumanInput { id })
 }
@@ -574,6 +604,11 @@ pub(super) fn read_is_denied(ctx: &Context<'_>, call: &ToolCall) -> Result<bool,
     ))
 }
 
+/// RunServices::continue_without_approval adapter: the user's choice for this kind of run.
+pub fn continues_without_approval(conn: &Connection, run: &Run) -> Result<bool, ApiError> {
+    waiting::continues(conn, run)
+}
+
 /// RunServices::check_approval adapter. Existing per-call terminal decisions take
 /// precedence over standing rules. For internal tools, admission/consumption,
 /// effect and ToolResult share one IMMEDIATE transaction. External tools consume
@@ -584,6 +619,9 @@ pub fn check_tool_approval(
     call: &ToolCall,
 ) -> Result<ApprovalCheck, ApiError> {
     let (id, digest) = guarded_identity(ctx, run, call)?;
+    if let Some(reason) = late::refusal(ctx.connection, run, call, &digest)? {
+        return Ok(ApprovalCheck::Denied { reason });
+    }
     if let Some(request) = existing_request(ctx, &id, &digest)? {
         return match request.status {
             RequestStatus::Pending => Ok(ApprovalCheck::Ask),
@@ -591,7 +629,7 @@ pub fn check_tool_approval(
                 match approvals::consume_allow_once(
                     ctx.connection,
                     &id,
-                    &run.run_id,
+                    &request.run_id,
                     &call.name,
                     &call.arguments,
                     clock(ctx),
@@ -779,8 +817,8 @@ pub(super) fn consumed_tool_approval(
     let (id, digest) = guarded_identity(ctx, &run, call)?;
     let authorized: bool = ctx.connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM forms_requests r JOIN forms_approval_grants g ON g.request_id=r.id
-         WHERE r.id=?1 AND r.run_id=?2 AND r.status='resolved' AND g.tool=?3 AND g.args_digest=?4 AND g.consumed_at IS NOT NULL)",
-        params![id, run.run_id, call.name, digest], |row| row.get(0))?;
+         WHERE r.id=?1 AND r.status='resolved' AND g.tool=?2 AND g.args_digest=?3 AND g.consumed_at IS NOT NULL)",
+        params![id, call.name, digest], |row| row.get(0))?;
     if !authorized {
         return Err(ApiError::new(
             403,
@@ -807,6 +845,7 @@ fn attach(
     )?;
     requests::attach_wake(conn, &receipt.resolution_id, &wake)?;
     retarget_wait(conn, request, &receipt.resolution_id)?;
+    late::record_decision(conn, request)?;
     Ok(grokbot_engine::contracts::ResumeReceipt {
         wake: wake.status,
         ..receipt
@@ -967,7 +1006,10 @@ pub fn routes(
                 | "/api/secrets/list"
                 | "/api/secrets/put"
         ) | ("GET" | "DELETE", "/api/secrets")
-            | ("GET" | "POST", "/api/approvals/reviewer")
+            | (
+                "GET" | "POST",
+                "/api/approvals/reviewer" | "/api/approvals/waiting"
+            )
     ) {
         return None;
     }
@@ -977,6 +1019,9 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
     let ctx = app.feature_context();
     if path == "/api/approvals/reviewer" {
         return reviewer::settings(&ctx, method, body);
+    }
+    if path == "/api/approvals/waiting" {
+        return waiting::settings(&ctx, method, body);
     }
     if path == "/api/forms/skill-content" {
         #[derive(Deserialize)]
@@ -1219,6 +1264,9 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
             else {
                 return Err(ApiError::new(400, "Request is not an approval"));
             };
+            if let Some(refusal) = late::unavailable(&tx, &request, &submission, clock(&ctx))? {
+                return Err(refusal);
+            }
             let policy = policy_for_request(&ctx, &request)?;
             if matches!(
                 input.decision,
@@ -1357,6 +1405,9 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
     };
     tx.commit()?;
     super::demonstrations::cleanup(&app.feature_context());
+    // A card decided after its turn ended: the follow-up turn is opened outside the
+    // decision's transaction, and the host tick retries it if this call fails.
+    let _ = late::start_pending(&app.feature_context());
     Ok(json!({"accepted":true,"receipt":receipt}))
 }
 
@@ -1488,6 +1539,8 @@ fn request_value(
         None => Value::Null,
     };
     if matches!(request.kind, InputKind::Approval { .. }) {
+        // A detached card outlives its turn: the page words its decision differently.
+        value["detached"] = json!(late::detached(ctx.connection, &request.id)?);
         let compact = !full_content
             && request.status != RequestStatus::Pending
             && matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "propose_skill");
@@ -1587,6 +1640,14 @@ fn approved_call_id(
     ctx: &Context<'_>,
     request: &HumanInputRequest,
 ) -> Result<Option<String>, ApiError> {
+    Ok(approved_call(ctx, request)?.map(|call| call.call_id))
+}
+
+/// L’appel exact que cette carte d’approbation lie, tel que le tour l’a journalisé.
+fn approved_call(
+    ctx: &Context<'_>,
+    request: &HumanInputRequest,
+) -> Result<Option<ToolCall>, ApiError> {
     let mut q = ctx
         .connection
         .prepare("SELECT payload FROM engine_run_events WHERE run_id=?1 AND kind='tool_call'")?;
@@ -1598,7 +1659,7 @@ fn approved_call_id(
             continue;
         };
         if approval_identity(&request.run_id, &call).is_ok_and(|(id, _)| id == request.id) {
-            return Ok(Some(call.call_id));
+            return Ok(Some(call));
         }
     }
     Ok(None)
@@ -1816,7 +1877,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let bot_secrets = live_bot_secrets(ctx, &vault)?;
         Ok(redact_value(
             &vault,
-            &json!({"requests":requests,"secrets":secrets,"bot_secrets":bot_secrets,"storage":vault.storage_status(),"rules":rules_value(ctx.connection)?,"reviewer":reviewer::config_value(ctx.connection)?}),
+            &json!({"requests":requests,"secrets":secrets,"bot_secrets":bot_secrets,"storage":vault.storage_status(),"rules":rules_value(ctx.connection)?,"reviewer":reviewer::config_value(ctx.connection)?,"waiting":waiting::value(ctx.connection)?}),
         )?)
     }
     load(ctx).unwrap_or_else(|_| json!({"error":"Human input state is unavailable"}))
@@ -1893,6 +1954,7 @@ pub fn tick(ctx: &Context<'_>) {
     // Roll back the entire expiry batch on error; the next host tick retries it.
     let _ = expire();
     let _ = reviewer::tick(ctx);
+    let _ = late::start_pending(ctx);
 }
 
 /// Legacy registry hook cannot propagate failures (its signature is frozen in
@@ -1909,11 +1971,10 @@ pub fn on_run_event_checked(ctx: &Context<'_>, event: &RunEvent) -> Result<(), A
             "Run event reactions require a caller-owned transaction",
         ));
     }
-    if matches!(
-        event.kind,
-        RunEventKind::Cancelled | RunEventKind::TurnEnded
-    ) {
+    if event.kind == RunEventKind::Cancelled {
         requests::cancel_for_run(ctx.connection, &event.run_id)?;
+    } else if event.kind == RunEventKind::TurnEnded {
+        requests::cancel_for_turn_end(ctx.connection, &event.run_id)?;
     } else if event.kind == RunEventKind::Suspended {
         // Auto-review may resolve before the engine writes its suspension event.
         for request in requests::list_for_run(ctx.connection, &event.run_id)? {

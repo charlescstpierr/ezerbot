@@ -211,3 +211,47 @@ test("Annuler une réponse dans la réunion dit que rien n’a été envoyé", (
   assert.ok(html.includes("Annulé · rien n’a été envoyé"));
   assert.ok(!html.includes(">Envoyer<"));
 });
+
+function renderLinearDraft({ status, etat, publication_result, brouillon }) {
+  const request = {
+    entry_id: "linear", status: { status }, route: { requesting_bot_id: "grokbot" },
+    kind: { kind: "approval", tool: brouillon.titre === undefined ? "linear_comment_issue" : "linear_create_issue" },
+    arguments: { brouillon: { service: "Linear", compte: "charles@atelier.test · Atelier Ezerbot", texte: "Texte proposé", empreinte: "abc", ...brouillon, ...(etat ? { etat } : {}) } },
+    ...(publication_result ? { publication_result } : {}),
+  };
+  const input = { request, status, pending: status === "pending", busy: false, error: "", act: async () => true };
+  globalThis.window = { GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } } };
+  try {
+    return renderToStaticMarkup(React.createElement(DraftCard, { message: { id: "linear", kind: "approval", payload: request }, input, disabled: false, expired: false }));
+  } finally { delete globalThis.window; }
+}
+
+test("la carte brouillon d’une issue Linear montre le compte, l’équipe, le titre et la description, Envoyer et Annuler, sans « Toujours »", () => {
+  const html = renderLinearDraft({ status: "pending", brouillon: { action: "Créer une issue Linear", equipe: "ENG", titre: "Titre proposé" } });
+  for (const label of [">Publié sous le compte<", ">Équipe<", "Titre de l’issue (modifiable)", "Corps de l’issue (modifiable)", ">Envoyer<", ">Annuler<", "crée cette issue"]) assert.ok(html.includes(label), label);
+  for (const value of ["charles@atelier.test · Atelier Ezerbot", ">ENG<", "value=\"Titre proposé\"", ">Texte proposé</textarea>"]) assert.ok(html.includes(value), value);
+  assert.ok(!html.includes("Toujours"));
+  assert.ok(!html.includes("Dépôt"));
+});
+
+test("la carte brouillon d’un commentaire Linear montre le compte, l’issue et le texte exact, sans titre", () => {
+  const html = renderLinearDraft({ status: "pending", brouillon: { action: "Commenter une issue Linear", issue: "ENG-12" } });
+  for (const label of [">Publié sous le compte<", ">Issue<", "Texte exact du commentaire (modifiable)", ">Envoyer<", ">Annuler<"]) assert.ok(html.includes(label), label);
+  assert.ok(html.includes(">ENG-12<"));
+  assert.ok(!html.includes("Titre de l’issue"));
+  assert.ok(!html.includes("Toujours"));
+});
+
+test("une issue Linear créée nomme son identifiant, et un envoi refusé ou non confirmé ne prétend rien avoir publié", () => {
+  const sent = renderLinearDraft({ status: "resolved", etat: "sent", brouillon: { action: "Créer une issue Linear", equipe: "ENG", titre: "Titre" }, publication_result: { status: "done", output: { compte: "charles@atelier.test", identifiant: "ENG-31", url: "https://linear.app/atelier/issue/ENG-31" } } });
+  assert.ok(sent.includes("Issue ENG-31 créée sous charles@atelier.test"));
+  assert.ok(sent.includes("https://linear.app/atelier/issue/ENG-31"));
+  const commented = renderLinearDraft({ status: "resolved", etat: "sent", brouillon: { action: "Commenter une issue Linear", issue: "ENG-12" }, publication_result: { status: "done", output: { compte: "charles@atelier.test", url: "https://linear.app/atelier/issue/ENG-12#comment-1" } } });
+  assert.ok(commented.includes("Commentaire publié sous charles@atelier.test"));
+  for (const etat of ["refused", "rate_limited", "unconfirmed"]) {
+    const html = renderLinearDraft({ status: "resolved", etat, brouillon: { action: "Commenter une issue Linear", issue: "ENG-12" }, publication_result: { status: "failed", reason: "Raison du refus." } });
+    assert.ok(html.includes("Raison du refus."), etat);
+    assert.ok(!html.includes("Commentaire publié"), etat);
+    assert.ok(!html.includes(">Envoyer<"), etat);
+  }
+});

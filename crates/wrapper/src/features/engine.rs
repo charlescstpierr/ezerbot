@@ -1694,6 +1694,7 @@ impl RunServices for Services<'_> {
             || super::recall::is_tool(&call.name)
             || super::mcp::is_github_tool(&call.name)
             || super::mcp::is_slack_tool(&call.name)
+            || super::mcp::is_linear_tool(&call.name)
             || super::mcp::is_gmail_tool(&call.name)
     }
     fn external_unavailable_reason(
@@ -1707,6 +1708,9 @@ impl RunServices for Services<'_> {
         }
         if super::mcp::is_slack_tool(&call.name) {
             return Some(super::mcp::slack_unavailable(&ctx));
+        }
+        if super::mcp::is_linear_tool(&call.name) {
+            return Some(super::mcp::linear_unavailable(&ctx));
         }
         if super::mcp::is_gmail_tool(&call.name) {
             return Some(super::mcp::gmail_unavailable(&ctx));
@@ -1740,6 +1744,8 @@ impl RunServices for Services<'_> {
             super::mcp::run_github_tool(&ctx, call)
         } else if super::mcp::is_slack_tool(&call.name) {
             super::mcp::run_slack_tool(&ctx, call)
+        } else if super::mcp::is_linear_tool(&call.name) {
+            super::mcp::run_linear_tool(&ctx, call)
         } else if super::mcp::is_gmail_tool(&call.name) {
             super::mcp::run_gmail_tool(&ctx, call)
         } else {

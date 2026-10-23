@@ -191,7 +191,11 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               const gmailFree = !!gmail && !gmail.querySelector("form") && gmail.querySelectorAll('input:not([type="checkbox"])').length === 0;
               // Le même consentement Google lit l'agenda et Drive : la carte Gmail le dit, sans second formulaire.
               const gmailReads = !!gmail && /agenda/i.test(gmail.textContent) && /Drive/.test(gmail.textContent);
-              return heading === "Connecteurs" && add && reunions && gmailFree && gmailReads ? {ok: true, heading, reunions, gmailFree, gmailReads} : null;
+              // Linear n'a ni champ ni secret non plus, et sa fiche sépare la lecture des effets par carte brouillon.
+              const linear = panel.querySelector('[data-connector="linear"]');
+              const linearFree = !!linear && !linear.querySelector("form") && linear.querySelectorAll('input:not([type="checkbox"])').length === 0;
+              const linearActions = !!linear && /issues/i.test(linear.textContent) && /carte brouillon/i.test(linear.textContent);
+              return heading === "Connecteurs" && add && reunions && gmailFree && gmailReads && linearFree && linearActions ? {ok: true, heading, reunions, gmailFree, gmailReads, linearFree, linearActions} : null;
             }""",
             "connecteurs non prêts",
         )
@@ -1361,6 +1365,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"invite-{theme}-{size}.png", f"saisie-{theme}-{size}.png", f"mot-de-passe-{theme}-{size}.png"]
     if sphere == "dictee":
         return [f"microphone-{theme}-{size}.png", f"repli-{theme}-{size}.png", f"ecoute-{theme}-{size}.png", f"brouillon-{theme}-{size}.png"]
+    if sphere == "parametres-connecteurs":
+        return [f"{theme}-{size}.png", f"linear-{theme}-{size}.png"]
     return [f"{theme}-{size}.png"]
 
 
@@ -1374,6 +1380,17 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
                 """() => {
                   const retention = document.getElementById("meeting-retention");
                   retention?.scrollIntoView({block: "center"});
+                  return true;
+                }""",
+            )
+        if sphere == "parametres-connecteurs" and index == 1:
+            # Un second plan sur la fiche Linear, que le titre Connecteurs en haut du premier laisse hors cadre.
+            eval_js(
+                evidence,
+                """() => {
+                  const card = document.querySelector('[data-panel="mcp"] [data-connector="linear"]');
+                  if (!card) throw new Error("fiche Linear absente");
+                  card.scrollIntoView({block: "center"});
                   return true;
                 }""",
             )

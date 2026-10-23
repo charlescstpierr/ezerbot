@@ -333,6 +333,32 @@ test("a Slack client that is not configured is explained on the card and offers 
   assert.equal(warning.textContent, said);
 });
 
+const linearClient = {...service,id:"linear",name:"Linear",category:"Développement",description:"Lister les équipes et lire les issues de votre espace Linear, et préparer des issues et des commentaires depuis le chat.",permissions:"Lecture des équipes, des issues et de leurs commentaires ; une issue ou un commentaire n’est publié qu’après votre clic sur sa carte brouillon, sous votre nom.",needs_client:false,has_client:true,configured:true,unconfigured_message:null,scopes_label:"read issues:create comments:create",redirect_uri:null};
+
+test("Linear shows its permissions and actions, offers no client fields and connects in one click", async () => {
+  const { root, calls } = await mount([], {}, [linearClient]);
+  const card = catalogueCard(root,"linear");
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  assert.match(card.textContent, /Autorisations : Lecture des équipes, des issues et de leurs commentaires/);
+  assert.match(card.textContent, /créer|publié qu’après votre clic sur sa carte brouillon/);
+  assert.ok(!card.textContent.includes("Identifiant OAuth"));
+  assert.ok(!card.textContent.includes("URL de retour"));
+  assert.match(card.textContent, /aucun secret à saisir/);
+  await card.all().find(n => n.attrs["data-connector-action"] === "connect").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/connect",body:{id:"linear"}});
+});
+
+test("a connected Linear card names the account and a client that is not configured is explained without a form", async () => {
+  const account = "charles@atelier.test · Atelier Ezerbot";
+  const connected = await mount([], {}, [{...linearClient,status:"connected",has_tokens:true,account,server:{id:"l1",enabled_bots:[],tools:[]}}]);
+  assert.match(catalogueCard(connected.root,"linear").textContent, new RegExp(`Compte connecté : ${account}`));
+  const said = "Le client Linear d’Ezerbot n’est pas configuré dans cette version. Il n’y a ni identifiant ni secret à saisir : la connexion reste indisponible tant que le client n’est pas préparé.";
+  const { root } = await mount([], {}, [{...linearClient,configured:false,has_client:false,unconfigured_message:said}]);
+  const card = catalogueCard(root,"linear");
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  assert.equal(card.all().find(n => n.className === "mcp-warning").textContent, said);
+});
+
 test("the device code is shown, copyable and cancellable while GitHub waits", async () => {
   const expires_at = Date.UTC(2026,9,22,12,15);
   const item = {...github,status:"authorizing",authorization_url:"https://github.com/login/device",device:{user_code:"WDJB-MJHT",verification_uri:"https://github.com/login/device",expires_at},server:{id:"c1",enabled_bots:[],tools:[]}};

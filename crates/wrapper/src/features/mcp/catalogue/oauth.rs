@@ -45,12 +45,13 @@ fn random() -> Result<String, ApiError> {
         .map_err(|_| invalid("Impossible de préparer une connexion sécurisée."))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
-/// What identifies the client at the token and revocation endpoints. Gmail's and Slack's is
+/// What identifies the client at the token and revocation endpoints. Gmail's, Slack's and Linear's is
 /// the public client of the build and nothing else: no secret is read, so none can be sent.
 fn token_fields(m: Manifest, env: &HashMap<String, String>) -> Vec<(String, String)> {
     let public = match m.id {
         "gmail" => Some(gmail::client_id()),
         "slack" => Some(slack::client_id()),
+        "linear" => Some(linear::client_id()),
         _ => None,
     };
     if let Some(client) = public {
@@ -111,7 +112,14 @@ fn accept_token(
     {
         return Err(fail());
     }
-    validate_scopes(m, raw["scope"].as_str())?;
+    // Linear's older apps answer the granted scopes as a list rather than a string.
+    let granted = raw["scope"].as_array().map(|list| {
+        list.iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    validate_scopes(m, granted.as_deref().or(raw["scope"].as_str()))?;
     let access = raw["access_token"]
         .as_str()
         .filter(|s| !s.is_empty() && s.len() <= 3000 && !s.chars().any(char::is_control))
@@ -150,7 +158,16 @@ fn accept_token(
             .ok_or_else(fail)?;
         env.insert("EMAIL".into(), email.into());
     }
-    if m.id == "slack" {
+    if m.id == "linear" {
+        // The account is the one shown on the card; a renewal keeps the one it had.
+        if !env.contains_key("EMAIL") {
+            env.insert("EMAIL".into(), linear::identity(access).ok_or_else(fail)?);
+        }
+        // A client typed under an earlier version is not carried into the new secret.
+        env.remove("CLIENT_ID");
+        env.remove("CLIENT_SECRET");
+        linear::write_tokens(ctx, server, env)?;
+    } else if m.id == "slack" {
         // The workspace is the account shown on the card; a renewal keeps the one it had.
         // The exchange may give the team's identifier only: the token names the workspace.
         let workspace = workspace.or_else(|| {
@@ -216,7 +233,12 @@ pub(super) fn begin(
     m: Manifest,
     mut env: HashMap<String, String>,
 ) -> Result<Value, ApiError> {
-    let listener = HttpServer::http(("127.0.0.1",if m.id=="slack" && fake_base().is_none() {52187} else {0})).map_err(|_|invalid("Le port de retour OAuth est occupé. Fermez l’autre connexion en cours, puis réessayez."))?;
+    let fixed_port = match m.id {
+        "slack" => 52187,
+        "linear" => linear::REDIRECT_PORT,
+        _ => 0,
+    };
+    let listener = HttpServer::http(("127.0.0.1",if fake_base().is_none() {fixed_port} else {0})).map_err(|_|invalid("Le port de retour OAuth est occupé. Fermez l’autre connexion en cours, puis réessayez."))?;
     let port = listener.server_addr().to_ip().ok_or_else(fail)?.port();
     let redirect = format!("http://127.0.0.1:{port}/oauth/{}/callback", m.id);
     let state = random()?;
@@ -234,17 +256,20 @@ pub(super) fn begin(
         }
         save(ctx, &server.id, &env)?;
     }
-    if fake_base().is_some() && !matches!(m.id, "gmail" | "slack") && !env.contains_key("CLIENT_ID")
+    if fake_base().is_some()
+        && !matches!(m.id, "gmail" | "slack" | "linear")
+        && !env.contains_key("CLIENT_ID")
     {
         env.insert("CLIENT_ID".into(), "ezerbot-factice".into());
         save(ctx, &server.id, &env)?;
     }
-    // Gmail's and Slack's client is the build's, never read from the vault.
+    // Gmail's, Slack's and Linear's client is the build's, never read from the vault.
     // A dynamic client is registered for this exact redirect URI. Notion assigns
     // a new loopback port on every attempt, so register anew after restart too.
     let client = match m.id {
         "gmail" => gmail::client_id().ok_or_else(gmail::not_configured)?,
         "slack" => slack::client_id().ok_or_else(slack::not_configured)?,
+        "linear" => linear::client_id().ok_or_else(linear::not_configured)?,
         _ => env.get("CLIENT_ID").ok_or_else(fail)?.clone(),
     };
     let mut url = url::Url::parse(&endpoint(m, "authorize")).map_err(|_| fail())?;
@@ -260,7 +285,15 @@ pub(super) fn begin(
                 &URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
             )
             .append_pair("code_challenge_method", "S256")
-            .append_pair("scope", m.scopes);
+            .append_pair(
+                "scope",
+                // Linear takes its scopes separated by commas.
+                &if m.id == "linear" {
+                    m.scopes.replace(' ', ",")
+                } else {
+                    m.scopes.to_owned()
+                },
+            );
         if m.endpoint.is_empty() {
             query.append_pair("access_type", "offline").append_pair(
                 "prompt",
@@ -490,7 +523,7 @@ pub(super) fn revoke(m: Manifest, env: &HashMap<String, String>) -> bool {
     let Some(token) = token else { return true };
     let mut fields = token_fields(m, env);
     fields.push(("token".into(), token.clone()));
-    if m.id == "notion" {
+    if matches!(m.id, "notion" | "linear") {
         fields.push((
             "token_type_hint".into(),
             if env.contains_key("REFRESH_TOKEN") {

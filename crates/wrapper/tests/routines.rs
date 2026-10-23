@@ -1240,6 +1240,30 @@ fn routine_without_skill_runs_inline_prompt() {
 }
 
 #[test]
+fn a_routine_turn_carries_the_citation_instruction() {
+    let mut f = Fixture::new(true);
+    let r = f.create("CITE_ROUTINE_PAYLOAD");
+    f.events(vec![
+        call("done", "complete_task", json!({"summary":"Report ready"})),
+        complete(),
+    ]);
+    f.events(vec![complete()]);
+    f.tick_due(&r);
+    f.wait_run(&r);
+    let seen = f.server.seen.lock().unwrap();
+    let routine = seen
+        .bodies
+        .iter()
+        .find(|b| b.to_string().contains("CITE_ROUTINE_PAYLOAD"))
+        .expect("the routine request");
+    let instructions = routine["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("Sources citées") && instructions.contains("source introuvable"),
+        "{instructions}"
+    );
+}
+
+#[test]
 fn skill_invocation_uses_pinned_version() {
     let mut f = Fixture::new(true);
     let skill = f.post(

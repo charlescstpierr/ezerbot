@@ -292,7 +292,16 @@ pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock>
     if files.is_empty() {
         return Vec::new();
     }
-    vec![library_block(&recall(&files, &recall_query(ctx, request)))]
+    let query = recall_query(ctx, request);
+    // A file the model is given is a source of this run: it comes with its number.
+    let mut number = |file: &Stored| {
+        super::sources::number_context(
+            ctx,
+            &super::sources::Draft::new(super::sources::Kind::Library, &file.name)
+                .locator(&file.id),
+        )
+    };
+    vec![library_block(&recall_numbered(&files, &query, &mut number))]
 }
 
 /// The question as the model sees it now: follow-ups to a running task come first.
@@ -327,13 +336,36 @@ fn library_block(text: &str) -> ContextBlock {
     }
 }
 
+#[cfg(test)]
 fn recall(files: &[Stored], query: &str) -> String {
+    recall_numbered(files, query, &mut |_| None)
+}
+
+/// The files the question calls for, each given the number `number` assigns it once it is shown.
+fn recall_numbered(
+    files: &[Stored],
+    query: &str,
+    number: &mut dyn FnMut(&Stored) -> Option<i64>,
+) -> String {
     let lines = files
         .iter()
-        .map(|file| json_line(&file.name, &file.text, file.note.as_deref(), None))
+        .map(|file| json_line(&file.name, &file.text, file.note.as_deref(), None, None))
         .collect::<Vec<_>>();
     if render(&lines).chars().count() <= BUDGET {
-        return render(&lines);
+        return render(
+            &files
+                .iter()
+                .map(|file| {
+                    json_line(
+                        &file.name,
+                        &file.text,
+                        file.note.as_deref(),
+                        None,
+                        number(file),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
     }
     let terms = terms(query);
     let mut ranked = files
@@ -364,14 +396,31 @@ fn recall(files: &[Stored], query: &str) -> String {
     ranked.truncate(MAX_RECALLED);
     let room = BUDGET.saturating_sub(HEADER.chars().count() + FOOTER.chars().count());
     let chosen = ranked.iter().map(|(_, _, file)| *file).collect::<Vec<_>>();
-    render(&shared_lines(&chosen, &terms, room))
+    let numbers = chosen
+        .iter()
+        .filter_map(|file| number(file).map(|n| (file.id.as_str(), n)))
+        .collect::<BTreeMap<_, _>>();
+    render(&shared_lines(&chosen, &terms, room, &numbers))
 }
 
 /// Every chosen file gets an equal share of the room; a file that needs less leaves the rest to the others.
-fn shared_lines(files: &[&Stored], terms: &BTreeSet<String>, room: usize) -> Vec<String> {
+fn shared_lines(
+    files: &[&Stored],
+    terms: &BTreeSet<String>,
+    room: usize,
+    numbers: &BTreeMap<&str, i64>,
+) -> Vec<String> {
     let full = files
         .iter()
-        .map(|file| json_line(&file.name, &file.text, file.note.as_deref(), None))
+        .map(|file| {
+            json_line(
+                &file.name,
+                &file.text,
+                file.note.as_deref(),
+                None,
+                numbers.get(file.id.as_str()).copied(),
+            )
+        })
         .collect::<Vec<_>>();
     let mut lines: Vec<Option<String>> = vec![None; files.len()];
     let mut pending = (0..files.len()).collect::<Vec<_>>();
@@ -394,8 +443,14 @@ fn shared_lines(files: &[&Stored], terms: &BTreeSet<String>, room: usize) -> Vec
         let share = (room / pending.len()).saturating_sub(1);
         for index in pending {
             let file = files[index];
-            lines[index] =
-                line_that_fits(&file.name, &file.text, file.note.as_deref(), terms, share);
+            lines[index] = line_that_fits(
+                &file.name,
+                &file.text,
+                file.note.as_deref(),
+                terms,
+                share,
+                numbers.get(file.id.as_str()).copied(),
+            );
         }
     }
     lines.into_iter().flatten().collect()
@@ -421,8 +476,12 @@ fn json_line(
     text: &str,
     note: Option<&str>,
     excerpt: Option<(usize, usize)>,
+    source: Option<i64>,
 ) -> String {
     let mut value = json!({"name": name, "text": text});
+    if let Some(source) = source {
+        value["source"] = json!(source);
+    }
     if let Some(note) = note.filter(|note| !note.is_empty()) {
         value["note"] = json!(note);
     }
@@ -499,8 +558,9 @@ fn line_that_fits(
     note: Option<&str>,
     terms: &BTreeSet<String>,
     room: usize,
+    source: Option<i64>,
 ) -> Option<String> {
-    let full = json_line(name, text, note, None);
+    let full = json_line(name, text, note, None, source);
     if full.chars().count() <= room {
         return Some(full);
     }
@@ -518,6 +578,7 @@ fn line_that_fits(
             &shown,
             note,
             (count < total).then_some((count, total)),
+            source,
         );
         if line.chars().count() <= room {
             best = Some(line);

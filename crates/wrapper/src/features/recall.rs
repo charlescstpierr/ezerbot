@@ -53,6 +53,12 @@ const REGIONS: [&str; 4] = ["us-west-2", "us-east-1", "eu-central-1", "ap-northe
 const POLL_MS: u64 = 4_000;
 const MAX_FAILURES: i64 = 3;
 const FINAL_TRIES: i64 = 30;
+/// Essais de la passe finale quand seul le point de lecture continu répond.
+static LIVE_TRIES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(3);
+#[doc(hidden)]
+pub fn set_live_tries(tries: i64) {
+    LIVE_TRIES.store(tries, Ordering::Release);
+}
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BODY: u64 = 8 << 20;
 /// Lignes gardées par réunion, montrées dans la carte, et lues par le modèle en une fois.
@@ -765,15 +771,29 @@ fn store_lines(ctx: &Context<'_>, id: &str, lines: &[Line], replace: bool) -> Re
     tx.commit()?;
     Ok(())
 }
-fn pull_lines(ctx: &Context<'_>, key: &str, meeting: &Meeting, ended: bool) -> bool {
+/// Ce que rapporte une lecture : rien, un instantané du point continu, ou l’enregistrement complet.
+#[derive(PartialEq)]
+enum Pull {
+    Failed,
+    Live,
+    Recording,
+}
+fn pull_lines(ctx: &Context<'_>, key: &str, meeting: &Meeting, ended: bool) -> Pull {
     let Some(bot) = meeting.bot_id.as_deref() else {
-        return false;
+        return Pull::Failed;
     };
-    fetch_lines(key, meeting.region.as_deref(), bot, ended)
-        .ok()
-        .is_some_and(|(lines, authoritative)| {
-            store_lines(ctx, &meeting.id, &lines, authoritative).is_ok()
-        })
+    match fetch_lines(key, meeting.region.as_deref(), bot, ended) {
+        Ok((lines, authoritative))
+            if store_lines(ctx, &meeting.id, &lines, authoritative).is_ok() =>
+        {
+            if authoritative {
+                Pull::Recording
+            } else {
+                Pull::Live
+            }
+        }
+        _ => Pull::Failed,
+    }
 }
 fn line_count(conn: &Connection, id: &str) -> i64 {
     conn.query_row(
@@ -786,9 +806,14 @@ fn line_count(conn: &Connection, id: &str) -> i64 {
 /// Dernière passe sur le transcript d’une réunion finie, puis son résumé. Sans
 /// réponse de Recall après quelques essais, le résumé part des lignes déjà reçues.
 fn finalize(ctx: &Context<'_>, key: &str, meeting: &Meeting) {
-    let pulled = pull_lines(ctx, key, meeting, true);
     // L’enregistrement met parfois quelques instants à être prêt : on réessaie un moment.
-    if !pulled && meeting.failures + 1 < FINAL_TRIES {
+    // Un instantané du point continu n’est pas l’enregistrement : il ne clôt qu’après quelques essais.
+    let retry = match pull_lines(ctx, key, meeting, true) {
+        Pull::Recording => false,
+        Pull::Live => meeting.failures + 1 < LIVE_TRIES.load(Ordering::Acquire),
+        Pull::Failed => meeting.failures + 1 < FINAL_TRIES,
+    };
+    if retry {
         let _ = ctx.connection.execute(
             "UPDATE wrapper_recall_meetings SET failures=failures+1 WHERE id=?1",
             [&meeting.id],

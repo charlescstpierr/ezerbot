@@ -27,6 +27,7 @@
     const controls = [...card.querySelectorAll("button, a, summary")];
     const focused = [...inputs, ...controls].find(n => n === document.activeElement);
     return {
+      lines: document.activeElement?.classList?.contains("mcp-lines") || false,
       details: details.map(n => n.open),
       fields: inputs.filter(n => n.type !== "checkbox").map(n => ({name:n.name,value:n.value})),
       focus: focused && {name:focused.name,action:focused.getAttribute("data-connector-action"),label:focused.getAttribute("aria-label"),summary:details.findIndex(n => n.querySelector("summary") === focused),start:focused.selectionStart,end:focused.selectionEnd,direction:focused.selectionDirection},
@@ -38,6 +39,8 @@
     details.forEach((n,i) => { if (i < view.details.length) n.open = view.details[i]; });
     const inputs = [...card.querySelectorAll("input")];
     for (const field of view.fields) { const target = inputs.find(n => n.name === field.name); if (target) target.value = field.value; }
+    // La liste du transcript est focalisable : un défilement au clavier survit aux nouvelles lignes.
+    if (view.lines) card.querySelector(".mcp-lines")?.focus({preventScroll:true});
     const f = view.focus;
     if (!f) return;
     const controls = [...card.querySelectorAll("button, a, summary")];

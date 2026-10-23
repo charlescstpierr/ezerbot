@@ -31,8 +31,9 @@ class Node {
   getAttribute(key) { return this.attrs[key] ?? null; }
   addEventListener(name, action) { this.events[name] = action; }
   all() { return [this, ...this.children.flatMap(n => n.all())]; }
-  querySelectorAll(selector) { return this.all().slice(1).filter(n => selector.split(",").map(s => s.trim()).includes(n.tag)); }
+  querySelectorAll(selector) { return this.all().slice(1).filter(n => selector.split(",").map(s => s.trim()).some(s => s.startsWith(".") ? n.className.split(" ").includes(s.slice(1)) : s === n.tag)); }
   querySelector(selector) { return this.querySelectorAll(selector)[0]; }
+  get classList() { return { contains: c => this.className.split(" ").includes(c) }; }
   focus() { this.ownerDocument.activeElement = this; }
   requestSubmit() { return this.events.submit({ preventDefault() {} }); }
 }
@@ -173,6 +174,24 @@ test("un résumé qui échoue le dit en français et se réessaie ; sans résum�
   f.setItem({ ...connected, meeting: { ...ended, line_count: 0, lines: [], can_summarize: false, summary: null } });
   assert.match(f.root.textContent, /Aucune ligne n’a été reçue/);
   assert.equal(buttons(f.root, "Produire le résumé").length, 0);
+});
+
+test("la liste du transcript garde le focus clavier quand de nouvelles lignes remplacent la carte", async () => {
+  const line = (n) => ({ at_ms: n * 1000, clock: `0:0${n}`, speaker: "Alice", text: `Phrase ${n}` });
+  const f = await mount({ ...connected, meeting: { ...call, line_count: 1, lines: [line(1)] } });
+  const before = f.root.all().find(n => n.className === "mcp-lines");
+  before.focus();
+  assert.ok(f.root.ownerDocument.activeElement === before);
+  f.setItem({ ...connected, meeting: { ...call, line_count: 2, lines: [line(1), line(2)] } });
+  const after = f.root.all().find(n => n.className === "mcp-lines");
+  assert.ok(after !== before);
+  assert.ok(f.root.ownerDocument.activeElement === after);
+  assert.match(after.textContent, /Phrase 2/);
+  // Sans focus sur la liste, une mise à jour ne lui vole pas celui d'un autre champ.
+  const link = f.root.all().find(n => n.name === "reunions-link");
+  link?.focus();
+  f.setItem({ ...connected, meeting: { ...call, line_count: 3, lines: [line(1), line(2), line(3)] } });
+  assert.ok(f.root.ownerDocument.activeElement !== f.root.all().find(n => n.className === "mcp-lines"));
 });
 
 function render(recall, status = "pending", extra = {}) {

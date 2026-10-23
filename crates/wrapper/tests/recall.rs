@@ -183,6 +183,7 @@ impl Fixture {
         let provider = Provider::with_endpoints(&path, ai.endpoints(), false);
         let recall = Recall::new();
         std::env::set_var("GROKBOT_FAKE_RECALL", &recall.base);
+        recall::set_live_tries(1);
         let app = App::open_with(&path, provider.clone()).unwrap();
         wait("models", || provider.status()["models_ready"] == true);
         Self {
@@ -302,6 +303,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         recall::pause_background(false);
+        recall::set_live_tries(3);
         std::env::remove_var("GROKBOT_FAKE_RECALL");
         let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
@@ -1357,4 +1359,43 @@ fn a_secret_said_in_the_call_never_reaches_the_card_or_the_summary() {
     f.sync();
     f.wait_summary("ready");
     assert!(!format!("{:?}", f.ai.seen.lock().unwrap().summary_requests).contains(spoken));
+}
+
+#[test]
+fn a_live_snapshot_keeps_the_final_pass_open_until_the_recording_is_ready() {
+    let mut f = Fixture::new();
+    f.in_call();
+    // Le point continu répond seul : son instantané ne vaut pas l'enregistrement, on réessaie un moment.
+    recall::set_live_tries(3);
+    f.recall.said(&[("Alice", 1.0, "Première phrase")]);
+    f.sync();
+    f.post("/api/recall/leave", json!({}));
+    f.recall.said(&[
+        ("Alice", 1.0, "Première phrase"),
+        ("Alice", 9.0, "Presque fini"),
+    ]);
+    f.sync();
+    f.sync();
+    assert_eq!(f.lines().len(), 2);
+    assert_eq!(
+        f.summary(),
+        Value::Null,
+        "pas de résumé sur un transcript peut-être incomplet"
+    );
+    // L'enregistrement devient prêt avec la dernière phrase : il fait foi.
+    f.recall.seen.lock().unwrap().artifact = Some(vec![
+        json!({"participant":{"name":"Alice"},"words":[{"text":"Première","start_timestamp":{"relative":1.0}},{"text":"phrase","start_timestamp":{"relative":1.4}}]}),
+        json!({"participant":{"name":"Alice"},"words":[{"text":"Presque","start_timestamp":{"relative":9.0}},{"text":"fini","start_timestamp":{"relative":9.4}}]}),
+        json!({"participant":{"name":"Bruno"},"words":[{"text":"Tout","start_timestamp":{"relative":20.0}},{"text":"à","start_timestamp":{"relative":20.2}},{"text":"fait","start_timestamp":{"relative":20.4}}]}),
+    ]);
+    f.sync();
+    assert_eq!(f.lines().len(), 3);
+    f.wait_summary("ready");
+    let sent = f.ai.seen.lock().unwrap().summary_requests[0].to_string();
+    assert!(sent.contains("Tout à fait"));
+    // Une fois l'enregistrement lu, la passe est close : plus de lecture.
+    let gets = f.recall.transcript_gets();
+    f.sync();
+    f.sync();
+    assert_eq!(f.recall.transcript_gets(), gets);
 }

@@ -818,6 +818,26 @@ pub(super) fn held(ctx: &Context<'_>, login: &str, id: &str) -> Result<Account, 
     }
     Ok(account)
 }
+/// Why no event of GitHub can reach a routine: no account is connected, whoever the
+/// accounts are enabled for. `None` when one is.
+pub(in super::super) fn routine_gap(ctx: &Context<'_>) -> Result<Option<String>, ApiError> {
+    let rows = github_rows(ctx)?;
+    let any = |wanted: &str| rows.iter().any(|(_, phase)| phase == wanted);
+    Ok(if any("connected") {
+        None
+    } else {
+        Some(
+            if rows.is_empty() {
+                NOT_CONNECTED
+            } else if any("reconnect") {
+                RECONNECT
+            } else {
+                DISCONNECTED
+            }
+            .into(),
+        )
+    })
+}
 /// Why the GitHub tools are not offered to this bot: no account, a disconnected one,
 /// or a connected one this bot may not use.
 pub(in super::super) fn unavailable(ctx: &Context<'_>) -> String {

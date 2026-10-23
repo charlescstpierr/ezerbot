@@ -692,19 +692,28 @@ pub fn deliver_slots(
     policy: &CatchUpPolicy,
 ) -> Result<Vec<Delivered>> {
     let routine = routine::require(conn, routine_id)?;
-    let version: u64 = if member_id.is_empty() {
-        routine.schedule_version
+    // A start from before the trigger was active is not owed: a pause, or a trigger added
+    // or edited since, is a cut, as for a slot the clock counts. The cursor of a lone
+    // trigger is the routine's, that of a member is its own.
+    let (since, cursor): (i64, i64) = conn.query_row(
+        "SELECT active_since, materialized_after FROM scheduler_routines WHERE routine_id=?1",
+        [routine_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (version, activated): (u64, i64) = if member_id.is_empty() {
+        (routine.schedule_version, cursor)
     } else {
         conn.query_row(
-            "SELECT version FROM scheduler_members WHERE routine_id=?1 AND member_id=?2 AND live=1",
+            "SELECT version, materialized_after FROM scheduler_members WHERE routine_id=?1 AND member_id=?2 AND live=1",
             params![routine_id, member_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?
         .ok_or_else(|| Error::InvalidInput("unknown trigger".into()))?
     };
+    let activated = activated.max(since);
     let earliest = now_ms.saturating_sub(i64::from(policy.late_minutes.max(1)) * 60_000);
-    let mut sorted: Vec<&Told> = told.iter().collect();
+    let mut sorted: Vec<&Told> = told.iter().filter(|slot| slot.at_ms > activated).collect();
     sorted.sort_by(|a, b| (a.at_ms, &a.key).cmp(&(b.at_ms, &b.key)));
     let mut absent = Vec::new();
     let mut delivered = Vec::new();
@@ -760,6 +769,7 @@ fn latest_due(schedule: &cron::Schedule, zone: &str, first: i64, now: i64) -> Re
         cron::Schedule::Once { .. }
         | cron::Schedule::Webhook
         | cron::Schedule::Mail
+        | cron::Schedule::Github { .. }
         | cron::Schedule::Calendar { .. }
         | cron::Schedule::Group { .. } => Ok(first),
         cron::Schedule::Every { interval_ms, .. } => {
@@ -815,6 +825,23 @@ pub fn missed_ranges(conn: &Connection, routine_id: &str) -> Result<Vec<MissedRa
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The nonce of an occurrence that an event outside the clock started: a webhook
+/// call, a new message or a GitHub event. It is automatic intent, so pause and
+/// edits cut it off, unlike a manual launch.
+pub fn is_event_nonce(nonce: &str) -> bool {
+    nonce.starts_with("webhook:")
+        || nonce.starts_with("mail:")
+        || nonce.starts_with("github:")
+        || nonce.starts_with("calendar:")
+}
+
+/// [`is_event_nonce`] as SQL, for the nonce column `column`.
+pub fn event_nonce_sql(column: &str) -> String {
+    format!(
+        "({column} LIKE 'webhook:%' OR {column} LIKE 'mail:%' OR {column} LIKE 'github:%' OR {column} LIKE 'calendar:%')"
+    )
 }
 
 /// Manual runs are allowed on paused routines, independently of automatic
@@ -1022,13 +1049,12 @@ pub fn list(conn: &Connection, routine_id: &str) -> Result<Vec<Occurrence>> {
 /// Pausing suppresses automatic dispatch, not explicitly requested manual runs.
 /// Deleting suppresses both while preserving their audit records.
 pub fn pending(conn: &Connection) -> Result<Vec<Occurrence>> {
+    let event = event_nonce_sql("scheduler_occurrences.manual_nonce");
     let mut query = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM scheduler_occurrences WHERE status='pending'
          AND routine_id IN (SELECT routine_id FROM scheduler_routines WHERE deleted=0
                             AND (enabled=1 OR (scheduler_occurrences.manual_nonce IS NOT NULL
-                                 AND scheduler_occurrences.manual_nonce NOT LIKE 'webhook:%'
-                                 AND scheduler_occurrences.manual_nonce NOT LIKE 'mail:%'
-                                 AND scheduler_occurrences.manual_nonce NOT LIKE 'calendar:%')))
+                                 AND NOT {event})))
          ORDER BY scheduled_at_utc, occurrence_id"
     ))?;
     let rows = query.query_map([], from_row)?;
@@ -1040,13 +1066,12 @@ pub fn pending(conn: &Connection) -> Result<Vec<Occurrence>> {
 /// first, so a host dispatches only these and the queue costs one row per
 /// routine per tick, however long it is. Manual launches are never queued.
 pub fn pending_heads(conn: &Connection) -> Result<Vec<Occurrence>> {
+    let event = event_nonce_sql("o.manual_nonce");
     let mut query = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM scheduler_occurrences o WHERE status='pending'
          AND routine_id IN (SELECT routine_id FROM scheduler_routines WHERE deleted=0
                             AND (enabled=1 OR (o.manual_nonce IS NOT NULL
-                                 AND o.manual_nonce NOT LIKE 'webhook:%'
-                                 AND o.manual_nonce NOT LIKE 'mail:%'
-                                 AND o.manual_nonce NOT LIKE 'calendar:%')))
+                                 AND NOT {event})))
          AND (manual_nonce IS NOT NULL OR NOT EXISTS (
             SELECT 1 FROM scheduler_occurrences older WHERE older.routine_id=o.routine_id
             AND older.status='pending' AND older.manual_nonce IS NULL
@@ -2461,6 +2486,46 @@ mod occurrences_tests {
         assert_eq!(
             slots(&conn, &routine),
             vec![(HOUR, "missed"), (2 * HOUR, "pending")]
+        );
+    }
+
+    #[test]
+    fn a_start_from_before_the_trigger_was_active_is_not_owed() {
+        let (conn, routine) = grouped(vec![("a", every(60)), ("c", begins())]);
+        let id = &routine.routine_id;
+        let policy = CatchUpPolicy::default();
+        // Paused at 10 000 and resumed at 50 000: what began between is not caught up.
+        routine::set_enabled(&conn, id, false, 10_000).unwrap();
+        routine::set_enabled(&conn, id, true, 50_000).unwrap();
+        let told_after_resume = [told("during", 30_000), told("after", 60_000)];
+        let delivered = deliver_slots(&conn, id, "c", &told_after_resume, 70_000, &policy).unwrap();
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|d| d.occurrence.scheduled_at_utc)
+                .collect::<Vec<_>>(),
+            vec![60_000]
+        );
+        assert_eq!(slots(&conn, &routine), vec![(60_000, "pending")]);
+        // A trigger added by an edit starts from the edit, even while the watch kept running.
+        let mut edited = routine::get(&conn, id).unwrap().unwrap();
+        edited.trigger = group_of(vec![
+            ("a", every(60)),
+            ("c", begins()),
+            (
+                "d",
+                calendar(&[cron::CalendarCase::Created, cron::CalendarCase::Begins]),
+            ),
+        ]);
+        routine::update(&conn, &edited, 200_000).unwrap();
+        let before_edit = [told("old", 150_000), told("new", 250_000)];
+        let added = deliver_slots(&conn, id, "d", &before_edit, 300_000, &policy).unwrap();
+        assert_eq!(
+            added
+                .iter()
+                .map(|d| d.occurrence.scheduled_at_utc)
+                .collect::<Vec<_>>(),
+            vec![250_000]
         );
     }
 

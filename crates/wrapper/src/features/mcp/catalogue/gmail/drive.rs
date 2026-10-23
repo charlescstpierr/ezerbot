@@ -14,7 +14,8 @@ const DOCS: &str = "application/vnd.google-apps";
 
 pub(super) fn schema() -> Value {
     json!({"type":"object","additionalProperties":false,"required":["nom"],"properties":{
-        "nom":{"type":"string","minLength":1,"maxLength":NAME,"description":"Le nom exact du fichier Drive à lire."}
+        "nom":{"type":"string","minLength":1,"maxLength":NAME,"description":"Le nom exact du fichier Drive à lire."},
+        "compte":account_property()
     }})
 }
 
@@ -61,6 +62,7 @@ pub(super) fn read_file(ctx: &Context<'_>, arguments: &Value) -> Result<Value, A
     #[serde(deny_unknown_fields)]
     struct Args {
         nom: String,
+        compte: Option<String>,
     }
     let ask = || invalid("Indiquez le nom du fichier Drive à lire (200 caractères au plus).");
     let args: Args = serde_json::from_value(arguments.clone()).map_err(|_| ask())?;
@@ -68,7 +70,10 @@ pub(super) fn read_file(ctx: &Context<'_>, arguments: &Value) -> Result<Value, A
     if name.is_empty() || name.chars().count() > NAME || name.chars().any(char::is_control) {
         return Err(ask());
     }
-    let account = usable(ctx)?;
+    let account = match pick(ctx, args.compte.as_deref())? {
+        Pick::Use(account) => *account,
+        Pick::Ask(question) => return Ok(question),
+    };
     let email = account.email.as_str();
     let search = |reply: Reply| -> Result<Value, ApiError> {
         if let Some(error) = refused_for(&reply, email, "le Drive") {

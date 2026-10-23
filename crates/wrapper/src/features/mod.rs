@@ -104,6 +104,7 @@ pub mod notifications;
 pub mod pages;
 pub mod recall;
 pub mod routine_calendar;
+pub mod routine_github;
 pub mod routine_mail;
 pub mod routine_webhooks;
 pub mod routines;
@@ -153,6 +154,7 @@ registry!(
     routines,
     routines_background,
     routine_webhooks,
+    routine_github,
     routine_mail,
     routine_calendar,
     delegation,

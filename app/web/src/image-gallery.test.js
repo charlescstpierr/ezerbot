@@ -77,6 +77,8 @@ test("three images of one message render as a grid, and the viewer shows the cap
   for (const caption of ["Phare au crépuscule", "Le quai", "Ciel violet"]) assert.ok(html.includes(caption), caption);
   assert.match(html, /Enregistrer l’image…/);
   assert.match(html, /Copier l’image/);
+  assert.match(html, /aria-label="Enregistrer l’image…"/);
+  assert.match(html, /aria-label="Copier l’image"/);
   assert.match(html, /aria-label="Image précédente"/);
   assert.match(html, /aria-label="Image suivante"/);
   assert.match(html, /gb-image-viewer/);
@@ -138,6 +140,57 @@ test("save writes the image file and copy places that image on the clipboard", a
   const blob = typeof item.getType === "function" ? await item.getType("image/png") : item["image/png"];
   assert.ok(blob, "le presse-papiers doit contenir une image/png");
   assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), PNG);
+});
+
+test("macOS save asks the shell for a panel before any write, and a failure stays a French error", async () => {
+  const target = three.attachments[0];
+  const dir = await mkdtemp(join(tmpdir(), "ezerbot-galerie-"));
+  const destination = join(dir, "Phare au crépuscule.png");
+  const order = [];
+  let anchors = 0;
+  let picker = 0;
+  const saved = await gallery.saveGalleryImage(target, {
+    bytes: PNG,
+    showSaveFilePicker() { picker += 1; },
+    document: {
+      body: { append() {} },
+      createElement() { anchors += 1; return { style: {}, click() {}, remove() {} }; },
+    },
+    native: {
+      async postMessage(body) {
+        order.push("panel");
+        assert.equal(body.command, "save");
+        assert.equal(body.mime, "image/png");
+        assert.equal(body.name, "Phare au crépuscule.png");
+        assert.equal(body.data, Buffer.from(PNG).toString("base64"));
+        order.push("write");
+        await writeFile(destination, Buffer.from(body.data, "base64"));
+        return { ok: true, name: body.name };
+      },
+    },
+  });
+  assert.deepEqual(order, ["panel", "write"]);
+  assert.equal(picker, 0);
+  assert.equal(anchors, 0);
+  assert.equal(saved, "Phare au crépuscule.png");
+  assert.deepEqual(await readFile(destination), Buffer.from(PNG));
+
+  await assert.rejects(
+    gallery.saveGalleryImage(target, {
+      bytes: PNG,
+      native: { async postMessage() { return { ok: false, error: "L’image n’a pas pu être enregistrée." }; } },
+    }),
+    (error) => {
+      assert.equal(gallery.galleryFailureText(error, "autre"), "L’image n’a pas pu être enregistrée.");
+      return true;
+    },
+  );
+  assert.equal(await gallery.saveGalleryImage(target, {
+    bytes: PNG,
+    native: { async postMessage() { return { ok: true, cancelled: true }; } },
+  }), null);
+  assert.equal(gallery.galleryFailureText({ name: "AbortError", message: "The user aborted a request." }, "L’image n’a pas pu être enregistrée."), "");
+  assert.equal(gallery.galleryFailureText(new Error("Image illisible."), "L’image n’a pas pu être enregistrée."), "Image illisible.");
 });
 
 test("a generated image and attached images share the grid, while documents and voice stay outside it", () => {

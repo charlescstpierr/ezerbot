@@ -616,7 +616,7 @@ def memo_step(evidence: Path, index: int) -> None:
 
 
 def iphone_reply_step(evidence: Path, index: int) -> None:
-    """Avant chaque capture : 0 le fil avec la réponse du bot, sans autre chemin de réponse, 1 la feuille Répondre ouverte, 2 « Vu depuis la notification » envoyé deux fois."""
+    """Avant chaque capture : 0 le fil avec la réponse du bot, 1 un toucher sur la notification et le bouton Répondre, 2 la feuille ouverte par ce bouton, 3 « Vu depuis la notification » envoyé deux fois."""
     if index == 0:
         eval_js(evidence, """() => { window.GrokbotPanels.openConversation(window.__replyConversation); return true; }""")
         wait_js(
@@ -629,16 +629,28 @@ def iphone_reply_step(evidence: Path, index: int) -> None:
         state = eval_js(
             evidence,
             """async () => {
-              await window.EzerbotNotifications.activate(window.__replyNotification, {reply: true});
+              await window.EzerbotNotifications.activate(window.__replyNotification, {push: true});
+              await new Promise((resolve) => setTimeout(resolve, 400));
+              const button = document.querySelector(".reply-offer button");
+              return {label: button?.textContent || "", sheet: !!document.querySelector("dialog.reply-sheet[open]")};
+            }""",
+        )
+        if not state["label"].startswith("Répondre") or state["sheet"]:
+            raise SystemExit(f"un toucher simple n'offre pas Répondre sur la conversation: {state}")
+    if index == 2:
+        state = eval_js(
+            evidence,
+            """async () => {
+              document.querySelector(".reply-offer button").click();
               await new Promise((resolve) => setTimeout(resolve, 400));
               const dialog = document.querySelector("dialog.reply-sheet");
               const field = dialog?.querySelector("textarea");
-              return {open: !!dialog?.open, title: dialog?.querySelector("h2")?.textContent, focused: document.activeElement === field, hint: dialog?.querySelector("p")?.textContent || ""};
+              return {open: !!dialog?.open, title: dialog?.querySelector("h2")?.textContent, focused: document.activeElement === field, offer: !!document.querySelector(".reply-offer")};
             }""",
         )
-        if not state["open"] or not state["title"].startswith("Répondre à ") or not state["focused"]:
+        if not state["open"] or not state["title"].startswith("Répondre à ") or not state["focused"] or state["offer"]:
             raise SystemExit(f"la feuille de réponse n'est pas prête, champ prêt: {state}")
-    if index == 2:
+    if index == 3:
         state = eval_js(
             evidence,
             """async () => {
@@ -732,7 +744,7 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
     if sphere == "memo-vocal":
         return [f"avant-{theme}-{size}.png", f"vitesse-{theme}-{size}.png", f"saut-{theme}-{size}.png", f"sans-temps-{theme}-{size}.png"]
     if sphere == "iphone-reponse":
-        return [f"avant-{theme}-{size}.png", f"feuille-{theme}-{size}.png", f"envoyee-{theme}-{size}.png"]
+        return [f"avant-{theme}-{size}.png", f"toucher-{theme}-{size}.png", f"feuille-{theme}-{size}.png", f"envoyee-{theme}-{size}.png"]
     if sphere == "voix-bots":
         return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
     if sphere == "dictee":

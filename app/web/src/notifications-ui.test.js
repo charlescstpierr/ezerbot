@@ -170,7 +170,7 @@ test("with the Mac out of reach the sheet says so, keeps the text and a retry re
   f.sendOutcomes.push(new Error("La connexion au moteur local est interrompue."));
   await submit(f, "Vu depuis la notification");
   const status = byClass(sheet(f), "notification-warning");
-  assert.match(status.textContent, /Le Mac est injoignable\. Votre message n’a pas été envoyé ni mis en file/);
+  assert.match(status.textContent, /Le Mac est injoignable\. Ce message n’est pas marqué envoyé et n’est pas mis en file/);
   assert.equal(status.role, "alert");
   assert.equal(sheet(f).open, true);
   assert.equal(find(sheet(f), el => el.tagName === "textarea").value, "Vu depuis la notification");
@@ -210,4 +210,69 @@ test("the field cannot be edited while the reply is on its way, and is editable 
   release(); await pending; await flush();
   assert.equal(field.readOnly, false);
   assert.equal(sheet(f).open, true);
+});
+
+const offer = f => descendants(f.panels).find(el => el.className === "reply-offer" && !el.removed);
+
+test("a plain tap on a push offers Répondre on the conversation, and the offer opens the sheet", async () => {
+  const f = await fixture();
+  await f.window.EzerbotNotifications.activate("reply:run-1", { push: true });
+  assert.equal(sheet(f), undefined);
+  const button = find(offer(f), el => el.tagName === "button");
+  assert.equal(button.textContent, "Répondre à Atlas");
+  button.onclick();
+  assert.equal(sheet(f).open, true);
+  assert.equal(offer(f), undefined);
+});
+
+test("opening a reply from the notification list, or a non-reply push, offers nothing", async () => {
+  const f = await fixture();
+  await f.window.EzerbotNotifications.activate("reply:run-1");
+  await f.window.EzerbotNotifications.activate("routine:occ", { push: true });
+  assert.equal(offer(f), undefined);
+});
+
+test("leaving the conversation withdraws the offer", async () => {
+  const f = await fixture();
+  await f.window.EzerbotNotifications.activate("reply:run-1", { push: true });
+  assert.ok(offer(f));
+  f.registration.onState({}, { conversation: { id: "autre" } });
+  assert.equal(offer(f), undefined);
+});
+
+test("a cold start from a plain push tap offers Répondre", async () => {
+  const f = await fixture({ search: "?notification=reply%3Arun-1" });
+  await f.poll(); await flush(); await flush();
+  assert.ok(offer(f));
+  assert.equal(sheet(f), undefined);
+});
+
+test("a send that got no answer stays unconfirmed: a reopened sheet reuses its message id", async () => {
+  const f = await fixture();
+  await f.window.EzerbotNotifications.activate("routine:occ", { reply: true });
+  f.sendOutcomes.push(new Error("La connexion au moteur local est interrompue."));
+  await submit(f, "Vu depuis la notification");
+  await f.window.EzerbotNotifications.activate("routine:occ", { reply: true });
+  await submit(f, "Vu depuis la notification");
+  assert.deepEqual(sent(f).map(([, body]) => body.message_id), ["message-1", "message-1"]);
+  await f.window.EzerbotNotifications.activate("routine:occ", { reply: true });
+  await submit(f, "Un autre texte");
+  assert.equal(sent(f)[2][1].message_id, "message-2");
+});
+
+test("a late failure of an earlier reply never shows on the sheet opened since", async () => {
+  const f = await fixture();
+  await f.window.EzerbotNotifications.activate("routine:occ", { reply: true });
+  const sheets = () => descendants(f.panels).filter(el => el.className.includes("reply-sheet"));
+  const [first] = sheets();
+  let release; f.gate.hold = new Promise(resolve => { release = resolve; });
+  find(first, el => el.tagName === "textarea").value = "Premier";
+  const pending = find(first, el => el.tagName === "form").onsubmit({ preventDefault() {} }); await flush();
+  await f.window.EzerbotNotifications.activate("routine:occ", { reply: true });
+  const second = sheets().at(-1);
+  f.sendOutcomes.push(Object.assign(new Error("Refus du Mac."), { status: 403 }));
+  release(); await pending; await flush();
+  assert.match(byClass(first, "notification-warning").textContent, /Refus du Mac/);
+  assert.equal(byClass(second, "notification-warning"), undefined);
+  assert.equal(find(second, el => el.tagName === "p").textContent, "");
 });

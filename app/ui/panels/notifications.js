@@ -119,16 +119,31 @@
     section.append(toggle("dnd", "Ne pas déranger", "Suspend les alertes ; les événements restent dans la liste des non lus."));
     for (const [key, label] of Object.entries(kinds)) section.append(toggle(key, label));
   }
-  // Répondre: a sheet on the conversation, field ready. One message id per text, so
-  // a second tap on Envoyer (or a retry after a lost answer) never posts twice.
-  let reply = null;
-  const MAC_UNREACHABLE = "Le Mac est injoignable. Votre message n’a pas été envoyé ni mis en file. Vérifiez que le Mac est allumé avec Ezerbot ouvert, puis réessayez.";
+  // Répondre: a sheet on the conversation, field ready. One message id per conversation
+  // and text until it is confirmed, so a second tap on Envoyer, a retry after a lost
+  // answer, or a reopened sheet never posts the same words twice.
+  let reply = null, offer = null;
+  const unconfirmed = new Map();
+  const MAC_UNREACHABLE = "Le Mac est injoignable. Ce message n’est pas marqué envoyé et n’est pas mis en file ; s’il est déjà arrivé, il apparaîtra dans le fil. Vérifiez que le Mac est allumé avec Ezerbot ouvert, puis réessayez avec le même texte : il ne partira pas deux fois.";
   function botName(conversationId) {
     const state = host.state, conversation = state?.conversations?.find(item => item.id === conversationId);
     return state?.bots?.find(bot => bot.id === conversation?.bot_id)?.name || "";
   }
-  function replyStatus(text, failed = false) {
-    reply.status.textContent = text; reply.status.className = failed ? "notification-warning" : "notification-hint"; reply.status.role = failed ? "alert" : "status";
+  function replyStatus(sheet, text, failed = false) {
+    sheet.status.textContent = text; sheet.status.className = failed ? "notification-warning" : "notification-hint"; sheet.status.role = failed ? "alert" : "status";
+  }
+  function dismissOffer() { offer?.remove?.(); offer = null; }
+  // iOS shows no action button on a web notification: a plain tap lands on the
+  // conversation, where this control opens the same sheet.
+  function offerReply(conversationId) {
+    dismissOffer();
+    const name = botName(conversationId);
+    const bar = node("div", null, "reply-offer"); bar.role = "status";
+    const open = node("button", name ? `Répondre à ${name}` : "Répondre", "primary-button"); open.type = "button";
+    open.onclick = () => { dismissOffer(); openReply(conversationId); };
+    bar.append(open); offer = bar; bar.conversationId = conversationId;
+    document.getElementById("panels").append(bar);
+    setTimeout(() => { if (offer === bar) dismissOffer(); }, 30000);
   }
   function openReply(conversationId) {
     reply?.dialog.remove?.();
@@ -143,21 +158,25 @@
     const status = node("p", null, "notification-hint"); status.role = "status";
     const send = node("button", "Envoyer", "primary-button"); send.type = "submit";
     form.append(area, status, send); dialog.append(heading, form);
-    reply = { dialog, area, status, send, conversationId, sending: false, sentBody: null, messageId: null };
+    const sheet = { dialog, status, sending: false };
+    reply = sheet;
     form.onsubmit = async event => {
       event.preventDefault();
-      const current = reply, body = area.value.trim();
-      if (!body || current.sending) return;
-      if (body !== current.sentBody) { current.sentBody = body; current.messageId = crypto.randomUUID(); }
-      current.sending = true; send.disabled = true; area.readOnly = true; replyStatus("Envoi en cours…");
+      const body = area.value.trim(), key = `${conversationId}\n${body}`;
+      if (!body || sheet.sending) return;
+      if (!unconfirmed.has(key)) unconfirmed.set(key, crypto.randomUUID());
+      sheet.sending = true; send.disabled = true; area.readOnly = true; replyStatus(sheet, "Envoi en cours…");
       try {
-        await host.api("/api/send", { conversation_id: current.conversationId, message_id: current.messageId, body });
+        await host.api("/api/send", { conversation_id: conversationId, message_id: unconfirmed.get(key), body });
+        unconfirmed.delete(key);
         await host.refresh().catch(() => {});
         dialog.close();
       } catch (e) {
-        // A refusal from the Mac says why; a missing answer means the Mac is out of reach.
-        replyStatus(e.status ? e.message : MAC_UNREACHABLE, true); send.disabled = false; area.readOnly = false;
-      } finally { current.sending = false; }
+        // A refusal from the Mac says why; a missing answer leaves the outcome unconfirmed.
+        if (e.status) unconfirmed.delete(key);
+        replyStatus(sheet, e.status ? e.message : MAC_UNREACHABLE, true); send.disabled = false; area.readOnly = false;
+        if (!e.status) host.refresh().catch(() => {});
+      } finally { sheet.sending = false; }
     };
     document.getElementById("panels").append(dialog);
     dialog.showModal(); area.focus();
@@ -173,6 +192,7 @@
       await host.refresh();
       focusTarget();
       if (options.reply) openReply(target.conversation_id);
+      else if (options.push && id.startsWith("reply:")) offerReply(target.conversation_id);
     } catch (e) { host.notify(e.message); }
   }
   function focusTarget() {
@@ -226,7 +246,7 @@
       const visible = p.focused && p.visible ? data.items.filter(item => item.conversation_id === p.conversation_id).map(item => item.id) : [];
       if (visible.length) { data = await host.api("/api/notifications/read", { ids: visible }); renderList(); }
       focusTarget();
-      if (launch) { const { id, reply: wantsReply } = launch; launch = null; open(id, { reply: wantsReply }); }
+      if (launch) { const { id, reply: wantsReply } = launch; launch = null; open(id, { reply: wantsReply, push: true }); }
     } catch (e) { pollFailure = e.message; renderSettings(); }
     finally { loading = false; }
   }
@@ -241,7 +261,7 @@
   host.register({
     id: "notifications",
     settingsSection(container) { section = container; section.className = "setting-section notifications-settings"; renderSettings(); },
-    onState(_, ctx) { current = ctx.conversation; },
+    onState(_, ctx) { current = ctx.conversation; if (offer && current?.id !== offer.conversationId) dismissOffer(); },
   });
   for (const name of ["focus", "blur", "visibilitychange"]) window.addEventListener(name, () => poll());
   document.addEventListener("visibilitychange", poll);

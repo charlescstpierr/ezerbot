@@ -28,3 +28,5 @@
 .reply-input { width: 100%; min-height: 96px; resize: vertical; font-size: 16px; }
 .reply-form p { margin: 0; }
 .reply-form .primary-button { min-height: 44px; justify-self: end; }
+.reply-offer { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(110px + env(safe-area-inset-bottom)); z-index: 30; max-width: calc(100vw - 32px); }
+.reply-offer .primary-button { min-height: 44px; box-shadow: 0 6px 20px rgba(0, 0, 0, .25); }

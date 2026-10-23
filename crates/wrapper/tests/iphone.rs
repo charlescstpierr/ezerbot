@@ -547,6 +547,11 @@ fn topics_stay_on_the_mac() {
     assert_eq!(after["conversations"].as_array().unwrap().len(), before);
     assert_eq!(after["topics"]["membership"], json!({}));
     assert!(f
-        .remote("POST", "/api/conversations", json!({"title":"Libre"}), Some(&token))
+        .remote(
+            "POST",
+            "/api/conversations",
+            json!({"title":"Libre"}),
+            Some(&token)
+        )
         .is_ok());
 }

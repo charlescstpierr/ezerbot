@@ -15,7 +15,7 @@ const VALIDITIES: [(&str, i64); 4] = [
     ("24h", 86_400_000),
     ("7d", 604_800_000),
 ];
-/// (clé, délai en ms) du rappel ; 0 = jamais. Le rappel lui-même est livré ailleurs.
+/// (clé, délai en ms) du rappel ; 0 = jamais. Le rappel est livré par `notifications`.
 const REMINDERS: [(&str, i64); 4] = [
     ("30min", 1_800_000),
     ("1h", 3_600_000),
@@ -68,6 +68,19 @@ impl Settings {
             ));
         }
         Ok(())
+    }
+    /// Délai du rappel unique et sa durée en mots pour la notification ; `None` = jamais.
+    pub(super) fn reminder(&self) -> Option<(i64, &'static str)> {
+        let phrase = match self.reminder.as_str() {
+            "30min" => "30 min",
+            "1h" => "1 h",
+            "3h" => "3 h",
+            _ => return None,
+        };
+        REMINDERS
+            .iter()
+            .find(|(key, _)| *key == self.reminder)
+            .map(|(_, ms)| (*ms, phrase))
     }
     pub(super) fn validity_ms(&self) -> i64 {
         VALIDITIES

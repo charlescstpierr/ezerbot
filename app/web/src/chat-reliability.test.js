@@ -203,6 +203,16 @@ test("group copy rewrites every retry instruction, including a delay or a shorte
   assert.equal(direct.error, cases[0][0]);
 });
 
+test("a task failure with a delay names the main conversation once", () => {
+  const error = "Les connexions précédentes se ferment encore. Réessayez dans une minute.";
+  const task = replyProblemState({ error_kind: "other", error }, { isTask: true });
+  assert.equal(task.retry, false);
+  assert.equal(task.error, "Les connexions précédentes se ferment encore. Poursuivez dans la conversation principale dans une minute.");
+  assert.equal(task.advice, null);
+  assert.equal(task.error.match(/Poursuivez dans la conversation principale/g).length, 1);
+  assert.doesNotMatch(task.error, /Réessayez/);
+});
+
 test("pings without an event are not described as a session renewal", () => {
   const raw = "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez.";
   const direct = replyProblemState({ error_kind: "other", error: raw });

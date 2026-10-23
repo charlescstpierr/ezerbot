@@ -15,7 +15,7 @@ mod agenda;
 mod drive;
 pub use agenda::{CalendarCase, CalendarEvent};
 
-mod email;
+pub(super) mod email;
 pub(in super::super) use email::TOOL as EMAIL_TOOL;
 
 pub(in super::super) const TOOL: &str = "gmail_list_recent_messages";

@@ -26,6 +26,7 @@
   <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
     <defs>
       <symbol id="i-mark" viewBox="0 0 48 48"><g fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round"><path d="M24 8v8m0 16v8M8 24h8m16 0h8M12.7 12.7l5.7 5.7m11.2 11.2 5.7 5.7m0-22.6-5.7 5.7M18.4 29.6l-5.7 5.7"/><circle cx="24" cy="24" r="5.8"/></g></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6l2 2.2h7.4A2.5 2.5 0 0 1 21 9.7v7.8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5Z"/></symbol>
       <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
       <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.7" cy="10.7" r="6.7"/><path d="m16 16 4.5 4.5"/></symbol>
       <symbol id="i-chat" viewBox="0 0 24 24"><path d="M20 11.5a8 8 0 0 1-8 8H5l-3 2v-10a9 9 0 0 1 18 0Z"/><path d="M7 10h8M7 14h5"/></symbol>
@@ -66,6 +67,7 @@
     <button class="new-chat" id="new-chat"><svg class="icon"><use href="#i-plus"/></svg><span>Nouvelle conversation</span><kbd>⌘ N</kbd></button>
     <label class="search-field"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="search" type="search" autocomplete="off" placeholder="Rechercher" aria-label="Rechercher une conversation"><kbd>⌘ K</kbd></label>
     <div class="sidebar-bots" role="group" aria-labelledby="sidebar-bots-label"><div class="sidebar-filter-row"><span class="section-label" id="sidebar-bots-label">BOTS</span><button class="favorites-filter add-bot" type="button" data-new-bot aria-label="Nouveau bot" title="Nouveau bot"><svg class="icon"><use href="#i-plus"/></svg></button></div><div class="sidebar-bot-list" id="sidebar-bot-list"></div></div>
+    <div class="sidebar-topics" id="sidebar-topics" role="group" aria-labelledby="sidebar-topics-label" hidden><div class="sidebar-filter-row"><span class="section-label" id="sidebar-topics-label">SUJETS</span><button class="favorites-filter add-topic" id="new-topic" type="button" aria-label="Nouveau sujet" title="Nouveau sujet"><svg class="icon"><use href="#i-plus"/></svg></button></div><div class="topic-list" id="topic-list"></div></div>
     <div class="sidebar-filter-row"><span class="section-label">CONVERSATIONS</span><button id="favorites-filter" class="favorites-filter" aria-label="Afficher les favoris" aria-pressed="false" title="Afficher les favoris"><svg class="icon"><use href="#i-star"/></svg></button></div>
     <nav class="conversation-list" id="conversation-list" aria-label="Vos conversations"><p class="sidebar-empty">Vos conversations apparaîtront ici.</p></nav>
     <div class="sidebar-bottom">
@@ -81,6 +83,7 @@
       <div class="popover conversation-menu" id="conversation-menu" hidden>
         <button id="rename-button"><svg class="icon"><use href="#i-edit"/></svg>Renommer</button>
         <button id="favorite-button"><svg class="icon"><use href="#i-star"/></svg><span>Ajouter aux favoris</span></button>
+        <button id="topic-button" hidden><svg class="icon"><use href="#i-folder"/></svg><span>Classer dans un sujet…</span></button>
         <button id="copy-link-button"><svg class="icon"><use href="#i-copy"/></svg>Copier le lien</button>
         <button id="edit-bot-button"><svg class="icon"><use href="#i-bot"/></svg>Modifier le bot</button>
         <button id="learn-skill-button"><svg class="icon"><use href="#i-learn"/></svg>Apprendre ceci comme skill</button>

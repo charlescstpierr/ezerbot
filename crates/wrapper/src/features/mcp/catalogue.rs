@@ -7,6 +7,7 @@ pub(super) mod github;
 pub(super) mod gmail;
 pub(super) mod jira;
 pub(super) mod linear;
+pub(super) mod microsoft;
 mod oauth;
 pub(super) mod slack;
 
@@ -28,7 +29,10 @@ pub(super) fn id_for_server(ctx: &Context<'_>, id: &str) -> Option<&'static str>
 }
 /// A service that Ezerbot talks to itself, with no process and no client to type.
 fn is_native_service(id: &str) -> bool {
-    matches!(id, "github" | "gmail" | "slack" | "linear" | "jira")
+    matches!(
+        id,
+        "github" | "gmail" | "slack" | "linear" | "jira" | "microsoft365"
+    )
 }
 /// A connection with no process: GitHub, Gmail and Slack are native adapters, connected or not.
 pub(super) fn native_status(ctx: &Context<'_>, server: &str) -> Option<&'static str> {
@@ -60,6 +64,7 @@ pub(super) fn native_tools(
         Some("slack") => slack::tool_specs(),
         Some("linear") => linear::tool_specs(),
         Some("jira") => jira::tool_specs(),
+        Some("microsoft365") => microsoft::tool_specs(),
         _ => github::tool_specs(),
     }
 }
@@ -81,6 +86,7 @@ pub(super) const MANIFESTS: &[Manifest] = &[
     Manifest { id:"gmail", category:"Courriel et agenda", name:"Gmail", description:"Lire vos derniers courriels, vos rendez-vous et un fichier de votre Drive, et préparer un envoi, depuis le chat, avec votre compte Google.", permissions:"Lecture de la boîte de réception, de l’agenda et des fichiers Drive, brouillons et modification des messages, adresse du compte. Les bots peuvent lire les derniers courriels, les rendez-vous d’un jour et un fichier Drive nommé, sans carte d’approbation, et préparer un courriel : il ne part qu’après votre clic sur sa carte brouillon. Aucun courriel n’est supprimé, et rien n’est écrit dans l’agenda ni dans Drive.", scopes:"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/drive.readonly", source:"https://developers.google.com/gmail/api/auth/scopes", license:"Service Google · client Google d’Ezerbot, aucun logiciel redistribué", setup:"Aucune application OAuth à créer et aucun secret à saisir. Connecter ouvre la page de connexion de Google dans le navigateur : vous choisissez votre compte et acceptez les autorisations demandées, courriel, agenda et Drive en lecture. Un seul consentement suffit pour les trois.", endpoint:"" },
     Manifest { id:"calendar", category:"Courriel et agenda", name:"Google Calendar", description:"Consulter vos agendas et gérer vos événements.", permissions:"Lecture et modification des agendas et événements ; adresse du compte.", scopes:"openid email https://www.googleapis.com/auth/calendar", source:"https://github.com/taylorwilsdon/google_workspace_mcp", license:"MIT · workspace-mcp 2.1.1 (communautaire)", setup:GOOGLE_SETUP, endpoint:"" },
     Manifest { id:"drive", category:"Courriel et agenda", name:"Google Drive", description:"Rechercher, lire et organiser les fichiers de votre Drive.", permissions:"Lecture et modification de tous les fichiers Drive accessibles au compte ; adresse du compte.", scopes:"openid email https://www.googleapis.com/auth/drive", source:"https://github.com/taylorwilsdon/google_workspace_mcp", license:"MIT · workspace-mcp 2.1.1 (communautaire)", setup:GOOGLE_SETUP, endpoint:"" },
+    Manifest { id:"microsoft365", category:"Courriel et agenda", name:"Microsoft 365", description:"Lire vos derniers courriels Outlook et vos rendez-vous de demain, et préparer un courriel depuis le chat, avec votre compte Microsoft 365.", permissions:"Lecture de la boîte de réception et de l’agenda Outlook, et identité du compte ; un courriel n’est envoyé qu’après votre clic sur sa carte brouillon, sous votre adresse. Ezerbot n’écrit rien dans le calendrier et ne modifie, ne déplace ni ne supprime aucun courriel.", scopes:"User.Read Mail.Read Mail.Send Calendars.Read offline_access", source:"https://learn.microsoft.com/en-us/graph/auth-v2-user", license:"Service Microsoft · client public Ezerbot (Microsoft Entra), PKCE, aucun logiciel redistribué", setup:"Aucune application OAuth à créer et aucun secret à saisir. Connecter ouvre la page de connexion de Microsoft dans le navigateur : vous choisissez votre compte et autorisez le client Microsoft d’Ezerbot à lire votre boîte de réception et votre agenda, et à envoyer un courriel sous votre adresse après votre clic sur une carte brouillon. Si votre organisation restreint le consentement, son administrateur doit autoriser l’application.", endpoint:"https://graph.microsoft.com/v1.0" },
     Manifest { id:"slack", category:"Messagerie", name:"Slack", description:"Lire les derniers messages d’un canal Slack et préparer des messages depuis le chat, avec votre compte Slack.", permissions:"Lecture des messages des canaux publics et privés que votre compte voit, et des noms des personnes ; un message n’est publié qu’après votre clic sur sa carte brouillon, sous votre nom.", scopes:"channels:history groups:history channels:read groups:read users:read chat:write", source:"https://docs.slack.dev/authentication/installing-with-oauth/", license:"Service Slack · client public Ezerbot, PKCE, aucun logiciel redistribué", setup:"Aucune application OAuth à créer et aucun secret à saisir. Connecter ouvre Slack dans le navigateur : vous choisissez l’espace de travail et autorisez le client Slack d’Ezerbot à lire vos canaux et à publier sous votre nom, après votre clic sur une carte brouillon.", endpoint:"https://slack.com/api" },
     Manifest { id:"linear", category:"Développement", name:"Linear", description:"Lister les équipes et lire les issues de votre espace Linear, et préparer des issues et des commentaires depuis le chat, avec votre compte Linear.", permissions:"Lecture des équipes, des issues et de leurs commentaires ; une issue ou un commentaire n’est publié qu’après votre clic sur sa carte brouillon, sous votre nom. Ezerbot ne modifie, ne ferme ni n’assigne aucune issue existante.", scopes:"read issues:create comments:create", source:"https://linear.app/developers/oauth-2-0-authentication", license:"Service Linear · client public Ezerbot, PKCE, aucun logiciel redistribué", setup:"Aucune application OAuth à créer et aucun secret à saisir. Connecter ouvre Linear dans le navigateur : vous choisissez l’espace de travail et autorisez le client Linear d’Ezerbot à lire vos issues et à publier sous votre nom, après votre clic sur une carte brouillon.", endpoint:"https://api.linear.app/graphql" },
     Manifest { id:"jira", category:"Développement", name:"Jira Cloud", description:"Lister et lire les issues d’un projet de votre site Jira Cloud, et préparer des commentaires depuis le chat, avec votre compte Atlassian.", permissions:"Lecture des issues, de leurs commentaires et de l’identité du compte ; un commentaire n’est publié qu’après votre clic sur sa carte brouillon, sous votre nom. Ezerbot ne crée, ne modifie, ne ferme ni n’assigne aucune issue.", scopes:"read:jira-work write:jira-work read:me offline_access", source:"https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/", license:"Service Atlassian · application OAuth 3LO Ezerbot, aucun logiciel redistribué", setup:"Aucune application OAuth à créer et aucun secret à saisir. Connecter ouvre Atlassian dans le navigateur : vous choisissez le site Jira et autorisez l’application Jira d’Ezerbot à lire ses issues et à commenter sous votre nom, après votre clic sur une carte brouillon.", endpoint:"https://api.atlassian.com" },
@@ -157,6 +163,7 @@ pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
     slack::post::migrate(conn)?;
     linear::draft::migrate(conn)?;
     jira::draft::migrate(conn)?;
+    microsoft::mail::migrate(conn)?;
     gmail::migrate(conn)?;
     conn.execute_batch("UPDATE wrapper_connector_catalogue SET phase='reconnect',message='La connexion a été interrompue. Reconnectez le service.',authorization_url=NULL,device_user_code=NULL,device_expires_at=0,generation=generation+1 WHERE phase='authorizing';")?;
     Ok(())
@@ -223,6 +230,8 @@ fn item_of(
         linear::client_id().is_some()
     } else if m.id == "jira" {
         jira::client_id().is_some()
+    } else if m.id == "microsoft365" {
+        microsoft::client_id().is_some()
     } else {
         private.contains_key("CLIENT_ID")
             && (m.id == "notion" || private.contains_key("CLIENT_SECRET"))
@@ -281,7 +290,7 @@ fn item_of(
         .and_then(|(code, expires)| code.map(|code| json!({"user_code":code,"verification_uri":github::DEVICE_PAGE,"expires_at":expires})))
         .unwrap_or(Value::Null);
     Ok(
-        json!({"device":device,"device_flow":m.id=="github","multi_account":multi_account(m.id),"configured":!matches!(m.id,"github"|"gmail"|"slack"|"linear"|"jira")||has_client,"unconfigured_message":(!has_client).then(||match m.id{"gmail"=>Some(gmail::not_configured().message),"slack"=>Some(slack::not_configured().message),"linear"=>Some(linear::not_configured().message),"jira"=>Some(jira::not_configured().message),_=>None}).flatten(),"id":m.id,"slot":row_id,"category":m.category,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(m),"redirect_uri":Value::Null,"source":m.source,"license":m.license,"setup":m.setup,"needs_client":!matches!(m.id,"notion"|"github"|"gmail"|"slack"|"linear"|"jira"),"has_client":has_client,"has_tokens":has_tokens,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}),
+        json!({"device":device,"device_flow":m.id=="github","multi_account":multi_account(m.id),"configured":!matches!(m.id,"github"|"gmail"|"slack"|"linear"|"jira"|"microsoft365")||has_client,"unconfigured_message":(!has_client).then(||match m.id{"gmail"=>Some(gmail::not_configured().message),"slack"=>Some(slack::not_configured().message),"linear"=>Some(linear::not_configured().message),"jira"=>Some(jira::not_configured().message),"microsoft365"=>Some(microsoft::not_configured().message),_=>None}).flatten(),"id":m.id,"slot":row_id,"category":m.category,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(m),"redirect_uri":Value::Null,"source":m.source,"license":m.license,"setup":m.setup,"needs_client":!matches!(m.id,"notion"|"github"|"gmail"|"slack"|"linear"|"jira"|"microsoft365"),"has_client":has_client,"has_tokens":has_tokens,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}),
     )
 }
 #[derive(Deserialize)]
@@ -386,7 +395,7 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
             return Err(invalid("GitHub n’utilise ni identifiant ni secret saisis ici. Cliquez simplement sur Connecter."));
         }
     }
-    if matches!(m.id, "gmail" | "slack" | "linear" | "jira") {
+    if matches!(m.id, "gmail" | "slack" | "linear" | "jira" | "microsoft365") {
         // Nothing typed here is ever read: the client is the build's.
         let (name, client) = match m.id {
             "gmail" => (
@@ -401,7 +410,11 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
                 "Linear",
                 linear::client_id().ok_or_else(linear::not_configured),
             ),
-            _ => ("Jira", jira::client_id().ok_or_else(jira::not_configured)),
+            "jira" => ("Jira", jira::client_id().ok_or_else(jira::not_configured)),
+            _ => (
+                "Microsoft 365",
+                microsoft::client_id().ok_or_else(microsoft::not_configured),
+            ),
         };
         client?;
         if !input.client_id.is_empty() || !input.client_secret.is_empty() {
@@ -457,7 +470,7 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
         }
         if !matches!(
             m.id,
-            "notion" | "github" | "gmail" | "slack" | "linear" | "jira"
+            "notion" | "github" | "gmail" | "slack" | "linear" | "jira" | "microsoft365"
         ) && (!env.contains_key("CLIENT_ID") || !env.contains_key("CLIENT_SECRET"))
             && fake_base().is_none()
         {
@@ -550,6 +563,22 @@ pub(super) fn preview(ctx: &Context<'_>, server: &Server, action: &str) -> Optio
         };
         return Some(card);
     }
+    if m.id == "microsoft365" {
+        let connection = if remove {
+            ""
+        } else {
+            "Le navigateur s’ouvre sur la page de connexion de Microsoft : vous choisissez votre compte et autorisez le client Microsoft d’Ezerbot à lire votre boîte de réception et votre agenda, et à envoyer un courriel sous votre adresse après votre clic sur une carte brouillon. Seul l’identifiant public du client est envoyé, avec une preuve PKCE ; le retour se fait sur ce Mac (127.0.0.1) et aucun secret n’existe dans Ezerbot. Les jetons reçus sont conservés dans le trousseau macOS : s’il refuse l’écriture, la connexion échoue et rien n’est conservé. Une nouvelle identification réinitialise l’activation par bot et les règles de ce service."
+        };
+        let mut card = json!({"id":m.id,"service":m.name,"action":action,"transport":"https","variables_privées":names,"permissions":m.permissions,"portées":scopes_label(m),"source":m.source,"licence":m.license,"révision":revision,"connexion":connection});
+        card["déconnexion"] = match private.get("EMAIL").filter(|_| remove) {
+            Some(account) => {
+                card["compte"] = json!(account);
+                json!(format!("Le compte Microsoft 365 {account} sera déconnecté : les jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. Microsoft ne propose pas de révocation à distance pour une application publique : le message le dira, et il vous restera à retirer l’accès d’Ezerbot dans les applications autorisées de votre compte Microsoft."))
+            }
+            None => json!("Les jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. Microsoft ne propose pas de révocation à distance pour une application publique : le message le dira."),
+        };
+        return Some(card);
+    }
     if m.id == "linear" {
         let connection = if remove {
             ""
@@ -621,7 +650,7 @@ fn credentials(ctx: &Context<'_>, id: &str) -> Result<Option<HashMap<String, Str
 fn save(ctx: &Context<'_>, id: &str, env: &HashMap<String, String>) -> Result<(), ApiError> {
     let mut private = env.clone();
     private.remove("EMAIL");
-    super::super::forms::vault(ctx)?.set(&secret_name(id), PURPOSE, &json!({"variables":private}).to_string()).map_err(|_|invalid("Impossible de conserver les identifiants OAuth dans le coffre local (4 Ko maximum). Vérifiez le stockage des secrets, puis reconnectez le service."))?;
+    super::super::forms::vault(ctx)?.set(&secret_name(id), PURPOSE, &json!({"variables":private}).to_string()).map_err(|_|invalid("Impossible de conserver les identifiants OAuth dans le coffre local (16 Ko maximum). Vérifiez le stockage des secrets, puis reconnectez le service."))?;
     if let Some(email) = env.get("EMAIL") {
         ctx.connection.execute(
             "UPDATE wrapper_connector_catalogue SET account_email=?2 WHERE server_id=?1",
@@ -677,6 +706,15 @@ fn endpoint(m: Manifest, kind: &str) -> String {
         }
         "authorize" if m.id == "jira" => "https://auth.atlassian.com/authorize".into(),
         "token" if m.id == "jira" => "https://auth.atlassian.com/oauth/token".into(),
+        "api" if m.id == "microsoft365" => "https://graph.microsoft.com/v1.0".into(),
+        "authorize" if m.id == "microsoft365" => format!(
+            "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
+            microsoft::tenant()
+        ),
+        "token" if m.id == "microsoft365" => format!(
+            "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+            microsoft::tenant()
+        ),
         "api" if m.id == "linear" => "https://api.linear.app/graphql".into(),
         "authorize" if m.id == "linear" => "https://linear.app/oauth/authorize".into(),
         "token" if m.id == "linear" => "https://api.linear.app/oauth/token".into(),
@@ -710,6 +748,9 @@ fn attach(
     }
     if m.id == "jira" {
         return jira::attach(ctx, server);
+    }
+    if m.id == "microsoft365" {
+        return microsoft::attach(ctx, server);
     }
     let token = env
         .get("ACCESS_TOKEN")
@@ -911,6 +952,8 @@ pub(super) fn ensure(ctx: &Context<'_>, server: &Server) -> Result<(), ApiError>
                 linear::RECONNECT
             } else if m.id == "jira" {
                 jira::RECONNECT
+            } else if m.id == "microsoft365" {
+                microsoft::RECONNECT
             } else {
                 crate::mcp::AUTH_REQUIRED
             },
@@ -924,6 +967,8 @@ pub(super) fn ensure(ctx: &Context<'_>, server: &Server) -> Result<(), ApiError>
             invalid(linear::RECONNECT)
         } else if m.id == "jira" {
             invalid(jira::RECONNECT)
+        } else if m.id == "microsoft365" {
+            invalid(microsoft::RECONNECT)
         } else {
             invalid(crate::mcp::AUTH_REQUIRED)
         });
@@ -960,7 +1005,7 @@ pub(super) fn remove(
     let client: HashMap<_, _> = env
         .into_iter()
         .filter(|(key, _)| {
-            !matches!(m.id, "slack" | "linear" | "jira")
+            !matches!(m.id, "slack" | "linear" | "jira" | "microsoft365")
                 && matches!(key.as_str(), "CLIENT_ID" | "CLIENT_SECRET")
         })
         .collect();

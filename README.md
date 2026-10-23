@@ -26,7 +26,7 @@ Ce dossier documente le client Grok Bot 0.70.2 installé sur le Mac et définit 
 
 ## Ouvrir Ezerbot, l’application locale
 
-Double-cliquer sur `Ouvrir Ezerbot.command` ou sur `app/build/Ezerbot.app`. L’app propose les thèmes clair et sombre, les conversations, la recherche, la recherche dans le fil (⌘F), la notation locale et exportable des réponses, les favoris, le renommage et la reprise des envois incertains. L’historique et les préférences restent sur le Mac dans `~/Library/Application Support/Grokbot/workspace.sqlite`.
+Double-cliquer sur `Ouvrir Ezerbot.command` ou sur `app/build/Ezerbot.app`. L’app propose les thèmes clair et sombre, les conversations, les sujets qui regroupent plusieurs fils (locaux, non partagés avec l’iPhone), la recherche, la recherche dans le fil (⌘F), la notation locale et exportable des réponses, les favoris, le renommage et la reprise des envois incertains. L’historique et les préférences restent sur le Mac dans `~/Library/Application Support/Grokbot/workspace.sqlite`.
 
 ```sh
 bash tools/build-app.sh

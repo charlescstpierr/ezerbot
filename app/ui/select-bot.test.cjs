@@ -129,9 +129,9 @@ function child(document, parent, tag, className) {
   return node;
 }
 
-function boot({ attachments = false, draft = "Brouillon du fil" } = {}) {
+function boot({ attachments = false, draft = "Brouillon du fil", selected = "conv-1" } = {}) {
   const storage = new Map([
-    ["grokbot.selected", "conv-1"],
+    ["grokbot.selected", selected],
     ["grokbot.bot", "bot-a"],
     ["grokbot.draft.conv-1", draft],
   ]);
@@ -271,6 +271,15 @@ test("selectBot leaves an empty thread before opening the new bot", async () => 
   await kept.tick();
   assert.equal(kept.panels.selectBot("bot-b"), true);
   assert.equal(kept.input.value, "Brouillon du fil");
+});
+
+test("choisir un bot sans fil affiché ferme la page d’un sujet", async () => {
+  const { panels, tick } = boot({ selected: "" });
+  await tick();
+  let navigations = 0;
+  assert.equal(panels.register({ id: "topics", onNavigate() { navigations += 1; } }), true);
+  assert.equal(panels.selectBot("bot-b"), true);
+  assert.equal(navigations, 1);
 });
 
 test("shift meta W from the composer opens skills", async () => {

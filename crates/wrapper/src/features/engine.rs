@@ -911,7 +911,27 @@ pub fn start_run(
     trigger: Trigger,
     input: HistoryItem,
 ) -> Result<Run, ApiError> {
-    create_run(ctx, trigger, input, None)
+    create_run(ctx, trigger, input, None, None)
+}
+/// Follow-up turn of a decision made after its turn ended (#216). The turn is named by
+/// the decision, so a retried start finds it again. `call` is the action Charles
+/// approved: the host writes it in the turn, the model never chooses its arguments.
+pub(crate) fn start_late_run(
+    ctx: &super::Context<'_>,
+    run_id: &str,
+    text: String,
+    call: Option<&grokbot_engine::contracts::ToolCall>,
+) -> Result<Run, ApiError> {
+    create_run(
+        ctx,
+        Trigger::UserMessage {
+            message_id: String::new(),
+            attempt: 0,
+        },
+        item(run_id, Role::User, text),
+        None,
+        Some((run_id, call)),
+    )
 }
 pub(crate) fn start_group_run(
     ctx: &super::Context<'_>,
@@ -924,6 +944,7 @@ pub(crate) fn start_group_run(
         user_trigger(ctx.conversation_id.unwrap(), turn, 0),
         item(turn, Role::User, prompt.into()),
         Some((turn, snapshot)),
+        None,
     )
 }
 fn create_run(
@@ -931,6 +952,7 @@ fn create_run(
     trigger: Trigger,
     input: HistoryItem,
     group: Option<(&str, &str)>,
+    late: Option<(&str, Option<&grokbot_engine::contracts::ToolCall>)>,
 ) -> Result<Run, ApiError> {
     let bot = ctx
         .bot_id
@@ -950,9 +972,11 @@ fn create_run(
         RunKind::Task
     };
     let run = Run {
-        run_id: group
-            .map(|(id, _)| format!("group-{id}"))
-            .unwrap_or(format!("run-{}", random_id(ctx.connection)?)),
+        run_id: match (group, late) {
+            (Some((id, _)), _) => format!("group-{id}"),
+            (None, Some((id, _))) => id.into(),
+            (None, None) => format!("run-{}", random_id(ctx.connection)?),
+        },
         bot_id: bot.into(),
         conversation_id: conversation.into(),
         trigger,
@@ -984,7 +1008,26 @@ fn create_run(
             if let Some((turn, snapshot)) = group {
                 conn.execute("UPDATE wrapper_group_turns SET run_id=?2,snapshot=?3,status='running' WHERE id=?1 AND status='queued'", params![turn,saved.run_id,snapshot])?;
             }
-            if group.is_none() && !matches!(saved.trigger, Trigger::UserMessage { .. }) {
+            if let Some((_, Some(call))) = late {
+                // Written once: a retried start finds the call already in the turn.
+                let written = store::events(conn, &saved.run_id, 0)?
+                    .iter()
+                    .any(|e| e.kind == RunEventKind::ToolCall);
+                if !written {
+                    if saved.status == RunStatus::Queued {
+                        model::set_running_at(conn, &saved.run_id, now() as i64)?;
+                    }
+                    store::append_event(
+                        conn,
+                        &saved.run_id,
+                        RunEventKind::ToolCall,
+                        &json!({"call_id":call.call_id,"name":call.name,"arguments":call.arguments,"response":0}),
+                    )?;
+                }
+            }
+            if group.is_none()
+                && (late.is_some() || !matches!(saved.trigger, Trigger::UserMessage { .. }))
+            {
                 super::conversations::append_entry(
                     conn,
                     conversation,
@@ -997,7 +1040,10 @@ fn create_run(
             Ok(saved)
         },
     )?;
-    launch(ctx, &saved)?;
+    // A late decision's turn is picked up by the host tick, like every resumed approval.
+    if late.is_none() {
+        launch(ctx, &saved)?;
+    }
     Ok(saved)
 }
 /// Settings actions are durable host-authored calls, not model instructions.

@@ -172,7 +172,9 @@ pub(in super::super::super) fn validate(
     // A draft that already exists is bound to its workspace: resuming it must not parse the
     // original call again.
     if let Some(run) = ctx.run_id {
-        if let Ok((request_id, _)) = crate::features::forms::approval_identity(run, call) {
+        if let Ok((request_id, _)) =
+            crate::features::forms::approval_identity_in(ctx.connection, run, call)
+        {
             let bound: Option<(String, i64)> = ctx
                 .connection
                 .query_row(
@@ -354,7 +356,7 @@ fn publish(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     let run = ctx.run_id.ok_or_else(|| {
         invalid("Rien n’a été publié : cette demande n’appartient à aucune exécution.")
     })?;
-    let (request_id, _) = crate::features::forms::approval_identity(run, call)?;
+    let (request_id, _) = crate::features::forms::approval_identity_in(ctx.connection, run, call)?;
     let row: Option<Stored> = ctx.connection.query_row(
         "SELECT server_id,workspace,generation,channel,thread,text,fingerprint,state FROM wrapper_slack_drafts WHERE request_id=?1",
         [&request_id],

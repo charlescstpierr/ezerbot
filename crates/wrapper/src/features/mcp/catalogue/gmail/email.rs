@@ -191,7 +191,9 @@ pub(in super::super::super) fn validate(
     // A draft that already exists is bound to its account: resuming it does not read
     // the arguments of the original call again.
     if let Some(run) = ctx.run_id {
-        if let Ok((request_id, _)) = crate::features::forms::approval_identity(run, call) {
+        if let Ok((request_id, _)) =
+            crate::features::forms::approval_identity_in(ctx.connection, run, call)
+        {
             let bound: Option<String> = ctx
                 .connection
                 .query_row(
@@ -394,7 +396,7 @@ fn send(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     let run = ctx.run_id.ok_or_else(|| {
         invalid("Rien n’a été envoyé : cette demande n’appartient à aucune exécution.")
     })?;
-    let (request_id, _) = crate::features::forms::approval_identity(run, call)?;
+    let (request_id, _) = crate::features::forms::approval_identity_in(ctx.connection, run, call)?;
     let row = ctx.connection.query_row(
         "SELECT login,to_json,cc_json,subject,body,fingerprint,state,message_id FROM wrapper_gmail_drafts WHERE request_id=?1",
         [&request_id],

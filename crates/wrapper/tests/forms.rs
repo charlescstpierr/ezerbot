@@ -2074,3 +2074,300 @@ fn host_authored_runs_keep_waiting_for_the_decision_even_with_the_chat_option_on
         RunStatus::AwaitingApproval
     );
 }
+
+// --- Approbation non bloquante : la décision arrive après la fin du tour ---
+
+impl Fixture {
+    fn late_run(&self) -> String {
+        self.conn
+            .query_row("SELECT run_id FROM wrapper_late_approvals", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+    fn late_runs(&self) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT count(*) FROM engine_runs WHERE run_id LIKE 'late-%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+    fn run_input_text(&self, run: &str) -> String {
+        let input: String = self
+            .conn
+            .query_row(
+                "SELECT input_json FROM wrapper_engine_runs WHERE run_id=?1",
+                [run],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<Value>(&input).unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+    fn resolve_error(&mut self, request: &HumanInputRequest, nonce: &str) -> ApiError {
+        let body = json!({"entry_id":request.entry_id,"submission_id":nonce,"conversation_id":request.route.target_conversation_id,"decision":"allow_once"});
+        self.app
+            .api(
+                "POST",
+                "/api/approvals/resolve",
+                &serde_json::to_vec(&body).unwrap(),
+            )
+            .unwrap_err()
+    }
+    /// A finished task with its protected call still waiting, and that card.
+    fn waiting_card(&self) -> HumanInputRequest {
+        let (id, progress) = self.continue_task();
+        assert_eq!(progress, RunProgress::Ended(TurnEnd::Finished));
+        assert_eq!(self.protected_effects(), 0);
+        requests::get(&self.conn, &id).unwrap().unwrap()
+    }
+}
+
+#[test]
+fn a_card_approved_after_its_turn_ended_runs_the_action_once_in_the_same_conversation() {
+    let mut f = Fixture::new();
+    let request = f.waiting_card();
+    f.decide(&request, "late", json!("allow_once"));
+    // The decision runs nothing by itself: it opens a turn where the bot was working.
+    assert_eq!(f.protected_effects(), 0);
+    let follow = f.late_run();
+    let turn = store::required(&f.conn, &follow).unwrap();
+    assert_eq!(turn.conversation_id, f.conversation);
+    assert_eq!(turn.bot_id, "grokbot");
+    let input = f.run_input_text(&follow);
+    assert!(
+        input.contains("Charles a approuvé : test_protected_write"),
+        "{input}"
+    );
+    assert!(input.contains(r#""path":"x""#), "{input}");
+    let gateway = ScriptedGateway::default();
+    assert_eq!(
+        f.drive(&follow, &gateway),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    // Exactly once, with the arguments the card showed.
+    assert_eq!(f.protected_effects(), 1);
+    let arguments: String = f
+        .conn
+        .query_row(
+            "SELECT arguments FROM test_protected_effects WHERE call_id='guarded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(arguments, r#"{"path":"x"}"#);
+    let events = store::events(&f.conn, &follow, 0).unwrap();
+    let result = events
+        .iter()
+        .find(|e| e.kind == RunEventKind::ToolResult)
+        .unwrap();
+    assert_eq!(
+        result.payload["authorized_by"],
+        json!({"kind":"allow_once","request_id":request.id})
+    );
+    // The bot is asked after the result, in the conversation, so it can report it.
+    assert_eq!(gateway.requests.lock().unwrap().len(), 1);
+    let thread: i64 = f
+        .conn
+        .query_row(
+            "SELECT count(*) FROM wrapper_messages WHERE conversation_id=?1 AND kind='engine_reply' AND message_id=?2",
+            params![f.conversation, follow],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(thread, 1);
+    // A second « Approuver » (another device) has no effect, and neither has a retry.
+    let again = f.resolve_error(&request, "second-device");
+    assert_eq!(again.status, 409);
+    assert!(
+        again.message.contains("déjà reçu une réponse"),
+        "{}",
+        again.message
+    );
+    f.decide(&request, "late", json!("allow_once"));
+    assert_eq!(f.late_runs(), 1);
+    assert_eq!(
+        f.drive(&follow, &ScriptedGateway::default()),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    assert_eq!(f.protected_effects(), 1);
+    assert!(approvals::consume_allow_once(
+        &f.conn,
+        &request.id,
+        &request.run_id,
+        GUARDED_TOOL,
+        &json!({"path":"x"}),
+        0
+    )
+    .is_err());
+}
+
+#[test]
+fn a_refusal_after_the_turn_ended_tells_the_bot_and_runs_nothing() {
+    let mut f = Fixture::new();
+    let request = f.waiting_card();
+    f.decide(&request, "refuse", json!("deny"));
+    let follow = f.late_run();
+    let input = f.run_input_text(&follow);
+    assert!(
+        input.contains("Charles a refusé : test_protected_write"),
+        "{input}"
+    );
+    assert!(input.contains("Rien n’a été exécuté"), "{input}");
+    // The turn carries no call at all: nothing can run from it.
+    assert!(!store::events(&f.conn, &follow, 0)
+        .unwrap()
+        .iter()
+        .any(|e| e.kind == RunEventKind::ToolCall));
+    let gateway = ScriptedGateway::default();
+    assert_eq!(
+        f.drive(&follow, &gateway),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    assert_eq!(f.protected_effects(), 0);
+    assert_eq!(gateway.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        requests::get(&f.conn, &request.id).unwrap().unwrap().status,
+        RequestStatus::Denied
+    );
+}
+
+#[test]
+fn the_bot_cannot_run_the_approved_tool_with_other_arguments_in_the_follow_up_turn() {
+    let mut f = Fixture::new();
+    let request = f.waiting_card();
+    f.decide(&request, "late", json!("allow_once"));
+    let follow = f.late_run();
+    // After the approved call, the model asks for the same tool with a changed path.
+    let gateway = ScriptedGateway::calls(vec![("again", GUARDED_TOOL, json!({"path":"changed"}))]);
+    assert_eq!(
+        f.drive(&follow, &gateway),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    assert_eq!(f.protected_effects(), 1);
+    let events = store::events(&f.conn, &follow, 0).unwrap();
+    let refused = events
+        .iter()
+        .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == "again")
+        .unwrap();
+    assert_eq!(refused.payload["outcome"]["status"], "failed");
+    assert!(refused.payload["outcome"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("ne sont pas ceux que Charles a approuvés"));
+    // Nothing new was asked of Charles and nothing of the other arguments ran.
+    assert!(requests::list_for_run(&f.conn, &follow).unwrap().is_empty());
+    let changed: i64 = f
+        .conn
+        .query_row(
+            "SELECT count(*) FROM test_protected_effects WHERE arguments LIKE '%changed%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(changed, 0);
+}
+
+#[test]
+fn an_expired_or_cancelled_card_cannot_be_approved_and_nothing_runs() {
+    let mut f = Fixture::new();
+    let request = f.waiting_card();
+    let created = f.request_row(&request.id).3 as u64;
+    f.app.tick(created + 24 * HOUR);
+    assert!(matches!(
+        requests::get(&f.conn, &request.id).unwrap().unwrap().status,
+        RequestStatus::Expired { .. }
+    ));
+    let refused = f.resolve_error(&request, "too-late");
+    assert_eq!(refused.status, 409);
+    assert_eq!(
+        refused.message,
+        "Cette demande a expiré. Aucune action n’a été faite."
+    );
+    assert_eq!(f.count("wrapper_late_approvals"), 0);
+    assert_eq!(f.late_runs(), 0);
+    assert_eq!(f.protected_effects(), 0);
+    // A card cancelled by an explicit stop answers in the same way.
+    f.start_kind("stopped", "grokbot", &f.conversation, RunKind::Task);
+    let stopped = f.approval_for("stopped", "guarded", json!({"path":"y"}));
+    let mut services = Services {
+        app: &f.app,
+        force_first_ask: false,
+    };
+    run_loop::with_run_events(&f.conn, &mut services, "stopped", |conn, _| {
+        model::cancel(conn, "stopped", TurnEnd::Stopped)
+    })
+    .unwrap();
+    let cancelled = f.resolve_error(&stopped, "after-stop");
+    assert_eq!(cancelled.status, 409);
+    assert_eq!(
+        cancelled.message,
+        "Cette demande a été annulée. Aucune action n’a été faite."
+    );
+    assert_eq!(f.late_runs(), 0);
+    assert_eq!(f.protected_effects(), 0);
+}
+
+#[test]
+fn a_restart_between_the_end_of_the_turn_and_the_decision_still_runs_the_action_once() {
+    let mut f = Fixture::new();
+    let request = f.waiting_card();
+    f.reopen();
+    f.decide(&request, "late", json!("allow_once"));
+    let follow = f.late_run();
+    f.reopen();
+    assert_eq!(
+        f.drive(&follow, &ScriptedGateway::default()),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    assert_eq!(f.protected_effects(), 1);
+    f.reopen();
+    assert_eq!(
+        f.drive(&follow, &ScriptedGateway::default()),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    assert_eq!(f.protected_effects(), 1);
+    assert_eq!(f.late_runs(), 1);
+}
+
+#[test]
+fn a_retried_start_finds_the_follow_up_turn_and_does_not_write_its_call_twice() {
+    let mut f = Fixture::new();
+    let request = f.waiting_card();
+    f.decide(&request, "late", json!("allow_once"));
+    let follow = f.late_run();
+    // The host stopped before it marked the turn as started.
+    f.conn
+        .execute("UPDATE wrapper_late_approvals SET started=0", [])
+        .unwrap();
+    forms::tick(&f.app.feature_context());
+    forms::tick(&f.app.feature_context());
+    assert_eq!(f.late_runs(), 1);
+    let calls = store::events(&f.conn, &follow, 0)
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == RunEventKind::ToolCall)
+        .count();
+    assert_eq!(calls, 1);
+    f.drive(&follow, &ScriptedGateway::default());
+    assert_eq!(f.protected_effects(), 1);
+}
+
+#[test]
+fn a_card_decided_while_its_turn_blocks_keeps_the_ordinary_resume() {
+    let mut f = Fixture::new();
+    // Direct chat stays blocking by default: the decision resumes that very turn.
+    let request = f.suspended_request("run", "guarded", GUARDED_TOOL, json!({"path":"x"}));
+    f.decide(&request, "now", json!("allow_once"));
+    assert_eq!(f.count("wrapper_late_approvals"), 0);
+    assert_eq!(f.late_runs(), 0);
+    assert_eq!(
+        f.drive("run", &ScriptedGateway::default()),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    assert_eq!(f.protected_effects(), 1);
+}

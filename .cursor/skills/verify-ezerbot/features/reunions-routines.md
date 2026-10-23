@@ -9,7 +9,7 @@ Les réunions règlent la durée de conservation de l’audio gardé. Les routin
 - `routines-liste` montre le titre Routines et le choix du bot, sans créer de routine.
 - `routines-regle` montre, sous le choix du bot, la règle de rattrapage : extinction ou veille rattrapées dans l’ordre, fenêtre de 60 minutes sinon, une pause ne se rattrape pas.
 - `routines-groupe` (hors parcours groupé) : une routine au déclencheur Groupe (horaire plus webhook) montre ses déclencheurs dans l’éditeur, un bloc Webhook avec son propre jeton, et un historique qui nomme le déclencheur de chaque run (« Horaire », « Webhook »). Voir « Gotchas ».
-- `routines-courriel` (hors parcours groupé) : le déclencheur « Courriel » de l’éditeur. Sans Gmail connecté, l’aperçu dit que Gmail n’est pas connecté et rien n’est enregistré ; connecté, un nouveau message ajoute un run « Courriel » dont le fil montre l’expéditeur, l’objet, la date et le texte, et le même message une seconde fois n’en ajoute pas. Voir « Gotchas ».
+- `routines-courriel` (hors parcours groupé) : le déclencheur « Courriel » de l’éditeur. Sans Gmail connecté, l’aperçu dit que Gmail n’est pas connecté et rien n’est enregistré ; connecté, un nouveau message ajoute un run « Courriel » dont le fil et l’historique nomment le compte qui l’a reçu, et le fil montre l’expéditeur, l’objet, la date et le texte, et le même message une seconde fois n’en ajoute pas. Voir « Gotchas ».
 - `routines-webhook` (hors parcours groupé) : une routine au déclencheur Webhook montre, dans le dialogue Routines, la publication Tailscale Funnel (URL `https`, rappel Bearer, jeton masqué) ou la raison sans URL. Voir « Gotchas ».
 
 ## How to get to it (user POV)

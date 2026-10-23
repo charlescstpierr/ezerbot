@@ -86,7 +86,7 @@ L’identité d’un événement est la routine, le déclencheur et l’identifi
 - commentaire (commentaire de pull request, commentaire d’issue, commentaire de revue inline)
 - issue ouverte
 
-**Courriel** : un nouveau message dans la boîte du connecteur. Le fil reçoit l’expéditeur, l’objet, la date et le texte. Le même identifiant de message ne part qu’une fois.
+**Courriel** : un nouveau message dans la boîte d’un compte Google connecté. Le fil, le contexte du run et l’historique nomment le compte qui l’a reçu ; le fil reçoit aussi l’expéditeur, l’objet, la date et le texte. Le même identifiant de message ne part qu’une fois par compte : reçu dans deux boîtes, il fait deux runs.
 
 **Calendrier**, cas au choix : événement créé, modifié, annulé, ou qui commence. Le début est un créneau à l’instant de début, dans le fuseau de l’événement, et suit la politique de rattrapage de l’horaire. Création, modification et annulation partent quand le connecteur les livre.
 

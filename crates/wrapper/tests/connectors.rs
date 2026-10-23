@@ -5007,7 +5007,10 @@ fn gmail_card_connects_a_first_account_on_a_fresh_base_and_after_the_last_one_le
     assert_eq!(item["slot"], "gmail");
     assert_eq!(item["status"], "disconnected");
     let started = f.post("/api/connectors/connect", card_connect_body(&item));
-    let run = started["run_id"].as_str().expect("connect starts").to_owned();
+    let run = started["run_id"]
+        .as_str()
+        .expect("connect starts")
+        .to_owned();
     f.decide(&run, json!("allow_once"));
     f.gmail_inbox();
     assert_eq!(f.callback("gmail", false, false), 200);

@@ -35,7 +35,7 @@ async function fixture({ enabled = true, dnd = false, items = [], status = "reco
   const top = new Element("div"), panels = new Element("div"), settings = new Element("div");
   const remote = { settings: { enabled, dnd, reply: true, approval: true, form: true, secret: true, routine: true, delegation: true }, items, unread: items.length, deliveries: [] };
   let interval, registration;
-  const nodes = [], frames = [], calls = [], sendOutcomes = [];
+  const nodes = [], frames = [], calls = [], sendOutcomes = [], gate = {};
   const target = { id: "routine:occ", conversation_id: "chat", card_id: "reply-run" };
   const host = {
     register(value) { registration = value; value.settingsSection(settings); },
@@ -43,7 +43,7 @@ async function fixture({ enabled = true, dnd = false, items = [], status = "reco
     state: { conversations: [{ id: "chat", bot_id: "atlas" }], bots: [{ id: "atlas", name: "Atlas" }] },
     async api(path, body) {
       calls.push([path, body]);
-      if (path === "/api/send") { if (sendOutcomes.length) { const outcome = sendOutcomes.shift(); if (outcome) throw outcome; } return { ok: true }; }
+      if (path === "/api/send") { if (gate.hold) await gate.hold; if (sendOutcomes.length) { const outcome = sendOutcomes.shift(); if (outcome) throw outcome; } return { ok: true }; }
       if (path.endsWith("/open")) return target; if (path.endsWith("/settings")) remote.settings = body; return JSON.parse(JSON.stringify(remote));
     },
     openConversation(id) { registration.onState({}, { conversation: { id } }); return true; },
@@ -58,7 +58,7 @@ async function fixture({ enabled = true, dnd = false, items = [], status = "reco
     window, document, URLSearchParams, crypto: { randomUUID: (() => { let n = 0; return () => `message-${++n}`; })() }, setInterval(fn) { interval = fn; }, setTimeout() {}, requestAnimationFrame(fn) { frames.push(fn); },
   });
   await flush();
-  return { top, panels, settings, remote, registration, window, nodes, frames, calls, sendOutcomes, async poll() { await interval(); await flush(); } };
+  return { top, panels, settings, remote, registration, window, nodes, frames, calls, sendOutcomes, gate, async poll() { await interval(); await flush(); } };
 }
 const item = (kind, title) => ({ id: `${kind}:1`, kind, title, card_id: "card", conversation_id: "chat", conversation_title: "Conversation", created_at: Date.now() });
 
@@ -196,4 +196,18 @@ test("opening the app from a push shows the reply sheet, or only the conversatio
   await plain.poll(); await flush(); await flush();
   assert.equal(sheet(plain), undefined);
   assert.ok(plain.calls.some(([path]) => path === "/api/notifications/open"));
+});
+
+test("the field cannot be edited while the reply is on its way, and is editable again if it fails", async () => {
+  const f = await fixture();
+  await f.window.EzerbotNotifications.activate("routine:occ", { reply: true });
+  const field = find(sheet(f), el => el.tagName === "textarea"), form = find(sheet(f), el => el.tagName === "form");
+  let release; f.gate.hold = new Promise(resolve => { release = resolve; });
+  field.value = "Vu depuis la notification";
+  const pending = form.onsubmit({ preventDefault() {} }); await flush();
+  assert.equal(field.readOnly, true);
+  f.sendOutcomes.push(new Error("La connexion au moteur local est interrompue."));
+  release(); await pending; await flush();
+  assert.equal(field.readOnly, false);
+  assert.equal(sheet(f).open, true);
 });

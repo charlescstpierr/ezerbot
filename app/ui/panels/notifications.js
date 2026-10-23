@@ -149,14 +149,14 @@
       const current = reply, body = area.value.trim();
       if (!body || current.sending) return;
       if (body !== current.sentBody) { current.sentBody = body; current.messageId = crypto.randomUUID(); }
-      current.sending = true; send.disabled = true; replyStatus("Envoi en cours…");
+      current.sending = true; send.disabled = true; area.readOnly = true; replyStatus("Envoi en cours…");
       try {
         await host.api("/api/send", { conversation_id: current.conversationId, message_id: current.messageId, body });
         await host.refresh().catch(() => {});
         dialog.close();
       } catch (e) {
         // A refusal from the Mac says why; a missing answer means the Mac is out of reach.
-        replyStatus(e.status ? e.message : MAC_UNREACHABLE, true); send.disabled = false;
+        replyStatus(e.status ? e.message : MAC_UNREACHABLE, true); send.disabled = false; area.readOnly = false;
       } finally { current.sending = false; }
     };
     document.getElementById("panels").append(dialog);

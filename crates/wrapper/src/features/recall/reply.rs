@@ -103,7 +103,9 @@ fn held(ctx: &Context<'_>, meeting: &str, bot: &str) -> Result<Meeting, ApiError
 pub(super) fn validate(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
     // Un brouillon qui existe déjà est lié à sa réunion : le reprendre ne relit pas l’appel d’origine.
     if let Some(run) = ctx.run_id {
-        if let Ok((request_id, _)) = super::super::forms::approval_identity(run, call) {
+        if let Ok((request_id, _)) =
+            super::super::forms::approval_identity_in(ctx.connection, run, call)
+        {
             let bound: Option<(String, String)> = ctx
                 .connection
                 .query_row(
@@ -257,7 +259,7 @@ pub(super) fn publish(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiEr
     let run = ctx.run_id.ok_or_else(|| {
         invalid("Rien n’a été envoyé : cette demande n’appartient à aucune exécution.")
     })?;
-    let (request_id, _) = super::super::forms::approval_identity(run, call)?;
+    let (request_id, _) = super::super::forms::approval_identity_in(ctx.connection, run, call)?;
     let row: Option<Stored> = ctx
         .connection
         .query_row(

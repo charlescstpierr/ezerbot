@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -22,7 +23,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -611,6 +612,19 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               return { ok: true, stopped };
             }""",
         )
+    if sphere == "approbation-tardive":
+        eval_js(evidence, close_overlays_js())
+        # Le shell est permis et le chat direct continue sans attendre : la carte survit au tour du bot.
+        return eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              await panels.api("/api/local/bot", { bot_id: "grokbot", shell: true });
+              await panels.api("/api/approvals/waiting", { task: true, chat: true, validity: "24h", reminder: "1h" });
+              await panels.refresh();
+              return { ok: true, waiting: panels.state.forms.waiting };
+            }""",
+        )
     raise SystemExit(f"sphère inconnue: {sphere}")
 
 
@@ -679,6 +693,120 @@ def task_send(evidence: Path, line: str) -> None:
           return true;
         }}""",
     )
+
+
+def late_ask(evidence: Path) -> dict:
+    """Une conversation neuve : le bot demande la commande, son tour finit, la carte attend encore."""
+    eval_js(evidence, """() => { document.getElementById("new-chat").click(); return true; }""")
+    wait_js(
+        evidence,
+        """() => document.querySelector('.gb-editor[aria-label="Votre message"]') ? {ok: true} : null""",
+        "conversation neuve non prête",
+    )
+    eval_js(
+        evidence,
+        """() => {
+          const editor = document.querySelector('.gb-editor[aria-label="Votre message"]');
+          editor.focus();
+          if (!document.execCommand("insertText", false, "Envoie le résumé")) throw new Error("saisie refusée");
+          return true;
+        }""",
+    )
+    wait_js(
+        evidence,
+        """() => {
+          const send = document.getElementById("send-button");
+          if (!send || send.disabled) return null;
+          send.click();
+          return {ok: true};
+        }""",
+        "envoi impossible",
+    )
+    state = wait_js(
+        evidence,
+        """() => {
+          const card = document.querySelector('[data-card-kind="approval"][data-request-status="pending"]');
+          const buttons = card ? [...card.querySelectorAll("button")].map((node) => node.textContent) : [];
+          const text = document.body.innerText;
+          if (!card || !buttons.includes("Autoriser une fois") || !text.includes("J’attends son accord pour envoyer le résumé.")) return null;
+          // La carte montre la commande (« Résumé envoyé » y figure) : seule une carte d'outil Terminée porte un résultat.
+          const results = [...document.querySelectorAll('[data-card-kind="tool"][data-local-state="terminé"]')].filter((node) => node.innerText.includes("Résumé envoyé"));
+          return {ok: true, buttons, sent: results.length > 0};
+        }""",
+        "la carte n'attend pas après la fin du tour du bot",
+        timeout=40,
+    )
+    if state["sent"]:
+        raise SystemExit(f"la commande est partie avant la décision: {state}")
+    return state
+
+
+def late_step(evidence: Path, index: int) -> None:
+    """approuvee : « Autorisé une fois » ; reprise : le bot a repris et le résultat est arrivé ; expiree : carte grise, rien n'est parti."""
+    if index == 1:
+        # Même conversation que la capture précédente : le bas du fil montre le résultat puis la réponse du bot.
+        eval_js(evidence, """() => { const last = [...document.querySelectorAll("[data-message-id]")].pop(); last?.scrollIntoView({block: "end"}); return true; }""")
+        state = wait_js(
+            evidence,
+            """() => {
+              const text = document.body.innerText;
+              return text.includes("Tu as approuvé : envoyer le résumé. C’est parti.") ? {ok: true} : null;
+            }""",
+            "la réponse du bot après la décision n'est pas dans le fil",
+        )
+        return
+    late_ask(evidence)
+    if index == 0:
+        eval_js(
+            evidence,
+            """() => {
+              const card = document.querySelector('[data-card-kind="approval"][data-request-status="pending"]');
+              [...card.querySelectorAll("button")].find((node) => node.textContent === "Autoriser une fois").click();
+              return true;
+            }""",
+        )
+        state = wait_js(
+            evidence,
+            """() => {
+              const card = document.querySelector('[data-card-kind="approval"][data-request-status="resolved"]');
+              const text = document.body.innerText;
+              const results = [...document.querySelectorAll('[data-card-kind="tool"][data-local-state="terminé"]')].filter((node) => node.innerText.includes("Résumé envoyé"));
+              if (!card || !text.includes("Tu as approuvé : envoyer le résumé") || results.length !== 1) return null;
+              card.scrollIntoView({block: "start"});
+              return {ok: true, card: card.innerText, results: results.length, buttons: card.querySelectorAll("button").length};
+            }""",
+            "le bot n'a pas repris avec le résultat après la décision tardive",
+            timeout=40,
+        )
+        if "Autorisé une fois" not in state["card"] or "Le bot reprend dans la conversation." not in state["card"] or "La reprise a échoué" in state["card"] or state["buttons"]:
+            raise SystemExit(f"la carte approuvée tard n'est pas celle attendue: {state}")
+        return
+    # Le temps passe sur une base jetable : l'échéance de la carte est ramenée à une seconde avant maintenant.
+    run = load_run(evidence)
+    with sqlite3.connect(run["db"], timeout=15) as conn:
+        changed = conn.execute(
+            "UPDATE forms_requests SET kind_json=json_set(kind_json,'$.expires_at',?) WHERE status='pending' AND json_extract(kind_json,'$.kind')='approval'",
+            (int(time.time() * 1000) - 1000,),
+        ).rowcount
+    if changed != 1:
+        raise SystemExit(f"{changed} carte(s) en attente au lieu d'une")
+    state = wait_js(
+        evidence,
+        """async () => {
+          await window.GrokbotPanels.refresh();
+          const card = document.querySelector('[data-card-kind="approval"][data-request-status="expired"]');
+          if (!card) return null;
+          card.scrollIntoView({block: "start"});
+          return {ok: true, card: card.innerText, grey: card.classList.contains("gb-approval-expired"), buttons: card.querySelectorAll("button").length, sent: [...document.querySelectorAll('[data-card-kind="tool"][data-local-state="terminé"]')].some((node) => node.innerText.includes("Résumé envoyé")) || document.body.innerText.includes("Tu as approuvé")};
+        }""",
+        "la carte n'est pas Expirée",
+        timeout=40,
+    )
+    if "Cette demande a expiré. Aucune action n’a été faite." not in state["card"] or not state["grey"] or state["buttons"] or state["sent"]:
+        raise SystemExit(f"la carte Expirée n'est pas celle attendue: {state}")
+    # Un dernier rafraîchissement a pu replacer le fil : la carte grise doit être celle qu'on voit.
+    time.sleep(0.6)
+    eval_js(evidence, """() => { document.querySelector('[data-card-kind="approval"][data-request-status="expired"]').scrollIntoView({block: "center"}); return true; }""")
 
 
 def background_task_step(evidence: Path, index: int) -> None:
@@ -1223,6 +1351,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"avant-{theme}-{size}.png", f"menu-{theme}-{size}.png", f"sous-fil-{theme}-{size}.png", f"reponse-{theme}-{size}.png", f"principal-{theme}-{size}.png"]
     if sphere == "approbation-non-bloquante":
         return [f"actif-{theme}-{size}.png", f"inactif-{theme}-{size}.png"]
+    if sphere == "approbation-tardive":
+        return [f"approuvee-{theme}-{size}.png", f"reprise-{theme}-{size}.png", f"expiree-{theme}-{size}.png"]
     if sphere == "voix-bots":
         return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
     if sphere == "voix-appel":
@@ -1265,6 +1395,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             iphone_reply_step(evidence, index)
         if sphere == "approbation-non-bloquante":
             waiting_step(evidence, index)
+        if sphere == "approbation-tardive":
+            late_step(evidence, index)
         if sphere == "taches-de-fond":
             background_task_step(evidence, index)
         if sphere == "reponse-fil":

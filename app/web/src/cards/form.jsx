@@ -49,19 +49,24 @@ export function HumanInputCard({ message, title, input, children, statusText, ba
   const requesterId = request.route?.requesting_bot_id;
   const requesterName = window.GrokbotPanels?.state?.bots?.find((bot) => bot.id === requesterId)?.name || requesterId;
   const requesterLabel = /^[aeiouyàâäéèêëîïôöùûü]/i.test(requesterName) ? `d’${requesterName}` : `de ${requesterName}`;
+  // A card that outlived its turn (#215) has no run to resume: the bot is told in a new turn.
+  const detached = message.kind === "approval" && request.detached === true;
+  const expiredApproval = message.kind === "approval" && status === "expired";
   const failureReason = ["run already ended", "run ended before wake delivery"].includes(wake?.reason)
     ? "Cette tâche du bot est déjà terminée." : "La reprise n’a pas abouti. La demande est conservée.";
   return (
-    <article className="gb-message rounded-xl border border-border bg-card p-4 text-foreground" data-message-id={message.id} data-card-kind={message.kind} data-request-status={status} aria-busy={Boolean(busy)}>
+    <article className={`gb-message rounded-xl border border-border bg-card p-4 text-foreground${expiredApproval ? " gb-approval-expired" : ""}`} data-message-id={message.id} data-card-kind={message.kind} data-request-status={status} aria-busy={Boolean(busy)}>
       <header className="gb-meta"><strong>{title}</strong>{badge}</header>
       {!available ? <p role="alert">Cette demande est indisponible. Actualisez l’état.</p> : <>
         <p className="mb-3 text-xs text-muted-foreground">{(request.connector?.origin ?? request.recall?.origin) === "settings" ? "Demande depuis Paramètres" : `Demande ${requesterLabel}`} · {authorization ? <span className="gb-status-ok" role="status">{authorization}</span> : statusText || statusLabel}</p>
         {children}
         {showDelivery && <div className="mt-3 text-sm" role="status" aria-live="polite">
           {busy && "Envoi en cours…"}
-          {!busy && wake?.status === "pending" && "Le bot reprend…"}
-          {!busy && delivered && ({ denied: "Refus pris en compte", cancelled: "Annulation prise en compte", expired: "Expiration prise en compte" }[status] || "Repris")}
-          {!busy && wake?.status === "failed" && `La reprise a échoué. ${failureReason}`}
+          {!busy && detached && status === "resolved" && "Le bot reprend dans la conversation."}
+          {!busy && detached && status === "denied" && "Refus transmis au bot."}
+          {!busy && !detached && wake?.status === "pending" && "Le bot reprend…"}
+          {!busy && !detached && delivered && ({ denied: "Refus pris en compte", cancelled: "Annulation prise en compte", expired: "Expiration prise en compte" }[status] || "Repris")}
+          {!busy && !detached && wake?.status === "failed" && `La reprise a échoué. ${failureReason}`}
         </div>}
       </>}
       {error && <p className="mt-2 text-sm text-muted-foreground" role="alert">{error}</p>}

@@ -579,10 +579,9 @@ fn namespace(server: &Server, tool: &Value) -> String {
     );
     format!("mcp_{}_{}", server.id, &hash[..16])
 }
+// Le Mode YOLO lève les cartes d'approbation, jamais le choix « Activer les outils
+// pour » d'un bot : un connecteur décoché reste fermé pour lui.
 fn enabled(conn: &Connection, server: &str, bot: &str) -> bool {
-    if super::yolo::active(conn, bot) {
-        return true;
-    }
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM wrapper_mcp_bots WHERE server_id=?1 AND bot_id=?2)",
         params![server, bot],

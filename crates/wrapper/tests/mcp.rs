@@ -1515,23 +1515,13 @@ fn a_redirect_is_refused_and_the_token_never_reaches_another_host() {
 }
 
 #[test]
-fn yolo_opens_connector_tools_to_a_bot_that_never_selected_them_but_keeps_the_lifecycle_card() {
+fn yolo_never_reopens_a_connector_a_bot_turned_off_and_keeps_the_lifecycle_card() {
     let mut f = Fixture::new();
     let id = f.add("normal");
     f.connect(&id);
     let echo = f.tool("echo");
-    // Le bot retire le connecteur : en mode « Demander », son outil n'existe plus pour lui.
-    f.post(
-        "/api/mcp/select",
-        json!({"id":id,"bot_id":"grokbot","enabled":false}),
-    );
-    let refused = f.send(&echo, json!({"text":"ask"}), "echo-ask");
-    f.finish(&refused.run_id);
-    assert!(
-        matches!(f.outcome(&refused.run_id), ToolOutcome::Failed { reason } if reason.contains("désactivé")),
-    );
-    // Le Mode YOLO l'ouvre à tous les bots, sans carte.
     f.post("/api/yolo/mode", json!({"mode":"yolo"}));
+    // Outils activés : le Mode YOLO lève la carte, comme avant.
     let run = f.send(&echo, json!({"text":"yolo"}), "echo-yolo");
     f.finish(&run.run_id);
     assert!(requests::list_for_run(&f.db(), &run.run_id)
@@ -1543,6 +1533,16 @@ fn yolo_opens_connector_tools_to_a_bot_that_never_selected_them_but_keeps_the_li
     let card = f.tool_card("echo-yolo");
     assert_eq!(card["authorized_by"]["kind"], "yolo");
     assert_eq!(card["connector"]["server"], "Atelier local");
+    // Outils décochés : le Mode YOLO ne les rouvre pas, l'appel est refusé.
+    f.post(
+        "/api/mcp/select",
+        json!({"id":id,"bot_id":"grokbot","enabled":false}),
+    );
+    let refused = f.send(&echo, json!({"text":"yolo-off"}), "echo-yolo-off");
+    f.finish(&refused.run_id);
+    assert!(
+        matches!(f.outcome(&refused.run_id), ToolOutcome::Failed { reason } if reason.contains("désactivé")),
+    );
     // Redémarrer un connecteur reste une décision de l'utilisateur.
     let restart = f.start(&id);
     assert_eq!(

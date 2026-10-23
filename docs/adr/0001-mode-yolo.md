@@ -8,7 +8,7 @@ Les capacités puissantes (terminal, fichiers, écran, connecteurs) étaient dé
 
 Un interrupteur global « Mode YOLO (tous les droits) », **activé par défaut** pour les bases neuves et existantes, plus une surcharge par bot (suivre le global, toujours agir, toujours demander).
 
-- Le mode **recouvre** les réglages sans les écraser : `local::enabled`, `screen::enabled` et `mcp::enabled` répondent vrai tant qu'il s'applique, et les tables de réglages ne sont pas touchées. Repasser à « Demander avant d'agir » rend donc les réglages d'avant, sans migration inverse. La migration ne fait qu'insérer la ligne `yolo` une seule fois (`INSERT OR IGNORE`) ; un choix « ask » n'est jamais rejoué.
+- Le mode **recouvre** les réglages sans les écraser : `local::enabled` et `screen::enabled` répondent vrai tant qu'il s'applique, et les tables de réglages ne sont pas touchées. Les connecteurs font exception : `mcp::enabled` ne lit jamais le mode, car décocher « Activer les outils pour » un bot est une coupure que YOLO ne rouvre pas ; le mode ne lève que la carte des outils des connecteurs activés. Repasser à « Demander avant d'agir » rend donc les réglages d'avant, sans migration inverse. La migration ne fait qu'insérer la ligne `yolo` une seule fois (`INSERT OR IGNORE`) ; un choix « ask » n'est jamais rejoué.
 - Le mode se branche sur la porte d'approbation existante (`check_tool_approval`) avec une nouvelle origine d'autorisation `AuthorizedBy::Yolo { source }`. L'admission, l'entrée du journal d'activité (`wrapper_yolo_log`) et la mention portée par le résultat d'outil partent dans la même transaction. Le fil rend cette origine par la carte « Fait automatiquement ».
 
 ## Garde-fous qui survivent au mode

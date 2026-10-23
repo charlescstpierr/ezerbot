@@ -4,7 +4,8 @@
 //! une surcharge par bot décident si les outils s'exécutent sans carte. Le mode
 //! recouvre les réglages sans jamais les écraser : repasser à « Demander avant
 //! d'agir » rend aussitôt les réglages d'avant (Terminal, Fichiers, Écran,
-//! connecteurs, règles « Toujours »).
+//! règles « Toujours »). Les connecteurs ne sont jamais rouverts : un bot dont
+//! « Activer les outils pour » est décoché n'y accède pas, YOLO ou non.
 //!
 //! Garde-fous qui survivent au mode : les données d'Ezerbot (dossier de la base,
 //! coffre, jetons) restent hors de portée des outils, un refus permanent écrit

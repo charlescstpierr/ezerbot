@@ -642,9 +642,23 @@ test("empty catalogue groups every service, merges Google and starts no connecti
 
 test("Google keeps the selected account slot of the shared consent", async () => {
   const gmail = {...service,category:"Courriel et agenda",needs_client:false,status:"connected",slot:"gmail:2",account:"autre@example.test",server:{id:"c2",tools:[],enabled_bots:[]}};
-  const {root,calls} = await mount([],{},[gmail,{...gmail,id:"calendar"},{...gmail,id:"drive"}]);
+  const {root,calls} = await mount([],{},[gmail,{...service,id:"calendar",category:"Courriel et agenda",needs_client:false},{...service,id:"drive",category:"Courriel et agenda",needs_client:false}]);
   const card = catalogueCard(root,"google");
   assert.match(card.textContent,/Compte connecté : autre@example.test/);
   await card.all().find(n => n.attrs["data-connector-action"] === "disconnect").events.click();
   assert.deepEqual(calls[0],{path:"/api/connectors/disconnect",body:{id:"gmail",account:"gmail:2"}});
+});
+
+test("a separate Calendar or Drive connection keeps its real state and controls beside Gmail", async () => {
+  const gmail = {...service,category:"Courriel et agenda",needs_client:false,status:"connected",account:"gmail@example.test",server:{id:"g1",tools:[],enabled_bots:[]}};
+  const calendar = {...service,id:"calendar",name:"Google Calendar",category:"Courriel et agenda",needs_client:false,status:"reconnect",has_tokens:true,account:"agenda@example.test",server:{id:"c1",tools:[],enabled_bots:[]}};
+  const drive = {...service,id:"drive",name:"Google Drive",category:"Courriel et agenda",needs_client:false};
+  const {root,calls} = await mount([],{},[gmail,calendar,drive]);
+  assert.deepEqual(shown(root),["gmail","calendar","drive"]);
+  assert.equal(catalogueCard(root,"google"),undefined);
+  const card = catalogueCard(root,"calendar");
+  assert.match(card.textContent,/À reconnecter.*Compte connecté : agenda@example.test/);
+  await card.all().find(n => n.attrs["data-connector-action"] === "disconnect").events.click();
+  assert.deepEqual(calls[0],{path:"/api/connectors/disconnect",body:{id:"calendar"}});
+  assert.ok(catalogueCard(root,"drive").all().some(n => n.attrs["data-connector-action"] === "connect"));
 });

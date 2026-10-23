@@ -52,7 +52,7 @@ async function mount(item) {
   const context = vm.createContext({ window: { GrokbotPanels: panels }, document, setTimeout() { return 1; }, clearTimeout() {} });
   vm.runInContext(await readFile(new URL("../../ui/panels/mcp.js", import.meta.url), "utf8"), context);
   panel.settingsSection(root);
-  return { root, calls, opened, dialog, panels, setItem(next) { panels.state = { ...panels.state, mcp: { servers: [], catalogue: [next] } }; panel.onState(panels.state); } };
+  return { root, calls, opened, dialog, panels, onState: state => panel.onState(state), setItem(next) { panels.state = { ...panels.state, mcp: { servers: [], catalogue: [next] } }; panel.onState(panels.state); } };
 }
 const base = { id: "reunions", kind: "recall", name: "Réunions", description: "Invitez un bot dans une réunion Google Meet, Zoom ou Microsoft Teams.", permissions: "Le bot rejoint les réunions dont vous collez le lien.", setup: "Collez votre clé.", source: "https://docs.recall.ai/", license: "Service Recall.ai", status: "disconnected", has_key: false, meeting: null, server: null };
 const buttons = (root, text) => root.all().filter(n => n.tag === "button" && n.textContent === text);
@@ -130,6 +130,21 @@ function render(recall, status = "pending", extra = {}) {
     } } }));
   } finally { delete globalThis.window; }
 }
+
+test("le formulaire de clé reste ouvert, avec la clé saisie, quand les bots ou la carte changent", async () => {
+  const f = await mount(base);
+  await buttons(f.root, "Connecter")[0].events.click({ preventDefault() {} });
+  const field = () => f.root.all().find(n => n.tag === "input" && n.type === "password");
+  field().value = "cle-en-cours";
+  field().focus();
+  const update = (bots, item) => { f.panels.state = { bots, mcp: { servers: [], catalogue: [item] } }; f.onState(f.panels.state); };
+  update([{ id: "grokbot", name: "Ezerbot" }, { id: "autre", name: "Autre bot" }], base);
+  update([{ id: "grokbot", name: "Ezerbot renommé" }, { id: "autre", name: "Autre bot" }], { ...base, description: "Texte mis à jour" });
+  const form = f.root.all().find(n => n.tag === "form");
+  assert.equal(form.hidden, false);
+  assert.equal(field().value, "cle-en-cours");
+  assert.equal(f.root.all().filter(n => n.tag === "article").length, 1);
+});
 
 test("la carte de consentement montre le lien, le nom du bot et la phrase, sans « Toujours »", () => {
   const phrase = "Prévenez les participants avant d’ajouter le bot à la réunion. Ils peuvent voir que le bot transcrit.";

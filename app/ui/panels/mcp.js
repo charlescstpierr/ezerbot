@@ -29,6 +29,7 @@
     const controls = [...card.querySelectorAll("button, a, summary")];
     const focused = [...inputs, ...controls].find(n => n === document.activeElement);
     return {
+      forms: [...card.querySelectorAll("form")].filter(n => n.id).map(n => ({id:n.id,hidden:n.hidden})),
       details: details.map(n => n.open),
       fields: inputs.filter(n => n.type !== "checkbox").map(n => ({name:n.name,value:n.value})),
       focus: focused && {name:focused.name,action:focused.getAttribute("data-connector-action"),label:focused.getAttribute("aria-label"),summary:details.findIndex(n => n.querySelector("summary") === focused),start:focused.selectionStart,end:focused.selectionEnd,direction:focused.selectionDirection},
@@ -38,6 +39,8 @@
     if (!view) return;
     const details = [...card.querySelectorAll("details")];
     details.forEach((n,i) => { if (i < view.details.length) n.open = view.details[i]; });
+    // Un formulaire ouvert (clé Recall) reste ouvert quand la carte est reconstruite.
+    for (const saved of view.forms || []) { const target = [...card.querySelectorAll("form")].find(n => n.id === saved.id); if (target && target.hidden && !saved.hidden) target.hidden = false; }
     const inputs = [...card.querySelectorAll("input")];
     for (const field of view.fields) { const target = inputs.find(n => n.name === field.name); if (target) target.value = field.value; }
     const f = view.focus;
@@ -126,7 +129,10 @@
   const waitingFor = item => item.device_flow ? "En attente de votre autorisation chez GitHub" : "En attente de votre autorisation dans le navigateur";
   function renderCatalogue(items, bots) {
     const gmail = items.find(item => item.id === "gmail");
-    if (gmail?.category) items = items.filter(item => item.id !== "drive").map(item => item.id === "calendar"
+    // Calendar et Drive ne fusionnent avec Gmail que s'ils n'ont aucune connexion propre : le backend les garde indépendants.
+    const ownConnection = item => !item || item.status !== "disconnected" || item.has_tokens || item.has_client || item.server || (item.accounts || []).length > 0;
+    const separate = ownConnection(items.find(item => item.id === "calendar")) || ownConnection(items.find(item => item.id === "drive"));
+    if (gmail?.category && !separate) items = items.filter(item => item.id !== "drive").map(item => item.id === "calendar"
       ? {...gmail,id:"google",connection_id:"gmail",multi_account:false,accounts:[],name:"Google Calendar et Drive",description:"Consulter vos rendez-vous et lire les fichiers de votre Drive avec le consentement Google commun."} : item);
     for (const category of ["Courriel et agenda","Fichiers et notes","Messagerie","Développement","Réunions"]) {
       if (!items.some(item => item.category === category) || catalogueGroups.has(category)) continue;
@@ -148,7 +154,8 @@
     const ids = new Set(items.map(item => item.id));
     for (const [id, previous] of catalogueCards) { if (!ids.has(id)) { previous.node.remove(); catalogueCards.delete(id); } }
     for (const item of items) {
-      const cardKey = JSON.stringify([item,bots.map(b => [b.id,b.name])]);
+      // La carte Recall n'affiche aucun bot : sa clé les ignore, pour ne pas fermer le formulaire de clé en cours de saisie.
+      const cardKey = JSON.stringify(item.kind === "recall" ? [item] : [item,bots.map(b => [b.id,b.name])]);
       const previous = catalogueCards.get(item.id);
       // Do not even detach an unchanged card: detaching an active password field
       // loses browser focus/selection despite keeping the node and its value.

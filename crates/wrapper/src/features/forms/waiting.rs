@@ -108,6 +108,12 @@ pub(super) fn load(conn: &Connection) -> Result<Settings, ApiError> {
 
 /// Le tour de ce run continue-t-il sans attendre la décision ?
 pub(super) fn continues(conn: &Connection, run: &Run) -> Result<bool, ApiError> {
+    // Un run écrit par l'hôte (gestion d'un connecteur, routines en arrière-plan, webhooks)
+    // ne contient que l'appel protégé : son tour finirait « en attente » et la carte
+    // ne pourrait plus lancer le changement. Il attend toujours la décision.
+    if run.run_id.starts_with("mcp-host-") {
+        return Ok(false);
+    }
     let settings = load(conn)?;
     Ok(match run.kind {
         RunKind::Task => settings.task,

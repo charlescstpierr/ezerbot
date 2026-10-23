@@ -2040,3 +2040,37 @@ fn stopping_a_running_task_still_cancels_its_waiting_card() {
     assert_eq!(f.request_row(&request.id).0, "cancelled");
     assert_eq!(f.protected_effects(), 0);
 }
+
+#[test]
+fn host_authored_runs_keep_waiting_for_the_decision_even_with_the_chat_option_on() {
+    let mut f = Fixture::new();
+    f.waiting(json!({"task":true,"chat":true,"validity":"24h","reminder":"1h"}));
+    f.start_kind(
+        "mcp-host-settings",
+        "grokbot",
+        &f.conversation,
+        RunKind::Chat,
+    );
+    let host = store::required(&f.conn, "mcp-host-settings").unwrap();
+    assert!(!forms::continues_without_approval(&f.conn, &host).unwrap());
+    // An ordinary chat run does continue with the option on.
+    let chat = store::required(&f.conn, "run").unwrap();
+    assert!(forms::continues_without_approval(&f.conn, &chat).unwrap());
+    // The settings flow suspends and its card keeps the historical ten minutes.
+    let progress = f.drive(
+        "mcp-host-settings",
+        &ScriptedGateway::call("guarded", GUARDED_TOOL, json!({"path":"x"})),
+    );
+    let RunProgress::Suspended(SuspendCause::HumanInput { id }) = progress else {
+        panic!("{progress:?}")
+    };
+    let (status, detached, expires, created) = f.request_row(&id);
+    assert_eq!((status.as_str(), detached), ("pending", 0));
+    assert_eq!(expires - created, (10 * MINUTE) as i64);
+    assert_eq!(
+        store::required(&f.conn, "mcp-host-settings")
+            .unwrap()
+            .status,
+        RunStatus::AwaitingApproval
+    );
+}

@@ -906,9 +906,19 @@ fn execute_journaled_external(
                         return Err(invalid("invalid approval wait"));
                     }
                     if detached {
-                        return Ok(Admission::Result(ToolOutcome::Failed {
+                        // The final outcome is journaled with the detaching of the request, so a
+                        // crash before the result event can never let a later approval run the call.
+                        let mut usage = store::budget_usage(conn, run_id, now_ms())?;
+                        usage.tool_calls += 1;
+                        store::save_budget_usage(conn, run_id, &usage)?;
+                        let outcome = ToolOutcome::Failed {
                             reason: APPROVAL_PENDING_REASON.into(),
-                        }));
+                        };
+                        conn.execute(
+                            "INSERT INTO engine_external_tools(run_id,call_id,authorized_by,outcome) VALUES (?1,?2,NULL,?3)",
+                            rusqlite::params![run_id, call.call_id, serde_json::to_string(&outcome)?],
+                        )?;
+                        return Ok(Admission::Result(outcome));
                     }
                     suspend(conn, &mut run, call, &cause, true)?;
                     return Ok(Admission::Wait(RunProgress::Suspended(cause)));
@@ -1600,6 +1610,13 @@ mod tests {
             Ok(self.resolved.clone())
         }
     }
+    fn call_event(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            call_id: id.into(),
+            name: name.into(),
+            arguments: json!({}),
+        }
+    }
     fn external_fixture() -> Result<(Connection, ToolCall)> {
         let conn = database(false, RunBudgets::default())?;
         let call = ToolCall {
@@ -2232,6 +2249,47 @@ mod tests {
                 "{mode}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn a_detached_journaled_call_is_never_executed_after_a_crash_before_its_result() -> Result<()> {
+        let conn = database(true, RunBudgets::default())?;
+        let call = call_event("protected", "work");
+        with_tx(&conn, |conn| -> Result<()> {
+            model::set_running_at(conn, "run", now_ms())?;
+            store::append_event(conn, "run", RunEventKind::ToolCall, &json!(call))?;
+            Ok(())
+        })?;
+        let mut services = Services {
+            detach: true,
+            journaled_external: true,
+            specs: vec![spec("work", true)],
+            ..Services::default()
+        };
+        // The request is created and detached, then the result event fails to commit.
+        conn.execute_batch("CREATE TRIGGER crash BEFORE INSERT ON engine_run_events WHEN NEW.kind='tool_result' BEGIN SELECT RAISE(ABORT,'crash'); END")?;
+        assert!(execute(&conn, &mut services, "run", &call).is_err());
+        conn.execute_batch("DROP TRIGGER crash")?;
+        assert!(!store::events(&conn, "run", 0)?
+            .iter()
+            .any(|e| e.kind == RunEventKind::ToolResult));
+        // The user approves before recovery: the call must still not run.
+        services.detach = false;
+        services.allowed = true;
+        execute(&conn, &mut services, "run", &call)?;
+        assert_eq!(services.external_calls, 0);
+        assert_eq!(services.approval_calls, 1);
+        let results: Vec<_> = store::events(&conn, "run", 0)?
+            .into_iter()
+            .filter(|e| e.kind == RunEventKind::ToolResult)
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].payload["outcome"]["reason"],
+            APPROVAL_PENDING_REASON
+        );
+        assert_eq!(store::budget_usage(&conn, "run", now_ms())?.tool_calls, 1);
         Ok(())
     }
 

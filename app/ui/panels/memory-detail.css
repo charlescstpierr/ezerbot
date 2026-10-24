@@ -1,5 +1,5 @@
 /* Mémoire : panneau de détail d'un souvenir, à droite du graphe ou de la Liste. Jetons Galet et jetons de portée uniquement. */
-.memory-space[data-detail] { display: grid; grid-template-columns: minmax(0, 1fr) 320px; column-gap: 20px; align-content: start; }
+.memory-space[data-detail] { display: grid; grid-template-columns: minmax(0, 1fr) 320px; column-gap: 20px; align-content: start; grid-auto-rows: max-content; }
 .memory-space[data-detail] > * { grid-column: 1; }
 .memory-space[data-detail] > .memory-detail { grid-column: 2; grid-row: 1 / span 8; position: sticky; top: 0; align-self: start; max-width: none; }
 .memory-detail { display: grid; gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--pane); max-height: calc(100vh - 120px); overflow-y: auto; }

@@ -1,31 +1,12 @@
 // The folder button must read a granted directory on the server. webkitdirectory
 // follows symlinks and never sets file.symlink, so this drives the real control.
 const assert = require("node:assert/strict");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
-
-const CHROME_CANDIDATES = [
-  process.env.CHROME_BIN,
-  "/usr/local/bin/google-chrome",
-  "google-chrome",
-  "google-chrome-stable",
-  "chromium",
-  "chromium-browser",
-].filter(Boolean);
-
-function chromeOnPath(command) {
-  if (command.includes("/")) return require("node:fs").existsSync(command);
-  return spawnSync("which", [command], { stdio: "ignore" }).status === 0;
-}
-
-function chromeBinary() {
-  const found = CHROME_CANDIDATES.find(chromeOnPath);
-  if (!found) throw new Error("chrome introuvable");
-  return found;
-}
+const { chromeBinary } = require("./chrome-binary.cjs");
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -124,23 +105,24 @@ test("Importer un dossier skips a real symlink whose target is outside the folde
   });
   let stderr = "";
   child.stderr.on("data", (chunk) => { if (stderr.length < 4000) stderr += chunk; });
-  const chromeDir = mkdtempSync(join(tmpdir(), "grokbot-folder-chrome-"));
-  const chrome = spawn(chromeBinary(), [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--remote-allow-origins=*",
-    "--remote-debugging-port=0",
-    `--user-data-dir=${join(chromeDir, "profile")}`,
-    "--window-size=1280,900",
-    "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
+  let chrome;
   const stop = () => {
     if (child.exitCode === null) child.kill("SIGKILL");
-    if (chrome.exitCode === null) chrome.kill("SIGKILL");
+    if (chrome && chrome.exitCode === null) chrome.kill("SIGKILL");
   };
   try {
+    const chromeDir = mkdtempSync(join(tmpdir(), "grokbot-folder-chrome-"));
+    chrome = spawn(chromeBinary(), [
+      "--headless=new",
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "--remote-allow-origins=*",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${join(chromeDir, "profile")}`,
+      "--window-size=1280,900",
+      "about:blank",
+    ], { stdio: ["ignore", "ignore", "pipe"] });
     const announced = JSON.parse(await readLine(child.stdout));
     const url = announced.url;
     const headers = {
@@ -241,9 +223,7 @@ test("Importer un dossier skips a real symlink whose target is outside the folde
     assert.equal(stored.includes("echappe/"), false);
 
     const shot = await cdp.send("Page.captureScreenshot", { format: "png" });
-    const { mkdirSync: makeDir, writeFileSync: write } = require("node:fs");
-    makeDir("/opt/cursor/artifacts/screenshots", { recursive: true });
-    write("/opt/cursor/artifacts/screenshots/import-dossier-symlink.png", Buffer.from(shot.data, "base64"));
+    writeFileSync(join(root, "import-dossier-symlink.png"), Buffer.from(shot.data, "base64"));
     cdp.close();
   } finally {
     stop();

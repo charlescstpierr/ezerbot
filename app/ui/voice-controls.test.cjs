@@ -1,32 +1,15 @@
 // Run with: node --test app/ui/voice-controls.test.cjs
 // Optional: CHROME_BIN=/path/to/chrome node --test app/ui/voice-controls.test.cjs
 const assert = require("node:assert/strict");
-const { spawn, spawnSync } = require("node:child_process");
-const { existsSync, mkdtempSync, writeFileSync } = require("node:fs");
+const { spawn } = require("node:child_process");
+const { mkdtempSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
+const { chromeBinary } = require("./chrome-binary.cjs");
 
 const UI = __dirname;
 const WIDTHS = [500, 820, 901, 1140];
-const CHROME_CANDIDATES = [
-  "google-chrome",
-  "google-chrome-stable",
-  "chromium",
-  "chromium-browser",
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-];
-
-function chromeOnPath(command) {
-  if (command.includes("/")) return existsSync(command);
-  return spawnSync("which", [command], { stdio: "ignore" }).status === 0;
-}
-
-function chromeBinary() {
-  if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
-  return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
-}
-
 function page() {
   return `<!doctype html>
 <html lang="fr" data-theme="dark" data-accent="citron">

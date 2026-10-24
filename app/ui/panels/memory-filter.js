@@ -36,7 +36,7 @@
     element.setAttribute("aria-label", "Filtrer les souvenirs");
     const search = node("input", "text-input"), bot = node("select", "text-input"), scope = node("select", "text-input");
     search.type = "search";
-    search.placeholder = "Rechercher un souvenir…";
+    search.placeholder = "Rechercher…";
     search.setAttribute("aria-label", "Rechercher un souvenir");
     bot.setAttribute("aria-label", "Filtrer par bot");
     scope.setAttribute("aria-label", "Filtrer par portée");

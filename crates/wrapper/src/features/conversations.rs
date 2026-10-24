@@ -340,8 +340,48 @@ pub fn has_submission(
     )?)
 }
 
+/// Projections attempted before a state read gives up on a vault that keeps changing.
+const VAULT_SETTLE_ATTEMPTS: usize = 4;
+
 impl App {
     pub(crate) fn conversations(&self) -> Result<Vec<Conversation>, ApiError> {
+        self.conversations_settled(&mut || {})
+    }
+
+    /// The replies share one vault snapshot (#377). A secret stored meanwhile (a tool renewing
+    /// an OAuth token) would escape it: once every reply is masked the vault is read again, and
+    /// the projection starts over with the new snapshot if it changed. What is returned was
+    /// masked with the vault as it stands after the last reply, never with an older one.
+    /// `after_reply` runs after each masked reply: a no-op, except in the test that writes
+    /// to the vault at that point.
+    pub(crate) fn conversations_settled(
+        &self,
+        after_reply: &mut dyn FnMut(),
+    ) -> Result<Vec<Conversation>, ApiError> {
+        for _ in 0..VAULT_SETTLE_ATTEMPTS {
+            let mut secrets = None;
+            let result = self.project_conversations(&mut secrets, after_reply)?;
+            match secrets {
+                None => return Ok(result),
+                Some(used)
+                    if used.unchanged_in(&super::engine::event_vault(&self.connection)?)? =>
+                {
+                    return Ok(result)
+                }
+                Some(_) => continue,
+            }
+        }
+        Err(ApiError::new(
+            503,
+            "Le coffre des secrets change sans arrêt : la lecture des conversations est refusée, réessayez.",
+        ))
+    }
+
+    fn project_conversations(
+        &self,
+        secrets: &mut Option<grokbot_forms::redact::Patterns>,
+        after_reply: &mut dyn FnMut(),
+    ) -> Result<Vec<Conversation>, ApiError> {
         let mut conversations = BTreeMap::new();
         let mut hidden = HashSet::new();
         let mut created = BTreeMap::new();
@@ -399,8 +439,6 @@ impl App {
         }
         let mut ordered: BTreeMap<String, Vec<(i64, Vec<Message>)>> = BTreeMap::new();
         let mut proposals = self.proposals_by_message()?;
-        // The vault is read once for all the replies of this state, not once per reply.
-        let mut secrets = None;
         for record in self.reader.list_submissions()? {
             let id = record.conversation_id.as_str();
             if hidden.contains(id) {
@@ -453,9 +491,10 @@ impl App {
                     proposals
                         .remove(&(id.to_owned(), record.message_id.as_str().to_owned()))
                         .unwrap_or_default(),
-                    &mut secrets,
+                    secrets,
                 )? {
                     pair.push(reply);
+                    after_reply();
                 }
             }
             // Meeting summaries are projected inside their durable meeting card,

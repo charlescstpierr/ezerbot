@@ -2717,7 +2717,7 @@ impl<'a> RedactedDeltas<'a> {
         Ok(())
     }
 }
-fn event_vault(conn: &Connection) -> grokbot_engine::contracts::Result<Vault> {
+pub(crate) fn event_vault(conn: &Connection) -> grokbot_engine::contracts::Result<Vault> {
     let path = conn
         .path()
         .ok_or_else(|| Error::InvalidInput("file database required".into()))?;

@@ -36,6 +36,12 @@ impl Patterns {
     pub fn value(&self, value: &Value) -> Result<Value> {
         mask_value(value, &self.0)
     }
+    /// Whether the vault still holds exactly the secrets of this snapshot. A caller that
+    /// masked several outputs with it reads this after the last one: false means a secret
+    /// was stored or removed meanwhile, and those outputs must be masked again.
+    pub fn unchanged_in(&self, vault: &Vault) -> Result<bool> {
+        Ok(known_patterns(vault)? == self.0)
+    }
 }
 /// Redact a cumulative live snapshot and withhold enough trailing characters
 /// to cover a secret split across reads, including its JSON-escaped form.
@@ -346,8 +352,13 @@ mod tests {
             snapshot.value(&value).unwrap(),
             redact_value(&test.vault, &value).unwrap()
         );
-        // The snapshot is a point in time; a new one sees what was added since.
+        // The snapshot is a point in time; a new one sees what was added since,
+        // and the snapshot knows it is no longer the vault's.
+        assert!(snapshot.unchanged_in(&test.vault).unwrap());
+        test.vault.set("TOKEN", "", "private-value").unwrap();
+        assert!(snapshot.unchanged_in(&test.vault).unwrap());
         test.vault.set("OTHER", "", "another-value").unwrap();
+        assert!(!snapshot.unchanged_in(&test.vault).unwrap());
         assert_eq!(snapshot.text("another-value").unwrap(), "another-value");
         assert_eq!(
             Patterns::of(&test.vault)
@@ -358,5 +369,6 @@ mod tests {
         );
         std::fs::write(test.vault.path(), b"broken").unwrap();
         assert!(Patterns::of(&test.vault).is_err());
+        assert!(snapshot.unchanged_in(&test.vault).is_err());
     }
 }

@@ -2506,3 +2506,92 @@ fn connector_install_text_is_served_once_not_with_every_state() {
         "read issues:create comments:create"
     );
 }
+
+/// Two replies of the history that both quote `secret`, as a tool output renewed meanwhile
+/// would (#377). The vault does not hold it yet.
+fn history_quoting(app: &mut App, secret: &str) -> String {
+    use grokbot_engine::{
+        contracts::{RunEventKind, Trigger},
+        store,
+    };
+    let id = conversation(app);
+    for message in ["premier", "second"] {
+        post(
+            app,
+            "/api/send",
+            json!({"conversation_id": id, "message_id": message, "body": "Question"}),
+        )
+        .unwrap();
+        let trigger = Trigger::UserMessage {
+            message_id: format!("{id}/{message}"),
+            attempt: 0,
+        };
+        let run = store::latest_run_for_trigger(&app.connection, &trigger)
+            .unwrap()
+            .expect("the message started a run");
+        // The run has ended (no provider here): record its text as it had streamed it.
+        app.connection
+            .execute(
+                "INSERT INTO engine_run_events(run_id,seq,kind,payload)
+                 SELECT ?1, COALESCE(MAX(seq),0)+1, ?2, ?3 FROM engine_run_events WHERE run_id=?1",
+                rusqlite::params![
+                    run.run_id,
+                    serde_json::to_value(RunEventKind::TextDelta)
+                        .unwrap()
+                        .as_str(),
+                    json!({"text": format!("Le jeton renouvelé est {secret}."), "response": 1})
+                        .to_string()
+                ],
+            )
+            .unwrap();
+    }
+    id
+}
+
+fn replies(conversations: &[super::Conversation]) -> Vec<String> {
+    conversations
+        .iter()
+        .flat_map(|c| &c.messages)
+        .filter(|m| m.role == "assistant")
+        .map(|m| serde_json::to_string(m).unwrap())
+        .collect()
+}
+
+#[test]
+fn a_secret_stored_while_the_replies_are_masked_never_leaves_in_clear() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let secret = "jeton-oauth-renouvele-pendant-la-lecture";
+    history_quoting(&mut app, secret);
+    let vault = super::features::engine::event_vault(&app.connection).unwrap();
+    // Synchronisation point: right after the first reply is masked with the snapshot taken
+    // for it, a tool worker stores the renewed token, before the second reply is masked.
+    let mut stored = false;
+    let conversations = app
+        .conversations_settled(&mut || {
+            if !stored {
+                vault.set("OAUTH_RENOUVELE", "", secret).unwrap();
+                stored = true;
+            }
+        })
+        .unwrap();
+    assert!(stored, "the vault changed during the projection");
+    let replies = replies(&conversations);
+    assert_eq!(replies.len(), 2);
+    for reply in &replies {
+        assert!(!reply.contains(secret), "secret in clear: {reply}");
+        assert!(reply.contains("[...]"), "{reply}");
+    }
+    // A vault that changes after every reply never settles: the read is refused, not served
+    // with a stale snapshot.
+    let mut renewals = 0;
+    let refused = app
+        .conversations_settled(&mut || {
+            renewals += 1;
+            vault
+                .set("OAUTH_RENOUVELE", "", &format!("{secret}-{renewals}"))
+                .unwrap();
+        })
+        .unwrap_err();
+    assert_eq!(refused.status, 503);
+}

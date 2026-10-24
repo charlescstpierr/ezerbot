@@ -9,6 +9,7 @@ so automatic memory can see a small model). Prints one JSON line, then serves.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -275,6 +276,23 @@ def response_body(raw: bytes) -> bytes:
                 {"type": "response.completed"},
             ]
         )
+    # Petit changement d'une Page déjà écrite : edit_page, l'id étant celui de write_page pour ce bot et ce fichier.
+    page_id = "page_" + hashlib.sha256(b"grokbot\0forfaits.page.tsx").hexdigest()
+    last_text = "" if items and isinstance(items[-1], dict) and items[-1].get("type") == "function_call_output" else _last_user_text(items)
+    for needle, call_id, before, after in (
+        ("change le prix de confort", "verify-edit", '["Confort", "19 \\u20ac"]', '["Confort", "21 \\u20ac"]'),
+        ("change tous les prix", "verify-edit-double", "\\u20ac", "euros"),
+    ):
+        if needle in last_text:
+            call = {
+                "id": f"fc-{call_id}",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": call_id,
+                "name": "edit_page",
+                "arguments": json.dumps({"id": page_id, "before": before, "after": after}),
+            }
+            return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
     if outputs:
         last = outputs[-1].get("call_id")
         if last == "verify-late":
@@ -282,7 +300,7 @@ def response_body(raw: bytes) -> bytes:
             waiting = "En attente" in str(outputs[-1].get("output"))
             done = "J’attends son accord pour envoyer le résumé." if waiting else "Tu as approuvé : envoyer le résumé. C’est parti. Le résumé est envoyé."
         else:
-            done = "Voici la Page." if last == "verify-page" else "La tâche tourne." if str(last).startswith("verify-task") else "Voici l’image."
+            done = "Voici la Page." if last == "verify-page" else "La Page est modifiée." if last == "verify-edit" else "Le passage n’est pas unique." if last == "verify-edit-double" else "La tâche tourne." if str(last).startswith("verify-task") else "Voici l’image."
         return _sse(
             [
                 {"type": "response.output_text.delta", "delta": done},

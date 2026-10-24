@@ -543,6 +543,7 @@ struct OAuth {
     base: String,
     seen: Arc<Mutex<SeenOAuth>>,
     stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 impl OAuth {
     fn new() -> Self {
@@ -552,7 +553,7 @@ impl OAuth {
         let captured = seen.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let done = stop.clone();
-        std::thread::spawn(move || {
+        let thread = std::thread::spawn(move || {
             while !done.load(Ordering::Acquire) {
                 let Some(mut req) = server.recv_timeout(Duration::from_millis(50)).unwrap() else {
                     continue;
@@ -1379,7 +1380,12 @@ impl OAuth {
                 let _ = req.respond(response);
             }
         });
-        Self { base, seen, stop }
+        Self {
+            base,
+            seen,
+            stop,
+            thread: Some(thread),
+        }
     }
     fn count(&self, suffix: &str) -> usize {
         self.seen
@@ -1393,21 +1399,94 @@ impl OAuth {
 }
 impl Drop for OAuth {
     fn drop(&mut self) {
+        // The server thread ends with its test, like `FakeOpenAi`'s: none outlives the
+        // fixture that owns it.
         self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 static OAUTH_TEST_LOCK: Mutex<()> = Mutex::new(());
+/// The longest a test keeps `OAUTH_TEST_LOCK`. A test that is still running past it is stuck
+/// (a thread cannot be stopped from outside), and every other test of the binary would wait
+/// behind it for ever: the binary ends with a failure that names the test instead.
+const FIXTURE_DEADLINE: Duration = Duration::from_secs(300);
+/// Starts when a test takes the lock and ends with its `Fixture`. `expired` runs once if the
+/// limit passes first.
+struct Deadline {
+    done: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Deadline {
+    fn start(
+        test: String,
+        limit: Duration,
+        expired: impl FnOnce(&str, Duration) + Send + 'static,
+    ) -> Self {
+        let (done, ended) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            // Disconnected: the test ended in time. Timeout: it did not.
+            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = ended.recv_timeout(limit) {
+                expired(&test, limit);
+            }
+        });
+        Self {
+            done: Some(done),
+            thread: Some(thread),
+        }
+    }
+    fn for_current_test() -> Self {
+        let test = std::thread::current().name().unwrap_or("?").to_owned();
+        Self::start(test, FIXTURE_DEADLINE, |test, limit| {
+            eprintln!(
+                "\nle test `{test}` tient OAUTH_TEST_LOCK depuis plus de {limit:?} sans finir : \
+                 les autres tests du binaire l'attendent. Le binaire s'arrête ici plutôt que de rester bloqué."
+            );
+            std::process::exit(101);
+        })
+    }
+}
+impl Drop for Deadline {
+    fn drop(&mut self) {
+        drop(self.done.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+/// What the browser does when the authorization ends: one GET on the loopback listener of the
+/// sign-in. The listener is tiny_http, which hands a request to whoever calls `recv` and to
+/// nobody once the sign-in has left it, so a request that reached it as the sign-in ended is
+/// never answered. No such call may wait for ever: the test that made it would keep
+/// `OAUTH_TEST_LOCK` and stop the whole binary.
+fn browser_get(url: &str, within: Duration) -> Result<u16, String> {
+    match ureq::AgentBuilder::new()
+        .timeout(within)
+        .build()
+        .get(url)
+        .call()
+    {
+        Ok(response) => Ok(response.status()),
+        Err(ureq::Error::Status(code, _)) => Ok(code),
+        Err(error) => Err(error.to_string()),
+    }
+}
+/// A return that completes or refuses a sign-in does real work (token, tools): it gets time.
+const CALLBACK_WITHIN: Duration = Duration::from_secs(60);
 struct Fixture {
     app: App,
     path: PathBuf,
     provider: Provider,
     ai: FakeOpenAi,
     oauth: OAuth,
+    _deadline: Deadline,
     _environment_guard: MutexGuard<'static, ()>,
 }
 impl Fixture {
     fn new() -> Self {
         let environment_guard = OAUTH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = Deadline::for_current_test();
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir()
             .join(format!(
@@ -1435,6 +1514,7 @@ impl Fixture {
             provider,
             ai,
             oauth,
+            _deadline: deadline,
             _environment_guard: environment_guard,
         }
     }
@@ -1556,11 +1636,8 @@ impl Fixture {
                 if deny { "error" } else { "code" },
                 if deny { "access_denied" } else { "fake-code" },
             );
-        match ureq::get(callback.as_str()).call() {
-            Ok(r) => r.status(),
-            Err(ureq::Error::Status(code, _)) => code,
-            Err(e) => panic!("callback transport {e}"),
-        }
+        browser_get(callback.as_str(), CALLBACK_WITHIN)
+            .unwrap_or_else(|e| panic!("callback transport {e}"))
     }
     fn outcome(&self, run: &str) -> ToolOutcome {
         let event = store::events(&self.db(), run, 0)
@@ -4347,7 +4424,8 @@ fn gmail_refusal_or_cancellation_leaves_no_token_behind() {
     late.query_pairs_mut()
         .append_pair("state", &query["state"])
         .append_pair("code", "late-code");
-    let _ = ureq::get(late.as_str()).call();
+    // Whatever the listener answers, or nothing: only that this return completes nothing counts.
+    let _ = browser_get(late.as_str(), Duration::from_secs(10));
     assert_eq!(f.oauth.count("/gmail/token"), 0);
     assert_eq!(f.item("gmail")["status"], "disconnected");
     f.assert_no_gmail_token_kept();
@@ -7746,11 +7824,8 @@ fn linear_refuses_a_grant_that_lacks_a_permission_and_keeps_no_token() {
         "{}?state={}&code=fake-code",
         fields["redirect_uri"], fields["state"]
     );
-    let status = match ureq::get(&callback).call() {
-        Ok(r) => r.status(),
-        Err(ureq::Error::Status(code, _)) => code,
-        Err(e) => panic!("callback transport {e}"),
-    };
+    let status = browser_get(&callback, CALLBACK_WITHIN)
+        .unwrap_or_else(|e| panic!("callback transport {e}"));
     assert_eq!(status, 400);
     wait("linear reconnect", || {
         g.item("linear")["status"] == "reconnect"
@@ -9878,11 +9953,8 @@ fn jira_refuses_a_grant_that_lacks_a_permission_and_keeps_no_token() {
         "{}?state={}&code=fake-code",
         fields["redirect_uri"], fields["state"]
     );
-    let status = match ureq::get(&callback).call() {
-        Ok(r) => r.status(),
-        Err(ureq::Error::Status(code, _)) => code,
-        Err(e) => panic!("callback transport {e}"),
-    };
+    let status = browser_get(&callback, CALLBACK_WITHIN)
+        .unwrap_or_else(|e| panic!("callback transport {e}"));
     assert_eq!(status, 400);
     wait("jira reconnect", || g.item("jira")["status"] == "reconnect");
     assert!(g.jira_secret().is_none(), "a refused grant keeps no token");
@@ -10377,4 +10449,56 @@ fn jira_draft_is_refused_after_a_new_sign_in_even_to_an_account_of_the_same_name
     g.github_settle(&run);
     assert!(failed(&g, &run).contains("compte Jira a changé"));
     assert_eq!(g.jira_sends(), 0);
+}
+
+#[test]
+fn a_return_nobody_answers_ends_in_an_error_instead_of_waiting_for_ever() {
+    // The request reaches the listener and nobody ever responds to it: what a sign-in that
+    // left its tiny_http listener just before leaves behind.
+    let listener = Server::http("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://{}/oauth/gmail/callback?state=s&code=late-code",
+        listener.server_addr()
+    );
+    let (sent, outcome) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(browser_get(&url, Duration::from_millis(500)));
+    });
+    let unanswered = listener
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .expect("the request reached the listener");
+    let outcome = outcome
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the browser's call is bounded: it still waits for an answer");
+    assert!(outcome.is_err(), "{outcome:?}");
+    drop(unanswered);
+}
+
+#[test]
+fn a_test_that_keeps_the_lock_past_its_deadline_is_reported_and_one_that_ends_is_not() {
+    let expired = Arc::new(AtomicBool::new(false));
+    let reported = expired.clone();
+    let stuck = Deadline::start(
+        "stuck".to_owned(),
+        Duration::from_millis(50),
+        move |test, limit| {
+            assert_eq!((test, limit), ("stuck", Duration::from_millis(50)));
+            reported.store(true, Ordering::Release);
+        },
+    );
+    wait("the stuck test is reported", || {
+        expired.load(Ordering::Acquire)
+    });
+    drop(stuck);
+
+    let expired = Arc::new(AtomicBool::new(false));
+    let reported = expired.clone();
+    let punctual = Deadline::start(
+        "punctual".to_owned(),
+        Duration::from_secs(60),
+        move |_, _| reported.store(true, Ordering::Release),
+    );
+    drop(punctual);
+    assert!(!expired.load(Ordering::Acquire));
 }

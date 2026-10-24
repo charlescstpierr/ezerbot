@@ -13,7 +13,7 @@ function galleryIO() {
   };
 }
 
-function ImageViewer({ images, index, onIndex, onClose }) {
+export function ImageViewer({ images, index, onIndex, onClose }) {
   const dialog = useRef(null);
   const image = images[index];
   const [broken, setBroken] = useState(false);

@@ -22,11 +22,12 @@
   let phase = "idle", detail = "", liveText = "", lastUtterance = 0, lastBarge = 0, paused = false, sending = false;
   let inputHeld = false, followResumedReply = false;
   let voicesLoaded = false;
-  // A sub-task of this thread that ended (state.delegation, already polled) is told once per session.
-  let toldTasks = new Set(), announcement = null;
+  // A sub-task of this thread that ended (its card in the thread, already polled) is told once per session,
+  // unless Charles cuts the announcement short: `announcing` is the one spoken and not yet heard to the end.
+  let toldTasks = new Set(), announcement = null, announcing = null;
   const ANNOUNCEMENT_MS = 5000;
-  const endedTasks = () => (ctx?.state?.delegation?.delegations || []).filter(edge =>
-    edge.parent_conversation_id === conversationId && ["done","failed","refused"].includes(edge.status?.status));
+  const endedTasks = () => (ctx?.conversation?.messages || []).filter(message => message.kind === "delegation"
+    && ["done","failed","refused"].includes(message.payload?.status?.status)).map(message => message.payload);
   const taskTitle = edge => { const line = String(edge.objective || "").split("\n")[0].trim(); return line.length > 80 ? `${line.slice(0,79).trimEnd()}…` : line; };
   const announcementText = edge => `La tâche « ${taskTitle(edge)} » ${edge.status.status === "done" ? "est terminée" : "a échoué"}.`;
   const announced = () => announcement && Date.now() < announcement.until && ["listening","thinking","speaking"].includes(phase) ? announcement.text : "";
@@ -68,7 +69,7 @@
     clearTimeout(timer); epoch++;
     if (token) bridge("cancel").catch(() => {});
     token = ""; reader = null; conversationId = null; sending = false; paused = false;
-    inputHeld = false; followResumedReply = false; announcement = null;
+    inputHeld = false; followResumedReply = false; announcement = announcing = null;
     if (clear) { phase = "idle"; detail = ""; liveText = ""; scopeKey = null; }
     render(); panels.composerChanged();
   }
@@ -106,7 +107,7 @@
     token = crypto.randomUUID(); settingsToken = token; conversationId = ctx.conversation?.id; scopeKey = contextKey(ctx);
     reader = window.GrokbotChat.createVoiceReader(ctx.conversation?.messages || []);
     phase = "authorizing"; detail = ""; liveText = ""; lastUtterance = 0; lastBarge = 0; paused = false;
-    inputHeld = false; followResumedReply = false; announcement = null;
+    inputHeld = false; followResumedReply = false; announcement = announcing = null;
     toldTasks = new Set(endedTasks().map(edge => edge.id));
     const rev = ++epoch;
     render(); panels.composerChanged();
@@ -147,6 +148,8 @@
       if (result.token !== token) { fail("stale"); return; }
       if (result.transcript) liveText = result.transcript;
       const needsAction = window.GrokbotChat.voiceNeedsAction(ctx.conversation?.messages || []);
+      if (announcing && result.barged > announcing.barge) { toldTasks.delete(announcing.id); announcing = null; }
+      else if (announcing && !result.speaking) announcing = null;
       if (result.barged > lastBarge) {
         lastBarge = result.barged;
         // Speaking is not a decision on an approval/form/secret card.
@@ -192,7 +195,7 @@
         const receipt = await bridge("speak", {text,voice:settings.voice,speed:settings.speed,language:settings.language,barge:lastBarge});
         if (rev !== epoch) return;
         if (errors[receipt.status]) { fail(receipt.status); return; }
-        if (receipt.barged <= lastBarge) { toldTasks.add(ended.id); announcement = {text, until:Date.now() + ANNOUNCEMENT_MS}; }
+        if (receipt.barged <= lastBarge) { toldTasks.add(ended.id); announcing = {id:ended.id, barge:lastBarge}; announcement = {text, until:Date.now() + ANNOUNCEMENT_MS}; }
       }
       phase = needsAction ? "waiting" : result.speaking || chunks.length ? "speaking" : thinking ? "thinking" : "listening";
       render();

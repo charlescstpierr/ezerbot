@@ -221,7 +221,7 @@ test("in a group, each reply is spoken with the voice of the bot that wrote it",
 
 // A sub-task launched from the thread, as the engine publishes it in state.delegation.
 const task=(id,status,over={})=>({id,objective:"Résumer le rapport",parent_conversation_id:"chat",status:{status},...over});
-const tasksOf=(f,...edges)=>{f.context.state.delegation={delegations:edges,active_by_conversation:{}};return edges;};
+const tasksOf=(f,...edges)=>{f.context.conversation.messages.push(...edges.map(payload=>({id:"card-"+payload.id,kind:"delegation",role:"assistant",payload})));return edges;};
 const spoken=f=>f.calls.filter(c=>c.command==="speak").map(c=>c.text);
 const phrase="La tâche « Résumer le rapport » est terminée.";
 
@@ -269,9 +269,10 @@ test("the announcement waits for the end of the sentence being spoken, even whil
 });
 
 test("a task of another thread is never announced",async()=>{
-  const f=fixture();const [edge]=tasksOf(f,task("t1","running",{parent_conversation_id:"autre"}));
+  const f=fixture();
+  f.context.state.delegation={delegations:[task("t1","running",{parent_conversation_id:"autre"})]};
   await cls(f.root,"voice-session-toggle").onclick();await f.tick();
-  edge.status={status:"done",result:"Fait."};await f.tick();await f.tick();
+  f.context.state.delegation.delegations[0].status={status:"done",result:"Fait."};await f.tick();await f.tick();
   assert.deepEqual(spoken(f),[]);
 });
 
@@ -287,8 +288,21 @@ test("muted with a card waiting, nothing is announced until the card is answered
   f.source.muted=true;f.context.conversation.messages.push({id:"approval",kind:"approval",payload:{status:{status:"pending"}}});
   edge.status={status:"done",result:"Fait."};await f.tick();await f.tick();
   assert.equal(f.source.paused,true);assert.deepEqual(spoken(f),[]);
-  f.context.conversation.messages[0].payload.status.status="approved";await f.tick();
+  f.context.conversation.messages.find(m=>m.id==="approval").payload.status.status="approved";await f.tick();
   assert.equal(f.source.paused,false);assert.deepEqual(spoken(f),[phrase]);
+});
+
+test("an announcement that Charles cuts off after the bridge took it is said again once he stops",async()=>{
+  const f=fixture();const [edge]=tasksOf(f,task("t1","running"));
+  await cls(f.root,"voice-session-toggle").onclick();await f.tick();
+  edge.status={status:"done",result:"Fait."};await f.tick();
+  assert.deepEqual(spoken(f),[phrase]);
+  f.source.barged=1;f.source.speaking=false;f.source.transcript="Attends";await f.tick();
+  assert.deepEqual(spoken(f),[phrase],"nothing while Charles speaks");
+  f.source.transcript="";await f.tick();
+  assert.deepEqual(spoken(f),[phrase,phrase]);
+  f.source.speaking=false;await f.tick();await f.tick();
+  assert.deepEqual(spoken(f),[phrase,phrase],"heard to the end, it is not said a third time");
 });
 
 test("an announcement that Charles cut by speaking is said again, and shown only once said",async()=>{

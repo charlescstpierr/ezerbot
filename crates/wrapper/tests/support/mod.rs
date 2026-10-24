@@ -85,6 +85,10 @@ pub struct Seen {
     pub memory_delay: Duration,
     /// Optional provider telemetry for default chat replies (titles remain independent).
     pub usage: Option<Value>,
+    /// Optional hard ceiling for every Responses request, including auxiliary calls.
+    pub response_limit: Option<usize>,
+    pub response_calls: usize,
+    pub rejected_response_calls: usize,
     /// GET WHAM usage is independent of model responses and their telemetry.
     pub quota_reply: Option<ScriptedResponse>,
     pub quota_headers: Vec<HashMap<String, String>>,
@@ -390,7 +394,16 @@ impl FakeOpenAi {
                         }
                         (200, "application/json".into(), models.to_string())
                     }
+                    "/v1/responses" | "/backend-api/codex/responses"
+                        if seen
+                            .response_limit
+                            .is_some_and(|limit| seen.response_calls >= limit) =>
+                    {
+                        seen.rejected_response_calls += 1;
+                        (429, "application/json".into(), "{}".into())
+                    }
                     "/v1/responses" | "/backend-api/codex/responses" => {
+                        seen.response_calls += 1;
                         let request_body: Value =
                             serde_json::from_str(&body).unwrap_or(Value::Null);
                         if request_body["tools"].as_array().is_some_and(|tools| {

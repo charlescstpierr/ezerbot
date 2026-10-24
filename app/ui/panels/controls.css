@@ -65,8 +65,8 @@ select:focus-visible,
 input[type="number"]:focus-visible,
 [data-card-kind="form"] input[type="text"]:focus-visible,
 [data-card-kind="secret"] input[type="password"]:focus-visible {
-  border-color: var(--accent-ink);
-  outline: 2px solid var(--accent-ink);
+  border-color: var(--focus);
+  outline: 2px solid var(--focus);
   outline-offset: 0;
 }
 select:disabled,
@@ -88,12 +88,12 @@ input[type="number"]:disabled,
 }
 :is([data-card-kind="form"], [data-card-kind="secret"]) .gb-retry:hover:enabled { background: var(--soft); }
 :is([data-card-kind="form"], [data-card-kind="secret"]) .gb-retry-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-on);
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--canvas);
   font-weight: 600;
 }
 :is([data-card-kind="form"], [data-card-kind="secret"]) .gb-retry-primary:hover:enabled {
-  background: var(--accent);
+  background: var(--text);
   filter: brightness(1.08);
 }

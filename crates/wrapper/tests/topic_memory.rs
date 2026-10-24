@@ -619,3 +619,46 @@ fn oublier_ne_touche_pas_aux_propositions_en_attente_d_un_autre_sujet() {
     );
     assert_eq!(f.card(&b, &elsewhere)["payload"]["status"], "pending");
 }
+
+#[test]
+fn un_souvenir_ajoute_a_la_main_au_sujet_est_lu_par_ses_fils_seulement() {
+    let mut f = Fixture::new();
+    let topic = f.topic("Déménagement");
+    let inside = f.thread("Camion", Some(&topic));
+    let outside = f.thread("Courses", None);
+    let added = f.post(
+        "/api/memory/add",
+        json!({"bot_id": "grokbot", "text": "Le garde-meuble ferme à 18 h", "scope": "topic", "topic_id": topic}),
+    );
+    assert_eq!(added["fact"]["scope"], "topic");
+    assert_eq!(f.topic_facts(&topic).len(), 1);
+    assert!(f.recall(&inside, "garde-meuble").contains("ferme à 18 h"));
+    assert!(f.recall(&inside, "garde-meuble").contains("user_stated"));
+    assert!(!f.recall(&outside, "garde-meuble").contains("ferme à 18 h"));
+    let all = f.app.api("GET", "/api/memory/all", b"").unwrap();
+    let in_all = all["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fact| fact["fact_id"] == added["fact"]["id"])
+        .expect("souvenir de sujet absent de /api/memory/all");
+    assert_eq!(in_all["provenance"]["source"], "user_stated");
+    assert_eq!(in_all["scope"], "topic");
+    assert_eq!(in_all["topic_id"], json!(topic));
+    // Un souvenir de sujet n'entre pas dans la mémoire privée du bot.
+    let private = f.post("/api/memory", json!({"bot_id": "grokbot"}));
+    assert!(private["facts"].as_array().unwrap().is_empty());
+    // Sans sujet valide : refus, rien de créé.
+    for (body, status) in [
+        (json!({"scope": "topic"}), 400),
+        (json!({"scope": "topic", "topic_id": "inconnu"}), 404),
+        (json!({"scope": "private", "topic_id": topic}), 400),
+    ] {
+        let mut body = body;
+        body["bot_id"] = json!("grokbot");
+        body["text"] = json!("Autre chose");
+        let error = f.post_result("/api/memory/add", body).unwrap_err();
+        assert_eq!(error.status, status);
+    }
+    assert_eq!(f.topic_facts(&topic).len(), 1);
+}

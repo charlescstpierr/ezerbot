@@ -18,7 +18,7 @@ La mémoire automatique est un réglage par bot dans Paramètres. La mémoire du
 
 Preconditions:
 
-- `doctor: ok`, badge `ChatGPT`, catalogue chargé (le faux catalogue contient `gpt-test-mini`, donc la mémoire automatique n’affiche pas « aucun petit modèle »).
+- `doctor: ok`, la pilule Modèle `#composer-tools [data-picker="model"]` est présente, catalogue chargé (le faux catalogue contient `gpt-test-mini`, donc la mémoire automatique n’affiche pas « aucun petit modèle »).
 - Aucun fait appris. Ne pas envoyer de message pendant cette sphère : un envoi pourrait créer un fait.
 
 - **Réglage.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => { document.getElementById("settings-button").click(); const panel = document.querySelector("[data-panel=memory]"); return {heading: panel.querySelector("h3").textContent, toggle: !!panel.querySelector("input[name=automatic-grokbot]")}; }'`. Le heading est `Mémoire automatique` et l’interrupteur existe.

@@ -18,7 +18,7 @@
 
 Preconditions:
 
-- `doctor: ok`, badge `ChatGPT`.
+- `doctor: ok`, la pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 
 - **Conversation.** Le parcours crée une conversation par l’API, envoie la question et attend la réponse du faux bot.
 - **Menu.** `.gb-message[data-message-id=<question>] button[aria-label="Actions du message"]`, puis l’entrée `[role="menuitem"]` « Répondre en fil » dans `[role="menu"][aria-label="Actions du message"]`.

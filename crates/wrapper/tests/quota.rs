@@ -486,7 +486,11 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
     let contents = fixture.log();
     let kept: Vec<_> = contents
         .lines()
-        .filter(|line| !line.contains("upstream turn="))
+        .filter(|line| {
+            !line.contains("upstream turn=")
+                && !line.contains("] api_state")
+                && !line.contains("] affichage client=")
+        })
         .collect();
     // startup, connection probe, the refused turn, its single refusal, shutdown.
     assert_eq!(kept.len(), 5, "{contents}");

@@ -152,7 +152,7 @@ pub fn valid_pattern_key(key: &str) -> bool {
     (1..=MAX_PATTERN_CHARS).contains(&count) && !key.chars().any(char::is_control)
 }
 
-fn normalize_name(name: &str) -> String {
+pub(crate) fn normalize_name(name: &str) -> String {
     let chars: Vec<char> = name.chars().collect();
     let mut out = String::new();
     for (index, &ch) in chars.iter().enumerate() {

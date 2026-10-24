@@ -55,6 +55,7 @@
       <symbol id="i-learn" viewBox="0 0 24 24"><path d="M12 5c-3-2-6-2-9-1v15c3-1 6-1 9 1m0-15c3-2 6-2 9-1v15c-3-1-6-1-9 1V5Z"/></symbol>
       <symbol id="i-bot" viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="5"/><path d="M12 8V4.5M9.5 13v2m5-2v2"/></symbol>
       <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M12 17v4m-5 0h10"/></symbol>
+      <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></symbol>
     </defs>
   </svg>
 
@@ -71,7 +72,6 @@
     <div class="sidebar-filter-row"><span class="section-label">CONVERSATIONS</span><button id="favorites-filter" class="favorites-filter" aria-label="Afficher les favoris" aria-pressed="false" title="Afficher les favoris"><svg class="icon"><use href="#i-star"/></svg></button></div>
     <nav class="conversation-list" id="conversation-list" aria-label="Vos conversations"><p class="sidebar-empty">Vos conversations apparaîtront ici.</p></nav>
     <div class="sidebar-bottom">
-      <div class="local-note"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><div><strong>Chez vous, sur votre Mac.</strong><span>Historique enregistré localement.</span></div></div>
       <button class="account-button" id="settings-button"><span class="account-avatar" id="account-avatar">V</span><span class="account-copy"><strong id="account-name">Espace personnel</strong><span>Paramètres de l’application</span></span><svg class="icon"><use href="#i-settings"/></svg></button>
     </div>
   </aside>
@@ -79,7 +79,7 @@
   <main class="main-panel">
     <header class="topbar">
       <div class="topbar-title"><button class="icon-button sidebar-toggle" id="sidebar-toggle" aria-label="Ouvrir les conversations" aria-controls="sidebar" aria-expanded="false"><svg class="icon"><use href="#i-menu"/></svg></button><button class="workspace-label" id="workspace-label" type="button" disabled>Espace personnel</button><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">Nouvelle conversation</h1></div>
-      <div class="topbar-actions"><span class="mode-badge"><span class="status-dot"></span><span id="mode-badge-text">Local</span></span><button class="icon-button" id="conversation-menu-button" aria-label="Actions de la conversation" aria-expanded="false" aria-controls="conversation-menu" disabled><svg class="icon"><use href="#i-more"/></svg></button></div>
+      <div class="topbar-actions"><button class="icon-button" id="conversation-menu-button" aria-label="Actions de la conversation" aria-expanded="false" aria-controls="conversation-menu" disabled><svg class="icon"><use href="#i-more"/></svg></button></div>
       <div class="popover conversation-menu" id="conversation-menu" hidden>
         <button id="rename-button"><svg class="icon"><use href="#i-edit"/></svg>Renommer</button>
         <button id="favorite-button"><svg class="icon"><use href="#i-star"/></svg><span>Ajouter aux favoris</span></button>

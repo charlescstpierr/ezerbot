@@ -42,6 +42,8 @@ struct SendMessage {
     simulate_loss: bool,
     #[serde(default)]
     apply_skill_id: Option<String>,
+    #[serde(default)]
+    page_anchor: Option<super::pages::anchors::PageAnchor>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -400,6 +402,16 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     &input.conversation_id,
                     &input.message_id,
                     skill_id,
+                )?;
+            }
+            if let Some(anchor) = &input.page_anchor {
+                super::pages::anchors::record(
+                    &tx,
+                    &input.conversation_id,
+                    &input.message_id,
+                    anchor,
+                    &input.mentions,
+                    now(),
                 )?;
             }
             super::conversations::append_entry(
@@ -1639,6 +1651,7 @@ impl RunServices for Services<'_> {
                 !super::screen::is_tool(&s.name)
                     || super::screen::enabled(self.connection, &run.bot_id)
             })
+            .map(gated)
             .collect()
     }
     fn call_tool(
@@ -3531,6 +3544,7 @@ fn delete_undelivered(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
         "DELETE FROM wrapper_attachment_order WHERE conversation_id = ?1 AND message_id = ?2",
         params![conversation_id, message_id],
     )?;
+    super::pages::anchors::discard_message(&tx, &conversation_id, &message_id)?;
     tx.commit()?;
     app.conversation_response(&conversation_id)
 }
@@ -3951,5 +3965,31 @@ mod title_tests {
         );
         let long = clean_title(&"mot ".repeat(40)).unwrap();
         assert!(long.chars().count() <= 60 && long.ends_with('…'));
+    }
+}
+
+/// Un outil interdit passe toujours par la porte, même déclaré « sans approbation ».
+fn gated(mut spec: ToolSpec) -> ToolSpec {
+    spec.requires_approval |= grokbot_forms::forbidden::classify(&spec.name).is_some();
+    spec
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    fn spec(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.into(),
+            description: String::new(),
+            schema: json!({}),
+            requires_approval: false,
+        }
+    }
+
+    #[test]
+    fn a_forbidden_tool_declared_without_approval_reaches_the_gate() {
+        assert!(gated(spec("stripe_create_payment")).requires_approval);
+        assert!(!gated(spec("stripe_list_payments")).requires_approval);
     }
 }

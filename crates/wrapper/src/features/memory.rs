@@ -6,8 +6,14 @@
 //! separately in `memory_auto`.
 //!
 //! GET /api/memory?bot_id=<id> (default: grokbot), or POST /api/memory
-//! {bot_id}, lists active owned/private and workspace/team facts. POST children
+//! {bot_id}, lists active owned/private and workspace/team facts.
+//! GET /api/memory/all is an owner-facing, read-only workspace catalogue, including
+//! topic facts and deleted owners; it never changes bot recall or model context.
+//! POST children
 //! /forget, /correct and /promote require bot_id and fact_id/text or fact_ids.
+//! POST /api/memory/add {bot_id, text, scope: "private"|"topic", topic_id?} est
+//! l'ajout à la main : provenance « déclaré » (`Source::UserStated`), sans modèle,
+//! sans déduplication (c'est un geste explicite de l'utilisateur).
 //! Promotion accepts ONE batch of <=100; earlier successful requests survive a
 //! later failure (RC03). Forgetting atomically wipes the correction lineage,
 //! redacts run replay/cards and invalidates covering summaries. Regeneration is
@@ -68,6 +74,20 @@ struct Correct {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Add {
+    bot_id: String,
+    text: String,
+    scope: AddScope,
+    topic_id: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AddScope {
+    Private,
+    Topic,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Promote {
     bot_id: String,
     fact_ids: Vec<String>,
@@ -80,12 +100,18 @@ pub fn routes(
     body: &[u8],
 ) -> Option<Result<ApiResponse, ApiError>> {
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    if method == "GET" && route == "/api/memory/all" {
+        return Some(workspace_listing(&app.connection).map(ApiResponse::Json));
+    }
     if !matches!(
         (method, route),
         ("GET" | "POST", "/api/memory")
             | (
                 "POST",
-                "/api/memory/forget" | "/api/memory/correct" | "/api/memory/promote"
+                "/api/memory/forget"
+                    | "/api/memory/correct"
+                    | "/api/memory/promote"
+                    | "/api/memory/add"
             )
     ) {
         return None;
@@ -147,6 +173,62 @@ pub fn routes(
                 tx.commit()?;
                 json!({"fact": fact})
             }
+            "/api/memory/add" => {
+                let input: Add = parse(body)?;
+                validate_id(&input.bot_id)?;
+                app.require_bot(&input.bot_id)?;
+                // Le texte est vérifié avant toute écriture : refus clair, rien de créé.
+                // Même plafond que l'outil `remember`, mesuré sur le texte reçu.
+                if input.text.trim().is_empty()
+                    || input.text.chars().count() > facts::MAX_FACT_CHARS
+                {
+                    return Err(ApiError::new(
+                        400,
+                        "Le texte d'un souvenir doit contenir entre 1 et 2 000 caractères.",
+                    ));
+                }
+                let text = input.text.trim();
+                let tx = super::write_transaction(&app.connection)?;
+                let fact = match input.scope {
+                    AddScope::Topic => {
+                        let topic = input.topic_id.as_deref().ok_or_else(|| {
+                            ApiError::new(400, "Indiquez le sujet de ce souvenir.")
+                        })?;
+                        validate_id(topic)?;
+                        super::topics::require_topic(&tx, topic)?;
+                        super::topic_memory::add(&tx, topic, &input.bot_id, text)?
+                    }
+                    AddScope::Private => {
+                        if input.topic_id.is_some() {
+                            return Err(ApiError::new(
+                                400,
+                                "Un souvenir privé ne prend pas de sujet.",
+                            ));
+                        }
+                        let fact = facts::remember(
+                            &tx,
+                            &Fact {
+                                fact_id: String::new(),
+                                bot_id: input.bot_id.clone(),
+                                scope: Scope::Private,
+                                text: text.into(),
+                                provenance: Provenance {
+                                    conversation_id: None,
+                                    entry_id: None,
+                                    source: Source::UserStated,
+                                },
+                                learned_at: crate::now() as i64,
+                                status: FactStatus::Active,
+                                sensitive: false,
+                            },
+                        )
+                        .map_err(memory_error)?;
+                        json!(fact)
+                    }
+                };
+                tx.commit()?;
+                json!({"fact": fact})
+            }
             "/api/memory/promote" => {
                 let input: Promote = parse(body)?;
                 validate_id(&input.bot_id)?;
@@ -164,6 +246,53 @@ pub fn routes(
         };
         Ok(ApiResponse::Json(result))
     })())
+}
+
+/// One SQLite snapshot of every active fact, independent of the selected bot/fil.
+fn workspace_listing(conn: &Connection) -> Result<Value, ApiError> {
+    let mut statement = conn.prepare(
+        "WITH active AS (
+            SELECT fact_id, bot_id, scope, text, provenance, learned_at, sensitive,
+                   NULL AS topic_id, NULL AS topic_name
+            FROM memory_facts WHERE status = 'active'
+            UNION ALL
+            SELECT f.id, f.bot_id, 'topic', f.text,
+                   json_object('conversation_id', f.conversation_id, 'entry_id', NULL, 'source', 'user_stated'),
+                   f.created_at, 0, f.topic_id, t.name
+            FROM wrapper_topic_facts f
+            LEFT JOIN wrapper_topics t ON t.account_id = f.account_id AND t.id = f.topic_id
+            WHERE f.account_id = ?1
+         )
+         SELECT a.*, (a.bot_id IS NOT NULL AND COALESCE(b.deleted, 1)) AS bot_deleted
+         FROM active a
+         LEFT JOIN wrapper_bots b ON b.account_id = ?1 AND b.id = a.bot_id
+         ORDER BY a.learned_at DESC, a.fact_id ASC",
+    )?;
+    let rows = statement.query_map([ACCOUNT], |row| {
+        let raw: String = row.get("provenance")?;
+        let provenance: Provenance = serde_json::from_str(&raw).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        Ok(json!({
+            "fact_id": row.get::<_, String>("fact_id")?,
+            "bot_id": row.get::<_, Option<String>>("bot_id")?,
+            "bot_deleted": row.get::<_, bool>("bot_deleted")?,
+            "scope": row.get::<_, String>("scope")?,
+            "text": row.get::<_, String>("text")?,
+            "provenance": provenance,
+            "learned_at": row.get::<_, i64>("learned_at")?,
+            "status": {"status": "active"},
+            "sensitive": row.get::<_, bool>("sensitive")?,
+            "topic_id": row.get::<_, Option<String>>("topic_id")?,
+            "topic_name": row.get::<_, Option<String>>("topic_name")?,
+        }))
+    })?;
+    let facts = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(json!({"facts": facts}))
 }
 
 fn listing(conn: &Connection, bot: &str) -> Result<Value, ApiError> {

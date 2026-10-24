@@ -6,6 +6,35 @@ Le contexte contient un aperçu des faits récents (2 000 caractères, enregistr
 
 Recherche lexicale locale, sans réseau ni embeddings : mots exacts prioritaires, sous-chaînes ensuite, accents français ignorés, dates puis identifiants pour départager. `query` accepte 1–300 caractères, `limit` 1–20 ; les résultats ont un budget d’environ 12 000 caractères. Le modèle doit reformuler avec des mots-clés/synonymes en cas de résultat vide. Ce n’est pas une garantie de rappel sémantique ni de justesse d’un modèle particulier.
 
+## Lecture globale de l’espace
+
+`GET /api/memory/all` (query ignorée) renvoie `{"facts": [...]}` : tous les
+faits actifs privés, d’équipe et de sujet, sans pagination ni doublons d’équipe.
+Chaque fait expose `fact_id`, `text`, `bot_id`, `bot_deleted`, `scope`
+(`private`, `team`, `topic`), `topic_id`, `topic_name`, `learned_at` (millisecondes
+Unix), `provenance` (`conversation_id`, `entry_id`, `source`) et `sensitive`.
+Les champs de sujet sont `null` hors sujet ; un bot supprimé ou manquant garde
+son identifiant avec `bot_deleted: true`. Les faits de sujet suivent la convention
+de rappel existante : `source: user_stated`, `sensitive: false`.
+Les faits remplacés ou oubliés et les propositions non acceptées sont exclus.
+Tri : date décroissante, puis identifiant. Cette route locale en lecture seule
+est destinée au propriétaire ; elle ne change ni l’écran ni l’accès des bots à
+leur mémoire ou leur contexte.
+
+## Score synthétique de rappel
+
+```sh
+cargo test -p grokbot-memory --test recall_score --locked -- --nocapture
+```
+
+Le harnais local charge les **200 faits ensemble**, puis les **40 questions** des fichiers JSONL dans `crates/memory/tests/fixtures/` (un fait ou une question par ligne). `expected` désigne l'`id` du fait attendu ; les identifiants `fact_<id en hexadécimal sur 32 chiffres>` et les dates (`1 700 000 000 000 + id`) sont fixes. Le catalogue est entièrement synthétique et n'est envoyé ni à un modèle ni au réseau.
+
+Score de départ : **recall@3 = 0,8500**, **recall@5 = 0,9000**, **MRR@20 = 0,7946**. Le test imprime quatre décimales et les questions hors du top 3 avec leur rang (ou leur absence des 20 premiers), vérifie la répétabilité et protège les trois scores contre une baisse. MRR est la moyenne de `1 / rang`, zéro si absent des 20 premiers.
+
+Le jeu comprend accents, ligatures `œ`/`æ` recherchées en `oe`/`ae`, mots vides, quatre reformulations sans mot commun attendu (échecs assumés), et un fait ancien plus précis qu'un fait récent proche (bascule cuivre en production). Le harnais vérifie séparément un rang 2 calculable à la main, l'oubli, le remplacement et l'isolation des faits privés entre bots.
+
+Cette mesure appelle seulement `recall::search_scored`, sans changer ses réglages. Elle ne mesure ni la fusion avec les sujets du wrapper ni un rappel sémantique réel, et ses chiffres ne sont pas directement comparables à LongMemEval. Le jeu réel et les réglages restent hors de ce ticket.
+
 ## Apprentissage et partage
 
 L’apprentissage automatique ne s’arrête plus quand le catalogue grandit. Le petit modèle ne reçoit pas tout le catalogue : avant l’appel, `recall::search` (le même rappel lexical local que `recall_memory`) retient au plus **20 faits proches** du message, et c’est seulement avec eux que le modèle déduplique. Le prompt a donc la même taille à 5 ou à 500 faits. Un message qui répète un fait connu ne produit ni doublon ni nouveau reçu (le texte identique est aussi écarté localement, parmi tous les faits actifs, avant l’écriture). Le panneau n’affiche plus d’avis de pause ; le rappel, la correction et l’oubli continuent à fonctionner et aucune consolidation destructive n’a lieu.
@@ -29,6 +58,11 @@ Aucun texte n’est dupliqué dans ce journal ni dans `memory_share_offers`. Les
 Recherche instantanée, insensible aux accents et à la casse, combinable avec portée (privé/équipe) et provenance. Le compteur indique les résultats sur le total. La sélection collective ne concerne que les faits de travail visibles, non sensibles et non déjà partagés. Modifier, oublier et le partage manuel restent disponibles.
 
 ## Tests ciblés
+
+Le [jeu synthétique de tri de partage](memory-sharing-evaluation.md) mesure la
+matrice de confusion, l'exactitude par classe et les fuites de présélection,
+sans modifier les règles du tri. Il documente aussi le diagnostic zéro fuite
+volontairement rouge sur le score de départ.
 
 ```sh
 cargo test -p grokbot-memory --lib

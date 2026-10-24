@@ -23,6 +23,7 @@ use grokbot_engine::{
 };
 use grokbot_forms::{
     approvals::{self, ApprovalDecision, ApprovalRule, RuleScope},
+    forbidden::{classify, classify_in, Forbidden},
     redact::redact_value,
     requests::{self, Field, HumanInputRequest, InputKind, RequestStatus},
     rules,
@@ -615,6 +616,29 @@ pub fn continues_without_approval(conn: &Connection, run: &Run) -> Result<bool, 
     waiting::continues(conn, run)
 }
 
+/// Famille interdite d'après le nom de l'outil, le vrai nom de l'outil du connecteur
+/// et le nom du connecteur : un connecteur peut appeler « create_payment » comme il veut.
+fn forbidden(ctx: &Context<'_>, call: &ToolCall) -> Option<Forbidden> {
+    if super::mcp::is_lifecycle(&call.name) {
+        return None;
+    }
+    let remote = call
+        .name
+        .starts_with("mcp_")
+        .then(|| super::mcp::display(ctx, &call.name))
+        .flatten();
+    let label = |key: &str| {
+        remote
+            .as_ref()
+            .and_then(|label| label.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let (server, tool) = (label("server"), label("tool"));
+    classify(&call.name).or_else(|| classify_in(&server, &tool))
+}
+
 /// RunServices::check_approval adapter. Existing per-call terminal decisions take
 /// precedence over standing rules. For internal tools, admission/consumption,
 /// effect and ToolResult share one IMMEDIATE transaction. External tools consume
@@ -624,6 +648,12 @@ pub fn check_tool_approval(
     run: &Run,
     call: &ToolCall,
 ) -> Result<ApprovalCheck, ApiError> {
+    if let Some(family) = forbidden(ctx, call) {
+        super::yolo::record_forbidden(ctx, run, call, family)?;
+        return Ok(ApprovalCheck::Denied {
+            reason: family.reason().into(),
+        });
+    }
     let (id, digest) = guarded_identity(ctx, run, call)?;
     if let Some(reason) = late::refusal(ctx.connection, run, call, &digest)? {
         return Ok(ApprovalCheck::Denied { reason });

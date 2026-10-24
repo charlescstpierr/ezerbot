@@ -19,7 +19,7 @@ Quand on demande un dessin, le bot appelle l’outil `generate_image` sur la ses
 Preconditions:
 
 - `doctor: ok` sur cette instance.
-- Badge `#mode-badge-text` égal à `ChatGPT`.
+- La pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - Le faux OpenAI répond à une demande contenant « dessine » par un appel `generate_image`, à l’appel d’image par un PNG de dégradé, puis par « Voici l’image. ».
 
 - **Lancer.** Run `bash .cursor/skills/verify-ezerbot/scripts/launch.sh --evidence <preuves> --sphere images`. Sans `--sphere images`, le wrapper répond « OK » à tout et l’image n’est jamais demandée.

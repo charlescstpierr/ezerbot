@@ -17,7 +17,7 @@ Un mémo envoyé se lit à la vitesse choisie, de 0,5 à 2, et sa transcription 
 
 Preconditions:
 
-- `doctor: ok` sur le build de développement (`state.voice.debug_fake` vrai), badge `ChatGPT`.
+- `doctor: ok` sur le build de développement (`state.voice.debug_fake` vrai), la pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 
 - **Mémo.** Le parcours crée le mémo par `/api/voice/debug` (`start` avec `purpose: "memo"` et `scenario: "long_memo"`, puis `stop`), `/api/voice/memos` avec les `words` reçus, puis `/api/send` avec le mémo en pièce jointe.
 - **Vitesse.** Saisir dans `.gb-memo-speed input` (événement `input`, puis `blur`) : `document.querySelector(".gb-voice-memo audio").playbackRate` suit, `.gb-memo-refusal` dit le refus.

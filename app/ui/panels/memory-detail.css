@@ -18,6 +18,9 @@
 .memory-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .memory-detail button:disabled { opacity: .5; cursor: default; }
 .memory-detail button:focus-visible, button.memory-space-text:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* Le texte d'un résultat fait partie de son point : un clic dessus ouvre le détail (memory-graph.css le laisse traverser par défaut). */
+.memory-graph-point { cursor: pointer; }
+.memory-graph-point .memory-graph-label { pointer-events: auto; }
 .memory-graph-point.is-selected circle { stroke: var(--text); stroke-width: 3; }
 .memory-space-item { cursor: pointer; }
 .memory-space-item.is-selected { border-color: var(--text); }

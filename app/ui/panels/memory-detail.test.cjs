@@ -323,3 +323,9 @@ test("styles : jetons seulement, aucun texte sous 11,5 px", () => {
   assert.doesNotMatch(css, /#[0-9a-fA-F]{3,8}\b|rgb\(|hsl\(/);
   for (const [, size] of css.matchAll(/font-size:\s*(\d+(?:\.\d+)?)px/g)) assert.ok(Number(size) >= 11.5, `${size}px`);
 });
+
+test("styles : le texte d'un résultat reçoit le clic (le graphe le laissait traverser), sans que les étiquettes de groupe le reçoivent", () => {
+  const graph = fs.readFileSync(`${__dirname}/memory-graph.css`, "utf8"), detail = fs.readFileSync(`${__dirname}/memory-detail.css`, "utf8");
+  assert.match(graph, /\.memory-graph-label[^{}]*\{[^}]*pointer-events:\s*none/, "le graphe garde ses étiquettes de groupe traversables");
+  assert.match(detail, /^\.memory-graph-point \.memory-graph-label \{ pointer-events: auto; \}$/m, "plus spécifique que la règle du graphe : elle l'emporte, quel que soit l'ordre des feuilles");
+});

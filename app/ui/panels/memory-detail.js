@@ -84,12 +84,20 @@
       problem = "";
       render();
       let data;
+      const before = new Set((facts() || []).map((item) => item.fact_id));
       try {
         data = await panels.api(path, request);
       } catch (error) {
+        // Une erreur ne dit pas si le moteur a appliqué l'action (réponse perdue) : on relit avant de rendre la main, puis le panneau se règle sur la relecture.
+        await reload();
         busy = false;
+        // Une correction appliquée remplace le souvenir par un nouveau, de même bot et de même texte, absent de la liste d'avant.
+        const replaced = request.text === undefined ? null : (facts() || []).find((item) => !before.has(item.fact_id) && item.bot_id === request.bot_id && item.text === request.text);
+        if (replaced && !current()) moved.set(request.fact_id, replaced.fact_id);
+        refresh();
         if (mine !== epoch) return;
-        if (!current()) { close(true); return; } // le souvenir a disparu pendant l'envoi : rien à corriger
+        if (!current()) { close(true); return; } // oublié (ou disparu) pendant l'envoi : le panneau se ferme
+        if (current().fact_id !== request.fact_id) { mode = "view"; note = done; draft = ""; problem = ""; render("edit"); return; } // corrigé : le texte relu s'affiche
         problem = error?.message || "L’action n’a pas abouti.";
         render(mode === "edit" ? "body" : "back");
         return;

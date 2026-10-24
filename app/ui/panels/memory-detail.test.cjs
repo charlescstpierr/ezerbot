@@ -28,7 +28,8 @@ class Element {
 const fact = (id, bot, scope, text, source, conversation, extra = {}) => ({ fact_id: id, bot_id: bot, scope, text, provenance: { source, conversation_id: conversation }, learned_at: Date.parse("2026-10-20T10:00:00Z"), ...extra });
 const FACTS = [fact("f1", "grokbot", "private", "Aime le café <b>noir</b>", "user_stated", "c1"), fact("f2", "chef", "team", "L’équipe déjeune à midi", "model_inferred", null), fact("f3", "chef", "topic", "Le garde-meuble ferme à 18 h", "user_stated", null, { topic_id: "t1", topic_name: "Déménagement" })];
 // `refuse` : le moteur répond à toute action par cette erreur ; `opened` : les fils que l'application sait ouvrir.
-async function harness({ refuse = null, opened = ["c1"] } = {}) {
+// `lose` : le moteur applique l'action mais la réponse se perd (erreur réseau sans `status`).
+async function harness({ refuse = null, opened = ["c1"], lose = null } = {}) {
   const sidebar = new Element("aside"), main = new Element("main"), dock = new Element("div"), bots = new Element("div"), keys = [], registered = [];
   bots.className = "sidebar-bots"; dock.className = "composer-dock"; sidebar.append(bots); main.append(dock);
   const nodes = { sidebar, "conversation-title": new Element("h1"), "workspace-label": new Element("button") };
@@ -42,8 +43,9 @@ async function harness({ refuse = null, opened = ["c1"] } = {}) {
       calls.api.push([path, JSON.parse(JSON.stringify(body || {}))]);
       if (path === "/api/memory/all") return net.down ? Promise.reject(new Error("hors ligne")) : { facts: facts.map((item) => ({ ...item })) };
       if (refuse) { await net.hold; throw new Error(refuse); }
-      if (path === "/api/memory/correct") { const old = facts.find((item) => item.fact_id === body.fact_id), next = { ...old, fact_id: `n${++n}`, text: body.text }; facts = [next, ...facts.filter((item) => item !== old)]; await net.hold; return { fact: next }; }
+      if (path === "/api/memory/correct") { const old = facts.find((item) => item.fact_id === body.fact_id), next = { ...old, fact_id: `n${++n}`, text: body.text }; facts = [next, ...facts.filter((item) => item !== old)]; await net.hold; if (lose) throw new Error(lose); return { fact: next }; }
       facts = facts.filter((item) => item.fact_id !== body.fact_id);
+      if (lose) throw new Error(lose);
       return { forgotten: [body.fact_id] };
     },
   };
@@ -297,6 +299,46 @@ test("filtre actif : un souvenir de sujet trouvé par le filtre s'oublie par la 
   await h.settle();
   assert.deepEqual(h.mutations(), [["/api/topics/memory/forget", { fact_id: "f3" }]]);
   assert.deepEqual([h.items(), h.filter.count(), h.open()], [0, "0 souvenir sur 2", false]);
+});
+
+const rereads = (h) => h.calls.api.filter(([path]) => path === "/api/memory/all").length;
+test("réponse perdue après Modifier : le moteur a corrigé, le panneau relit la liste avant de rendre la main et affiche le texte relu", async () => {
+  const edited = await harness({ lose: "Réseau coupé" });
+  edited.tab("graph");
+  edited.point("f1").click();
+  edited.button("Modifier").click();
+  const before = rereads(edited);
+  await edited.type("Enregistrer", "Café au lait");
+  assert.equal(rereads(edited) > before, true, "la liste est relue après l'erreur");
+  assert.deepEqual([edited.open(), edited.text("text"), edited.point("n1") !== null, edited.point("f1")], [true, "Café au lait", true, null], "le texte relu s'affiche, le souvenir remplacé n'est plus proposé");
+  assert.equal(edited.button("Modifier").disabled, false, "les contrôles sont rendus, sur le souvenir à jour");
+  assert.equal(edited.panel().querySelector(".memory-detail-error").textContent, "", "aucune erreur : l'action a abouti");
+  edited.button("Modifier").click();
+  await edited.type("Enregistrer", "Café serré");
+  assert.deepEqual(edited.mutations().map(([, body]) => body.fact_id), ["f1", "n1"], "la nouvelle correction vise le souvenir à jour, pas l'ancien");
+});
+
+test("réponse perdue après Oublier : le moteur a oublié, le panneau relit la liste, se ferme et le graphe et la Liste sont à jour", async () => {
+  const forgot = await harness({ lose: "Réseau coupé" });
+  forgot.tab("graph");
+  forgot.point("f2").click();
+  forgot.button("Oublier…").click();
+  forgot.button("Oublier ce souvenir").click();
+  await forgot.settle();
+  assert.deepEqual([forgot.open(), forgot.points(), forgot.point("f2")], [false, 2, null], "oublié : le panneau se ferme, le graphe est à jour");
+  forgot.tab("list");
+  assert.deepEqual([forgot.items(), forgot.item("f2")], [2, null]);
+});
+
+test("réponse perdue sans effet : la liste est relue, l'erreur reste affichée et la saisie est gardée", async () => {
+  const h = await harness({ refuse: "Réseau coupé" });
+  h.tab("list");
+  h.item("f1").click();
+  h.button("Modifier").click();
+  const before = h.calls.api.filter(([path]) => path === "/api/memory/all").length;
+  await h.type("Enregistrer", "Texte voulu");
+  assert.equal(h.calls.api.filter(([path]) => path === "/api/memory/all").length > before, true);
+  assert.deepEqual([h.text("error"), h.panel().querySelector(".memory-detail-field").value, h.button("Enregistrer").disabled], ["Réseau coupé", "Texte voulu", false]);
 });
 
 test("un souvenir de sujet s'oublie par /api/topics/memory/forget, sans Modifier ; l'erreur d'oubli garde le souvenir", async () => {

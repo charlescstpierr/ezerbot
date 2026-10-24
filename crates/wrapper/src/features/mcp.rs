@@ -976,6 +976,7 @@ pub fn routes(
                 | "/api/connectors/connect"
                 | "/api/connectors/cancel"
                 | "/api/connectors/disconnect"
+                | "/api/connectors/details"
         )
     {
         return None;

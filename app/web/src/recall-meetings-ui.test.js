@@ -44,7 +44,7 @@ async function mount(item) {
   const panels = {
     state: { bots: [{ id: "grokbot", name: "Ezerbot" }], mcp: { servers: [], catalogue: [item] } },
     register(value) { panel = value; },
-    async api(path, body) { calls.push({ path, body: JSON.parse(JSON.stringify(body)) }); if (panels.failWith) throw new Error(panels.failWith); return panels.result || {}; },
+    async api(path, body) { if (path === "/api/connectors/details") { const { id, setup, license, source } = panels.state.mcp.catalogue[0]; return { details: [{ id, setup, license, source }] }; } calls.push({ path, body: JSON.parse(JSON.stringify(body)) }); if (panels.failWith) throw new Error(panels.failWith); return panels.result || {}; },
     async copyText() {}, async refresh() {}, notify() {},
     openConversation(id) { opened.push(id); return true; },
   };
@@ -53,6 +53,7 @@ async function mount(item) {
   const context = vm.createContext({ window: { GrokbotPanels: panels }, document, setTimeout() { return 1; }, clearTimeout() {} });
   vm.runInContext(await readFile(new URL("../../ui/panels/mcp.js", import.meta.url), "utf8"), context);
   panel.settingsSection(root);
+  await new Promise(resolve => setImmediate(resolve));
   return { root, calls, opened, dialog, panels, onState: state => panel.onState(state), setItem(next) { panels.state = { ...panels.state, mcp: { servers: [], catalogue: [next] } }; panel.onState(panels.state); } };
 }
 const base = { id: "reunions", kind: "recall", name: "Réunions", description: "Invitez un bot dans une réunion Google Meet, Zoom ou Microsoft Teams.", permissions: "Le bot rejoint les réunions dont vous collez le lien.", setup: "Collez votre clé.", source: "https://docs.recall.ai/", license: "Service Recall.ai", status: "disconnected", has_key: false, meeting: null, server: null };

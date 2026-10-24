@@ -342,25 +342,38 @@ pub fn has_submission(
 
 impl App {
     pub(crate) fn conversations(&self) -> Result<Vec<Conversation>, ApiError> {
+        self.project_conversations(None)
+    }
+
+    /// Projection d'une seule conversation, sans lire l'historique des autres.
+    /// `None` si elle n'existe pas ou si elle est supprimée.
+    pub(crate) fn conversation(&self, id: &str) -> Result<Option<Conversation>, ApiError> {
+        Ok(self.project_conversations(Some(id))?.into_iter().next())
+    }
+
+    fn project_conversations(&self, only: Option<&str>) -> Result<Vec<Conversation>, ApiError> {
         let mut conversations = BTreeMap::new();
         let mut hidden = HashSet::new();
         let mut created = BTreeMap::new();
-        let mut statement = self.connection.prepare("SELECT id, title, favorite, deleted, created_at, updated_at, bot_id, kind, parent_id, group_description, group_avatar FROM wrapper_conversations WHERE account_id = ?1")?;
-        let rows = statement.query_map([ACCOUNT], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, bool>(2)?,
-                row.get::<_, bool>(3)?,
-                row.get::<_, u64>(4)?,
-                row.get::<_, u64>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, Option<String>>(10)?,
-            ))
-        })?;
+        let mut statement = self.connection.prepare(&format!("SELECT id, title, favorite, deleted, created_at, updated_at, bot_id, kind, parent_id, group_description, group_avatar FROM wrapper_conversations WHERE account_id = ?1{}", if only.is_some() { " AND id = ?2" } else { "" }))?;
+        let rows = statement.query_map(
+            rusqlite::params_from_iter(std::iter::once(ACCOUNT).chain(only)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, u64>(4)?,
+                    row.get::<_, u64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                ))
+            },
+        )?;
         for row in rows {
             let (
                 id,
@@ -398,8 +411,15 @@ impl App {
             );
         }
         let mut ordered: BTreeMap<String, Vec<(i64, Vec<Message>)>> = BTreeMap::new();
-        let mut proposals = self.proposals_by_message()?;
-        for record in self.reader.list_submissions()? {
+        let mut proposals = self.proposals_by_message(only)?;
+        let records = match only {
+            Some(id) => self.reader.list_conversation_submissions(
+                &grokbot_domain::ConversationId::new(id)
+                    .map_err(|_| ApiError::new(404, "Conversation introuvable."))?,
+            )?,
+            None => self.reader.list_submissions()?,
+        };
+        for record in records {
             let id = record.conversation_id.as_str();
             if hidden.contains(id) {
                 continue;
@@ -461,16 +481,19 @@ impl App {
                 ordered.entry(id.into()).or_default().push((ordinal, pair));
             }
         }
-        let mut statement = self.connection.prepare("SELECT ordinal, conversation_id, kind, message_id, created_at FROM wrapper_messages WHERE account_id = ?1 AND kind <> 'submission' ORDER BY ordinal")?;
-        let rows = statement.query_map([ACCOUNT], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, u64>(4)?,
-            ))
-        })?;
+        let mut statement = self.connection.prepare(&format!("SELECT ordinal, conversation_id, kind, message_id, created_at FROM wrapper_messages WHERE account_id = ?1 AND kind <> 'submission'{} ORDER BY ordinal", if only.is_some() { " AND conversation_id = ?2" } else { "" }))?;
+        let rows = statement.query_map(
+            rusqlite::params_from_iter(std::iter::once(ACCOUNT).chain(only)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            },
+        )?;
         for row in rows {
             let (ordinal, conversation_id, kind, id, created_at) = row?;
             let meeting_reply: bool = kind == "group_reply" && self.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_group_turns t JOIN wrapper_meetings m ON m.conversation_id=t.conversation_id AND m.message_id=t.root_id WHERE t.id=?1 AND t.parent_id IS NULL)",[&id],|r|r.get(0))?;
@@ -520,7 +543,7 @@ impl App {
                 .cmp(&a.updated_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
-        let reactions = self.reactions()?;
+        let reactions = self.reactions(only)?;
         for conversation in &mut result {
             for message in &mut conversation.messages {
                 if let Some(emoji) = reactions.get(&(conversation.id.clone(), message.id.clone())) {
@@ -531,12 +554,18 @@ impl App {
         Ok(result)
     }
 
-    fn reactions(&self) -> Result<BTreeMap<(String, String), String>, ApiError> {
-        let mut statement = self.connection.prepare(
-            "SELECT conversation_id, message_id, emoji FROM wrapper_reactions WHERE account_id = ?1",
+    fn reactions(
+        &self,
+        only: Option<&str>,
+    ) -> Result<BTreeMap<(String, String), String>, ApiError> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT conversation_id, message_id, emoji FROM wrapper_reactions WHERE account_id = ?1{}",
+            if only.is_some() { " AND conversation_id = ?2" } else { "" }
+        ))?;
+        let rows = statement.query_map(
+            rusqlite::params_from_iter(std::iter::once(ACCOUNT).chain(only)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        let rows =
-            statement.query_map([ACCOUNT], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         let mut reactions = BTreeMap::new();
         for row in rows {
             let (conversation, message, emoji) = row?;

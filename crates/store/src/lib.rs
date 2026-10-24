@@ -194,34 +194,10 @@ impl SessionStore {
              FROM submissions WHERE account_id = ?1
              ORDER BY conversation_id, message_id",
         )?;
-        let rows = statement.query_map(params![self.account_id.as_str()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-            ))
-        })?;
+        let rows = statement.query_map(params![self.account_id.as_str()], submission_columns)?;
         let mut items = Vec::new();
         for row in rows {
-            let (account_id, generation, conversation_id, message_id, body, state_json) = row?;
-            if generation < 0 {
-                return Err(StoreError::Invalid("génération négative".into()));
-            }
-            let dto: SubmissionStateDto = serde_json::from_str(&state_json)?;
-            let item = CommittedSubmission {
-                account_id: AccountId::new(account_id).map_err(|_| StoreError::empty_id())?,
-                generation: AccountGeneration(generation as u64),
-                conversation_id: ConversationId::new(conversation_id)
-                    .map_err(|_| StoreError::empty_id())?,
-                message_id: MessageId::new(message_id).map_err(|_| StoreError::empty_id())?,
-                body,
-                state: submission_from_dto(dto)?,
-            };
-            validate_submission(&item)?;
-            items.push(item);
+            items.push(submission_from_columns(row?)?);
         }
         drop(statement);
         tx.commit()?;
@@ -359,6 +335,27 @@ impl SessionStore {
         Ok(self.read_journal()?.0.export_committed())
     }
 
+    /// Soumissions validées d'une seule conversation, dans l'ordre des messages.
+    pub fn list_conversation_submissions(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<Vec<CommittedSubmission>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT account_id, generation, conversation_id, message_id, body, state_json
+             FROM submissions WHERE account_id = ?1 AND conversation_id = ?2
+             ORDER BY message_id",
+        )?;
+        let rows = statement.query_map(
+            params![self.account_id.as_str(), conversation.as_str()],
+            submission_columns,
+        )?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(submission_from_columns(row?)?);
+        }
+        Ok(items)
+    }
+
     fn check_origin(&self, account: &AccountId, path: &Path) -> Result<(), StoreError> {
         if account != &self.account_id {
             return Err(StoreError::AccountMismatch);
@@ -368,6 +365,39 @@ impl SessionStore {
         }
         Ok(())
     }
+}
+
+type SubmissionColumns = (String, i64, String, String, String, String);
+
+fn submission_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<SubmissionColumns> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
+}
+
+fn submission_from_columns(
+    (account_id, generation, conversation_id, message_id, body, state_json): SubmissionColumns,
+) -> Result<CommittedSubmission, StoreError> {
+    if generation < 0 {
+        return Err(StoreError::Invalid("génération négative".into()));
+    }
+    let dto: SubmissionStateDto = serde_json::from_str(&state_json)?;
+    let item = CommittedSubmission {
+        account_id: AccountId::new(account_id).map_err(|_| StoreError::empty_id())?,
+        generation: AccountGeneration(generation as u64),
+        conversation_id: ConversationId::new(conversation_id)
+            .map_err(|_| StoreError::empty_id())?,
+        message_id: MessageId::new(message_id).map_err(|_| StoreError::empty_id())?,
+        body,
+        state: submission_from_dto(dto)?,
+    };
+    validate_submission(&item)?;
+    Ok(item)
 }
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
@@ -729,6 +759,42 @@ mod tests {
         save_fixture_journal(&mut store_alice, &Journal::new()).unwrap();
         assert!(store_alice.list_submissions().unwrap().is_empty());
         assert_eq!(store_bob.list_submissions().unwrap()[0].body, "bob-body");
+    }
+
+    #[test]
+    fn lister_une_conversation_ne_rend_que_ses_soumissions() {
+        let db = TestDatabase::new("liste-par-conversation");
+        let account = must_id(AccountId::new("alice"));
+        let mut store = open_store(&db.0, &account).unwrap();
+        let mut journal = Journal::new();
+        for (conversation, message, body) in [
+            ("conversation-a", "m1", "a-premier"),
+            ("conversation-b", "m1", "b-premier"),
+            ("conversation-a", "m2", "a-second"),
+        ] {
+            journal
+                .prepare(PreparedMessage {
+                    actor: AuthenticatedActor {
+                        account_id: account.clone(),
+                        generation: AccountGeneration(1),
+                        team_id: None,
+                    },
+                    conversation_id: must_id(ConversationId::new(conversation)),
+                    message_id: must_id(MessageId::new(message)),
+                    body: body.into(),
+                })
+                .unwrap();
+        }
+        save_fixture_journal(&mut store, &journal).unwrap();
+        let listed = store
+            .list_conversation_submissions(&must_id(ConversationId::new("conversation-a")))
+            .unwrap();
+        let bodies: Vec<_> = listed.iter().map(|item| item.body.as_str()).collect();
+        assert_eq!(bodies, ["a-premier", "a-second"]);
+        assert!(store
+            .list_conversation_submissions(&must_id(ConversationId::new("inconnue")))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

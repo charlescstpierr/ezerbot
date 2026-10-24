@@ -1092,12 +1092,19 @@ impl App {
     }
 
     /// Les propositions de chaque réponse, périmées au besoin, indexées par (conversation, message).
-    fn proposals_by_message(&self) -> Result<BTreeMap<(String, String), Vec<Proposal>>, ApiError> {
+    fn proposals_by_message(
+        &self,
+        only: Option<&str>,
+    ) -> Result<BTreeMap<(String, String), Vec<Proposal>>, ApiError> {
         let mut statement = self.connection.prepare(&format!(
-            "SELECT {PROPOSAL_COLUMNS} FROM wrapper_proposals WHERE account_id = ?1 ORDER BY created_at, id"
+            "SELECT {PROPOSAL_COLUMNS} FROM wrapper_proposals WHERE account_id = ?1{} ORDER BY created_at, id",
+            if only.is_some() { " AND conversation_id = ?2" } else { "" }
         ))?;
         let rows: Vec<Proposal> = statement
-            .query_map([ACCOUNT], proposal_from_row)?
+            .query_map(
+                rusqlite::params_from_iter(std::iter::once(ACCOUNT).chain(only)),
+                proposal_from_row,
+            )?
             .collect::<Result<_, _>>()?;
         drop(statement);
         let mut grouped: BTreeMap<(String, String), Vec<Proposal>> = BTreeMap::new();
@@ -1248,9 +1255,7 @@ impl App {
     /// La conversation d'une proposition, même supprimée : la réponse reste cohérente.
     fn conversation_value(&self, id: &str) -> Result<Value, ApiError> {
         Ok(self
-            .conversations()?
-            .into_iter()
-            .find(|conversation| conversation.id == id)
+            .conversation(id)?
             .map_or(Value::Null, |conversation| json!(conversation)))
     }
 
@@ -1376,9 +1381,7 @@ impl App {
 
     fn conversation_response(&self, id: &str) -> Result<Value, ApiError> {
         let conversation = self
-            .conversations()?
-            .into_iter()
-            .find(|c| c.id == id)
+            .conversation(id)?
             .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?;
         Ok(json!({"conversation": conversation}))
     }

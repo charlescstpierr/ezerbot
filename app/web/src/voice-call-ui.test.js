@@ -28,6 +28,7 @@ function fixture({ available = true, remote = false } = {}) {
   let source = { status: "listening", lines: [], transcript: "", speaking: false };
   let lineGate = null;
   const held = [], holding = new Set();
+  let script, microphone = "fake-usb";
   let startStatus = "listening", mode = false, dictation = false, meeting = false;
   const root = new Element("div"), send = new Element("button"), actions = new Element("div"); actions.className = "topbar-actions";
   actions.insertBefore = (child, reference) => { child.parent = actions; actions.children.splice(reference ? actions.children.indexOf(reference) : actions.children.length, 0, child); };
@@ -36,12 +37,17 @@ function fixture({ available = true, remote = false } = {}) {
   let context = { connected: true, bot: { id: "ezerbot", name: "Ezerbot" }, conversation: { id: "chat", messages: [] }, state };
   const bridge = async body => {
     calls.push({ debug: body.command, ...body });
-    if (body.command === "start") source = { status: startStatus, lines: [], transcript: "", speaking: false, muted: false, token: body.token };
-    if (body.command === "mute" || body.command === "unmute") { source.muted = body.command === "mute"; if (source.muted) source.transcript = ""; }
-    if (body.command === "interrupt") source.speaking = false;
-    if (body.command === "cancel") { source.status = "idle"; source.muted = false; }
+    const action = script?.(body) ?? (holding.has(body.command) ? "hold" : "");
+    if (action === "reject") throw new Error("refus");
+    if (action !== "hold-reject") {
+      if (body.command === "start") source = { status: startStatus, lines: [], transcript: "", speaking: false, muted: false, token: body.token };
+      if (body.command === "mute" || body.command === "unmute") { source.muted = body.command === "mute"; if (source.muted) source.transcript = ""; }
+      if (body.command === "interrupt") source.speaking = false;
+      if (body.command === "cancel") { source.status = "idle"; source.muted = false; }
+    }
     const reply = { ...source };
-    if (holding.has(body.command)) await new Promise(resolve => held.push(resolve));
+    if (action.startsWith("hold")) await new Promise(resolve => held.push({ command: body.command, resolve }));
+    if (action === "hold-reject") throw new Error("refus");
     return reply;
   };
   const panels = {
@@ -58,7 +64,7 @@ function fixture({ available = true, remote = false } = {}) {
   };
   const window = {
     GrokbotPanels: panels, GrokbotChat: { voiceNeedsAction }, EzerbotIPhone: remote ? { remote: true } : undefined,
-    EzerbotMicrophone: { current: () => "fake-usb", fellBack(id) { notices.push("repli:" + id); } },
+    EzerbotMicrophone: { current: () => microphone, fellBack(id) { notices.push("repli:" + id); } },
     EzerbotVoiceMode: { active: () => mode }, EzerbotDictation: { active: () => dictation, refresh() {} },
     addEventListener(name, fn) { listeners[name] = fn; }, dispatchEvent(event) { events.push(event.type); },
   };
@@ -75,7 +81,8 @@ function fixture({ available = true, remote = false } = {}) {
     get context() { return context; }, setContext(c) { context = c; panel.onState(state, c); },
     tick: async () => { await timer?.(); }, startTick: () => timer?.(),
     hold(...commands) { holding.clear(); for (const command of commands) holding.add(command); },
-    release() { holding.clear(); for (const resolve of held.splice(0)) resolve(); }, keydown: e => keydown(e),
+    release(...commands) { if (!commands.length) holding.clear(); for (const late of held.splice(0)) if (!commands.length || commands.includes(late.command)) late.resolve(); else held.push(late); },
+    set script(fn) { script = fn; }, set microphone(id) { microphone = id; }, keydown: e => keydown(e),
     toggle: () => cls(root, "voice-call-toggle"), listeners,
   };
 }
@@ -337,15 +344,14 @@ test("an older bridge answer cannot undo a newer unmute: the screen never says m
   assert.match(stateOf(f), /^Appel en cours/);
 });
 
-test("a click then ⌘⇧M before the first answer toggles twice: the microphone ends up listening", async () => {
+test("a gesture while a mute command is in flight is ignored: one command, and the screen follows its answer", async () => {
   const f = fixture();
   await f.toggle().onclick();
   f.hold("mute", "unmute"); const click = muteButton(f).onclick(); const key = shortcut(f);
   f.release(); await click; await key;
-  assert.deepEqual(f.calls.map(c => c.debug).filter(c => c === "mute" || c === "unmute"), ["mute", "unmute"]);
-  assert.equal(f.source.muted, false); assert.equal(muteButton(f).attributes["aria-pressed"], "false"); assert.match(stateOf(f), /^Appel en cours/);
+  assert.deepEqual(f.calls.map(c => c.debug).filter(c => c === "mute" || c === "unmute"), ["mute"]);
+  assert.equal(f.source.muted, true); assert.equal(muteButton(f).attributes["aria-pressed"], "true"); assert.equal(stateOf(f), "Micro coupé · le bot ne vous entend pas");
 });
-
 test("a card waiting for a click and a muted microphone are both said", async () => {
   const f = fixture();
   await f.toggle().onclick();
@@ -355,4 +361,52 @@ test("a card waiting for a click and a muted microphone are both said", async ()
   assert.match(stateOf(f), /carte/); assert.match(stateOf(f), /micro coupé/i); assert.equal(muteButton(f).attributes["aria-pressed"], "true");
   await f.tick(); assert.match(stateOf(f), /carte/); assert.match(stateOf(f), /micro coupé/i);
   await muteButton(f).onclick(); assert.equal(stateOf(f), "En attente de vous · répondez dans la carte");
+});
+
+const settle = () => new Promise(r => setImmediate(r));
+function* orders(items) { if (items.length < 2) { yield items; return; } for (const [i, x] of items.entries()) for (const rest of orders(items.filter((_, j) => j !== i))) yield [x, ...rest]; }
+test("whatever the outcome, lateness and order of the bridge answers, the screen ends on the bridge's muted and the next gesture sends the right command", async () => {
+  let runs = 0;
+  for (const startMuted of [false, true]) for (const mode of ["", "hold", "reject", "hold-reject"]) for (const tick of ["", "before", "during"]) for (const gesture of ["", "click", "key"]) for (const second of ["", "reject"]) for (const order of orders([...tick ? ["status"] : [], ...mode.startsWith("hold") ? ["command"] : []])) {
+    const f = fixture(), name = JSON.stringify({ startMuted, mode, tick, gesture, second, order });
+    await f.toggle().onclick(); if (startMuted) await muteButton(f).onclick();
+    let sent = 0, reads = 0;
+    f.script = body => body.command === "status" ? (++reads === 1 && tick ? "hold" : "") : body.command === "mute" || body.command === "unmute" ? (++sent === 1 ? mode : second) : "";
+    const pending = [];
+    if (tick === "before") pending.push(f.startTick());
+    pending.push(muteButton(f).onclick());
+    if (gesture === "click") pending.push(muteButton(f).onclick());
+    if (gesture === "key") pending.push(shortcut(f));
+    if (tick === "during") pending.push(f.startTick());
+    await settle();
+    for (const late of order) { f.release(...late === "status" ? ["status"] : ["mute", "unmute"]); await settle(); }
+    f.release(); await Promise.all(pending); await settle();
+    const muted = f.source.muted;
+    assert.equal(muteButton(f).attributes["aria-pressed"], String(muted), name);
+    assert.match(stateOf(f), muted ? /^Micro coupé/ : /^Appel en cours/, name);
+    f.script = undefined; const before = f.calls.length; await muteButton(f).onclick();
+    assert.equal(f.calls[before].debug, muted ? "unmute" : "mute", name);
+    assert.equal(f.source.muted, !muted, name); assert.equal(muteButton(f).attributes["aria-pressed"], String(!muted), name);
+    runs++;
+  }
+  assert.ok(runs > 150, String(runs));
+});
+
+test("a mute answered after the call ended changes nothing in the next call", async () => {
+  for (const mode of ["hold", "hold-reject"]) {
+    const f = fixture(); await f.toggle().onclick();
+    f.script = body => body.command === "mute" ? mode : ""; const click = muteButton(f).onclick();
+    await all(f.root).find(x => x.textContent === "Quitter").onclick(); await f.toggle().onclick();
+    f.release(); await click; await settle();
+    assert.equal(muteButton(f).attributes["aria-pressed"], "false", mode); assert.match(stateOf(f), /^Appel en cours/);
+    f.script = undefined; await muteButton(f).onclick(); assert.equal(f.calls.at(-1).debug, "mute", mode); assert.equal(f.source.muted, true);
+  }
+});
+
+test("a status that carries the microphone fallback announces it, once, for the microphone asked at the start", async () => {
+  const f = fixture(); f.microphone = "usb-A"; await f.toggle().onclick();
+  await muteButton(f).onclick(); f.source.microphone_fallback = true;
+  f.microphone = "usb-B";
+  f.hold("unmute"); const unmute = muteButton(f).onclick(); await f.tick(); f.release(); await unmute; await f.tick();
+  assert.deepEqual(f.notices, ["repli:usb-A"], "the choice saved meanwhile is not the one that was missing");
 });

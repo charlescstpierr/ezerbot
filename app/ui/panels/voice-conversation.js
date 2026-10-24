@@ -20,10 +20,14 @@
   const contextKey = context => context.conversation?.id || `new:${context.bot?.id || "grokbot"}`;
   let button, bar, label, transcript, heldNotice, stop, mute, leave, systemSettings;
   let phase = "idle", detail = "", liveText = "", lastUtterance = 0, lastBarge = 0, paused = false, sending = false;
-  // Mirror of the bridge `muted`, read from its answers: the click sends the command, the screen follows the reply.
-  // Only the answer to the latest request that carries `muted` may change it; `muteWanted` is the state the next gesture flips.
-  let muted = false, muteWanted = false, muteSeq = 0;
-  const applyMuted = (seq, value) => { if (seq !== muteSeq) return false; muted = muteWanted = Boolean(value); return true; };
+  // `muted` is the bridge's, as its latest answer said: the screen never guesses it. One mute/unmute command flies at a time
+  // (`muting`); a status read that started before it ended is older than the command (`reads`) and says nothing about `muted`.
+  // `requested` is the microphone asked at the start, the one a fallback says is gone; `fellBack` says so once per session.
+  let muted = false, muting = false, reads = 0, requested = "", fellBack = false;
+  const noteFallback = answer => {
+    if (!answer.microphone_fallback || answer.muted || fellBack) return;
+    fellBack = true; window.EzerbotMicrophone?.fellBack(requested);
+  };
   let inputHeld = false, followResumedReply = false;
   let voicesLoaded = false;
   const botViews = new Set();
@@ -71,7 +75,7 @@
     clearTimeout(timer); epoch++;
     if (token) bridge("cancel").catch(() => {});
     token = ""; reader = null; conversationId = null; sending = false; paused = false;
-    inputHeld = false; followResumedReply = false; muted = muteWanted = false;
+    inputHeld = false; followResumedReply = false; muted = muting = false;
     if (clear) { phase = "idle"; detail = ""; liveText = ""; scopeKey = null; }
     render(); panels.composerChanged();
   }
@@ -97,16 +101,21 @@
     await receipt;
   }
   async function toggleMute() {
-    if (!active() || phase === "authorizing") return;
-    muteWanted = !muteWanted;
-    const rev = epoch, seq = ++muteSeq, receipt = await bridge(muteWanted ? "mute" : "unmute");
-    if (rev !== epoch) return;
-    if (errors[receipt.status]) { fail(receipt.status); return; }
-    if (!applyMuted(seq, receipt.muted)) return;
-    if (muted) liveText = "";
-    // Unmuting listens again to the chosen microphone, which may have gone while muted.
-    if (!muted && receipt.microphone_fallback) window.EzerbotMicrophone?.fellBack(window.EzerbotMicrophone.current());
-    render();
+    if (!active() || phase === "authorizing" || muting) return;
+    const rev = epoch;
+    muting = true; reads++;
+    try {
+      let answer;
+      // A refused command changed nothing: the bridge's status says what it still is.
+      try { answer = await bridge(muted ? "unmute" : "mute"); }
+      catch (error) { panels.notify(error.message); answer = await bridge("status"); }
+      if (rev !== epoch) return;
+      if (errors[answer.status]) { fail(answer.status); return; }
+      muted = Boolean(answer.muted);
+      if (muted) liveText = "";
+      noteFallback(answer);
+      render();
+    } finally { if (rev === epoch) { muting = false; reads++; } }
   }
   const muteToggled = () => toggleMute().catch(error => panels.notify(error.message));
   async function interrupt() {
@@ -122,14 +131,14 @@
     token = crypto.randomUUID(); settingsToken = token; conversationId = ctx.conversation?.id; scopeKey = contextKey(ctx);
     reader = window.GrokbotChat.createVoiceReader(ctx.conversation?.messages || []);
     phase = "authorizing"; detail = ""; liveText = ""; lastUtterance = 0; lastBarge = 0; paused = false;
-    inputHeld = false; followResumedReply = false; muted = muteWanted = false;
+    inputHeld = false; followResumedReply = false; muted = muting = fellBack = false;
     const rev = ++epoch;
     render(); panels.composerChanged();
     try {
-      const requested = window.EzerbotMicrophone?.current() ?? "";
+      requested = window.EzerbotMicrophone?.current() ?? "";
       const result = await bridge("start", {microphone:requested});
       if (rev !== epoch) return;
-      if (result.microphone_fallback) window.EzerbotMicrophone?.fellBack(requested);
+      noteFallback(result);
       if (errors[result.status]) { fail(result.status); return; }
       phase = result.status; render(); schedule(rev);
     } catch (error) { if (rev === epoch) fail("failed", error.message); }
@@ -155,12 +164,13 @@
     if (ticking) { schedule(rev); return; }
     ticking = true;
     try {
-      const seq = ++muteSeq, result = await bridge("status");
+      const seq = ++reads, result = await bridge("status");
       if (rev !== epoch) return;
       if (errors[result.status] || result.status === "idle") { fail(result.status); return; }
       if (result.status === "authorizing") { phase = "authorizing"; render(); return; }
       if (result.token !== token) { fail("stale"); return; }
-      applyMuted(seq, result.muted);
+      noteFallback(result);
+      if (!muting && seq === reads) muted = Boolean(result.muted);
       if (muted) liveText = ""; else if (result.transcript) liveText = result.transcript;
       const needsAction = window.GrokbotChat.voiceNeedsAction(ctx.conversation?.messages || []);
       if (result.barged > lastBarge) {

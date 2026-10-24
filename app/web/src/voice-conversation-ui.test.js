@@ -16,6 +16,7 @@ const cls = (n,c) => all(n).find(x => x.className === c);
 function fixture() {
   let startExtras={}, notices=[], panel, timer, keydown, source={status:"idle",transcript:"",utterance_id:0,barged:0}, scenario="", nextSend, refusal="";
   const calls=[], sends=[], follows=[], held=[], holding=new Set();
+  let script;
   let dictationRefreshes=0;
   const root=new Element("div"), send=new Element("button"), settings=new Element("div"), composer=new Element("div"), controls=new Element("div");controls.className="voice-controls";root.append(controls,send,settings,composer);
   const voices=[{id:"v-a",name:"Voix A",language:"fr-CA"},{id:"v-b",name:"Voix B",language:"fr-FR"},{id:"v-en",name:"Voice C",language:"en-US"}];
@@ -24,15 +25,20 @@ function fixture() {
   const bridge=async body => {
     calls.push(body);
     if(body.command === "options")return {voices};
-    if(body.command === "start")source={status:scenario || "listening",token:body.token,transcript:"",utterance_id:0,barged:0,muted:false,...startExtras};
-    if(body.command === "mute" || body.command === "unmute") { source.muted=body.command === "mute"; if(source.muted)source.transcript=""; }
-    if(body.command === "speak")source.speaking=true;
-    if(body.command === "interrupt") { source.speaking=false;source.transcript=""; }
-    if(body.command === "cancel") { source.status="idle";source.muted=false; }
-    if(body.command === "pause")source.paused=true;
-    if(body.command === "resume")source.paused=false;
+    const action=script?.(body) ?? (holding.has(body.command) ? "hold" : "");
+    if(action === "reject")throw new Error("refus");
+    if(action !== "hold-reject") {
+      if(body.command === "start")source={status:scenario || "listening",token:body.token,transcript:"",utterance_id:0,barged:0,muted:false,...startExtras};
+      if(body.command === "mute" || body.command === "unmute") { source.muted=body.command === "mute"; if(source.muted)source.transcript=""; }
+      if(body.command === "speak")source.speaking=true;
+      if(body.command === "interrupt") { source.speaking=false;source.transcript=""; }
+      if(body.command === "cancel") { source.status="idle";source.muted=false; }
+      if(body.command === "pause")source.paused=true;
+      if(body.command === "resume")source.paused=false;
+    }
     const reply={...source};
-    if(holding.has(body.command))await new Promise(resolve=>held.push(resolve));
+    if(action.startsWith("hold"))await new Promise(resolve=>held.push({command:body.command,resolve}));
+    if(action === "hold-reject")throw new Error("refus");
     return reply;
   };
   const panels={
@@ -48,7 +54,7 @@ function fixture() {
     crypto:{randomUUID:()=>"token"},setTimeout(fn){timer=fn;return 1;},clearTimeout(){timer=null;},
   });
   const section=bot=>{const container=new Element("div");const cleanup=panel.botSection(bot,container,context);return {container,cleanup};};
-  return {section,hold(...commands){holding.clear();for(const command of commands)holding.add(command);},release(){holding.clear();for(const resolve of held.splice(0))resolve();},set refusal(text){refusal=text;},root,calls,sends,follows,notices,panel,set startExtras(value){startExtras=value;},setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
+  return {section,hold(...commands){holding.clear();for(const command of commands)holding.add(command);},set script(fn){script=fn;},release(...commands){if(!commands.length)holding.clear();for(const late of held.splice(0))if(!commands.length||commands.includes(late.command))late.resolve();else held.push(late);},set refusal(text){refusal=text;},root,calls,sends,follows,notices,panel,set startExtras(value){startExtras=value;},setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
     setContext(c){context=c;panel.onState(c.state,c);},tick:async()=>timer?.(),keydown:e=>keydown(e)};
 }
 test("end-to-end voice sends only the recognized utterance once, reads streamed sentences, pauses on approval",async()=>{
@@ -276,12 +282,12 @@ test("an older bridge answer cannot undo a newer unmute: the screen never says m
   assert.equal(muteButton(f).attributes["aria-pressed"],"false","the status read while muted is older than the unmute");
   assert.match(stateOf(f),/^À l’écoute/);
 });
-test("a click then ⌘⇧M before the first answer toggles twice: the microphone ends up listening",async()=>{
+test("a gesture while a mute command is in flight is ignored: one command, and the screen follows its answer",async()=>{
   const f=fixture();await cls(f.root,"voice-session-toggle").onclick();
   f.hold("mute","unmute");const click=muteButton(f).onclick();const key=shortcut(f);
   f.release();await click;await key;
-  assert.deepEqual(f.calls.map(c=>c.command).filter(c=>c==="mute"||c==="unmute"),["mute","unmute"]);
-  assert.equal(f.source.muted,false);assert.equal(muteButton(f).attributes["aria-pressed"],"false");assert.match(stateOf(f),/^À l’écoute/);
+  assert.deepEqual(f.calls.map(c=>c.command).filter(c=>c==="mute"||c==="unmute"),["mute"]);
+  assert.equal(f.source.muted,true);assert.equal(muteButton(f).attributes["aria-pressed"],"true");assert.equal(stateOf(f),"Micro coupé · le bot ne vous entend pas");
 });
 test("a card waiting for a click and a muted microphone are both said",async()=>{
   const f=fixture();await cls(f.root,"voice-session-toggle").onclick();
@@ -291,4 +297,50 @@ test("a card waiting for a click and a muted microphone are both said",async()=>
   assert.match(stateOf(f),/carte/);assert.match(stateOf(f),/micro coupé/i);assert.equal(muteButton(f).attributes["aria-pressed"],"true");
   await f.tick();assert.match(stateOf(f),/carte/);assert.match(stateOf(f),/micro coupé/i);
   await muteButton(f).onclick();assert.equal(stateOf(f),"En attente de vous · répondez dans la carte");
+});
+
+const settle=()=>new Promise(r=>setImmediate(r));
+function* orders(items){if(items.length<2){yield items;return;}for(const [i,x] of items.entries())for(const rest of orders(items.filter((_,j)=>j!==i)))yield [x,...rest];}
+test("whatever the outcome, lateness and order of the bridge answers, the screen ends on the bridge's muted and the next gesture sends the right command",async()=>{
+  let runs=0;
+  for(const startMuted of [false,true])for(const mode of ["","hold","reject","hold-reject"])for(const tick of ["","before","during"])for(const gesture of ["","click","key"])for(const second of ["","reject"])for(const order of orders([...tick?["status"]:[],...mode.startsWith("hold")?["command"]:[]])){
+    const f=fixture(),name=JSON.stringify({startMuted,mode,tick,gesture,second,order});
+    await cls(f.root,"voice-session-toggle").onclick();if(startMuted)await muteButton(f).onclick();
+    let sent=0,reads=0;
+    f.script=body=>body.command==="status"?(++reads===1&&tick?"hold":""):body.command==="mute"||body.command==="unmute"?(++sent===1?mode:second):"";
+    const pending=[];
+    if(tick==="before")pending.push(f.tick());
+    pending.push(muteButton(f).onclick());
+    if(gesture==="click")pending.push(muteButton(f).onclick());
+    if(gesture==="key")pending.push(shortcut(f));
+    if(tick==="during")pending.push(f.tick());
+    await settle();
+    for(const late of order){f.release(...late==="status"?["status"]:["mute","unmute"]);await settle();}
+    f.release();await Promise.all(pending);await settle();
+    const muted=f.source.muted;
+    assert.equal(muteButton(f).attributes["aria-pressed"],String(muted),name);
+    assert.equal(stateOf(f),muted?"Micro coupé · le bot ne vous entend pas":"À l’écoute · parlez pour envoyer",name);
+    f.script=undefined;const before=f.calls.length;await muteButton(f).onclick();
+    assert.equal(f.calls[before].command,muted?"unmute":"mute",name);
+    assert.equal(f.source.muted,!muted,name);assert.equal(muteButton(f).attributes["aria-pressed"],String(!muted),name);
+    runs++;
+  }
+  assert.ok(runs>150,String(runs));
+});
+test("a mute answered after the session ended changes nothing in the next session",async()=>{
+  for(const mode of ["hold","hold-reject"]){
+    const f=fixture(),toggle=cls(f.root,"voice-session-toggle");await toggle.onclick();
+    f.script=body=>body.command==="mute"?mode:"";const click=muteButton(f).onclick();
+    await toggle.onclick();await toggle.onclick();
+    f.release();await click;await settle();
+    assert.equal(muteButton(f).attributes["aria-pressed"],"false",mode);assert.match(stateOf(f),/^À l’écoute/);
+    f.script=undefined;await muteButton(f).onclick();assert.equal(f.calls.at(-1).command,"mute",mode);assert.equal(f.source.muted,true);
+  }
+});
+test("a status that carries the microphone fallback announces it, once, for the microphone asked at the start",async()=>{
+  const f=fixture();f.context.state.voice.microphone="usb-A";await cls(f.root,"voice-session-toggle").onclick();
+  await muteButton(f).onclick();f.source.microphone_fallback=true;
+  f.context.state.voice.microphone="usb-B";
+  f.hold("unmute");const unmute=muteButton(f).onclick();await f.tick();f.release();await unmute;await f.tick();
+  assert.deepEqual(f.notices,["repli:usb-A"],"the choice saved meanwhile is not the one that was missing");
 });

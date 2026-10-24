@@ -25,10 +25,14 @@
   let ctx, callId = "", scopeKey = "", conversationId = "", epoch = 0, timer, ticking = false;
   let button, menuItem, bar, label, notice, transcriptToggle, mute, interrupt, leave, transcript;
   let phase = "idle", detail = "", lines = [], partial = "", written = 0, shown = false, paused = false, speaking = false;
-  // Mirror of the bridge `muted`, read from its answers: the click sends the command, the screen follows the reply.
-  // Only the answer to the latest request that carries `muted` may change it; `muteWanted` is the state the next gesture flips.
-  let muted = false, muteWanted = false, muteSeq = 0;
-  const applyMuted = (seq, value) => { if (seq !== muteSeq) return false; muted = muteWanted = Boolean(value); return true; };
+  // `muted` is the bridge's, as its latest answer said: the screen never guesses it. One mute/unmute command flies at a time
+  // (`muting`); a status read that started before it ended is older than the command (`reads`) and says nothing about `muted`.
+  // `requested` is the microphone asked at the start, the one a fallback says is gone; `fellBack` says so once per call.
+  let muted = false, muting = false, reads = 0, requested = "", fellBack = false;
+  const noteFallback = answer => {
+    if (!answer.microphone_fallback || answer.muted || fellBack) return;
+    fellBack = true; window.EzerbotMicrophone?.fellBack?.(requested);
+  };
   let lastActive = false, drawn = "";
   // Calls this view already ended: a state read older than the end must not end them twice.
   const finished = new Set();
@@ -107,7 +111,7 @@
   }
   function reset() {
     clearTimeout(timer); epoch++;
-    callId = ""; conversationId = ""; scopeKey = ""; lines = []; partial = ""; written = 0; shown = false; paused = false; speaking = false; ticking = false; muted = muteWanted = false;
+    callId = ""; conversationId = ""; scopeKey = ""; lines = []; partial = ""; written = 0; shown = false; paused = false; speaking = false; ticking = false; muted = muting = false;
   }
   async function quit() {
     const id = callId;
@@ -142,7 +146,7 @@
     if (busy()) { panels.notify(errors.microphone_busy); return; }
     const rev = ++epoch;
     conversationId = ctx.conversation.id; scopeKey = contextKey(ctx);
-    phase = "authorizing"; detail = ""; lines = []; partial = ""; written = 0; shown = false; paused = false; speaking = false; muted = muteWanted = false;
+    phase = "authorizing"; detail = ""; lines = []; partial = ""; written = 0; shown = false; paused = false; speaking = false; muted = muting = fellBack = false;
     callId = "pending";
     render(); panels.composerChanged();
     let opened;
@@ -151,13 +155,13 @@
     if (rev !== epoch) { try { await panels.api("/api/voice/call/end", {id: opened.call.id}); } catch { /* Closed at the next start. */ } return; }
     callId = opened.call.id;
     try {
-      const requested = window.EzerbotMicrophone?.current() ?? "";
+      requested = window.EzerbotMicrophone?.current() ?? "";
       const voice = botVoice();
       // The secret goes to the provider once. It is never shown, stored or kept past this call.
       const result = await bridge("start", {secret: opened.secret, microphone: requested, voice: voice.voice, speed: voice.speed, language: voice.language});
       opened = null;
       if (rev !== epoch) return;
-      if (result.microphone_fallback) window.EzerbotMicrophone?.fellBack?.(requested);
+      noteFallback(result);
       if (errors[result.status]) { await fail(result.status); return; }
       phase = "listening"; render(); schedule(rev);
     } catch (error) { if (rev === epoch) await fail("failed", error.message); }
@@ -168,10 +172,11 @@
     if (ticking) { schedule(rev); return; }
     ticking = true;
     try {
-      const seq = ++muteSeq, result = await bridge("status");
+      const seq = ++reads, result = await bridge("status");
       if (rev !== epoch) return;
       if (errors[result.status] || result.status === "idle") { await fail(result.status); return; }
-      applyMuted(seq, result.muted);
+      noteFallback(result);
+      if (!muting && seq === reads) muted = Boolean(result.muted);
       lines = result.lines || lines; partial = muted ? "" : result.transcript || ""; speaking = Boolean(result.speaking);
       // A card waiting for a click holds the voice. Speaking is not a decision on it.
       const needsAction = window.GrokbotChat.voiceNeedsAction(ctx.conversation?.messages || []);
@@ -208,16 +213,21 @@
     bridge("interrupt").catch(error => panels.notify(error.message));
   }
   async function toggleMute() {
-    if (!active() || ["authorizing", "ending"].includes(phase)) return;
-    muteWanted = !muteWanted;
-    const rev = epoch, seq = ++muteSeq, receipt = await bridge(muteWanted ? "mute" : "unmute");
-    if (rev !== epoch) return;
-    if (errors[receipt.status]) { await fail(receipt.status); return; }
-    if (!applyMuted(seq, receipt.muted)) return;
-    if (muted) partial = "";
-    // Unmuting listens again to the chosen microphone, which may have gone while muted.
-    if (!muted && receipt.microphone_fallback) window.EzerbotMicrophone?.fellBack?.(window.EzerbotMicrophone.current());
-    render();
+    if (!active() || ["authorizing", "ending"].includes(phase) || muting) return;
+    const rev = epoch;
+    muting = true; reads++;
+    try {
+      let answer;
+      // A refused command changed nothing: the bridge's status says what it still is.
+      try { answer = await bridge(muted ? "unmute" : "mute"); }
+      catch (error) { panels.notify(error.message); answer = await bridge("status"); }
+      if (rev !== epoch) return;
+      if (errors[answer.status]) { await fail(answer.status); return; }
+      muted = Boolean(answer.muted);
+      if (muted) partial = "";
+      noteFallback(answer);
+      render();
+    } finally { if (rev === epoch) { muting = false; reads++; } }
   }
   const muteToggled = () => toggleMute().catch(error => panels.notify(error.message));
   panels.register({

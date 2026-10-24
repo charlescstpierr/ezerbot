@@ -119,6 +119,26 @@ test("rien à ouvrir depuis le Graphe : la Liste s'affiche et le focus est sur s
   assert.equal(h.shown(), false);
 });
 
+test("les filtres d'une visite précédente ne cachent pas les souvenirs de la réponse", async () => {
+  const h = await harness();
+  h.entry().click();
+  await h.settle();
+  const field = (label) => h.screen().querySelector(`[aria-label="${label}"]`);
+  field("Rechercher un souvenir").value = "garde-meuble";
+  field("Rechercher un souvenir").fire("input");
+  field("Filtrer par bot").value = "chef";
+  field("Filtrer par bot").fire("change");
+  assert.deepEqual(h.items(), ["f3"], "le filtre d'avant est bien actif");
+  h.navigate();
+  await h.openWith(["f1", "f2"]);
+  assert.deepEqual(h.items(), ["f1", "f2"]);
+  assert.equal(field("Rechercher un souvenir").value, "");
+  assert.equal(field("Filtrer par bot").value, "");
+  assert.equal(h.main.querySelector(".memory-filter-count").textContent, "");
+  h.press("Tout afficher");
+  assert.deepEqual(h.items(), ["f1", "f2", "f3"]);
+});
+
 test("un souvenir oublié depuis la réponse : message lisible, aucun panneau vide", async () => {
   const h = await harness();
   await h.settle();

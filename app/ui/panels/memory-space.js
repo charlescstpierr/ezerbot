@@ -66,6 +66,7 @@
     show(); // quitter le fil passe par la navigation, qui ferme cet écran : on retient la demande ensuite
     recalled = { ids: ids.map(String), origin };
     used = null;
+    filter?.reset(); // les filtres d'une visite précédente cacheraient les souvenirs demandés
     paint();
     return { ok: true };
   }

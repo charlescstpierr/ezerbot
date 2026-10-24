@@ -283,6 +283,10 @@ fn calibrate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
 
     /// A read must not grow with old history: every table the two queries touch is searched
     /// through an index, none is scanned.
@@ -313,8 +317,8 @@ mod tests {
     }
 
     const NOW: i64 = 2_000_000_000_000;
-    const LIMIT_PASSAGES: i32 = 20_000;
-    const LIMIT_TOKENS: i32 = 1_000;
+    /// Written threshold for the whole read of one routine, instructions.
+    const READ_STEPS: u64 = 20_000;
 
     /// Five recent passages, each with a subtask, and `old` finished and `old` missed ones long ago.
     fn history(old: i64) -> Connection {
@@ -332,7 +336,7 @@ mod tests {
                 name: "R".into(),
                 body: grokbot_scheduler::routine::RoutineBody::InlinePrompt { prompt: "p".into() },
                 trigger: grokbot_scheduler::cron::Schedule::Every {
-                    interval_ms: 60_000,
+                    interval_ms: 1_800_000,
                     phase_ms: None,
                 },
                 time_zone: "UTC".into(),
@@ -343,6 +347,11 @@ mod tests {
                 modified_at: 0,
                 last_served_at: None,
             },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE scheduler_routines SET materialized_after=?1",
+            [NOW - 1_800_000],
         )
         .unwrap();
         let counted = "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<?1-1)";
@@ -385,47 +394,45 @@ mod tests {
         conn
     }
 
-    /// SQLite virtual-machine steps a query takes, rows drained.
-    fn vm_steps(conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> i32 {
-        let mut statement = conn.prepare(sql).unwrap();
-        let rows = statement.query_map(params, |_| Ok(())).unwrap().count();
-        assert!(rows > 0);
-        statement.get_status(rusqlite::StatementStatus::VmStep)
+    /// SQLite instructions the whole read of a routine's cost takes (`Costing::new` and
+    /// `Costing::of`: the account, the passages, the window's tokens, the schedule's cursors),
+    /// counted one by one by a progress handler on the connection.
+    fn read_steps(old: i64) -> u64 {
+        let conn = history(old);
+        let provider = Provider::new(std::path::Path::new("routine-cost-scale.sqlite"));
+        let steps = Arc::new(AtomicU64::new(0));
+        let counted = steps.clone();
+        conn.progress_handler(
+            1,
+            Some(move || {
+                counted.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        let costing = Costing::new(&conn, &provider, NOW as u64).unwrap();
+        // 20 % of the weekly window used: the quota gauge is the only input not read from the database.
+        let reset = NOW as u64 / 1000 + 3 * 86_400;
+        let quota = json!({"quota":{"primary":{"limit_window_seconds":WEEK_S,"used_percent":20.0,"reset_at":reset}}});
+        let _ = costing
+            .calibration
+            .set(calibrate(&conn, &quota, 0).unwrap());
+        let routine = grokbot_scheduler::routine::get(&conn, "r1")
+            .unwrap()
+            .unwrap();
+        let cost = costing.of(&conn, &routine).unwrap();
+        assert_eq!(cost["state"], "measured", "{cost}");
+        assert_eq!(cost["forecast"]["state"], "estimated", "{cost}");
+        assert_eq!(cost["quota_share"]["reason"], "calibration_weak", "{cost}");
+        steps.load(Ordering::Relaxed)
     }
 
     /// A routine's cost is read on every GET: ten times the old history must not cost ten times
-    /// the work. The passages query takes ~10 000 steps and the window sum ~140, whatever the history.
+    /// the work. The whole read takes about `READ_STEPS` instructions, whatever the history.
     #[test]
-    fn old_history_ten_times_larger_costs_about_the_same() {
-        let measure = |old: i64| {
-            let conn = history(old);
-            let week_start = NOW - WEEK_MS;
-            (
-                vm_steps(
-                    &conn,
-                    PASSAGES,
-                    &[
-                        &"r1",
-                        &week_start,
-                        &AVERAGED_PASSAGES,
-                        &RECENT_FINISHED,
-                        &"c1",
-                    ],
-                ),
-                vm_steps(&conn, LOCAL_TOKENS, &[&week_start]),
-            )
-        };
-        let (passages, tokens) = measure(500);
-        let (passages_10x, tokens_10x) = measure(5000);
-        eprintln!("VMSTEPS passages {passages} -> {passages_10x}, tokens {tokens} -> {tokens_10x}");
-        assert!(
-            passages_10x <= passages + passages / 10,
-            "{passages} -> {passages_10x}"
-        );
-        assert!(
-            tokens_10x <= tokens + tokens / 10,
-            "{tokens} -> {tokens_10x}"
-        );
-        assert!(passages_10x < LIMIT_PASSAGES && tokens_10x < LIMIT_TOKENS);
+    fn old_history_ten_times_larger_costs_about_the_same_for_the_whole_read() {
+        let (read, read_10x) = (read_steps(500), read_steps(5000));
+        eprintln!("VMSTEPS whole read {read} -> {read_10x}");
+        assert!(read_10x <= read + read / 10, "{read} -> {read_10x}");
+        assert!(read_10x < READ_STEPS, "{read_10x}");
     }
 }

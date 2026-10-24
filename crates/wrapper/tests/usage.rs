@@ -663,6 +663,69 @@ fn another_account_never_calibrates_this_ones_quota() {
 }
 
 #[test]
+fn a_return_to_the_confirmed_account_after_another_one_ran_stays_unconfirmed_without_a_tick() {
+    // Account A is confirmed since before the window; its gauge says 20 % used.
+    let mut c = Cost::new(
+        weekly(20.0),
+        json!({"kind":"every","interval_ms":1_800_000}),
+    );
+    c.chat(50_000);
+    c.pass("a", "done", 3_600_000, Some(2000));
+    c.trust_account();
+    assert_eq!(c.cost()["quota_share"]["state"], "estimated");
+    // Account B signs in and uses the app; no tick runs. Then A signs back in, still no tick.
+    let session = c.f.dir.join("app.codex-auth.json");
+    let account_a = std::fs::read(&session).unwrap();
+    support::write_codex_session(&session, "account-b");
+    let conversation = c.app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]
+        ["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let body = json!({"conversation_id":conversation,"message_id":"b1","body":"Bonjour"});
+    c.app
+        .api("POST", "/api/send", body.to_string().as_bytes())
+        .unwrap();
+    wait("la réponse du compte B", || {
+        c.conn
+            .query_row(
+                "SELECT COUNT(*) FROM engine_runs WHERE conversation_id=?1 AND status='finished'",
+                [&conversation],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0
+    });
+    let started = (now() * 1000) as i64 - 1000;
+    insert_run(&c.conn, "chat-b", &c.bot, &conversation, "chat", started);
+    add_usage(&c.conn, "chat-b", 1_999_900, 100, 0);
+    std::fs::write(&session, account_a).unwrap();
+    let share = c.cost()["quota_share"].clone();
+    assert_eq!(share["state"], "unknown", "{share}");
+    assert_eq!(share["reason"], "account_unconfirmed");
+    assert!(share["percent"].is_null());
+}
+
+#[test]
+fn passages_without_telemetry_never_hide_a_measured_one_however_many_are_newer() {
+    let mut c = Cost::every_30_minutes();
+    c.pass("measured", "done", 2 * DAY_MS, Some(2000));
+    for n in 0..200 {
+        c.pass(&format!("blind{n}"), "done", 3_600_000 + n * 1000, None);
+    }
+    let cost = c.cost();
+    assert_eq!(
+        (
+            cost["average_tokens"].clone(),
+            cost["average_sample"].clone()
+        ),
+        (json!(2000), json!(1)),
+        "{cost}"
+    );
+    assert_eq!(cost["forecast"]["state"], "estimated");
+}
+
+#[test]
 fn catch_up_passages_count_by_when_their_run_started_and_a_backlog_hides_nothing() {
     // Twelve slots owed for ten days, run today: the week counts them all, the average takes ten.
     let mut c = Cost::every_30_minutes();

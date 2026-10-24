@@ -45,6 +45,8 @@ jiff = { workspace = true }
 nix = { version = "0.29.0", default-features = false, features = ["fs", "signal", "user"] }
 
 [dev-dependencies]
+# `progress_handler` counts every SQLite instruction of a read (routine_cost scale test).
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 nix = { version = "0.29.0", default-features = false, features = ["fs", "user"] }
 # Relit le QR servi au Mac, comme le ferait l'appareil photo de l'iPhone.
 rqrr = { version = "0.11", default-features = false }

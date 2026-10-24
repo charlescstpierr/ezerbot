@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { after } from "node:test";
-import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createServer } from "vite";
+import { createTestServer } from "./vite-test-server.js";
 import react from "@vitejs/plugin-react";
 
 function mount(api) {
@@ -80,11 +79,7 @@ test("Envoyer transmet l’objet et le corps corrigés d’un courriel, Annuler 
   assert.equal(Object.hasOwn(calls[1].body, "text"), false);
 });
 
-const vite = await createServer({
-  root: fileURLToPath(new URL("..", import.meta.url)), configFile: false,
-  plugins: [react()], server: { middlewareMode: true }, logLevel: "error",
-  optimizeDeps: { noDiscovery: true },
-});
+const vite = await createTestServer({ plugins: [react()] });
 after(() => vite.close());
 const { DraftCard } = await vite.ssrLoadModule("/src/cards/draft.jsx");
 

@@ -24,7 +24,7 @@ const WEEK_MS: i64 = WEEK_S as i64 * 1000;
 const AVERAGED_PASSAGES: u32 = 10;
 /// How many of a routine's latest finished passages are looked through for them: a bound on the
 /// work of a read when a long run of passages sent no usage, not a sample size.
-const RECENT_FINISHED: u32 = 1000;
+const RECENT_FINISHED: u32 = 500;
 /// The quota gauge is a rounded percentage: below these, tokens per percent is noise.
 const MIN_USED_PERCENT: f64 = 5.0;
 const MIN_LOCAL_TOKENS: u64 = 50_000;
@@ -400,8 +400,13 @@ mod tests {
     /// SQLite instructions the whole read of a routine's cost takes (`Costing::new` and
     /// `Costing::of`: the account, the passages, the window's tokens, the schedule's cursors),
     /// counted one by one by a progress handler on the connection.
-    fn read_steps(old: i64) -> u64 {
+    /// `blind`: no passage sent usage, so the read looks through its whole bound for measured ones.
+    fn read_steps(old: i64, blind: bool) -> u64 {
         let conn = history(old);
+        if blind {
+            conn.execute("DELETE FROM engine_response_usage", [])
+                .unwrap();
+        }
         let provider = Provider::new(std::path::Path::new("routine-cost-scale.sqlite"));
         let steps = Arc::new(AtomicU64::new(0));
         let counted = steps.clone();
@@ -423,19 +428,25 @@ mod tests {
             .unwrap()
             .unwrap();
         let cost = costing.of(&conn, &routine).unwrap();
-        assert_eq!(cost["state"], "measured", "{cost}");
-        assert_eq!(cost["forecast"]["state"], "estimated", "{cost}");
-        assert_eq!(cost["quota_share"]["reason"], "calibration_weak", "{cost}");
+        if blind {
+            assert_eq!(cost["state"], "no_measure_yet", "{cost}");
+        } else {
+            assert_eq!(cost["state"], "measured", "{cost}");
+            assert_eq!(cost["forecast"]["state"], "estimated", "{cost}");
+            assert_eq!(cost["quota_share"]["reason"], "calibration_weak", "{cost}");
+        }
         steps.load(Ordering::Relaxed)
     }
 
     /// A routine's cost is read on every GET: ten times the old history must not cost ten times
-    /// the work. The whole read takes about `READ_STEPS` instructions, whatever the history.
+    /// the work, whether its passages sent usage or not. The whole read stays under `READ_STEPS`.
     #[test]
     fn old_history_ten_times_larger_costs_about_the_same_for_the_whole_read() {
-        let (read, read_10x) = (read_steps(1500), read_steps(15_000));
-        eprintln!("VMSTEPS whole read {read} -> {read_10x}");
-        assert!(read_10x <= read + read / 10, "{read} -> {read_10x}");
-        assert!(read_10x < READ_STEPS, "{read_10x}");
+        for blind in [false, true] {
+            let (read, read_10x) = (read_steps(1500, blind), read_steps(15_000, blind));
+            eprintln!("VMSTEPS whole read, blind={blind}: {read} -> {read_10x}");
+            assert!(read_10x <= read + read / 10, "{read} -> {read_10x}");
+            assert!(read_10x < READ_STEPS, "{read_10x}");
+        }
     }
 }

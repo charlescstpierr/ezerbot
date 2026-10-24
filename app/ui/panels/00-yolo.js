@@ -4,6 +4,7 @@
   if (!panels) return;
   let settings, key = "", error = "", saving = false;
   const SHOWN = 20;
+  const ORIGINS = { bot: "réglage du bot", forbidden: "action interdite" };
   const node = (tag, text, cls) => { const e = document.createElement(tag); if (text) e.textContent = text; if (cls) e.className = cls; return e; };
   const when = (at) => { try { return new Date(at).toLocaleString("fr-CA", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
   async function save(path, body) {
@@ -77,7 +78,7 @@
       for (const entry of log.slice(0, SHOWN)) {
         const bot = bots.find(b => b.id === entry.bot_id)?.name || entry.bot_id;
         const item = node("li"); item.dataset.tool = entry.tool;
-        const head = node("span", `${when(entry.at)} · ${bot} · ${entry.source === "bot" ? "réglage du bot" : "réglage global"}`);
+        const head = node("span", `${when(entry.at)} · ${bot} · ${ORIGINS[entry.source] || "réglage global"}`);
         item.append(head, node("code", entry.summary)); list.append(item);
       }
       settings.append(list);

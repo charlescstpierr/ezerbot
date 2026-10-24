@@ -18,6 +18,7 @@ import json
 import os
 import selectors
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -209,6 +210,15 @@ def main() -> None:
             # Les sphères images, images-reference, pages, reponse-fil, taches-de-fond, approbation-tardive, approbation-rappel et sources-citees gardent le faux OpenAI du run : lui seul sait répondre à un dessin,
             # écrire une Page, citer le message parent d'un sous-fil, lancer une tâche de fond, demander une commande protégée puis en rendre le résultat, ou citer des sources numérotées.
             child_env["EZERBOT_FAKE_SIGNIN"] = "1"
+        if args.sphere == "iphone-jumelage":
+            # Faux Tailscale dans le HOME jetable (le seul que le wrapper de debug accepte) et port privé libre : 47863 peut être tenu par l'app installée.
+            tailscale = home / "tailscale-fake"
+            tailscale.write_text("#!/bin/sh\nprintf '%s\\n' '{\"BackendState\":\"Running\",\"Self\":{\"DNSName\":\"mac-exemple.tailnet-exemple.ts.net.\"},\"CurrentTailnet\":{\"Name\":\"tailnet-exemple\"}}'\n")
+            tailscale.chmod(0o700)
+            child_env["GROKBOT_FAKE_TAILSCALE"] = str(tailscale)
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                child_env["GROKBOT_IPHONE_PORT"] = str(probe.getsockname()[1])
         print(
             f"run: {binary} --port 0 --db {db}",
             flush=True,

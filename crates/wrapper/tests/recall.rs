@@ -257,7 +257,9 @@ impl Fixture {
         let r = self.request(run);
         self.post("/api/approvals/resolve",json!({"entry_id":r.entry_id,"conversation_id":r.route.target_conversation_id,"submission_id":format!("decide-{run}"),"decision":decision}));
         self.app.tick(0);
+        // The first tick can race the suspended worker's ownership release.
         wait("terminal host action", || {
+            self.app.tick_suspended(0);
             store::required(&self.db(), run)
                 .unwrap()
                 .status
@@ -331,8 +333,8 @@ fn the_catalogue_offers_meetings_and_never_shows_the_key_again() {
     assert_eq!(item["status"], "disconnected");
     assert_eq!(item["has_key"], false);
     let state = f.state();
-    assert_eq!(state["mcp"]["catalogue"].as_array().unwrap().len(), 9);
-    // Les huit autres entrées restent telles quelles.
+    assert_eq!(state["mcp"]["catalogue"].as_array().unwrap().len(), 10);
+    // Les neuf autres entrées restent telles quelles.
     for id in [
         "gmail",
         "calendar",
@@ -341,6 +343,7 @@ fn the_catalogue_offers_meetings_and_never_shows_the_key_again() {
         "notion",
         "github",
         "linear",
+        "jira",
         "microsoft365",
     ] {
         assert!(state["mcp"]["catalogue"]
@@ -463,6 +466,9 @@ fn the_consent_card_gates_the_invitation_and_cancel_invites_nobody() {
 #[test]
 fn leaving_cancels_a_connecting_bot_and_ends_a_running_one() {
     let mut f = Fixture::new();
+    // Seules les passes explicites lisent le code de Recall : le suivi de fond
+    // ferait passer le troisième bot « in_call » avant l'assertion « joining ».
+    recall::pause_background(true);
     f.connect();
     f.joined();
     let id = f.item()["meeting"]["id"].as_str().unwrap().to_owned();

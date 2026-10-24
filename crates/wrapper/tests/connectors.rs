@@ -1475,8 +1475,11 @@ impl Fixture {
             .unwrap()
             .into()
     }
-    fn finish(&self, run: &str) {
+    fn finish(&mut self, run: &str) {
+        // An approval can be visible before its worker releases run ownership.
+        // Retry wake delivery if the initial host tick raced that release.
         wait("terminal host action", || {
+            self.app.tick_suspended(0);
             store::required(&self.db(), run)
                 .unwrap()
                 .status
@@ -1605,6 +1608,28 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn finishing_a_host_action_delivers_its_pending_approval_wake() {
+    let mut f = Fixture::new();
+    let run = f.connect("calendar");
+    f.wait_approval(&run);
+    let request = requests::list_for_run(&f.db(), &run).unwrap().remove(0);
+    f.post(
+        "/api/approvals/resolve",
+        json!({
+            "entry_id": request.entry_id,
+            "conversation_id": request.route.target_conversation_id,
+            "submission_id": "finish-without-an-initial-tick",
+            "decision": "allow_once"
+        }),
+    );
+    // No initial host tick: finishing must deliver the durable approval wake,
+    // not merely observe the database until its deadline expires.
+    f.finish(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Done { .. }));
+    assert_eq!(f.item("calendar")["status"], "authorizing");
+}
+
+#[test]
 fn google_server_adapter_keeps_only_an_access_snapshot_in_memory() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let output = std::process::Command::new("python3")
@@ -1716,7 +1741,7 @@ fn changing_oauth_application_is_refused_without_losing_tokens_even_when_reconne
 #[test]
 fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     let mut f = Fixture::new();
-    assert_eq!(f.state()["mcp"]["catalogue"].as_array().unwrap().len(), 9);
+    assert_eq!(f.state()["mcp"]["catalogue"].as_array().unwrap().len(), 10);
     assert_eq!(f.item("reunions")["name"], "Réunions");
     assert!(f
         .app

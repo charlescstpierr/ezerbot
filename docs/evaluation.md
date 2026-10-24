@@ -44,3 +44,5 @@ gitleaks detect --source . --no-banner
 Les régressions lancent le même point d’entrée dans des sous-processus : scénario de trois messages, espace non marqué/non neuf ou lié symboliquement, plafond absent/invalide, arrêt à deux appels, valeurs-pièges absentes du JSON et des journaux, scénario invalide et plafond serveur auxiliaire. Le lanceur lui-même reste ignoré par défaut.
 
 L’étape B (compte de test réel, mesures réelles et procédure associée) est hors périmètre.
+
+Le [banc F1 de mémoire automatique](memory-auto-evaluation.md) rejoue séparément des sorties enregistrées synthétiques à travers l’extracteur, sans réseau ni compte. Il mesure les faits retenus et les garde-fous, pas les tokens ni la qualité d’un vrai modèle.

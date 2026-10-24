@@ -90,6 +90,23 @@ test("scoped consent keeps shell input active; outside input pauses; resume and 
   for(const fn of f.listeners.keydown)fn({key:"Escape",preventDefault(){}});await new Promise(r=>setImmediate(r));assert.equal(f.calls.at(-1)[0],"/api/screen/revoke");assert.equal(f.registration.wantsPolling(),false);
   assert.doesNotMatch(preview.className,/screen-preview-active/);
 });
+test("sans conversation ouverte, une session en cours garde son entrée dans l’en-tête", async () => {
+  const f = fixture();
+  const entry = all(f.top).find(e => e.className.includes("screen-button"));
+  const item = all(f.panels).find(e => e.className.includes("screen-menu-item"));
+  f.state.screen = { ...f.state.screen, session: { id: 7, paused: false, expires_at: Date.now() + 60000 } };
+  await f.host.refresh();
+  assert.equal(entry.hidden, false);
+  assert.doesNotMatch(entry.className, /screen-button-kept/, "dans un fil, le menu de la conversation porte l’entrée");
+  assert.equal(item.hidden, false);
+  f.registration.onState(f.state, { conversation: null, bot: f.state.bots[0] });
+  assert.equal(entry.hidden, false);
+  assert.match(entry.className, /screen-button-kept/, "le menu est désactivé sur l’accueil");
+  f.state.screen = { ...f.state.screen, session: null };
+  f.registration.onState(f.state, { conversation: null, bot: f.state.bots[0] });
+  assert.equal(entry.hidden, true);
+  assert.doesNotMatch(entry.className, /screen-button-kept/);
+});
 test("le Mode YOLO ouvre l’écran au bot sans réglage, la session et l’entrée restent à accorder", async () => {
   const f = fixture();
   const entry = all(f.top).find(e => e.className.includes("screen-button"));

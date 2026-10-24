@@ -28,13 +28,32 @@ function chromeBinary() {
   return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
 }
 
-function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "", workspace = "", welcome = false, title = "Nouvelle conversation", header = "bench" } = {}) {
+function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "", workspace = "", welcome = false, title = "Nouvelle conversation", header = "bench", unread = "" } = {}) {
   const speedPill = speed
     ? `<button class="tool-pill" type="button" data-picker="speed"><small>Vitesse</small><b>${speed}</b><svg class="icon"><use href="#i-chevron"/></svg></button>`
     : "";
   const tools = pills
     ? `<button class="tool-pill" type="button" data-picker="model"><small>Modèle</small><b>${model}</b><svg class="icon"><use href="#i-chevron"/></svg></button><button class="tool-pill" type="button" data-picker="effort"><small>Effort</small><b>${effort}</b><svg class="icon"><use href="#i-chevron"/></svg></button>${speedPill}`
     : "";
+  // L'en-tête réel d'un fil direct (avec Écran du Mac) ou d'un groupe, tel que les panneaux le montent.
+  // Sur l'accueil, le menu est désactivé : une session d'écran en cours garde son entrée dans l'en-tête.
+  const homeSession = `<div class="topbar-title"><button class="icon-button sidebar-toggle" type="button" aria-label="Ouvrir les conversations"><svg class="icon"><use href="#i-menu"/></svg></button><button class="workspace-label" type="button" disabled>Ezerbot</button><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">${title}</h1></div>
+      <div class="topbar-actions">
+        <button class="tool-pill screen-button screen-button-kept screen-active" type="button" aria-label="Écran du Mac">Écran du Mac</button>
+        <button class="tool-pill notifications-button" type="button" aria-label="Notifications"><span class="notifications-icon" aria-hidden="true"><svg class="icon"><use href="#i-plus"/></svg></span><span class="notifications-label">Notifications</span><span class="notification-count" aria-hidden="true" hidden>0</span></button>
+        <button class="tool-pill" type="button" data-topbar-intent="create">Créer un groupe</button>
+        <button class="icon-button" id="conversation-menu-button" type="button" disabled aria-label="Actions de la conversation"><svg class="icon"><use href="#i-more"/></svg></button>
+      </div>
+      <div class="popover conversation-menu" id="conversation-menu" hidden><button class="screen-menu-item" type="button"><span>Écran du Mac</span></button></div>`;
+  const threadHeader = header === "home-session" ? homeSession : header === "direct" || header === "group" ? `<div class="topbar-title"><button class="icon-button sidebar-toggle" type="button" aria-label="Ouvrir les conversations"><svg class="icon"><use href="#i-menu"/></svg></button><button class="workspace-label" type="button">${header === "group" ? "Groupe" : "Ezerbot"}</button><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">${title}</h1></div>
+      <div class="topbar-actions">
+        <button class="tool-pill screen-button" type="button" aria-label="Écran du Mac"${header === "group" ? " hidden" : ""}>Écran du Mac</button>
+        <button class="tool-pill notifications-button${unread ? " has-unread" : ""}" type="button" aria-label="Notifications"><span class="notifications-icon" aria-hidden="true"><svg class="icon"><use href="#i-plus"/></svg></span><span class="notifications-label">Notifications</span><span class="notification-count" aria-hidden="true"${unread ? "" : " hidden"}>${unread || "0"}</span></button>
+        <button class="tool-pill" type="button" data-topbar-intent="create">Créer un groupe</button>
+        <button class="tool-pill" type="button" data-topbar-intent="members">Membres</button>
+        <button class="icon-button" id="conversation-menu-button" type="button" aria-label="Actions de la conversation"><svg class="icon"><use href="#i-more"/></svg></button>
+      </div>
+      <div class="popover conversation-menu" id="conversation-menu"><button class="screen-menu-item" type="button"${header === "group" ? " hidden" : ""}><span>Écran du Mac</span></button><button type="button">Renommer</button></div>` : "";
   const welcomeBlock = welcome ? `<section class="chat-scroll" id="chat-scroll"><div class="welcome" id="welcome"><div class="mascot-stage"><button class="mascot-greeting" type="button"></button></div><p class="welcome-eyebrow">UN PETIT COMPAGNON, DE GRANDES IDÉES</p><h2>Une idée en tête<span> ?</span></h2><p class="welcome-description">Posez-la ici. On lui fait une place.</p><div class="plan-banner" id="plan-banner"><span>Connectez votre compte ChatGPT via Codex pour obtenir de vraies réponses.</span><button class="chatgpt-button" type="button">Se connecter via Codex</button></div><div class="suggestion-grid"><button class="suggestion" type="button"><span class="suggestion-icon"></span><span><strong>Faire grandir une idée</strong><small>Du premier déclic au prochain pas</small></span></button><button class="suggestion" type="button"><span class="suggestion-icon"></span><span><strong>Trouver les bons mots</strong><small>Un texte clair, à votre manière</small></span></button><button class="suggestion" type="button"><span class="suggestion-icon"></span><span><strong>Explorer du code</strong><small>Comprendre, construire, affiner</small></span></button><button class="suggestion" type="button"><span class="suggestion-icon"></span><span><strong>Suivre sa curiosité</strong><small>Une bonne question ouvre des portes</small></span></button></div></div></section>` : "";
   return `<!doctype html>
 <html lang="fr" data-theme="dark" data-accent="citron">
@@ -45,6 +64,7 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
   <link rel="stylesheet" href="file://${UI}/panels/meetings.css">
   <link rel="stylesheet" href="file://${UI}/panels/voice-conversation.css">
   <link rel="stylesheet" href="file://${UI}/panels/voice.css">
+  ${threadHeader ? `<link rel="stylesheet" href="file://${UI}/panels/notifications.css"><link rel="stylesheet" href="file://${UI}/panels/screen.css"><link rel="stylesheet" href="file://${UI}/panels/multibot.css">` : ""}
 </head>
 <body>
   <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -59,7 +79,7 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
   <aside class="sidebar"></aside>
   <main class="main-panel">
     <header class="topbar">
-      ${header === "app" ? `<div class="topbar-title"><button class="icon-button sidebar-toggle" type="button" aria-label="Ouvrir les conversations"><svg class="icon"><use href="#i-menu"/></svg></button><button class="workspace-label" type="button" disabled>Espace personnel</button><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">${title}</h1></div>
+      ${threadHeader ? threadHeader : header === "app" ? `<div class="topbar-title"><button class="icon-button sidebar-toggle" type="button" aria-label="Ouvrir les conversations"><svg class="icon"><use href="#i-menu"/></svg></button><button class="workspace-label" type="button" disabled>Espace personnel</button><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">${title}</h1></div>
       <div class="topbar-actions">
         <button class="tool-pill notifications-button" type="button">Notifications</button>
         <button class="tool-pill" type="button">Créer un groupe</button>
@@ -225,6 +245,10 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         titleGap: document.querySelector(".notifications-button")
           ? boxOf(document.querySelector(".notifications-button")).left - boxOf(document.getElementById("conversation-title")).right
           : null,
+        screenEntry: [".topbar-actions .screen-button", ".popover .screen-menu-item"].map((selector) => {
+          const node = document.querySelector(selector);
+          return node && getComputedStyle(node).display !== "none" ? node.getBoundingClientRect().width : 0;
+        }),
         workspaceText: document.querySelector(".workspace-label")?.textContent || "",
         workspaceClient: document.querySelector(".workspace-label")?.clientWidth || 0,
         workspaceScroll: document.querySelector(".workspace-label")?.scrollWidth || 0,
@@ -1023,6 +1047,28 @@ test("the real header keeps the title clear of Notifications from 761 to 785", {
         assert.equal(theme.workspaceText, "Espace personnel", where);
         assert.ok(theme.titleGap >= -0.5, where);
         assert.equal(theme.titleClear, true, where);
+      }
+    }
+  }
+});
+
+test("a direct thread, group or home title stays clear of every header action from 761 to 1140", { timeout: 300000 }, async () => {
+  const widths = sweep(761, 1140, 20, [786, 800, 804, 819, 820, 850, 900, 901, 1100, 1101]);
+  for (const header of ["direct", "group", "home-session"]) {
+    for (const [title, unread] of header === "home-session" ? [["Nouvelle conversation", ""]] : [["Fil direct", ""], ["Préparer la revue de lancement avec l'équipe", ""], ["Préparer la revue de lancement avec l'équipe", "3"], ["Préparer la revue de lancement avec l'équipe", "999+"]]) {
+      for (const width of widths) {
+        const report = await measure(width, 560, "Ezerbot", { header, title, speed: "", unread });
+        for (const theme of report.themes) {
+          const where = `${header} ${width} « ${title} » non-lus=${unread || 0} ${theme.theme} title=${theme.titleClient}/${theme.titleScroll} titleBox=${JSON.stringify(theme.titleBox)} actions=${JSON.stringify(theme.actionsBox)} screen=${theme.screenEntry}`;
+          assert.equal(theme.titleText, title, where);
+          assert.equal(theme.titleClear, true, where);
+          // « 999+ » à 761 px ne laisse que quelques pixels au titre : il reste dégagé, sans plancher de lisibilité.
+          if (unread !== "999+") assert.ok(theme.titleClient >= 40, where);
+          if (title === "Fil direct" && width >= 820) assert.equal(theme.titleFits, true, where);
+          // Écran du Mac reste joignable : dans l'en-tête ou, faute de place, dans le menu de la conversation.
+          if (header === "direct") assert.equal(theme.screenEntry.filter((size) => size > 0).length, 1, where);
+          if (header === "home-session") assert.ok(theme.screenEntry[0] > 0, where);
+        }
       }
     }
   }

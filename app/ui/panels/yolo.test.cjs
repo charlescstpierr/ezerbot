@@ -58,6 +58,14 @@ test('le panneau annonce le Mode YOLO activé, ses garde-fous et son journal', (
   assert.equal(ask.attributes['aria-pressed'], 'false');
 });
 
+test('un refus d’action interdite est nommé tel quel dans le journal', () => {
+  const refused = { id: 3, at: Date.UTC(2026, 9, 23, 15, 5), bot_id: 'grokbot', tool: 'mcp_stripe_ab12_0123456789abcdef', summary: 'Refusé (action interdite : paiement) · Connecteur Stripe · create_payment', source: 'forbidden' };
+  const { root } = mount({ bots, yolo: yolo({ log: [refused] }) });
+  const text = root.textContent;
+  assert.match(text, /Ezerbot · action interdite/);
+  assert.match(text, /Refusé \(action interdite : paiement\)/);
+});
+
 test('un clic sur « Demander avant d’agir » revient au mode d’avant, puis un clic rallume le YOLO', async () => {
   const { root, requests, refreshed } = mount({ bots, yolo: yolo() });
   const ask = all(root).find(e => e.dataset.yoloMode === 'ask');

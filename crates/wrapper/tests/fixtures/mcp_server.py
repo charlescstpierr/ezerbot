@@ -50,6 +50,11 @@ for line in sys.stdin:
                 {"name": name, "description": "Action protégée du connecteur fictif.", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}
                 for name in ("send_email", "post_message", "create_comment", "delete_file", "sendEmail", "deleteFile", "chat.postMessage", "echo")
             ]
+        if mode == "payments":
+            tools = [
+                {"name": name, "description": "Action du connecteur de caisse fictif.", "inputSchema": {"type": "object", "properties": {}}}
+                for name in ("create_payment", "transfer_funds", "list_payments")
+            ]
         result = {"tools": tools}
         if mode == "change-during-list" and not changed:
             changed = True
@@ -94,6 +99,10 @@ for line in sys.stdin:
                 result["structuredContent"] = {"value": int(os.environ["NUMERIC_TOKEN"])}
         elif name == "addition":
             result = {"content": [{"type": "text", "text": str(args.get("a", 0) + args.get("b", 0))}]}
+        elif name in ("create_payment", "transfer_funds", "list_payments"):
+            with open(os.environ["CALL_LOG"], "a") as calls:
+                calls.write(name + "\n")
+            result = {"content": [{"type": "text", "text": name}]}
         elif name in ("send_email", "post_message", "create_comment", "delete_file", "sendEmail", "deleteFile", "chat.postMessage"):
             result = {"content": [{"type": "text", "text": f"{name}:{args.get('text', '')}"}]}
         else:

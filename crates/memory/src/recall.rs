@@ -110,11 +110,124 @@ pub fn search_scored(
     Ok(ranked)
 }
 
+/// Private topics that make a fact personal wherever it appears, even next to work
+/// vocabulary. Matched on word prefixes of the folded text (`salaire` covers
+/// `salaires`, `anxie` covers `anxiete`/`anxiety`). Over-matching only costs an
+/// abstention; a miss would preselect a private fact.
+const PRIVATE_STEMS: &[&str] = &[
+    // money, banking, debt
+    "salaire",
+    "salary",
+    "salaries",
+    "wage",
+    "remuneration",
+    "revenu",
+    "income",
+    "bonus",
+    "gagn",
+    "earn",
+    "euro",
+    "dollar",
+    "usd",
+    "solde",
+    "bancaire",
+    "banque",
+    "bank",
+    "dette",
+    "debt",
+    "loyer",
+    "rent",
+    "hypotheque",
+    "mortgage",
+    "impot",
+    "financ",
+    "epargne",
+    "savings",
+    "heritage",
+    "inheritance",
+    // health and body
+    "anxie",
+    "depress",
+    "therap",
+    "traitement",
+    "treatment",
+    "medicament",
+    "insulin",
+    "ordonnance",
+    "prescri",
+    "pilule",
+    "medication",
+    "diagnos",
+    "maladie",
+    "illness",
+    "disease",
+    "cancer",
+    "allergi",
+    "enceinte",
+    "pregnan",
+    "handicap",
+    "disabilit",
+    "burnout",
+    "insomni",
+    "sommeil",
+    "dors",
+    "psych",
+    "chronic",
+    "chronique",
+    // intimate life and identity
+    "liaison",
+    "amant",
+    "divorce",
+    "conjoint",
+    "epoux",
+    "epouse",
+    "spouse",
+    "husband",
+    "wife",
+    "mari",
+    "amoureu",
+    "sexuel",
+    "sexual",
+    "religion",
+    "intime",
+    "intimate",
+    "naissance",
+    // identity documents and secrecy
+    "passeport",
+    "passport",
+    "assurance",
+    "insurance",
+    "confidenti",
+    "secret",
+    "prive",
+];
+
+/// First-person possessives. "Mon salaire chez l'entreprise" is a private matter that
+/// merely cites the job, while "Je travaille sur le projet Atlas" is plain work: only
+/// possession makes a work fact ambiguous. Pronouns alone are too common in work
+/// facts to abstain on.
+const FIRST_PERSON_POSSESSIVES: &[&str] = &["mon", "ma", "mes", "my", "mine"];
+
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !c.is_alphanumeric())
+}
+
+fn has_private_topic(text: &str) -> bool {
+    words(text).any(|word| PRIVATE_STEMS.iter().any(|stem| word.starts_with(stem)))
+}
+
+fn claims_possession(text: &str) -> bool {
+    words(text).any(|word| FIRST_PERSON_POSSESSIVES.contains(&word))
+}
+
 /// Conservative local classification, not a claim about Grok's server sorter.
-/// Unknown/personal facts are never preselected; explicit consent still wins.
+/// A personal signal always beats a work signal; a work fact with a first-person
+/// possessive abstains in `review`. Unknown/personal facts are never preselected; explicit
+/// consent still wins.
 pub fn sharing_class(fact: &Fact) -> &'static str {
     let text = normalize(&fact.text);
     if fact.sensitive
+        || has_private_topic(&text)
         || [
             "famille",
             "enfant",
@@ -156,7 +269,11 @@ pub fn sharing_class(fact: &Fact) -> &'static str {
     .iter()
     .any(|s| text.contains(s))
     {
-        "work"
+        if claims_possession(&text) {
+            "review"
+        } else {
+            "work"
+        }
     } else {
         "review"
     }
@@ -194,6 +311,45 @@ mod tests {
         f.sensitive = true;
         f.text = "Projet Atlas".into();
         assert_eq!(sharing_class(&f), "personal");
+    }
+    /// Invented outside `sharing-class.json`: the rule must hold on private facts
+    /// worded differently from the evaluation set, not only on its ten leaks.
+    #[test]
+    fn private_paraphrases_with_work_words_are_never_preselected() {
+        let mut f = fact(1, "a");
+        for text in [
+            "Ma rémunération mensuelle dépasse celle de mon chef d'équipe.",
+            "I earn a salary higher than my team lead.",
+            "Ma thérapie hebdomadaire passe avant la réunion client.",
+            "Je suis en arrêt maladie pendant la sortie du produit.",
+            "Je gagne 4200 euros par mois dans cette entreprise.",
+            "Je prends de l'insuline avant la réunion client.",
+            "I am anxious about telling the team about my pregnancy.",
+            "Mon époux et moi vivons séparés, le projet n'en sait rien.",
+            "Ma situation financière est tendue avant la release.",
+            "Sa dette envers la banque inquiète toute l'équipe.",
+            "I struggle with debt while the project ships.",
+            "Mes revenus complémentaires ne concernent pas l'entreprise.",
+            // No private-topic word at all: the first-person job mention abstains.
+            "Mon avocat s'occupe d'un litige qui touche le projet.",
+            "Je cache une situation difficile à mon équipe.",
+        ] {
+            f.text = text.into();
+            assert_ne!(sharing_class(&f), "work", "{text}");
+        }
+    }
+    #[test]
+    fn impersonal_work_facts_stay_preselected() {
+        let mut f = fact(1, "a");
+        for text in [
+            "Le projet Atlas utilise Rust.",
+            "L'équipe relit les modifications chaque matin.",
+            "The release requires a signed artifact.",
+            "Je travaille sur le projet Boréal.",
+        ] {
+            f.text = text.into();
+            assert_eq!(sharing_class(&f), "work", "{text}");
+        }
     }
     #[test]
     fn recall_matches_decomposed_accents_and_ligatures() {

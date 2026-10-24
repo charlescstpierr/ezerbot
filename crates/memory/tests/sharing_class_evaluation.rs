@@ -1,6 +1,6 @@
 //! Offline measurement only: labels describe intended sharing, not keyword output.
-//! Run with `--nocapture` for the report; the opt-in zero-leak check exposes the
-//! known baseline failure without changing or blessing the production heuristic.
+//! Run with `--nocapture` for the report; the zero-leak check is a normal test
+//! (#267) and fails on any personal or sensitive fact preselected as work.
 use grokbot_engine::contracts::with_tx;
 use grokbot_memory::{
     facts::{self, Fact, FactStatus, Provenance, Scope, Source},
@@ -325,7 +325,6 @@ fn promotion_keeps_every_sensitive_corpus_fact_private() {
 }
 
 #[test]
-#[ignore = "Baseline leaks tracked in #267; opt-in safety target, see docs/memory-sharing-evaluation.md"]
 fn zero_personal_or_sensitive_facts_preselected() {
     let cases = corpus();
     let metrics = Metrics::evaluate(&cases);

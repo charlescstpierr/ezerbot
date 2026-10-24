@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Démarrage du moteur sur une base avec historique (#302).
 
-Sème une base de N conversations × M envois `/api/send` (transport simulé,
-aucun LLM) avec le premier binaire, puis chronomètre des redémarrages à froid
+Sème une base de N conversations × M envois `/api/send` avec le premier
+binaire, puis chronomètre des redémarrages à froid
 sur des copies identiques de cette base : du `spawn` jusqu'à l'annonce
 `{"url": …}` et jusqu'au premier `GET /api/ping` = 200. Chaque redémarrage
 vérifie ensuite qu'un envoi passe. Avec plusieurs `--bin`, les passes
 alternent les binaires (A B A B …) pour que la dérive de la machine ne
 favorise aucun côté. Une référence base vide est mesurée de la même façon.
+
+Comme le protocole de l'issue, le binaire release tourne sans compte ni LLM :
+chaque envoi écrit sa soumission, son message et sa run, et la run se termine
+en `failed` (`signin_required`). Le script affiche les runs par statut. Les
+runs étant terminées, la reprise de runs interrompues n'est pas chronométrée
+ici ; les tests `crash_recovery` et `orchestrated_crash` la couvrent.
 
     cargo build --release --locked -p grokbot-wrapper
     python3 tools/bench/startup-history.py --bin target/release/grokbot-wrapper
@@ -23,6 +29,7 @@ import http.client
 import json
 import os
 import platform
+import select
 import shutil
 import signal
 import sqlite3
@@ -33,10 +40,11 @@ import tempfile
 import time
 
 BODY = "Peux-tu m'aider à préparer la réunion de demain ? " * 4
+START_LIMIT_S = 60
 
 
-def request(port, method, path, body=None):
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=120)
+def request(port, method, path, body=None, timeout=120):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     headers = {"Host": f"127.0.0.1:{port}"}
     if method != "GET":
         headers.update(
@@ -62,23 +70,29 @@ def start(binary, db):
         stderr=subprocess.DEVNULL,
         text=True,
     )
-    line = process.stdout.readline()
-    announced = time.perf_counter()
-    if not line:
-        process.wait()
-        raise RuntimeError(f"{binary} s'est arrêté sans annoncer d'URL")
-    port = int(json.loads(line)["url"].rsplit(":", 1)[1])
-    deadline = announced + 30
-    while True:
-        try:
-            status, _ = request(port, "GET", "/api/ping")
-            if status == 200:
-                break
-        except OSError:
-            pass
-        if time.perf_counter() > deadline:
-            stop(process)
-            raise RuntimeError("/api/ping n'a pas répondu 200 en 30 s")
+    try:
+        ready, _, _ = select.select([process.stdout], [], [], START_LIMIT_S)
+        if not ready:
+            raise RuntimeError(f"{binary} n'a pas annoncé d'URL en {START_LIMIT_S} s")
+        line = process.stdout.readline()
+        announced = time.perf_counter()
+        if not line:
+            raise RuntimeError(f"{binary} s'est arrêté sans annoncer d'URL")
+        port = int(json.loads(line)["url"].rsplit(":", 1)[1])
+        deadline = announced + START_LIMIT_S
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                raise RuntimeError(f"/api/ping n'a pas répondu 200 en {START_LIMIT_S} s")
+            try:
+                status, _ = request(port, "GET", "/api/ping", timeout=remaining)
+                if status == 200:
+                    break
+            except OSError:
+                pass
+    except BaseException:
+        stop(process)
+        raise
     pinged = time.perf_counter()
     return process, port, (announced - started) * 1000, (pinged - started) * 1000
 
@@ -125,6 +139,14 @@ def seed(binary, db, conversations, messages):
 def count(db, table):
     with sqlite3.connect(db) as connection:
         return connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+
+
+def runs_by_status(db):
+    with sqlite3.connect(db) as connection:
+        rows = connection.execute(
+            "SELECT status, count(*) FROM engine_runs GROUP BY status ORDER BY status"
+        ).fetchall()
+    return " ".join(f"{status}={n}" for status, n in rows) or "aucune"
 
 
 def copy_db(source, directory):
@@ -201,6 +223,7 @@ def main():
             f"engine_runs={count(source, 'engine_runs')} "
             f"engine_run_events={count(source, 'engine_run_events')}"
         )
+        print(f"runs par statut: {runs_by_status(source)}")
         print(machine())
 
         history = {binary: ([], []) for binary in binaries}

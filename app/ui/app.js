@@ -233,7 +233,7 @@
       conversation.messages.push({id:messageId,role:"user",body:text,state:"queued",created_at:new Date().toISOString()});
       render(true);
       try {
-        const response = await api("/api/send", {conversation_id:conversationId,message_id:messageId,body:text});
+        const response = await api("/api/send", {conversation_id:conversationId,message_id:messageId,body:text,voice:true});
         upsertConversation(response.conversation); render(true); schedulePoll();
         return messageId;
       } catch (error) {

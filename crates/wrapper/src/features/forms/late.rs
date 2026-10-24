@@ -44,6 +44,19 @@ fn follow_up_run(request_id: &str) -> String {
     format!("late-{}", &digest[..32])
 }
 
+/// The turn that posted the card a follow-up turn answers; `None` for any other turn.
+pub(super) fn origin_run(conn: &Connection, run_id: &str) -> Option<String> {
+    let request_id: String = conn
+        .query_row(
+            "SELECT request_id FROM wrapper_late_approvals WHERE run_id=?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()??;
+    requests::get(conn, &request_id).ok()?.map(|r| r.run_id)
+}
+
 /// Called with every resolution: a detached card that was just allowed or refused gets
 /// its follow-up turn recorded in the same transaction as the decision.
 pub(super) fn record_decision(

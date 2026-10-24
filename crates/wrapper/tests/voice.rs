@@ -1140,3 +1140,62 @@ fn mute_and_the_pause_of_a_waiting_card_are_independent() {
     assert_eq!(resumed["paused"], false);
     assert_eq!(resumed["muted"], true, "resume never unmutes");
 }
+
+fn mode_says(f: &mut Fixture, text: &str) -> Value {
+    f.post(
+        MODE,
+        json!({"command":"speak","token":"m","text":text,"voice":"fake-fr-CA","speed":1.0,"barge":0}),
+    )
+}
+fn heard_and_cut(status: &Value) -> (Value, Value) {
+    (status["speech_heard"].clone(), status["speech_cut"].clone())
+}
+
+#[test]
+fn each_sentence_has_a_number_and_the_status_names_the_last_heard_and_the_last_cut() {
+    let mut f = Fixture::new();
+    f.post(MODE, json!({"command":"start","token":"m"}));
+    assert_eq!(mode_says(&mut f, "La tâche est terminée.")["speech_id"], 1);
+    assert_eq!(mode_says(&mut f, "Et la suite.")["speech_id"], 2);
+    mode(&mut f, "pause");
+    assert_eq!(heard_and_cut(&mode(&mut f, "status")), (json!(0), json!(0)));
+    let cut = f.post(MODE, json!({"command":"feed","token":"m","text":"Attends"}));
+    assert_eq!(
+        heard_and_cut(&cut),
+        (json!(0), json!(1)),
+        "a paused sentence is not heard: the cut names it, and drops the one behind it"
+    );
+    mode(&mut f, "resume");
+    let stale = f.post(
+        MODE,
+        json!({"command":"speak","token":"m","text":"Trop tard.","voice":"fake-fr-CA","speed":1.0,"barge":0}),
+    );
+    assert_eq!(
+        stale["speech_id"],
+        Value::Null,
+        "a refused sentence has no number"
+    );
+    let third = f.post(
+        MODE,
+        json!({"command":"speak","token":"m","text":"Ensuite.","voice":"fake-fr-CA","speed":1.0,"barge":1}),
+    );
+    assert_eq!(third["speech_id"], 3);
+    assert_eq!(
+        heard_and_cut(&mode(&mut f, "finish_speech")),
+        (json!(3), json!(1))
+    );
+    f.post(
+        MODE,
+        json!({"command":"speak","token":"m","text":"Encore.","voice":"fake-fr-CA","speed":1.0,"barge":1}),
+    );
+    assert_eq!(
+        heard_and_cut(&mode(&mut f, "interrupt")),
+        (json!(3), json!(4))
+    );
+    mode(&mut f, "cancel");
+    assert_eq!(
+        heard_and_cut(&f.post(MODE, json!({"command":"start","token":"n"}))),
+        (json!(0), json!(0)),
+        "a new session counts again"
+    );
+}

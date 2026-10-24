@@ -569,6 +569,42 @@ fn a_command_approved_after_its_turn_ended_runs_once_and_the_bot_reports_it() {
     assert_eq!(runs, 1);
 }
 #[test]
+fn a_voice_message_keeps_its_short_answer_in_the_turn_opened_by_a_late_approval() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.post(
+        "/api/approvals/waiting",
+        json!({"task":true,"chat":true,"validity":"24h","reminder":"1h"}),
+    );
+    let command = format!("printf x >> {}", f.root().join("voice-marker").display());
+    f.script(vec![json!({"type":"response.output_item.done","item":{"id":"fc-voice","type":"function_call","status":"completed","call_id":"voice","name":"run_shell","arguments":f.shell(&command).to_string()}}),json!({"type":"response.completed"})]);
+    f.reply("J’attends son accord.");
+    f.post(
+        "/api/send",
+        json!({"conversation_id":f.chat,"message_id":"voice","body":"Lance cette commande","voice":true}),
+    );
+    f.finish("voice");
+    let card = requests::list_for_run(&f.db(), &f.run("voice").run_id)
+        .unwrap()
+        .remove(0);
+    f.reply("C’est fait.");
+    f.decide(&card, json!("allow_once"));
+    let follow: String = f
+        .db()
+        .query_row(
+            "SELECT run_id FROM engine_runs WHERE run_id LIKE 'late-%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    f.finish(&follow);
+    let bodies = f.server.seen.lock().unwrap().bodies.clone();
+    let body = bodies.last().unwrap().to_string();
+    assert!(body.contains("Charles a approuvé : run_shell"), "{body}");
+    assert!(body.contains("une ou deux phrases"), "{body}");
+    assert!(body.contains("check_delegations avec portee"), "{body}");
+}
+#[test]
 fn an_app_data_listing_approved_after_its_turn_ended_runs_in_the_follow_up_turn() {
     let mut f = Fixture::new();
     f.settings(false, true);

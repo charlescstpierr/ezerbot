@@ -48,7 +48,7 @@ async function harness({ refuse = null, opened = ["c1"] } = {}) {
     },
   };
   const context = vm.createContext({ window: { GrokbotPanels: panels }, document, setInterval: () => 0, JSON, Number, String, Date, Promise, Object, Array, Boolean, Math, Set, Map });
-  for (const file of ["memory-detail.js", "memory-graph.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
+  for (const file of ["memory-detail.js", "memory-filter.js", "memory-graph.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
   const settle = async () => { for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
   Element.active = null;
   registered[0].onState({ bots: [{ id: "grokbot", name: "Ezerbot" }, { id: "chef", name: "Chef" }], memory_auto: { revision: 1 } }, {});
@@ -61,6 +61,16 @@ async function harness({ refuse = null, opened = ["c1"] } = {}) {
     point: (id) => main.querySelector(`.memory-graph-point[data-id="${id}"]`),
     item: (id) => main.querySelector(`.memory-space-item[data-fact-id="${id}"]`),
     panel: () => main.querySelector(".memory-detail"),
+    // La barre de filtres de #262 : on la pilote par ses champs, comme l'utilisateur.
+    filter: {
+      field: (label) => main.querySelector(`[aria-label="${label}"]`),
+      search(text) { const field = h.filter.field("Rechercher un souvenir"); field.value = text; field.fire("input"); },
+      bot(id) { const field = h.filter.field("Filtrer par bot"); field.value = id; field.fire("change"); },
+      count: () => main.querySelector(".memory-filter-count").textContent,
+    },
+    lit: () => main.querySelectorAll(".memory-graph-point").filter((point) => point.classes.includes("is-match")).map((point) => point.attributes["data-id"]),
+    title: () => nodes["conversation-title"].textContent,
+    empty: () => main.querySelector(".memory-space-empty")?.textContent,
     open: () => !h.panel().hidden,
     text: (cls) => h.panel().querySelector(`.memory-detail-${cls}`).textContent,
     cells: () => h.panel().querySelectorAll("dd").map((dd) => dd.textContent),
@@ -229,6 +239,64 @@ test("Oublier demande confirmation ; annuler ne change rien ; confirmer retire l
   assert.deepEqual([h.points(), h.open(), h.point("f1")], [2, false, null]);
   h.tab("list");
   assert.deepEqual([h.items(), h.item("f1")], [2, null]);
+});
+
+test("filtre actif : le clic sur un point mis en avant (ou sur son texte) ouvre le détail ; un souvenir qui sort du filtre garde son panneau", async () => {
+  const h = await harness();
+  h.tab("graph");
+  h.filter.search("midi");
+  assert.deepEqual([h.lit(), h.filter.count()], [["f2"], "1 souvenir sur 3"]);
+  // Le texte de l'étiquette est un enfant du point : un clic dessus remonte jusqu'au point qui ouvre le détail.
+  const label = h.point("f2").querySelector(".memory-graph-label");
+  assert.equal(label.textContent, "L’équipe déjeune à…", "le texte raccourci de #262");
+  assert.equal(h.point("f2").children.includes(label), true);
+  h.point("f2").click();
+  assert.deepEqual([h.open(), h.text("text"), h.point("f2").classes.includes("is-selected")], [true, "L’équipe déjeune à midi", true]);
+  // Le filtre change et le souvenir choisi n'y est plus : le panneau reste (on y lit ou on y écrit), le filtre ne ferme rien.
+  h.filter.search("café");
+  assert.deepEqual([h.lit(), h.open(), h.text("text")], [["f1"], true, "L’équipe déjeune à midi"]);
+  assert.equal(h.point("f2").classes.includes("is-selected"), true, "le point choisi reste marqué, même estompé");
+  h.tab("list");
+  assert.deepEqual([h.items(), h.item("f2"), h.open()], [1, null, true], "la Liste ne garde que les résultats ; le panneau reste ouvert");
+  h.filter.search("");
+  assert.equal(h.item("f2").classes.includes("is-selected"), true, "sans filtre, la ligne retrouve sa marque");
+  h.filter.search("zzz");
+  assert.deepEqual([h.empty(), h.open()], ["Aucun souvenir ne correspond à ces filtres.", true], "zéro résultat : le message, et le panneau reste");
+  h.button("Fermer").click();
+  assert.equal(h.open(), false);
+});
+
+test("filtre actif : après Oublier ou Modifier, le compteur « N souvenirs sur M », le titre et la mise en avant se mettent à jour", async () => {
+  const h = await harness();
+  h.tab("graph");
+  h.filter.bot("chef");
+  assert.deepEqual([h.lit(), h.filter.count(), h.title()], [["f2", "f3"], "2 souvenirs sur 3", "Mémoire · 3 souvenirs"]);
+  h.point("f2").click();
+  h.button("Modifier").click();
+  await h.type("Enregistrer", "Déjeuner à 13 h");
+  assert.deepEqual(h.mutations(), [["/api/memory/correct", { bot_id: "chef", fact_id: "f2", text: "Déjeuner à 13 h" }]]);
+  assert.deepEqual([h.lit().sort(), h.filter.count(), h.text("text")], [["f3", "n1"], "2 souvenirs sur 3", "Déjeuner à 13 h"], "le souvenir corrigé garde son filtre de bot et son panneau");
+  h.filter.search("13 h");
+  assert.deepEqual([h.lit(), h.filter.count()], [["n1"], "1 souvenir sur 3"]);
+  h.button("Oublier…").click();
+  h.button("Oublier ce souvenir").click();
+  await h.settle();
+  assert.deepEqual(h.mutations().at(-1), ["/api/memory/forget", { bot_id: "chef", fact_id: "n1" }]);
+  assert.deepEqual([h.open(), h.filter.count(), h.title(), h.points(), h.empty()], [false, "0 souvenir sur 2", "Mémoire · 2 souvenirs", 0, "Aucun souvenir ne correspond à ces filtres."]);
+  h.filter.search("");
+  assert.deepEqual([h.lit(), h.points(), h.filter.count()], [["f3"], 2, "1 souvenir sur 2"], "bot « chef » seul : il ne reste que le souvenir de sujet");
+});
+
+test("filtre actif : un souvenir de sujet trouvé par le filtre s'oublie par la route des sujets", async () => {
+  const h = await harness();
+  h.filter.search("garde");
+  assert.deepEqual([h.items(), h.filter.count()], [1, "1 souvenir sur 3"]);
+  h.item("f3").click();
+  h.button("Oublier…").click();
+  h.button("Oublier ce souvenir").click();
+  await h.settle();
+  assert.deepEqual(h.mutations(), [["/api/topics/memory/forget", { fact_id: "f3" }]]);
+  assert.deepEqual([h.items(), h.filter.count(), h.open()], [0, "0 souvenir sur 2", false]);
 });
 
 test("un souvenir de sujet s'oublie par /api/topics/memory/forget, sans Modifier ; l'erreur d'oubli garde le souvenir", async () => {

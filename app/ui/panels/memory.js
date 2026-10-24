@@ -136,7 +136,7 @@
       const sourceFilter = node("select", "text-input"); sourceFilter.setAttribute("aria-label", "Filtrer la source");
       for (const [value, text] of [["", "Toutes les sources"], ["automatic", "Automatique"], ["user_stated", "Déclaré"], ["model_inferred", "Déduit"], ["imported", "Importé"]]) { const opt = node("option", "", text); opt.value = value; sourceFilter.append(opt); }
       filters.append(search, scopeFilter, sourceFilter);
-      const normalize = (text) => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("fr");
+      const normalize = window.EzerbotMemoryFilter.normalize; // la même que la recherche de l'écran Mémoire (memory-filter.js)
       function visible() { return facts.filter((f) => (!scopeFilter.value || f.scope === scopeFilter.value) && (!sourceFilter.value || f.provenance?.source === sourceFilter.value) && normalize(f.text).includes(normalize(search.value.trim()))); }
       search.addEventListener("input", render); scopeFilter.addEventListener("change", render); sourceFilter.addEventListener("change", render);
       const profile = node("details", "memory-profile");

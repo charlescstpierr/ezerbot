@@ -18,10 +18,37 @@
   };
   let ctx, token = "", settingsToken = "", conversationId, scopeKey, reader, epoch = 0, timer, ticking = false;
   const contextKey = context => context.conversation?.id || `new:${context.bot?.id || "grokbot"}`;
-  let button, bar, label, transcript, heldNotice, stop, leave, systemSettings;
+  let button, bar, label, transcript, heldNotice, stop, mute, leave, systemSettings;
   let phase = "idle", detail = "", liveText = "", lastUtterance = 0, lastBarge = 0, paused = false, sending = false;
+  // `muted` is the bridge's, as its latest answer said: the screen never guesses it. One mute/unmute command flies at a time
+  // (`muting`, the id of that command); a status read that started before it ended is older than the command (`reads`) and says nothing about `muted`.
+  // A command with no answer after `commandLimit` (50 polls) is over: its answer, if it comes, is dropped and the next status says `muted`.
+  // `requested` is the microphone asked at the start, the one a fallback says is gone; `fellBack` says so once per session.
+  const commandLimit = 5000;
+  let muted = false, muting = false, commands = 0, reads = 0, requested = "", fellBack = false;
+  const noteFallback = answer => {
+    if (!answer.microphone_fallback || answer.muted || fellBack) return;
+    fellBack = true; window.EzerbotMicrophone?.fellBack(requested);
+  };
   let inputHeld = false, followResumedReply = false;
   let voicesLoaded = false;
+  // A sub-task of this thread that ended (its card in the thread, already polled) is told once per session.
+  // `announcing` is its sentence in the bridge (`speech`, and `cut`, the last cut when it was queued): told only
+  // once the bridge read that sentence to the end, told again when a cut drops it. `owed` holds every announcement
+  // sent and not yet heard to the end (cut, failure, a session left): a new session says them again.
+  // Announcements the bar shows queue up, each for its 5 s.
+  // Charles is heard when `barged` moves or words come in: the silence starts after that.
+  let toldTasks = new Set(), announcements = [], announcing = null, heardAt = -Infinity;
+  const owed = new Set();
+  const ANNOUNCEMENT_MS = 5000, SILENCE_MS = 1500;
+  const endedTasks = () => (ctx?.conversation?.messages || []).filter(message => message.kind === "delegation"
+    && ["done","failed","refused"].includes(message.payload?.status?.status)).map(message => message.payload);
+  const taskTitle = edge => { const line = String(edge.objective || "").split("\n")[0].trim(); return line.length > 80 ? `${line.slice(0,79).trimEnd()}…` : line; };
+  const announcementText = edge => `La tâche « ${taskTitle(edge)} » ${edge.status.status === "done" ? "est terminée" : "a échoué"}.`;
+  const announced = () => {
+    announcements = announcements.filter(shown => Date.now() < shown.until);
+    return announcements.length && ["listening","thinking","speaking"].includes(phase) ? announcements[0].text : "";
+  };
   const botViews = new Set();
   const noVoice = {voice:"",speed:1,language:"",chosen:false};
   // Each bot speaks with its own voice, speed and language, whichever conversation it is in.
@@ -43,13 +70,20 @@
     button.setAttribute("aria-pressed", String(active()));
     button.title = window.EzerbotVoiceCall?.active?.() && !active() ? "Indisponible pendant l’appel vocal" : panels.meetingActive?.() && !active() ? "Indisponible pendant l’enregistrement d’une réunion" : button.disabled ? "Ouvrez une conversation pour utiliser le mode voix" : "Mode voix · parler et écouter les réponses sur ce Mac";
     bar.hidden = phase === "idle";
-    label.textContent = detail || ({authorizing:"Autorisation du microphone…",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:"En attente de vous · répondez dans la carte",sending:"Envoi de la transcription…"}[phase] || "");
-    bar.dataset.phase = phase;
+    // A muted microphone wins over the listening and speaking labels and an announcement: none says the bot cannot hear.
+    const shown = muted && ["listening","speaking"].includes(phase) ? "muted" : phase;
+    label.textContent = detail || (shown !== "muted" && announced()) || ({authorizing:"Autorisation du microphone…",muted:"Micro coupé · le bot ne vous entend pas",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:`En attente de vous · répondez dans la carte${muted ? " · micro coupé" : ""}`,sending:"Envoi de la transcription…"}[shown] || "");
+    bar.dataset.phase = shown;
     bar.dataset.tone = detail ? "danger" : "";
-    transcript.textContent = liveText || "Votre transcription apparaîtra ici. L’audio reste sur ce Mac.";
-    transcript.hidden = Boolean(detail) && !liveText;
+    transcript.textContent = muted ? "" : liveText || "Votre transcription apparaîtra ici. L’audio reste sur ce Mac.";
+    transcript.hidden = muted || Boolean(detail) && !liveText;
     transcript.scrollTop = transcript.scrollHeight;
     heldNotice.hidden = !inputHeld || !window.GrokbotChat.voiceNeedsAction(ctx.conversation?.messages || []);
+    mute.hidden = !active();
+    mute.disabled = phase === "authorizing";
+    mute.setAttribute("aria-pressed", String(muted));
+    const muteName = muted ? "Réactiver le micro" : "Couper le micro";
+    mute.setAttribute("aria-label", muteName); mute.title = `${muteName} (⌘⇧M)`;
     stop.hidden = !active() || !["speaking","thinking","sending"].includes(phase);
     leave.textContent = active() ? "Quitter" : "Fermer";
     systemSettings.hidden = !["mic_denied","speech_denied","offline_unavailable"].includes(phase);
@@ -60,7 +94,7 @@
     clearTimeout(timer); epoch++;
     if (token) bridge("cancel").catch(() => {});
     token = ""; reader = null; conversationId = null; sending = false; paused = false;
-    inputHeld = false; followResumedReply = false;
+    inputHeld = false; followResumedReply = false; muted = muting = false; announcements = []; announcing = null;
     if (clear) { phase = "idle"; detail = ""; liveText = ""; scopeKey = null; }
     render(); panels.composerChanged();
   }
@@ -85,6 +119,25 @@
     phase = "listening"; render();
     await receipt;
   }
+  async function toggleMute() {
+    if (!active() || phase === "authorizing" || muting) return;
+    const rev = epoch;
+    const mine = muting = ++commands, limit = setTimeout(() => { if (muting === mine) { muting = false; reads++; } }, commandLimit);
+    reads++;
+    try {
+      let answer;
+      // A refused command changed nothing: the bridge's status says what it still is.
+      try { answer = await bridge(muted ? "unmute" : "mute"); }
+      catch (error) { panels.notify(error.message); answer = await bridge("status"); }
+      if (rev !== epoch || muting !== mine) return;
+      noteFallback(answer);
+      if (errors[answer.status]) { fail(answer.status); return; }
+      muted = Boolean(answer.muted);
+      if (muted) liveText = "";
+      render();
+    } finally { clearTimeout(limit); if (rev === epoch && muting === mine) { muting = false; reads++; } }
+  }
+  const muteToggled = () => toggleMute().catch(error => panels.notify(error.message));
   async function interrupt() {
     if (!active()) return;
     await stopSpeech();
@@ -98,14 +151,15 @@
     token = crypto.randomUUID(); settingsToken = token; conversationId = ctx.conversation?.id; scopeKey = contextKey(ctx);
     reader = window.GrokbotChat.createVoiceReader(ctx.conversation?.messages || []);
     phase = "authorizing"; detail = ""; liveText = ""; lastUtterance = 0; lastBarge = 0; paused = false;
-    inputHeld = false; followResumedReply = false;
+    inputHeld = false; followResumedReply = false; muted = muting = fellBack = false; announcements = []; announcing = null; heardAt = -Infinity;
+    toldTasks = new Set(endedTasks().filter(edge => !owed.has(edge.id)).map(edge => edge.id));
     const rev = ++epoch;
     render(); panels.composerChanged();
     try {
-      const requested = window.EzerbotMicrophone?.current() ?? "";
+      requested = window.EzerbotMicrophone?.current() ?? "";
       const result = await bridge("start", {microphone:requested});
       if (rev !== epoch) return;
-      if (result.microphone_fallback) window.EzerbotMicrophone?.fellBack(requested);
+      noteFallback(result);
       if (errors[result.status]) { fail(result.status); return; }
       phase = result.status; render(); schedule(rev);
     } catch (error) { if (rev === epoch) fail("failed", error.message); }
@@ -131,15 +185,22 @@
     if (ticking) { schedule(rev); return; }
     ticking = true;
     try {
-      const result = await bridge("status");
+      const seq = ++reads, result = await bridge("status");
       if (rev !== epoch) return;
+      if (announcing && result.token === token) {
+        if (result.speech_cut > announcing.cut && result.speech_cut <= announcing.speech) {
+          toldTasks.delete(announcing.id); announcements = announcements.filter(shown => shown !== announcing.shown); announcing = null;
+        } else if (result.speech_heard >= announcing.speech) { owed.delete(announcing.id); announcing = null; }
+      }
+      noteFallback(result);
       if (errors[result.status] || result.status === "idle") { fail(result.status); return; }
       if (result.status === "authorizing") { phase = "authorizing"; render(); return; }
       if (result.token !== token) { fail("stale"); return; }
-      if (result.transcript) liveText = result.transcript;
+      if (!muting && seq === reads) muted = Boolean(result.muted);
+      if (muted) liveText = ""; else if (result.transcript) { liveText = result.transcript; heardAt = Date.now(); }
       const needsAction = window.GrokbotChat.voiceNeedsAction(ctx.conversation?.messages || []);
       if (result.barged > lastBarge) {
-        lastBarge = result.barged;
+        lastBarge = result.barged; heardAt = Date.now();
         // Speaking is not a decision on an approval/form/secret card.
         if (!needsAction) { reader.interrupt(ctx.conversation?.messages || []); await stopRun(); }
         if (rev !== epoch) return;
@@ -176,6 +237,19 @@
         panels.followVoiceReply?.(conversationId);
       }
       const thinking = (ctx.conversation?.messages || []).some(pendingReply);
+      const ended = !announcing && !needsAction && !result.speaking && !result.transcript && !chunks.length && Date.now() - heardAt >= SILENCE_MS
+        ? endedTasks().findLast(edge => !toldTasks.has(edge.id)) : null;
+      if (ended) {
+        const text = announcementText(ended), settings = botVoice();
+        owed.add(ended.id);
+        const receipt = await bridge("speak", {text,voice:settings.voice,speed:settings.speed,language:settings.language,barge:lastBarge});
+        if (rev !== epoch) return;
+        if (errors[receipt.status]) { fail(receipt.status); return; }
+        if (receipt.speech_id) {
+          const shown = {text, until:Math.max(Date.now(), announcements.at(-1)?.until ?? 0) + ANNOUNCEMENT_MS};
+          toldTasks.add(ended.id); announcements.push(shown); announcing = {id:ended.id, speech:receipt.speech_id, cut:receipt.speech_cut, shown};
+        }
+      }
       phase = needsAction ? "waiting" : result.speaking || chunks.length ? "speaking" : thinking ? "thinking" : "listening";
       render();
     } catch (error) { if (rev === epoch) fail("failed",error.message); }
@@ -269,14 +343,21 @@
         bar = el("section","voice-session-bar"); bar.setAttribute("aria-label","Conversation vocale");
         const row = el("div","voice-session-row"); label = el("strong","voice-session-state"); label.setAttribute("role","status");
         stop = el("button","attachment-retry","Interrompre"); stop.type = "button"; stop.onclick = () => interrupt().catch(error => fail("failed",error.message));
+        mute = el("button","icon-button voice-mute-toggle"); mute.type = "button"; mute.setAttribute("aria-keyshortcuts","Meta+Shift+M");
+        mute.innerHTML = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/><path class="voice-mute-slash" d="M3 3l18 18"/></svg>';
+        mute.onclick = muteToggled;
         leave = el("button","attachment-retry","Quitter"); leave.type = "button"; leave.onclick = () => exit();
         systemSettings = el("button","attachment-retry","Ouvrir Réglages Système"); systemSettings.type = "button"; systemSettings.onclick = () => bridge("settings", {reason:phase}).catch(() => panels.notify("Ouvrez Réglages Système › Confidentialité et sécurité."));
-        row.append(label,stop,leave,systemSettings);
+        row.append(label,mute,stop,leave,systemSettings);
         transcript = el("p","voice-live-transcript");
         heldNotice = el("p","voice-held-notice","Transcription non envoyée : répondez d’abord dans la carte."); heldNotice.setAttribute("role","status");
         bar.append(row,transcript,heldNotice); container.append(bar);
         document.addEventListener("keydown", event => {
           if (event.key === "Escape" && active()) { event.preventDefault(); event.stopImmediatePropagation(); interrupt().catch(error => fail("failed",error.message)); }
+          // ⌘⇧M: free in the app (app.js takes N, F, K, ⇧W; the dictation takes D; the native menu has no M).
+          if (event.metaKey && event.shiftKey && !event.ctrlKey && !event.altKey && !event.repeat && event.key?.toLowerCase() === "m" && active()) {
+            event.preventDefault(); event.stopImmediatePropagation(); muteToggled();
+          }
         },true);
         window.addEventListener("beforeunload", () => exit());
         window.addEventListener("pagehide", () => exit());

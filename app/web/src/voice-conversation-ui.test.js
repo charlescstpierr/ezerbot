@@ -21,18 +21,27 @@ function fixture() {
   const voices=[{id:"v-a",name:"Voix A",language:"fr-CA"},{id:"v-b",name:"Voix B",language:"fr-FR"},{id:"v-en",name:"Voice C",language:"en-US"}];
   const bots={ezerbot:{voice:"v-a",speed:1,language:"",chosen:false},chef:{voice:"v-b",speed:1.8,language:"fr",chosen:true}};
   let context={connected:true,bot:{id:"ezerbot",name:"Ezerbot"},conversation:{id:"chat",messages:[]},state:{voice:{bots,voices,single:false}}};
+  // Like the native bridge: each queued sentence has a number; `speech_heard` is the last one read to the end,
+  // `speech_cut` the first one a cut dropped (with those queued behind it).
+  let queue=[], speeches=0;
+  const cut=()=>{if(queue.length)source.speech_cut=queue[0];queue=[];source.speaking=false;};
   const bridge=async body => {
     calls.push(body);
     if(body.command === "options")return {voices};
-    if(body.command === "start")source={status:scenario || "listening",token:body.token,transcript:"",utterance_id:0,barged:0,...startExtras};
+    if(body.command === "start"){source={status:scenario || "listening",token:body.token,transcript:"",utterance_id:0,barged:0,speech_heard:0,speech_cut:0,...startExtras};queue=[];speeches=0;}
     if(body.command === "speak" && refuseSpeak){refuseSpeak=false;return {status:"tts_unavailable"};}
-    if(body.command === "speak"){source.speaking=true;if(bargeOnSpeak){bargeOnSpeak=false;source.speaking=false;source.barged++;}}
-    if(body.command === "interrupt") { source.speaking=false;source.transcript=""; }
-    if(body.command === "cancel")source.status="idle";
+    if(body.command === "speak" && bargeOnSpeak){bargeOnSpeak=false;cut();source.barged++;return {...source};}
+    if(body.command === "speak"){source.speaking=true;queue.push(++speeches);return {...source,speech_id:speeches};}
+    if(body.command === "interrupt") { cut();source.transcript=""; }
+    if(body.command === "cancel"){cut();source.status="idle";}
     if(body.command === "pause")source.paused=true;
     if(body.command === "resume")source.paused=false;
-    return {...source};
+    return {...source,speaking:Boolean(source.speaking && !source.paused)};
   };
+  // The sentences at the head of the queue are read to the end.
+  const heard=(count=queue.length)=>{source.speech_heard=queue.splice(0,count).at(-1) ?? source.speech_heard;source.speaking=queue.length>0;};
+  // Charles speaks: the native bridge cuts what is queued at his first word.
+  const talk=text=>{source.barged++;source.transcript=text;cut();};
   const panels={
     register(p){ panel=p;p.composer.mount(composer,context);p.onState(context.state,context);},
     composerChanged(){}, notify(text){notices.push(text);}, async refresh(){}, async api(path,body){calls.push({path,...body});if(path==="/api/voice/bot"&&refusal)throw new Error(refusal);if(path==="/api/conversations")return {conversation:{id:"created"}};},
@@ -46,7 +55,7 @@ function fixture() {
     Date:{now:()=>clock},crypto:{randomUUID:()=>"token"},setTimeout(fn){timer=fn;return 1;},clearTimeout(){timer=null;},
   });
   const section=bot=>{const container=new Element("div");const cleanup=panel.botSection(bot,container,context);return {container,cleanup};};
-  return {section,set clock(ms){clock=ms;},set bargeOnSpeak(value){bargeOnSpeak=value;},set refuseSpeak(value){refuseSpeak=value;},set refusal(text){refusal=text;},root,calls,sends,follows,notices,panel,set startExtras(value){startExtras=value;},setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
+  return {section,heard,talk,set clock(ms){clock=ms;},set bargeOnSpeak(value){bargeOnSpeak=value;},set refuseSpeak(value){refuseSpeak=value;},set refusal(text){refusal=text;},root,calls,sends,follows,notices,panel,set startExtras(value){startExtras=value;},setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
     setContext(c){context=c;panel.onState(c.state,c);},tick:async()=>timer?.(),keydown:e=>keydown(e)};
 }
 test("end-to-end voice sends only the recognized utterance once, reads streamed sentences, pauses on approval",async()=>{
@@ -244,7 +253,7 @@ test("a failed or refused task is announced as failed, a cancelled one is not",a
   const f=fixture();const edges=tasksOf(f,task("a","running",{objective:"Trier"}),task("b","running",{objective:"Archiver"}),task("c","running",{objective:"Ranger"}));
   await cls(f.root,"voice-session-toggle").onclick();await f.tick();
   edges[0].status={status:"failed",reason:"x"};edges[1].status={status:"refused",reason:"y"};edges[2].status={status:"cancelled"};
-  for(let i=0;i<3;i++){await f.tick();f.source.speaking=false;}
+  for(let i=0;i<3;i++){await f.tick();f.heard();}
   assert.deepEqual(spoken(f),["La tâche « Archiver » a échoué.","La tâche « Trier » a échoué."]);
 });
 
@@ -300,11 +309,11 @@ test("an announcement that Charles cuts off after the bridge took it is said aga
   await cls(f.root,"voice-session-toggle").onclick();await f.tick();
   edge.status={status:"done",result:"Fait."};await f.tick();
   assert.deepEqual(spoken(f),[phrase]);
-  f.source.barged=1;f.source.speaking=false;f.source.transcript="Attends";await f.tick();
+  f.talk("Attends");await f.tick();
   assert.deepEqual(spoken(f),[phrase],"nothing while Charles speaks");
   f.source.transcript="";f.clock=2000;await f.tick();
   assert.deepEqual(spoken(f),[phrase,phrase]);
-  f.source.speaking=false;await f.tick();await f.tick();
+  f.heard();await f.tick();await f.tick();
   assert.deepEqual(spoken(f),[phrase,phrase],"heard to the end, it is not said a third time");
 });
 
@@ -338,7 +347,7 @@ test("an announcement the bridge refused is tried again when the voice mode is r
   assert.deepEqual(spoken(f),[phrase]);
   await cls(f.root,"voice-session-toggle").onclick();await f.tick();
   assert.deepEqual(spoken(f),[phrase,phrase],"never said, so said again");
-  f.source.speaking=false;await f.tick();
+  f.heard();await f.tick();
   await cls(f.root,"voice-session-toggle").onclick();await cls(f.root,"voice-session-toggle").onclick();await f.tick();
   assert.deepEqual(spoken(f),[phrase,phrase],"said, so not said a third time after a relaunch");
 });
@@ -348,10 +357,48 @@ test("two announcements in a row are each shown for 5 s, one after the other",as
   await cls(f.root,"voice-session-toggle").onclick();await f.tick();
   const state=()=>cls(f.root,"voice-session-state").textContent;
   edges[0].status={status:"done"};f.clock=1000;await f.tick();
-  edges[1].status={status:"done"};f.source.speaking=false;f.clock=3000;await f.tick();
+  edges[1].status={status:"done"};f.heard();f.clock=3000;await f.tick();
   assert.deepEqual(spoken(f),["La tâche « Trier » est terminée.","La tâche « Archiver » est terminée."]);
-  f.source.speaking=false;
+  f.heard();
   f.clock=5500;await f.tick();assert.equal(state(),"La tâche « Trier » est terminée.","the first is not erased by the second");
   f.clock=7000;await f.tick();assert.equal(state(),"La tâche « Archiver » est terminée.");
   f.clock=11001;await f.tick();assert.equal(state(),"À l’écoute · parlez pour envoyer");
+});
+
+test("an announcement paused by a card and then cut by Charles is said again once the card is answered",async()=>{
+  const f=fixture();const [edge]=tasksOf(f,task("t1","running"));
+  await cls(f.root,"voice-session-toggle").onclick();await f.tick();
+  edge.status={status:"done",result:"Fait."};await f.tick();
+  assert.deepEqual(spoken(f),[phrase]);
+  f.context.conversation.messages.push({id:"approval",kind:"approval",payload:{status:{status:"pending"}}});
+  await f.tick();await f.tick();
+  assert.equal(f.source.paused,true);
+  f.talk("Attends");await f.tick();
+  f.source.transcript="";f.context.conversation.messages.find(m=>m.id==="approval").payload.status.status="approved";
+  f.clock=2000;await f.tick();await f.tick();
+  assert.deepEqual(spoken(f),[phrase,phrase],"suspended is not heard: its cut puts it back");
+});
+
+test("an announcement lost by a synthesis failure after the bridge took it is said at the relaunch",async()=>{
+  const f=fixture();const [edge]=tasksOf(f,task("t1","running"));
+  await cls(f.root,"voice-session-toggle").onclick();await f.tick();
+  edge.status={status:"done",result:"Fait."};await f.tick();
+  assert.deepEqual(spoken(f),[phrase]);
+  f.source.status="tts_unavailable";await f.tick();
+  assert.equal(f.panel.wantsPolling(),false);
+  await cls(f.root,"voice-session-toggle").onclick();await f.tick();
+  assert.deepEqual(spoken(f),[phrase,phrase]);
+});
+
+test("an announcement heard to the end is not said again when Charles cuts the bot's next sentence",async()=>{
+  const f=fixture();const [edge]=tasksOf(f,task("t1","running"));
+  await cls(f.root,"voice-session-toggle").onclick();await f.tick();
+  edge.status={status:"done",result:"Fait."};await f.tick();
+  reply(f,"r","Voici la suite. Et encore");await f.tick();
+  assert.deepEqual(spoken(f),[phrase,"Voici la suite."]);
+  f.heard(1);await f.tick();
+  assert.equal(f.source.speaking,true,"the bot's sentence is still being read");
+  f.talk("Stop");await f.tick();
+  f.source.transcript="";f.clock=2000;await f.tick();await f.tick();
+  assert.deepEqual(spoken(f).filter(text=>text===phrase),[phrase]);
 });

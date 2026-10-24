@@ -8,6 +8,12 @@
 @property(nonatomic) NSUInteger recognitionGeneration;
 @property(nonatomic) NSUInteger utterance;
 @property(nonatomic) NSUInteger barged;
+// Sentences are numbered as they are queued, and leave the queue in order (`speechLeft`, the
+// last one gone): read to the end (`speechHeard`) or dropped by a cut (`speechCut`, the first one it dropped).
+@property(nonatomic) NSUInteger speechCount;
+@property(nonatomic) NSUInteger speechLeft;
+@property(nonatomic) NSUInteger speechHeard;
+@property(nonatomic) NSUInteger speechCut;
 @property(nonatomic) BOOL speaking;
 @property(nonatomic) BOOL paused;
 @property(nonatomic) BOOL muted;
@@ -45,9 +51,11 @@
     return @{ @"token":self.token ?: @"", @"status":self.status ?: @"idle", @"transcript":self.transcript ?: @"",
         @"utterance_id":@(self.utterance), @"final_text":self.finalText ?: @"", @"barged":@(self.barged),
         @"speaking":@(self.speaking && !self.paused), @"paused":@(self.paused), @"muted":@(self.muted),
+        @"speech_heard":@(self.speechHeard), @"speech_cut":@(self.speechCut),
         @"microphone_id":self.microphone[@"id"] ?: @"", @"microphone_name":self.microphone[@"name"] ?: @"", @"microphone_fallback":self.microphone[@"fallback"] ?: @NO };
 }
 - (void)interrupt {
+    if (self.speechLeft < self.speechCount) { self.speechCut = self.speechLeft + 1; self.speechLeft = self.speechCount; }
 #if defined(EZERBOT_RELEASE)
     ++self.speechGeneration;
     [self.synth stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
@@ -87,7 +95,7 @@
 // system-output stream that the microphone could mistake for the user.
 - (void)finishSentenceIfDrained {
     if (!self.synthesisFinished || self.pendingBuffers) return;
-    if (self.speechQueue.count) [self.speechQueue removeObjectAtIndex:0];
+    if (self.speechQueue.count) { [self.speechQueue removeObjectAtIndex:0]; self.speechHeard = ++self.speechLeft; }
     self.speaking = self.speechQueue.count > 0;
     if (self.speaking) [self synthesizeSentence];
 }
@@ -295,6 +303,7 @@
     }
     if ([command isEqual:@"start"]) {
         [self cancel]; self.token = token; self.utterance = 0; self.barged = 0;
+        self.speechCount = 0; self.speechLeft = 0; self.speechHeard = 0; self.speechCut = 0;
         NSString *requested = body[@"microphone"];
         self.requestedMicrophone = [requested isKindOfClass:NSString.class] && requested.length <= 256 ? requested : @"";
         [self resolveMicrophone];
@@ -368,6 +377,9 @@
         [self.spoken addObject:text];
 #endif
         self.speaking = YES;
+        NSMutableDictionary *queued = [[self snapshot] mutableCopy];
+        queued[@"speech_id"] = @(++self.speechCount);
+        reply(queued); return;
     } else if ([command isEqual:@"settings"]) {
 #if defined(EZERBOT_RELEASE)
         NSString *pane = [body[@"reason"] isEqual:@"speech_denied"] ? @"Privacy_SpeechRecognition" : @"Privacy_Microphone";

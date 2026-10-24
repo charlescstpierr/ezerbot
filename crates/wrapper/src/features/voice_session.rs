@@ -365,11 +365,26 @@ pub(crate) struct DebugSession {
     spoken: Vec<String>,
     voices: Vec<Value>,
     until: u64,
+    /// Sentence numbers, as the native bridge gives them: the last queued, the last read to
+    /// the end, and the first one the last cut dropped.
+    speeches: u64,
+    heard: u64,
+    cut: u64,
 }
 #[cfg(debug_assertions)]
 impl DebugSession {
     pub fn active(&self) -> bool {
         self.active
+    }
+    /// The number of the sentence at the head of the queue.
+    fn head(&self) -> u64 {
+        self.speeches + 1 - self.queue.len() as u64
+    }
+    fn cut_queue(&mut self) {
+        if !self.queue.is_empty() {
+            self.cut = self.head();
+            self.queue.clear();
+        }
     }
     /// The voice call holds the microphone while it lasts: `call_active` tells the mode to wait.
     pub fn command(&mut self, body: &[u8], call_active: bool) -> Result<Value, ApiError> {
@@ -402,6 +417,7 @@ impl DebugSession {
             1.0
         }
         let c: Command = parse(body)?;
+        let mut queued = None;
         if c.command == "options" {
             return Ok(
                 json!({"voices":FAKE_VOICES.map(|(id,name,language)| json!({"id":id,"name":name,"language":language})),"fake":true}),
@@ -428,6 +444,7 @@ impl DebugSession {
             self.queue.clear();
             self.spoken.clear();
             self.voices.clear();
+            (self.speeches, self.heard, self.cut) = (0, 0, 0);
             self.paused = false;
             self.muted = false;
             self.fault = None;
@@ -445,7 +462,7 @@ impl DebugSession {
                 "feed" => {
                     self.transcript = c.text;
                     if !self.transcript.is_empty() {
-                        self.queue.clear();
+                        self.cut_queue();
                         self.barged += 1;
                     }
                     if c.final_result {
@@ -473,12 +490,14 @@ impl DebugSession {
                         .push(json!({"voice":c.voice,"speed":c.speed,"language":c.language}));
                     self.spoken.push(c.text.clone());
                     self.queue.push(c.text);
+                    self.speeches += 1;
+                    queued = Some(self.speeches);
                     if self.queue.len() == 1 {
                         self.until = crate::now() + 2000;
                     }
                 }
                 "interrupt" => {
-                    self.queue.clear();
+                    self.cut_queue();
                     self.transcript.clear();
                 }
                 "pause" => self.paused = true,
@@ -505,7 +524,7 @@ impl DebugSession {
                 "cancel" => {
                     self.active = false;
                     self.muted = false;
-                    self.queue.clear();
+                    self.cut_queue();
                     self.transcript.clear();
                     self.final_text.clear();
                     self.source.command(
@@ -513,23 +532,30 @@ impl DebugSession {
                             .unwrap(),
                     )?;
                 }
-                "finish_speech" => self.queue.clear(),
+                "finish_speech" if !self.queue.is_empty() => {
+                    self.heard = self.speeches;
+                    self.queue.clear();
+                }
+                "finish_speech" => {}
                 "status" | "settings" => {}
                 "fail" => {
-                    self.queue.clear();
+                    self.cut_queue();
                     self.fault = Some("failed".into());
                 }
                 _ => return Err(ApiError::new(400, "Commande du mode voix inconnue.")),
             }
         }
         if !self.paused && !self.queue.is_empty() && crate::now() >= self.until {
+            self.heard = self.head();
             self.queue.remove(0);
             self.until = crate::now() + 2000;
         }
-        Ok(
-            json!({"status":if self.active {self.fault.as_deref().unwrap_or("listening")} else {"idle"},"token":self.token,"transcript":self.transcript,
+        let mut status = json!({"status":if self.active {self.fault.as_deref().unwrap_or("listening")} else {"idle"},"token":self.token,"transcript":self.transcript,
             "utterance_id":self.utterance,"final_text":self.final_text,"barged":self.barged,"speaking":!self.queue.is_empty() && !self.paused,
-            "paused":self.paused,"muted":self.muted,"recorded_speech":self.spoken,"recorded_voices":self.voices,"microphone_id":self.microphone["microphone_id"],"microphone_name":self.microphone["microphone_name"],"microphone_fallback":self.microphone["microphone_fallback"],"fake":true}),
-        )
+            "paused":self.paused,"muted":self.muted,"recorded_speech":self.spoken,"recorded_voices":self.voices,"microphone_id":self.microphone["microphone_id"],"microphone_name":self.microphone["microphone_name"],"microphone_fallback":self.microphone["microphone_fallback"],"speech_heard":self.heard,"speech_cut":self.cut,"fake":true});
+        if let Some(id) = queued {
+            status["speech_id"] = id.into();
+        }
+        Ok(status)
     }
 }

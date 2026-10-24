@@ -70,6 +70,24 @@ int main(void) {
         [voice command:@{@"command":@"start",@"token":@"again"} reply:reply];
         assert(![result[@"muted"] boolValue] && [voice.fakeSource.status isEqual:@"recording"]);
         [voice cancel];
-        puts("voice session native debug: two voice options, recording synthesis, live transcript, immediate barge-in, stale chunk, mute and unmute, cleanup OK; no permissions or audio");
+        // Each queued sentence has a number. A cut names the first sentence it drops; a refused one has none.
+        [voice command:@{@"command":@"start",@"token":@"ids"} reply:reply];
+        [voice command:@{@"command":@"speak",@"token":@"ids",@"text":@"Terminé.",@"voice":@"fake-fr-CA",@"speed":@1,@"barge":@0} reply:reply];
+        assert([result[@"speech_id"] unsignedIntegerValue] == 1 && [result[@"speech_heard"] unsignedIntegerValue] == 0 && [result[@"speech_cut"] unsignedIntegerValue] == 0);
+        [voice command:@{@"command":@"speak",@"token":@"ids",@"text":@"Et ensuite.",@"voice":@"fake-fr-CA",@"speed":@1,@"barge":@0} reply:reply];
+        assert([result[@"speech_id"] unsignedIntegerValue] == 2);
+        [voice command:@{@"command":@"pause",@"token":@"ids"} reply:reply];
+        [voice command:@{@"command":@"feed",@"token":@"ids",@"text":@"Attends",@"final_result":@NO} reply:reply];
+        assert([result[@"speech_cut"] unsignedIntegerValue] == 1 && [result[@"speech_heard"] unsignedIntegerValue] == 0);
+        [voice command:@{@"command":@"speak",@"token":@"ids",@"text":@"Trop tard.",@"voice":@"fake-fr-CA",@"speed":@1,@"barge":@0} reply:reply];
+        assert(result[@"speech_id"] == nil);
+        [voice command:@{@"command":@"speak",@"token":@"ids",@"text":@"Reprise.",@"voice":@"fake-fr-CA",@"speed":@1,@"barge":@1} reply:reply];
+        assert([result[@"speech_id"] unsignedIntegerValue] == 3);
+        [voice command:@{@"command":@"interrupt",@"token":@"ids"} reply:reply];
+        assert([result[@"speech_cut"] unsignedIntegerValue] == 3);
+        [voice command:@{@"command":@"start",@"token":@"ids-again"} reply:reply];
+        assert([result[@"speech_cut"] unsignedIntegerValue] == 0 && [result[@"speech_heard"] unsignedIntegerValue] == 0);
+        [voice cancel];
+        puts("voice session native debug: two voice options, recording synthesis, live transcript, immediate barge-in, stale chunk, mute and unmute, sentence numbers, cleanup OK; no permissions or audio");
     }
 }

@@ -1,4 +1,4 @@
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ImageViewer } from "../image-gallery.jsx";
 
 export const kind = "delegation";
@@ -18,7 +18,7 @@ const stages = { avant: "Avant", après: "Après" };
 function Thumb({ capture, onOpen }) {
   const [broken, setBroken] = useState(false);
   return (
-    <button type="button" className="gb-image-cell gb-capture-thumb" aria-label={capture.caption} onClick={onOpen}>
+    <button type="button" className="gb-image-cell gb-capture-thumb" aria-label={capture.caption} onClick={(event) => onOpen(event.currentTarget)}>
       {broken ? <span className="gb-capture-missing">Image non disponible</span> : <img src={capture.url} alt={capture.caption} loading="lazy" onError={() => setBroken(true)} />}
     </button>
   );
@@ -27,6 +27,11 @@ function Thumb({ capture, onOpen }) {
 // Same list, same order, for the row and the existing viewer: the arrows walk Avant and Après.
 function Captures({ captures }) {
   const [index, setIndex] = useState(null);
+  const opener = useRef(null);
+  // The dialog is removed with the state, so only once it is gone can the thumbnail take the focus back.
+  useEffect(() => {
+    if (index === null) { opener.current?.focus(); opener.current = null; }
+  }, [index]);
   const images = captures
     .filter((capture) => capture && typeof capture.id === "string" && typeof capture.url === "string" && Object.hasOwn(stages, capture.label))
     .map((capture) => {
@@ -39,7 +44,7 @@ function Captures({ captures }) {
     <div className="gb-captures" role="group" aria-label="Captures avant et après">
       {images.map((image, position) => (
         <figure className="gb-capture" key={`${image.id}-${position}`}>
-          <Thumb capture={image} onOpen={() => setIndex(position)} />
+          <Thumb capture={image} onOpen={(button) => { opener.current = button; setIndex(position); }} />
           <figcaption><strong>{image.stage}</strong>{image.legend && <span>{image.legend}</span>}</figcaption>
         </figure>
       ))}

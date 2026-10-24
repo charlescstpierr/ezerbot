@@ -33,6 +33,7 @@ const html = () => renderToStaticMarkup(element());
 const internals = React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
 function mount() {
   const state = new Map();
+  const effects = [];
   function expand(node, path) {
     if (Array.isArray(node)) return node.map((child, at) => expand(child, `${path}.${at}`));
     if (!node || typeof node !== "object" || !node.type) return node;
@@ -46,26 +47,39 @@ function mount() {
           if (!state.has(id)) state.set(id, typeof initial === "function" ? initial() : initial);
           return [state.get(id), (value) => state.set(id, typeof value === "function" ? value(state.get(id)) : value)];
         },
-        useRef: () => ({ current: null }),
-        useEffect() {},
+        useRef(initial) {
+          const id = key();
+          if (!state.has(id)) state.set(id, { current: initial ?? null });
+          return state.get(id);
+        },
+        useEffect(run, deps) { effects.push({ id: key(), run, deps }); },
         useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
       };
       try { return expand(node.type(node.props), `${path}/`); } finally { internals.H = previous; }
     }
     return { ...node, props: { ...node.props, children: expand(node.props.children, path) } };
   }
-  const nodes = [];
-  const collect = (node) => {
-    if (Array.isArray(node)) return node.forEach(collect);
-    if (!node || typeof node !== "object" || !node.props) return;
-    nodes.push(node);
-    collect(node.props.children);
+  const collect = (node, nodes = []) => {
+    if (Array.isArray(node)) node.forEach((child) => collect(child, nodes));
+    else if (node && typeof node === "object" && node.props) { nodes.push(node); collect(node.props.children, nodes); }
+    return nodes;
   };
-  const view = () => { nodes.length = 0; collect(expand(element(), "0")); return nodes.slice(); };
+  // Like React's commit: every stale cleanup first, then the effects whose deps changed.
+  function commit() {
+    const due = effects.splice(0).filter(({ id, deps }) => {
+      const last = state.get(`effect:${id}`);
+      return !last || !deps || deps.length !== last.deps.length || deps.some((dep, at) => !Object.is(dep, last.deps[at]));
+    });
+    for (const { id } of due) state.get(`effect:${id}`)?.cleanup?.();
+    for (const { id, run, deps } of due) state.set(`effect:${id}`, { deps, cleanup: run() });
+  }
+  const view = () => { const nodes = collect(expand(element(), "0")); commit(); return nodes; };
   const text = (node) => Array.isArray(node) ? node.map(text).join("") : typeof node === "object" && node ? text(node.props?.children) : node == null || typeof node === "boolean" ? "" : String(node);
   return {
     find: (type, label) => view().find((node) => node.type === type && node.props["aria-label"] === label),
     all: (type) => view().filter((node) => node.type === type),
+    // What the open viewer really displays: its own <img>, not the thumbnails.
+    shown: () => collect(view().find((node) => node.type === "dialog")).find((node) => node.type === "img")?.props.src,
     text: (node) => text(node),
   };
 }
@@ -90,18 +104,21 @@ test("a click on Après opens the existing viewer on that image and the arrow le
   setEdge([BEFORE, AFTER]);
   const page = mount();
   assert.equal(page.all("dialog").length, 0);
-  page.find("button", "Après : Page d’accueil après").props.onClick();
+  page.find("button", "Après : Page d’accueil après").props.onClick({ currentTarget: { focus() {} } });
   const viewer = page.all("dialog")[0];
   assert.equal(viewer.props["aria-label"], "Visionneuse");
   assert.match(page.text(viewer), /2 sur 2/);
   const shown = page.all("img").filter((img) => img.props.alt === "Après : Page d’accueil après" && img.props.src === AFTER.url);
   assert.equal(shown.length, 2, "the thumbnail and the viewer both show Après");
   assert.equal(page.all("figcaption").map((node) => page.text(node)).at(-1), "Après : Page d’accueil après");
+  assert.equal(page.shown(), AFTER.url);
   page.find("button", "Image précédente").props.onClick();
   assert.match(page.text(page.all("dialog")[0]), /1 sur 2/);
+  assert.equal(page.shown(), BEFORE.url, "the arrow really swaps the displayed image");
   assert.equal(page.all("figcaption").map((node) => page.text(node)).at(-1), "Avant : Page d’accueil avant");
   page.find("button", "Image suivante").props.onClick();
   assert.match(page.text(page.all("dialog")[0]), /2 sur 2/);
+  assert.equal(page.shown(), AFTER.url);
   page.all("dialog")[0].props.onClose();
   assert.equal(page.all("dialog").length, 0);
 });
@@ -109,8 +126,28 @@ test("a click on Après opens the existing viewer on that image and the arrow le
 test("a click on Avant opens the viewer on the first image of the list", () => {
   setEdge([BEFORE, AFTER]);
   const page = mount();
-  page.find("button", "Avant : Page d’accueil avant").props.onClick();
+  page.find("button", "Avant : Page d’accueil avant").props.onClick({ currentTarget: { focus() {} } });
   assert.match(page.text(page.all("dialog")[0]), /1 sur 2/);
+  assert.equal(page.shown(), BEFORE.url);
+});
+
+test("closing the viewer returns the focus to the thumbnail that opened it, not to the other one", () => {
+  setEdge([BEFORE, AFTER]);
+  const page = mount();
+  const focused = [];
+  const opener = (name) => ({ focus: () => focused.push(name) });
+  page.find("button", "Après : Page d’accueil après").props.onClick({ currentTarget: opener("après") });
+  assert.deepEqual(focused, [], "nothing is focused while the viewer is open");
+  page.all("dialog")[0].props.onClose();
+  assert.equal(page.all("dialog").length, 0);
+  assert.deepEqual(focused, ["après"]);
+  page.find("button", "Avant : Page d’accueil avant").props.onClick({ currentTarget: opener("avant") });
+  page.find("button", "Image suivante").props.onClick();
+  page.all("dialog")[0].props.onClose();
+  assert.equal(page.all("dialog").length, 0);
+  assert.deepEqual(focused, ["après", "avant"], "the opener is the clicked thumbnail even after the arrows moved on");
+  page.all("figure");
+  assert.deepEqual(focused, ["après", "avant"], "re-rendering alone does not steal the focus");
 });
 
 test("without captures the card renders exactly the same DOM as before", () => {

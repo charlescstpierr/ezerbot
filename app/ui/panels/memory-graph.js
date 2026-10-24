@@ -37,8 +37,7 @@
     graph.bounds = { x, y, w: Math.max(...xs) + 70 - x, h: Math.max(...ys) + 70 - y };
     return graph;
   }
-  // Le texte d'un souvenir trouvé, raccourci à un mot entier.
-  const excerpt = (text, max = 22) => {
+  const excerpt = (text, max = 22) => { // le texte d'un résultat, raccourci à un mot entier
     const chars = [...String(text).replace(/\s+/g, " ").trim()];
     if (chars.length <= max) return chars.join("");
     const cut = chars.slice(0, max).join(""), space = cut.lastIndexOf(" ");
@@ -48,12 +47,14 @@
   const kept = { zoom: 1, ox: 0, oy: 0 }; // le cadrage survit au redessin, par exemple à chaque frappe de la recherche
   // `options.matches` : ids des souvenirs trouvés (Set) ; ils ressortent avec leur texte, le reste s'estompe. Absent : rien ne change.
   function view(facts, options) {
-    const graph = buildGraph(facts, options), matches = options?.matches || null, box = { ...graph.bounds };
-    for (const n of graph.nodes) { // le texte d'un résultat déborde de son point : le cadre lui garde de la place
-      if (!matches?.has(n.id)) continue;
-      const x0 = Math.min(box.x, n.x - 150), y0 = Math.min(box.y, n.y - 40), x1 = Math.max(box.x + box.w, n.x + 150), y1 = Math.max(box.y + box.h, n.y + 50);
-      Object.assign(box, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
-    }
+    const graph = buildGraph(facts, options), matches = options?.matches || null;
+    // Le texte d'un résultat déborde de son point et garde sa taille à l'écran : la place qu'on lui laisse se compte en pixels (s = pixels par unité).
+    const room = (s) => {
+      let { x, y, w, h } = graph.bounds, x1 = x + w, y1 = y + h;
+      for (const n of graph.nodes) if (matches?.has(n.id)) { x = Math.min(x, n.x - 150 / s); y = Math.min(y, n.y - 40 / s); x1 = Math.max(x1, n.x + 150 / s); y1 = Math.max(y1, n.y + 50 / s); }
+      return { x, y, w: x1 - x, h: y1 - y };
+    };
+    let box = room(1);
     const make = (tag, attrs = {}, text) => {
       const el = document.createElementNS(SVG, tag);
       for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value);
@@ -112,7 +113,9 @@
     // Zoom : le viewBox se resserre autour du centre de la vue ; le texte garde sa taille à l'écran (--k = unités par pixel).
     let { zoom, ox, oy } = kept, scale = 1, drag = null;
     const apply = () => {
-      const w = box.w / zoom, h = box.h / zoom, rect = svg.getBoundingClientRect?.();
+      const rect = svg.getBoundingClientRect?.();
+      if (matches && rect?.width) for (let i = 0; i < 4; i++) box = room(Math.min(rect.width / box.w, rect.height / box.h)); // quelques passes : la place dépend de l'échelle
+      const w = box.w / zoom, h = box.h / zoom;
       scale = rect?.width ? Math.min(rect.width / w, rect.height / h) : 1;
       svg.setAttribute("viewBox", [box.x + box.w / 2 + ox - w / 2, box.y + box.h / 2 + oy - h / 2, w, h].map(round).join(" "));
       svg.setAttribute("style", `--k:${Number((1 / scale).toFixed(3))}`);

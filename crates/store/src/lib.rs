@@ -131,7 +131,8 @@ impl SessionStore {
     /// Une écriture concurrente impose de recharger le journal avant de réessayer.
     /// Le jeton de cette image avance seulement si le commit réussit.
     ///
-    /// Seules les lignes qui diffèrent de `journal.saved` sont écrites : les
+    /// Seules les lignes qui diffèrent de `journal.saved` sont écrites, et seules
+    /// elles sont copiées, le reste du journal est lu par référence : les
     /// lignes du compte ne sont écrites que par cette méthode, et la révision
     /// vérifiée dans la transaction prouve qu'aucun autre écrivain n'a validé
     /// depuis le chargement ou la dernière sauvegarde de cette image. Le disque
@@ -140,22 +141,16 @@ impl SessionStore {
     /// qu'un remplacement complet. La révision avance même sans ligne modifiée.
     pub fn save_journal(&mut self, journal: &mut StoredJournal) -> Result<(), StoreError> {
         self.check_origin(&journal.account_id, &journal.database_path)?;
-        let items = journal.export_committed();
-        if items.iter().any(|item| item.account_id != self.account_id) {
+        if journal
+            .committed()
+            .any(|item| item.account_id != self.account_id)
+        {
             return Err(StoreError::AccountMismatch);
         }
-        for item in &items {
+        for item in journal.committed() {
             validate_submission(item)?;
         }
-        let image: BTreeMap<SubmissionKey, CommittedSubmission> = items
-            .into_iter()
-            .map(|item| {
-                (
-                    (item.conversation_id.clone(), item.message_id.clone()),
-                    item,
-                )
-            })
-            .collect();
+        let (deleted, changed) = diff_saved(&journal.saved, journal.committed());
         let expected = journal.revision;
         let tx = self
             .connection
@@ -172,7 +167,7 @@ impl SessionStore {
                 "DELETE FROM submissions
                  WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
             )?;
-            for key in journal.saved.keys().filter(|key| !image.contains_key(*key)) {
+            for key in &deleted {
                 delete.execute(params![
                     self.account_id.as_str(),
                     key.0.as_str(),
@@ -188,10 +183,7 @@ impl SessionStore {
                     body = excluded.body,
                     state_json = excluded.state_json",
             )?;
-            for (key, item) in &image {
-                if journal.saved.get(key) == Some(item) {
-                    continue;
-                }
+            for item in &changed {
                 let state_json = serde_json::to_string(&submission_to_dto(&item.state))?;
                 upsert.execute(params![
                     item.account_id.as_str(),
@@ -210,7 +202,15 @@ impl SessionStore {
         )?;
         tx.commit()?;
         journal.revision = next;
-        journal.saved = image;
+        for key in &deleted {
+            journal.saved.remove(key);
+        }
+        for item in changed {
+            journal.saved.insert(
+                (item.conversation_id.clone(), item.message_id.clone()),
+                item,
+            );
+        }
         Ok(())
     }
 
@@ -502,6 +502,30 @@ fn journal_revision(connection: &Connection, account: &AccountId) -> Result<i64,
         Some(value) => Ok(value),
         None => Ok(0),
     }
+}
+
+/// Clés de `saved` absentes du journal, et éléments du journal nouveaux ou
+/// différents de `saved`. Les deux côtés sont ordonnés par clé : un seul
+/// parcours, sans copier les éléments inchangés.
+fn diff_saved<'a>(
+    saved: &BTreeMap<SubmissionKey, CommittedSubmission>,
+    journal: impl Iterator<Item = &'a CommittedSubmission>,
+) -> (Vec<SubmissionKey>, Vec<CommittedSubmission>) {
+    let mut deleted = Vec::new();
+    let mut changed = Vec::new();
+    let mut rows = saved.iter().peekable();
+    for item in journal {
+        let key = (&item.conversation_id, &item.message_id);
+        while let Some((saved_key, _)) = rows.next_if(|(k, _)| (&k.0, &k.1) < key) {
+            deleted.push(saved_key.clone());
+        }
+        match rows.next_if(|(k, _)| (&k.0, &k.1) == key) {
+            Some((_, row)) if row == item => {}
+            _ => changed.push(item.clone()),
+        }
+    }
+    deleted.extend(rows.map(|(key, _)| key.clone()));
+    (deleted, changed)
 }
 
 fn validate_submission(item: &CommittedSubmission) -> Result<(), StoreError> {

@@ -78,7 +78,8 @@ impl std::error::Error for JournalError {}
 pub struct CommittedSubmission {
     /// Compte propriétaire de la clé.
     pub account_id: AccountId,
-    /// Génération capturée à la préparation.
+    /// Génération capturée à la préparation. Les réponses ultérieures doivent
+    /// être acceptées par `AuthenticatedActor::accepts_continuation`.
     pub generation: AccountGeneration,
     /// Conversation de la clé.
     pub conversation_id: ConversationId,
@@ -90,23 +91,10 @@ pub struct CommittedSubmission {
     pub state: SubmissionState,
 }
 
-/// Image d'une soumission. Le corps sert à détecter un conflit d'idempotence.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Record {
-    account_id: AccountId,
-    conversation_id: ConversationId,
-    message_id: MessageId,
-    body: String,
-    /// Génération capturée à la préparation. Les réponses ultérieures doivent
-    /// être acceptées par `AuthenticatedActor::accepts_continuation`.
-    generation: AccountGeneration,
-    state: SubmissionState,
-}
-
 /// Clé durable d'une soumission : `(account_id, conversation_id, message_id)`.
 type Key = (AccountId, ConversationId, MessageId);
 
-impl Record {
+impl CommittedSubmission {
     fn key(&self) -> Key {
         (
             self.account_id.clone(),
@@ -131,10 +119,10 @@ impl Record {
 #[derive(Debug)]
 pub struct Journal {
     /// Dernier enregistrement validé de chaque clé, ordonné par clé.
-    committed: BTreeMap<Key, Record>,
+    committed: BTreeMap<Key, CommittedSubmission>,
     /// Étapes de la transaction ouverte, de la plus ancienne à la plus récente.
     /// Vide hors transaction. Elles recouvrent `committed` pour la consultation.
-    uncommitted: Vec<Record>,
+    uncommitted: Vec<CommittedSubmission>,
 }
 
 impl Default for Journal {
@@ -173,7 +161,7 @@ impl Journal {
             return Err(JournalError::Conflict);
         }
 
-        let mut record = Record {
+        let mut record = CommittedSubmission {
             account_id: message.actor.account_id,
             conversation_id: message.conversation_id,
             message_id: message.message_id,
@@ -410,19 +398,24 @@ impl Journal {
 
     /// Dernier état validé de chaque clé, dans l'ordre des clés (compte,
     /// conversation, message). La zone non validée est exclue.
-    pub fn export_committed(&self) -> Vec<CommittedSubmission> {
+    pub fn committed(&self) -> impl Iterator<Item = &CommittedSubmission> {
+        self.committed.values()
+    }
+
+    /// Dernier état validé d'une clé. La zone non validée est exclue.
+    pub fn committed_get(
+        &self,
+        account: &AccountId,
+        conversation: &ConversationId,
+        message: &MessageId,
+    ) -> Option<&CommittedSubmission> {
         self.committed
-            .values()
-            .cloned()
-            .map(|record| CommittedSubmission {
-                account_id: record.account_id,
-                generation: record.generation,
-                conversation_id: record.conversation_id,
-                message_id: record.message_id,
-                body: record.body,
-                state: record.state,
-            })
-            .collect()
+            .get(&(account.clone(), conversation.clone(), message.clone()))
+    }
+
+    /// Copie de [`Journal::committed`]. À éviter sur un chemin chaud.
+    pub fn export_committed(&self) -> Vec<CommittedSubmission> {
+        self.committed().cloned().collect()
     }
 
     /// Reconstruit un journal depuis des états déjà validés.
@@ -430,18 +423,7 @@ impl Journal {
     /// Deux images de la même clé se résolvent comme le journal : la dernière
     /// remplace la précédente. Aucune transaction n'est ouverte.
     pub fn from_committed(items: Vec<CommittedSubmission>) -> Self {
-        let committed = items
-            .into_iter()
-            .map(|item| Record {
-                account_id: item.account_id,
-                conversation_id: item.conversation_id,
-                message_id: item.message_id,
-                body: item.body,
-                generation: item.generation,
-                state: item.state,
-            })
-            .map(|record| (record.key(), record))
-            .collect();
+        let committed = items.into_iter().map(|item| (item.key(), item)).collect();
         Self {
             committed,
             uncommitted: Vec::new(),
@@ -554,7 +536,7 @@ impl Journal {
         }
     }
 
-    fn stage(&mut self, record: Record) {
+    fn stage(&mut self, record: CommittedSubmission) {
         self.uncommitted.push(record);
     }
 
@@ -574,7 +556,7 @@ impl Journal {
         account: &AccountId,
         conversation: &ConversationId,
         message: &MessageId,
-    ) -> Option<&Record> {
+    ) -> Option<&CommittedSubmission> {
         self.uncommitted
             .iter()
             .rev()
@@ -1198,6 +1180,38 @@ mod tests {
             Err(JournalError::StaleAccount)
         );
         assert_eq!(journal.export_committed(), before);
+    }
+
+    #[test]
+    fn la_vue_validee_rend_ce_que_l_export_rend_sans_la_zone_non_validee() {
+        let owner = actor(1);
+        let mut journal = Journal::new();
+        for id in ["msg-3", "msg-1", "msg-2"] {
+            let mut draft = prepared(&owner, id);
+            draft.message_id = must(MessageId::new(id));
+            journal.prepare(draft).unwrap();
+        }
+        let mut pending = journal.export_committed()[0].clone();
+        pending.body = "non validé".into();
+        journal.stage(pending.clone());
+
+        let viewed: Vec<_> = journal.committed().cloned().collect();
+
+        assert_eq!(viewed, journal.export_committed());
+        assert_eq!(viewed.len(), 3);
+        assert!(viewed.iter().all(|item| item.body != "non validé"));
+        let ids: Vec<_> = viewed.iter().map(|item| item.message_id.clone()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids, sorted);
+        assert_eq!(
+            journal.committed_get(
+                &owner.account_id,
+                &pending.conversation_id,
+                &pending.message_id
+            ),
+            Some(&viewed[0])
+        );
     }
 
     #[test]

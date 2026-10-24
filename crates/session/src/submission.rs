@@ -330,7 +330,7 @@ impl SubmissionSession {
             return Err(SessionError::Revoked);
         }
         if self.journal.as_ref().is_some_and(|journal| {
-            journal.export_committed().iter().any(|item| {
+            journal.committed().any(|item| {
                 item.account_id == self.actor.account_id && item.generation > self.actor.generation
             })
         }) {
@@ -363,13 +363,8 @@ impl SubmissionSession {
         let actor = self.actor.clone();
         let item = self
             .journal_mut()?
-            .export_committed()
-            .into_iter()
-            .find(|item| {
-                item.account_id == actor.account_id
-                    && &item.conversation_id == conversation
-                    && &item.message_id == message
-            })
+            .committed_get(&actor.account_id, conversation, message)
+            .cloned()
             .ok_or(JournalError::NotFound)?;
         if !actor.accepts_continuation(item.generation) {
             return Err(JournalError::StaleAccount.into());
@@ -394,12 +389,13 @@ impl SubmissionSession {
     fn next_reconciliation(&mut self) -> Result<ReconciliationId, SessionError> {
         // Une réouverture peut recharger un token issu d'un ancien compteur.
         // Le propriétaire est nouveau, et le token durable doit aussi tourner.
-        let existing = self.journal_mut()?.export_committed();
+        self.journal_mut()?;
+        let journal = self.journal.as_ref().ok_or(SessionError::ReloadRequired)?;
         loop {
             let number = next_counter(&mut self.reconciliation_counter)?;
             let candidate = ReconciliationId::new(format!("lookup-{number}"))
                 .map_err(|_| SessionError::CounterExhausted)?;
-            if !existing.iter().any(|item| matches!(
+            if !journal.committed().any(|item| matches!(
                 &item.state,
                 SubmissionState::OutcomeUnknown { reconciliation } if reconciliation == &candidate
             )) {

@@ -327,6 +327,18 @@ pub fn append_entry(
     Ok(())
 }
 
+pub fn has_submission(
+    conn: &Connection,
+    conversation: &str,
+    message: &str,
+) -> Result<bool, ApiError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND kind = 'submission')",
+        params![ACCOUNT, conversation, message],
+        |row| row.get(0),
+    )?)
+}
+
 impl App {
     pub(crate) fn conversations(&self) -> Result<Vec<Conversation>, ApiError> {
         let mut conversations = BTreeMap::new();

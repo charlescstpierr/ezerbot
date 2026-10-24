@@ -39,6 +39,35 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// L'ancre appartient au premier envoi : un renvoi doit porter la même ancre
+/// (même Page, même passage rogné), ou aucune si le premier n'en avait pas.
+pub fn check_resend(
+    conn: &Connection,
+    conversation: &str,
+    message: &str,
+    anchor: Option<&PageAnchor>,
+) -> Result<(), ApiError> {
+    let stored: Option<(String, String)> = conn
+        .query_row(
+            "SELECT page_id, passage FROM wrapper_page_anchors WHERE conversation_id = ?1 AND message_id = ?2",
+            params![conversation, message],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let sent = anchor.map(|a| (a.page_id.as_str(), a.passage.trim()));
+    if stored
+        .as_ref()
+        .map(|(page, passage)| (page.as_str(), passage.as_str()))
+        != sent
+    {
+        return Err(ApiError::new(
+            409,
+            "Ce message a déjà été envoyé avec une autre ancre de Page : renvoyez-le tel quel.",
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse sans rien écrire ; l'appelant garde le message dans la même transaction.
 pub fn record(
     conn: &Connection,
@@ -48,14 +77,6 @@ pub fn record(
     mentions: &[Mention],
     now_ms: u64,
 ) -> Result<(), ApiError> {
-    let accepted: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM wrapper_page_anchors WHERE conversation_id = ?1 AND message_id = ?2)",
-        params![conversation, message],
-        |row| row.get(0),
-    )?;
-    if accepted {
-        return Ok(());
-    }
     let passage = anchor.passage.trim();
     if passage.is_empty() || passage.chars().count() > PASSAGE_LIMIT {
         return Err(ApiError::new(

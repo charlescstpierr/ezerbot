@@ -379,6 +379,22 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     "Ajoutez du texte (16 Ko au plus) ou un fichier.",
                 ));
             }
+            // Le journal n'est écrit qu'après le commit : après un crash entre les deux,
+            // seule l'entrée du fil prouve que le premier envoi (ancre comprise) est durable.
+            let resend = previous.is_some()
+                || super::conversations::has_submission(
+                    &app.connection,
+                    &input.conversation_id,
+                    &input.message_id,
+                )?;
+            if resend {
+                super::pages::anchors::check_resend(
+                    &app.connection,
+                    &input.conversation_id,
+                    &input.message_id,
+                    input.page_anchor.as_ref(),
+                )?;
+            }
             let prepared = if previous.is_some() {
                 Some(
                     app.session
@@ -404,7 +420,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     skill_id,
                 )?;
             }
-            if let Some(anchor) = &input.page_anchor {
+            if let Some(anchor) = input.page_anchor.as_ref().filter(|_| !resend) {
                 super::pages::anchors::record(
                     &tx,
                     &input.conversation_id,

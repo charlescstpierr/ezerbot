@@ -18,15 +18,20 @@
   let failed = false, open = false, view = "list", generation = 0;
   let mark = null, painted = null, entry = null, screen = null, detail = null, found = null; // found : ids trouvés (Set), null sans filtre
   const filter = window.EzerbotMemoryFilter?.create(() => paint());
-  async function load() {
+  let loading = Promise.resolve();
+  // `load` rend la main quand la liste est à jour : une lecture dépassée par une plus récente attend celle-ci, sans quoi un appelant (le panneau de détail) croirait la liste relue.
+  function load() {
     const token = ++generation;
+    return (loading = read(token));
+  }
+  async function read(token) {
     try {
       const response = await panels.api("/api/memory/all");
-      if (token !== generation) return;
+      if (token !== generation) return loading;
       facts = Array.isArray(response?.facts) ? response.facts : [];
       failed = false;
     } catch {
-      if (token !== generation) return;
+      if (token !== generation) return loading;
       failed = true;
     }
     paint();

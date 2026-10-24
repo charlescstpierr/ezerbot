@@ -41,9 +41,9 @@ async function harness({ refuse = null, opened = ["c1"], lose = null } = {}) {
     openConversation: (id) => { calls.opened.push(id); return opened.includes(id); },
     async api(path, body) {
       calls.api.push([path, JSON.parse(JSON.stringify(body || {}))]);
-      if (path === "/api/memory/all") return net.down ? Promise.reject(new Error("hors ligne")) : { facts: facts.map((item) => ({ ...item })) };
+      if (path === "/api/memory/all") { const snapshot = facts.map((item) => ({ ...item })); await net.gate?.(); return net.down ? Promise.reject(new Error("hors ligne")) : { facts: snapshot }; }
       if (refuse) { await net.hold; throw new Error(refuse); }
-      if (path === "/api/memory/correct") { const old = facts.find((item) => item.fact_id === body.fact_id), next = { ...old, fact_id: `n${++n}`, text: body.text }; facts = [next, ...facts.filter((item) => item !== old)]; await net.hold; if (lose) throw new Error(lose); return { fact: next }; }
+      if (path === "/api/memory/correct") { const old = facts.find((item) => item.fact_id === body.fact_id), next = { ...old, fact_id: `n${++n}`, text: body.text }; facts = [...(net.sidecar ? [net.sidecar] : []), next, ...facts.filter((item) => item !== old)]; await net.hold; if (lose) throw new Error(lose); return { fact: next }; }
       facts = facts.filter((item) => item.fact_id !== body.fact_id);
       if (lose) throw new Error(lose);
       return { forgotten: [body.fact_id] };
@@ -316,6 +316,43 @@ test("réponse perdue après Modifier : le moteur a corrigé, le panneau relit l
   edited.button("Modifier").click();
   await edited.type("Enregistrer", "Café serré");
   assert.deepEqual(edited.mutations().map(([, body]) => body.fact_id), ["f1", "n1"], "la nouvelle correction vise le souvenir à jour, pas l'ancien");
+});
+
+test("réponse perdue après Modifier, avec une relecture périodique en même temps : le panneau attend la liste la plus récente, il ne se ferme pas", async () => {
+  const h = await harness({ lose: "Réseau coupé" });
+  h.tab("graph");
+  h.point("f1").click();
+  h.button("Modifier").click();
+  const reads = []; // chaque lecture attend qu'on la libère : la plus ancienne arrive avant la plus récente
+  h.net.gate = () => new Promise((resolve) => reads.push(resolve));
+  const field = h.panel().querySelector(".memory-detail-field");
+  field.value = "Café au lait";
+  field.fire("input");
+  h.button("Enregistrer").click();
+  await h.settle();
+  h.reload(); // l'actualisation périodique dépasse la relecture du panneau
+  await h.settle();
+  assert.equal(reads.length, 2);
+  reads[0]();
+  await h.settle();
+  assert.equal(h.button("Enregistrer").disabled, true, "la lecture dépassée ne rend pas la main : la liste la plus récente n'est pas arrivée");
+  reads[1]();
+  await h.settle();
+  assert.deepEqual([h.open(), h.text("text"), h.button("Modifier").disabled], [true, "Café au lait", false]);
+});
+
+test("réponse perdue après Modifier : un autre souvenir de même bot et de même texte n'est pas pris pour le remplaçant", async () => {
+  const h = await harness({ lose: "Réseau coupé" });
+  h.net.sidecar = fact("autre", "grokbot", "topic", "Café au lait", "user_stated", null, { topic_id: "t1", topic_name: "Déménagement" });
+  h.tab("graph");
+  h.point("f1").click();
+  h.button("Modifier").click();
+  await h.type("Enregistrer", "Café au lait");
+  assert.deepEqual([h.open(), h.cells()[4]], [true, "Privé"], "le panneau suit le souvenir privé corrigé");
+  h.button("Oublier…").click();
+  h.button("Oublier ce souvenir").click();
+  await h.settle();
+  assert.deepEqual(h.mutations().at(-1), ["/api/memory/forget", { bot_id: "grokbot", fact_id: "n1" }], "Oublier vise le souvenir corrigé, pas le souvenir de sujet");
 });
 
 test("réponse perdue après Oublier : le moteur a oublié, le panneau relit la liste, se ferme et le graphe et la Liste sont à jour", async () => {

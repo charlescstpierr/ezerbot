@@ -84,16 +84,16 @@
       problem = "";
       render();
       let data;
-      const before = new Set((facts() || []).map((item) => item.fact_id));
+      const before = new Set((facts() || []).map((item) => item.fact_id)), origin = current();
       try {
         data = await panels.api(path, request);
       } catch (error) {
         // Une erreur ne dit pas si le moteur a appliqué l'action (réponse perdue) : on relit avant de rendre la main, puis le panneau se règle sur la relecture.
         await reload();
         busy = false;
-        // Une correction appliquée remplace le souvenir par un nouveau, de même bot et de même texte, absent de la liste d'avant.
-        const replaced = request.text === undefined ? null : (facts() || []).find((item) => !before.has(item.fact_id) && item.bot_id === request.bot_id && item.text === request.text);
-        if (replaced && !current()) moved.set(request.fact_id, replaced.fact_id);
+        // Une correction appliquée remplace le souvenir par un nouveau, de même bot, de même portée et de même texte, absent de la liste d'avant. Deux candidats : on ne devine pas.
+        const same = request.text === undefined || !origin ? [] : (facts() || []).filter((item) => !before.has(item.fact_id) && item.bot_id === request.bot_id && item.scope === origin.scope && item.text === request.text);
+        if (same.length === 1 && !current()) moved.set(request.fact_id, same[0].fact_id);
         refresh();
         if (mine !== epoch) return;
         if (!current()) { close(true); return; } // oublié (ou disparu) pendant l'envoi : le panneau se ferme

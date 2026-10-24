@@ -15,7 +15,7 @@ const all = n => [n,...n.children.flatMap(all)];
 const cls = (n,c) => all(n).find(x => x.className === c);
 function fixture() {
   let startExtras={}, notices=[], panel, timer, keydown, source={status:"idle",transcript:"",utterance_id:0,barged:0}, scenario="", nextSend, refusal="";
-  const calls=[], sends=[], follows=[];
+  const calls=[], sends=[], follows=[], held=[], holding=new Set();
   let dictationRefreshes=0;
   const root=new Element("div"), send=new Element("button"), settings=new Element("div"), composer=new Element("div"), controls=new Element("div");controls.className="voice-controls";root.append(controls,send,settings,composer);
   const voices=[{id:"v-a",name:"Voix A",language:"fr-CA"},{id:"v-b",name:"Voix B",language:"fr-FR"},{id:"v-en",name:"Voice C",language:"en-US"}];
@@ -24,13 +24,16 @@ function fixture() {
   const bridge=async body => {
     calls.push(body);
     if(body.command === "options")return {voices};
-    if(body.command === "start")source={status:scenario || "listening",token:body.token,transcript:"",utterance_id:0,barged:0,...startExtras};
+    if(body.command === "start")source={status:scenario || "listening",token:body.token,transcript:"",utterance_id:0,barged:0,muted:false,...startExtras};
+    if(body.command === "mute" || body.command === "unmute") { source.muted=body.command === "mute"; if(source.muted)source.transcript=""; }
     if(body.command === "speak")source.speaking=true;
     if(body.command === "interrupt") { source.speaking=false;source.transcript=""; }
-    if(body.command === "cancel")source.status="idle";
+    if(body.command === "cancel") { source.status="idle";source.muted=false; }
     if(body.command === "pause")source.paused=true;
     if(body.command === "resume")source.paused=false;
-    return {...source};
+    const reply={...source};
+    if(holding.has(body.command))await new Promise(resolve=>held.push(resolve));
+    return reply;
   };
   const panels={
     register(p){ panel=p;p.composer.mount(composer,context);p.onState(context.state,context);},
@@ -45,7 +48,7 @@ function fixture() {
     crypto:{randomUUID:()=>"token"},setTimeout(fn){timer=fn;return 1;},clearTimeout(){timer=null;},
   });
   const section=bot=>{const container=new Element("div");const cleanup=panel.botSection(bot,container,context);return {container,cleanup};};
-  return {section,set refusal(text){refusal=text;},root,calls,sends,follows,notices,panel,set startExtras(value){startExtras=value;},setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
+  return {section,hold(...commands){holding.clear();for(const command of commands)holding.add(command);},release(){holding.clear();for(const resolve of held.splice(0))resolve();},set refusal(text){refusal=text;},root,calls,sends,follows,notices,panel,set startExtras(value){startExtras=value;},setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
     setContext(c){context=c;panel.onState(c.state,c);},tick:async()=>timer?.(),keydown:e=>keydown(e)};
 }
 test("end-to-end voice sends only the recognized utterance once, reads streamed sentences, pauses on approval",async()=>{
@@ -90,6 +93,51 @@ test("voice controls share one toolbar group; listening has no false interrupt a
   assert.ok(transcript.textContent.endsWith("Voici les derniers mots."));
   assert.equal(transcript.scrollTop,transcript.scrollHeight);
   await button.onclick();assert.equal(f.panel.wantsPolling(),false);
+});
+
+const muteButton=f=>cls(f.root,"icon-button voice-mute-toggle"), stateOf=f=>cls(f.root,"voice-session-state").textContent;
+const shortcut=(f,extra={})=>{const event={key:"M",metaKey:true,shiftKey:true,prevented:false,preventDefault(){this.prevented=true;},stopImmediatePropagation(){},...extra};f.keydown(event);return new Promise(r=>setImmediate(()=>r(event)));};
+test("the mute button sends mute, says the bot cannot hear, and empties the live transcript; a second click listens again",async()=>{
+  const f=fixture();await cls(f.root,"voice-session-toggle").onclick();const mute=muteButton(f);
+  assert.equal(mute.attributes["aria-label"],"Couper le micro");assert.equal(mute.attributes["aria-pressed"],"false");
+  f.source.transcript="Bonjour";await f.tick();assert.equal(cls(f.root,"voice-live-transcript").textContent,"Bonjour");
+  await mute.onclick();
+  assert.equal(f.calls.at(-1).command,"mute");assert.equal(f.calls.at(-1).token,"token");
+  assert.equal(stateOf(f),"Micro coupé · le bot ne vous entend pas");
+  assert.equal([mute.attributes["aria-pressed"],mute.attributes["aria-label"]].join(),"true,Réactiver le micro");
+  assert.equal(cls(f.root,"voice-live-transcript").hidden,true);assert.doesNotMatch(cls(f.root,"voice-live-transcript").textContent,/Bonjour/);
+  await f.tick();assert.equal(stateOf(f),"Micro coupé · le bot ne vous entend pas","the screen follows the bridge status, tick after tick");
+  await mute.onclick();
+  assert.equal(f.calls.at(-1).command,"unmute");assert.match(stateOf(f),/^À l’écoute/);
+  assert.equal(mute.attributes["aria-pressed"],"false");assert.equal(cls(f.root,"voice-live-transcript").hidden,false);
+});
+test("the screen follows the bridge, not the click: a bridge that stays unmuted keeps the button released",async()=>{
+  const f=fixture();await cls(f.root,"voice-session-toggle").onclick();
+  Object.defineProperty(f.source,"muted",{get:()=>false,set(){}});
+  await muteButton(f).onclick();
+  assert.equal(muteButton(f).attributes["aria-pressed"],"false");assert.match(stateOf(f),/^À l’écoute/);
+});
+test("⌘⇧M toggles the microphone during a session and does nothing without one",async()=>{
+  const f=fixture();let event=await shortcut(f);
+  assert.equal(event.prevented,false);assert.equal(f.calls.filter(c=>c.command==="mute").length,0,"no session, no command");
+  await cls(f.root,"voice-session-toggle").onclick();
+  event=await shortcut(f);assert.equal(event.prevented,true);assert.equal(f.source.muted,true);assert.equal(muteButton(f).attributes["aria-pressed"],"true");
+  await shortcut(f);assert.equal(f.source.muted,false);assert.equal(muteButton(f).attributes["aria-pressed"],"false");
+  for(const extra of [{shiftKey:false},{metaKey:false},{altKey:true},{ctrlKey:true},{key:"N"}])await shortcut(f,extra);
+  assert.equal(f.calls.filter(c=>c.command==="mute"||c.command==="unmute").length,2,"only ⌘⇧M");
+});
+test("leaving the voice mode and starting it again listens: the mute never sticks",async()=>{
+  const f=fixture();const toggle=cls(f.root,"voice-session-toggle");await toggle.onclick();await muteButton(f).onclick();assert.equal(f.source.muted,true);
+  await toggle.onclick();assert.equal(f.source.status,"idle");
+  await toggle.onclick();
+  assert.equal(f.source.muted,false);assert.equal(muteButton(f).attributes["aria-pressed"],"false");assert.match(stateOf(f),/^À l’écoute/);
+  await f.tick();assert.match(stateOf(f),/^À l’écoute/);
+});
+
+test("a microphone gone while muted is announced when the microphone is turned back on",async()=>{
+  const f=fixture();f.context.state.voice.microphone="usb";await cls(f.root,"voice-session-toggle").onclick();f.source.microphone_fallback=true;
+  await muteButton(f).onclick();assert.deepEqual(f.notices,[],"muted, nothing is listened to");
+  await muteButton(f).onclick();assert.deepEqual(f.notices,["repli:usb"]);
 });
 
 test("welcome voice creates a thread only after a successful utterance, never for permission refusal",async()=>{
@@ -217,4 +265,30 @@ test("in a group, each reply is spoken with the voice of the bot that wrote it",
     {text:"Je commence.",voice:"v-a",speed:1,language:""},
     {text:"Je continue.",voice:"v-b",speed:1.8,language:"fr"},
   ]);
+});
+
+test("an older bridge answer cannot undo a newer unmute: the screen never says muted while the bridge listens",async()=>{
+  const f=fixture();await cls(f.root,"voice-session-toggle").onclick();await muteButton(f).onclick();
+  assert.equal(muteButton(f).attributes["aria-pressed"],"true");
+  f.hold("status");const late=f.tick();f.hold();
+  await muteButton(f).onclick();assert.equal(f.source.muted,false);assert.equal(muteButton(f).attributes["aria-pressed"],"false");
+  f.release();await late;
+  assert.equal(muteButton(f).attributes["aria-pressed"],"false","the status read while muted is older than the unmute");
+  assert.match(stateOf(f),/^À l’écoute/);
+});
+test("a click then ⌘⇧M before the first answer toggles twice: the microphone ends up listening",async()=>{
+  const f=fixture();await cls(f.root,"voice-session-toggle").onclick();
+  f.hold("mute","unmute");const click=muteButton(f).onclick();const key=shortcut(f);
+  f.release();await click;await key;
+  assert.deepEqual(f.calls.map(c=>c.command).filter(c=>c==="mute"||c==="unmute"),["mute","unmute"]);
+  assert.equal(f.source.muted,false);assert.equal(muteButton(f).attributes["aria-pressed"],"false");assert.match(stateOf(f),/^À l’écoute/);
+});
+test("a card waiting for a click and a muted microphone are both said",async()=>{
+  const f=fixture();await cls(f.root,"voice-session-toggle").onclick();
+  f.context.conversation.messages.push({id:"approval",kind:"approval",payload:{status:{status:"pending"}}});
+  await f.tick();assert.equal(stateOf(f),"En attente de vous · répondez dans la carte");
+  await muteButton(f).onclick();
+  assert.match(stateOf(f),/carte/);assert.match(stateOf(f),/micro coupé/i);assert.equal(muteButton(f).attributes["aria-pressed"],"true");
+  await f.tick();assert.match(stateOf(f),/carte/);assert.match(stateOf(f),/micro coupé/i);
+  await muteButton(f).onclick();assert.equal(stateOf(f),"En attente de vous · répondez dans la carte");
 });

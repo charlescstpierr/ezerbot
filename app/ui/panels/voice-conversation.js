@@ -18,8 +18,12 @@
   };
   let ctx, token = "", settingsToken = "", conversationId, scopeKey, reader, epoch = 0, timer, ticking = false;
   const contextKey = context => context.conversation?.id || `new:${context.bot?.id || "grokbot"}`;
-  let button, bar, label, transcript, heldNotice, stop, leave, systemSettings;
+  let button, bar, label, transcript, heldNotice, stop, mute, leave, systemSettings;
   let phase = "idle", detail = "", liveText = "", lastUtterance = 0, lastBarge = 0, paused = false, sending = false;
+  // Mirror of the bridge `muted`, read from its answers: the click sends the command, the screen follows the reply.
+  // Only the answer to the latest request that carries `muted` may change it; `muteWanted` is the state the next gesture flips.
+  let muted = false, muteWanted = false, muteSeq = 0;
+  const applyMuted = (seq, value) => { if (seq !== muteSeq) return false; muted = muteWanted = Boolean(value); return true; };
   let inputHeld = false, followResumedReply = false;
   let voicesLoaded = false;
   const botViews = new Set();
@@ -43,13 +47,20 @@
     button.setAttribute("aria-pressed", String(active()));
     button.title = window.EzerbotVoiceCall?.active?.() && !active() ? "Indisponible pendant l’appel vocal" : panels.meetingActive?.() && !active() ? "Indisponible pendant l’enregistrement d’une réunion" : button.disabled ? "Ouvrez une conversation pour utiliser le mode voix" : "Mode voix · parler et écouter les réponses sur ce Mac";
     bar.hidden = phase === "idle";
-    label.textContent = detail || ({authorizing:"Autorisation du microphone…",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:"En attente de vous · répondez dans la carte",sending:"Envoi de la transcription…"}[phase] || "");
-    bar.dataset.phase = phase;
+    // A muted microphone wins over the listening and speaking labels: neither invites the user to speak.
+    const shown = muted && ["listening","speaking"].includes(phase) ? "muted" : phase;
+    label.textContent = detail || ({authorizing:"Autorisation du microphone…",muted:"Micro coupé · le bot ne vous entend pas",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:`En attente de vous · répondez dans la carte${muted ? " · micro coupé" : ""}`,sending:"Envoi de la transcription…"}[shown] || "");
+    bar.dataset.phase = shown;
     bar.dataset.tone = detail ? "danger" : "";
-    transcript.textContent = liveText || "Votre transcription apparaîtra ici. L’audio reste sur ce Mac.";
-    transcript.hidden = Boolean(detail) && !liveText;
+    transcript.textContent = muted ? "" : liveText || "Votre transcription apparaîtra ici. L’audio reste sur ce Mac.";
+    transcript.hidden = muted || Boolean(detail) && !liveText;
     transcript.scrollTop = transcript.scrollHeight;
     heldNotice.hidden = !inputHeld || !window.GrokbotChat.voiceNeedsAction(ctx.conversation?.messages || []);
+    mute.hidden = !active();
+    mute.disabled = phase === "authorizing";
+    mute.setAttribute("aria-pressed", String(muted));
+    const muteName = muted ? "Réactiver le micro" : "Couper le micro";
+    mute.setAttribute("aria-label", muteName); mute.title = `${muteName} (⌘⇧M)`;
     stop.hidden = !active() || !["speaking","thinking","sending"].includes(phase);
     leave.textContent = active() ? "Quitter" : "Fermer";
     systemSettings.hidden = !["mic_denied","speech_denied","offline_unavailable"].includes(phase);
@@ -60,7 +71,7 @@
     clearTimeout(timer); epoch++;
     if (token) bridge("cancel").catch(() => {});
     token = ""; reader = null; conversationId = null; sending = false; paused = false;
-    inputHeld = false; followResumedReply = false;
+    inputHeld = false; followResumedReply = false; muted = muteWanted = false;
     if (clear) { phase = "idle"; detail = ""; liveText = ""; scopeKey = null; }
     render(); panels.composerChanged();
   }
@@ -85,6 +96,19 @@
     phase = "listening"; render();
     await receipt;
   }
+  async function toggleMute() {
+    if (!active() || phase === "authorizing") return;
+    muteWanted = !muteWanted;
+    const rev = epoch, seq = ++muteSeq, receipt = await bridge(muteWanted ? "mute" : "unmute");
+    if (rev !== epoch) return;
+    if (errors[receipt.status]) { fail(receipt.status); return; }
+    if (!applyMuted(seq, receipt.muted)) return;
+    if (muted) liveText = "";
+    // Unmuting listens again to the chosen microphone, which may have gone while muted.
+    if (!muted && receipt.microphone_fallback) window.EzerbotMicrophone?.fellBack(window.EzerbotMicrophone.current());
+    render();
+  }
+  const muteToggled = () => toggleMute().catch(error => panels.notify(error.message));
   async function interrupt() {
     if (!active()) return;
     await stopSpeech();
@@ -98,7 +122,7 @@
     token = crypto.randomUUID(); settingsToken = token; conversationId = ctx.conversation?.id; scopeKey = contextKey(ctx);
     reader = window.GrokbotChat.createVoiceReader(ctx.conversation?.messages || []);
     phase = "authorizing"; detail = ""; liveText = ""; lastUtterance = 0; lastBarge = 0; paused = false;
-    inputHeld = false; followResumedReply = false;
+    inputHeld = false; followResumedReply = false; muted = muteWanted = false;
     const rev = ++epoch;
     render(); panels.composerChanged();
     try {
@@ -131,12 +155,13 @@
     if (ticking) { schedule(rev); return; }
     ticking = true;
     try {
-      const result = await bridge("status");
+      const seq = ++muteSeq, result = await bridge("status");
       if (rev !== epoch) return;
       if (errors[result.status] || result.status === "idle") { fail(result.status); return; }
       if (result.status === "authorizing") { phase = "authorizing"; render(); return; }
       if (result.token !== token) { fail("stale"); return; }
-      if (result.transcript) liveText = result.transcript;
+      applyMuted(seq, result.muted);
+      if (muted) liveText = ""; else if (result.transcript) liveText = result.transcript;
       const needsAction = window.GrokbotChat.voiceNeedsAction(ctx.conversation?.messages || []);
       if (result.barged > lastBarge) {
         lastBarge = result.barged;
@@ -269,14 +294,21 @@
         bar = el("section","voice-session-bar"); bar.setAttribute("aria-label","Conversation vocale");
         const row = el("div","voice-session-row"); label = el("strong","voice-session-state"); label.setAttribute("role","status");
         stop = el("button","attachment-retry","Interrompre"); stop.type = "button"; stop.onclick = () => interrupt().catch(error => fail("failed",error.message));
+        mute = el("button","icon-button voice-mute-toggle"); mute.type = "button"; mute.setAttribute("aria-keyshortcuts","Meta+Shift+M");
+        mute.innerHTML = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/><path class="voice-mute-slash" d="M3 3l18 18"/></svg>';
+        mute.onclick = muteToggled;
         leave = el("button","attachment-retry","Quitter"); leave.type = "button"; leave.onclick = () => exit();
         systemSettings = el("button","attachment-retry","Ouvrir Réglages Système"); systemSettings.type = "button"; systemSettings.onclick = () => bridge("settings", {reason:phase}).catch(() => panels.notify("Ouvrez Réglages Système › Confidentialité et sécurité."));
-        row.append(label,stop,leave,systemSettings);
+        row.append(label,mute,stop,leave,systemSettings);
         transcript = el("p","voice-live-transcript");
         heldNotice = el("p","voice-held-notice","Transcription non envoyée : répondez d’abord dans la carte."); heldNotice.setAttribute("role","status");
         bar.append(row,transcript,heldNotice); container.append(bar);
         document.addEventListener("keydown", event => {
           if (event.key === "Escape" && active()) { event.preventDefault(); event.stopImmediatePropagation(); interrupt().catch(error => fail("failed",error.message)); }
+          // ⌘⇧M: free in the app (app.js takes N, F, K, ⇧W; the dictation takes D; the native menu has no M).
+          if (event.metaKey && event.shiftKey && !event.ctrlKey && !event.altKey && !event.repeat && event.key?.toLowerCase() === "m" && active()) {
+            event.preventDefault(); event.stopImmediatePropagation(); muteToggled();
+          }
         },true);
         window.addEventListener("beforeunload", () => exit());
         window.addEventListener("pagehide", () => exit());

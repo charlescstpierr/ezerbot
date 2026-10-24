@@ -8,11 +8,15 @@
 .voice-session-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .voice-session-state { flex: 1 1 180px; color: var(--text); font-weight: 550; line-height: 1.5; }
 .voice-session-state::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 7px; background: var(--accent-ink); }
+.voice-session-bar[data-phase="muted"] .voice-session-state::before,
 .voice-session-bar[data-phase="thinking"] .voice-session-state::before,
 .voice-session-bar[data-phase="sending"] .voice-session-state::before,
 .voice-session-bar[data-phase="authorizing"] .voice-session-state::before { background: var(--muted); }
 .voice-session-bar[data-phase="waiting"] .voice-session-state::before { background: var(--warning-text); }
 .voice-session-bar[data-phase="speaking"] .voice-session-state::before { animation: voice-speaking-pulse 1.6s ease-in-out infinite; }
+.voice-mute-toggle[aria-pressed="true"] { color: var(--accent-on); background: var(--accent); }
+.voice-mute-slash { display: none; }
+.voice-mute-toggle[aria-pressed="true"] .voice-mute-slash { display: inline; }
 .voice-session-bar[data-tone="danger"] .voice-session-state { color: var(--danger-text); }
 .voice-session-bar[data-tone="danger"] .voice-session-state::before { background: var(--danger-text); animation: none; }
 @keyframes voice-speaking-pulse { 50% { transform: scale(1.25); } }

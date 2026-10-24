@@ -8,7 +8,7 @@ Recherche lexicale locale, sans réseau ni embeddings : mots exacts prioritaires
 
 ## Lecture globale de l’espace
 
-`GET /api/memory/all` (sans paramètres) renvoie `{"facts": [...]}` : tous les
+`GET /api/memory/all` (query ignorée) renvoie `{"facts": [...]}` : tous les
 faits actifs privés, d’équipe et de sujet, sans pagination ni doublons d’équipe.
 Chaque fait expose `fact_id`, `text`, `bot_id`, `bot_deleted`, `scope`
 (`private`, `team`, `topic`), `topic_id`, `topic_name`, `learned_at` (millisecondes

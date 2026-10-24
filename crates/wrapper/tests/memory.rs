@@ -253,10 +253,8 @@ fn workspace_memory_is_read_only_and_empty_workspace_is_valid() {
         404
     );
     assert_eq!(
-        app.api("GET", "/api/memory/all?bot_id=grokbot", b"")
-            .unwrap_err()
-            .status,
-        400
+        app.api("GET", "/api/memory/all?_=123", b"").unwrap(),
+        json!({"facts": []})
     );
 }
 

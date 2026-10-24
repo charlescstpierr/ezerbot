@@ -84,11 +84,7 @@ pub fn routes(
 ) -> Option<Result<ApiResponse, ApiError>> {
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
     if method == "GET" && route == "/api/memory/all" {
-        return Some(if query.is_empty() {
-            workspace_listing(&app.connection).map(ApiResponse::Json)
-        } else {
-            Err(ApiError::new(400, "Cette liste ne prend aucun paramètre."))
-        });
+        return Some(workspace_listing(&app.connection).map(ApiResponse::Json));
     }
     if !matches!(
         (method, route),

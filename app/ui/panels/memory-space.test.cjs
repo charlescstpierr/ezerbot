@@ -84,6 +84,7 @@ test("un clic ouvre « Espace personnel / Mémoire · 3 souvenirs » avec Graphe
 test("la Liste montre tous les souvenirs : texte, bot, portée, date, sans HTML interprété", async () => {
   const h = harness();
   await h.open();
+  assert.equal(h.calls.left, 1, "sans fil ouvert, on quitte aussi la page d’un sujet éventuelle");
   const items = named(h.screen(), "memory-space-item");
   const cells = (className) => items.map((item) => named(item, className)[0].textContent);
   assert.deepEqual(items.map((item) => item.dataset.factId), ["f1", "f2", "f3"]);

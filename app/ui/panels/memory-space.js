@@ -14,7 +14,7 @@
   const noun = (count) => (count < 2 ? `${count} souvenir` : `${count} souvenirs`);
   // learned_at est en millisecondes ; d’anciennes secondes restent comprises.
   const factDate = (value) => new Date(Number(value) < 1e12 ? value * 1000 : value).toLocaleDateString("fr-CA", { day: "numeric", month: "short", year: "numeric" });
-  let latest = null; // { state, conversation } du dernier onState
+  let latest = null; // { state } du dernier onState
   let facts = null; // null tant que la liste n’est pas arrivée
   let failed = false;
   let open = false;
@@ -39,8 +39,8 @@
   }
   function show() {
     if (panels.busy) return;
-    // L’écran remplace le fil affiché ; quitter le fil ferme tout écran ouvert, d’où cet ordre.
-    if (latest?.conversation) panels.leaveConversation?.();
+    // Quitter l’écran courant (fil ou page de sujet) passe par la navigation, qui ferme les autres pages : d’où cet ordre.
+    panels.leaveConversation?.();
     open = true;
     painted = null;
     load();
@@ -129,8 +129,8 @@
   }
   const registered = panels.register({
     id: "memory-space",
-    onState(state, context) {
-      latest = { state, conversation: context?.conversation || null };
+    onState(state) {
+      latest = { state };
       // La liste se relit quand la mémoire change (révision automatique, souvenirs de sujet), et toutes les 30 s.
       const next = [state?.memory_auto?.revision, Object.values(state?.topics?.memory || {}).reduce((sum, list) => sum + list.length, 0)].join(":");
       if (next !== mark) { mark = next; load(); }

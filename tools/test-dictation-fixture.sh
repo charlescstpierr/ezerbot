@@ -13,18 +13,31 @@ case $mode in run | --install | --status) ;; *) echo "usage : $0 [--install|--st
 # Under $HOME, outside every worktree, outside TCC-protected folders (Desktop, Documents) and caches.
 dir="$HOME/.local/share/ezerbot/dictation-fixture-test"
 
-# One install or run at a time across worktrees (so one prompt at most). The lock is taken by running
-# this same script as the command of `lockf FILE COMMAND`: the form of every macOS (the `lockf FD`
-# form only exists since late 2023), kept for the whole install and run, released when it ends.
-# A holder runs at most about 2 min (45 s prompt + 2 x 30 s). -k keeps the file, so waiters queue in order.
-if [[ ${EZERBOT_DICTATION_LOCK_HELD:-} != "$dir" ]]; then
-  mkdir -p "$dir"
-  status=0
-  EZERBOT_DICTATION_LOCK_HELD=$dir lockf -k -s -t 180 "$dir/.lock" "${BASH:-bash}" "$0" "$@" || status=$?
-  # 75 = EX_TEMPFAIL: lockf gave up waiting (our own exit codes are 0, 1, 2 and the binary's).
-  [[ $status -ne 75 ]] || echo "ÉCHEC : $dir/.lock tenu plus de 180 s par un autre test de dictée." >&2
-  exit "$status"
-fi
+# One install or run at a time across worktrees (so one prompt at most). This very process holds the
+# lock: it opens $dir/.lock on descriptor 9, and a short perl child takes flock(2) LOCK_EX on that
+# descriptor. A flock lock belongs to the open file description, so it stays held while this shell, or
+# anything it started (clang, the test binary), keeps descriptor 9 open, and the kernel frees it when the
+# last one is gone, even on SIGKILL (flock(2) NOTES: dup(2)/fork(2) copies are "multiple references to a
+# single lock"). No supervisor stands between the lock and the work: the former `lockf FILE COMMAND` form
+# held the lock in the lockf process alone, and killing it freed the lock while the script ran on.
+# lockf(1) uses the same flock(2) on the same file, so both forms exclude each other. /usr/bin/perl ships
+# with every macOS. A holder runs at most about 2 min (45 s prompt + 2 x 30 s); a waiter gives up after
+# 180 s with exit 75 (EX_TEMPFAIL; our own codes are 0, 1, 2 and the binary's).
+wait_s=180
+mkdir -p "$dir"
+exec 9>>"$dir/.lock"
+status=0
+/usr/bin/perl -MFcntl=:flock -e '
+  $SIG{ALRM} = sub { exit 75 };
+  open(my $fh, ">>&=", 9) or exit 1;
+  alarm $ARGV[0];
+  flock($fh, LOCK_EX) or exit 1;
+  alarm 0;' "$wait_s" || status=$?
+case $status in
+  0) ;;
+  75) echo "ÉCHEC : $dir/.lock tenu plus de $wait_s s par un autre test de dictée." >&2; exit 75 ;;
+  *) echo "ÉCHEC : impossible de prendre le verrou $dir/.lock (perl : code $status)." >&2; exit 1 ;;
+esac
 
 cd "$(dirname "$0")/.."
 bin="$dir/ezerbot-dictation-fixture-test"

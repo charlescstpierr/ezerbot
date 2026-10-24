@@ -27,6 +27,7 @@ use grokbot_engine::{
 use grokbot_forms::{
     approvals::args_digest,
     redact::{redact, redact_value},
+    vault::Vault,
 };
 use grokbot_memory::facts;
 use grokbot_skills::library;
@@ -1175,8 +1176,9 @@ fn bounded(text: &str, limit: usize) -> String {
 }
 fn bounded_status(status: &DelegationStatus, limit: usize) -> DelegationStatus {
     match status {
-        DelegationStatus::Done { result } => DelegationStatus::Done {
+        DelegationStatus::Done { result, captures } => DelegationStatus::Done {
             result: bounded(result, limit),
+            captures: captures.clone(),
         },
         DelegationStatus::Failed { reason } => DelegationStatus::Failed {
             reason: bounded(reason, limit),
@@ -1187,7 +1189,80 @@ fn bounded_status(status: &DelegationStatus, limit: usize) -> DelegationStatus {
         other => other.clone(),
     }
 }
+/// The parent bot reads how many captures were joined and their labels, never
+/// their ids or captions: the references are for the card.
+fn model_status(status: &DelegationStatus, limit: usize) -> Value {
+    let mut value = json!(bounded_status(status, limit));
+    if let (DelegationStatus::Done { captures, .. }, Some(fields)) = (status, value.as_object_mut())
+    {
+        if !captures.is_empty() {
+            let labels: Vec<_> = captures.iter().map(|c| c.label.as_str()).collect();
+            let plural = if labels.len() > 1 { "s" } else { "" };
+            fields.insert(
+                "captures".into(),
+                json!(format!(
+                    "{} capture{plural} jointe{plural} ({})",
+                    labels.len(),
+                    labels.join(", ")
+                )),
+            );
+        }
+    }
+    value
+}
+/// The card gets each reference that still exists in the task thread, with its
+/// thumbnail route. Added after the vault masking: ids and routes are generated
+/// by the host, never a secret, and masking them would break the thumbnails.
+fn attach_references(conn: &Connection, vault: &Vault, edge: &Delegation, edge_json: &mut Value) {
+    let (DelegationStatus::Done { captures, .. }, Some(conversation)) =
+        (&edge.status, &edge.conversation_id)
+    else {
+        return;
+    };
+    let live: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id=?1 AND id=?2 AND deleted=0)",
+            params![ACCOUNT, conversation],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    let shown: Vec<Value> = captures
+        .iter()
+        .filter(|c| {
+            live && super::screen::exists_in_thread(conn, conversation, &c.id).unwrap_or(false)
+        })
+        .filter_map(|c| {
+            Some(
+                json!({"id":c.id,"label":c.label,"caption":redact(vault,&c.caption).ok()?,
+                "url":capture_url(conversation,&c.id)}),
+            )
+        })
+        .collect();
+    if !shown.is_empty() {
+        edge_json["status"]["captures"] = shown.into();
+    }
+}
+/// A screen capture has its conversation-filtered thumbnail route; an attached
+/// image is served by its own id.
+fn capture_url(conversation: &str, id: &str) -> String {
+    if id.starts_with("screen:") {
+        super::screen::thumbnail_url(conversation, id)
+    } else {
+        format!("/api/attachments/{id}")
+    }
+}
 fn public_edge(conn: &Connection, edge: &Delegation) -> Result<Value> {
+    edge_value(conn, edge, model_status(&edge.status, RESULT_CHARACTERS))
+}
+/// The card's view, references left to `attach_references` once masking is done.
+fn card_edge(conn: &Connection, edge: &Delegation) -> Result<Value> {
+    let mut status = json!(bounded_status(&edge.status, RESULT_CHARACTERS));
+    if let Some(fields) = status.as_object_mut() {
+        fields.remove("captures");
+    }
+    edge_value(conn, edge, status)
+}
+fn edge_value(conn: &Connection, edge: &Delegation, status: Value) -> Result<Value> {
     let parent = store::required(conn, &edge.parent_run_id)?;
     let objective: String = conn.query_row(
         "SELECT objective FROM wrapper_delegation_calls WHERE id=?1",
@@ -1198,7 +1273,7 @@ fn public_edge(conn: &Connection, edge: &Delegation) -> Result<Value> {
         json!({"id":edge.id,"objective":bounded(&objective,240),"parent_run_id":edge.parent_run_id,"root_run_id":edge.root_run_id,
         "parent_bot":edge.parent_bot,"child_bot":edge.child_bot,"depth":edge.depth,
         "child_run_id":edge.child_run_id,"conversation_id":edge.conversation_id,
-        "parent_conversation_id":parent.conversation_id,"status":bounded_status(&edge.status,RESULT_CHARACTERS)}),
+        "parent_conversation_id":parent.conversation_id,"status":status}),
     )
 }
 fn wake(ctx: &Context<'_>, edge: &Delegation) -> Result<()> {
@@ -1258,7 +1333,7 @@ fn cancel_runs(ctx: &Context<'_>, cancelled: Vec<Delegation>) -> Result<()> {
 }
 fn react(ctx: &Context<'_>, run: &Run) -> Result<()> {
     let done = match &run.task_status {
-        Some(TaskStatus::Done { summary }) => Some(summary),
+        Some(TaskStatus::Done { summary, captures }) => Some((summary, captures)),
         _ => None,
     };
     if run.status.is_terminal() || done.is_some() {
@@ -1275,13 +1350,18 @@ fn react(ctx: &Context<'_>, run: &Run) -> Result<()> {
     }
     let status = if run.status == RunStatus::Cancelled {
         DelegationStatus::Cancelled
-    } else if let Some(summary) = done {
+    } else if let Some((summary, captures)) = done {
         let vault = super::forms::vault(ctx).map_err(|_| invalid("vault unavailable"))?;
+        let mut captures = captures.clone();
+        for capture in &mut captures {
+            capture.caption = grokbot_forms::redact::redact(&vault, &capture.caption)?;
+        }
         DelegationStatus::Done {
             result: bounded(
                 &grokbot_forms::redact::redact(&vault, summary)?,
                 RESULT_CHARACTERS,
             ),
+            captures,
         }
     } else if run.status.is_terminal() {
         let mut reason = "La sous-tâche s’est arrêtée sans terminer son travail.".to_owned();
@@ -1744,7 +1824,7 @@ fn result_context(conn: &Connection, request: &ContextRequest) -> Result<Option<
             .iter()
             .map(|d| {
                 json!({"id":d.id,"child_bot":d.child_bot,
-            "outcome":bounded_status(&d.status,allowance)})
+            "outcome":model_status(&d.status,allowance)})
             })
             .collect();
         let refused: Vec<_> = refusals
@@ -1920,12 +2000,16 @@ fn context_checked(ctx: &Context<'_>, request: &ContextRequest) -> Result<Vec<Co
 }
 
 pub fn state(ctx: &Context<'_>) -> Value {
+    let Ok(vault) = super::forms::vault(ctx) else {
+        return json!({"error":"Delegation state is unavailable"});
+    };
     let mut counts = serde_json::Map::new();
     let delegations: Vec<_> = state_edges(ctx.connection)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|edge| {
-            let value = public_edge(ctx.connection, &edge).ok()?;
+            let mut value = redact_value(&vault, &card_edge(ctx.connection, &edge).ok()?).ok()?;
+            attach_references(ctx.connection, &vault, &edge, &mut value);
             if matches!(
                 edge.status,
                 DelegationStatus::Queued | DelegationStatus::Running
@@ -1937,11 +2021,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
             Some(value)
         })
         .collect();
-    let value = json!({"delegations":delegations,"active_by_conversation":counts});
-    super::forms::vault(ctx)
-        .ok()
-        .and_then(|vault| redact_value(&vault, &value).ok())
-        .unwrap_or_else(|| json!({"error":"Delegation state is unavailable"}))
+    json!({"delegations":delegations,"active_by_conversation":counts})
 }
 pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
     if kind == "delegation_followup" {
@@ -2020,8 +2100,9 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         return None;
     }
     let edge = graph::get(ctx.connection, id).ok()??;
-    let payload = public_edge(ctx.connection, &edge).ok()?;
-    let payload = redact_value(&super::forms::vault(ctx).ok()?, &payload).ok()?;
+    let vault = super::forms::vault(ctx).ok()?;
+    let mut payload = redact_value(&vault, &card_edge(ctx.connection, &edge).ok()?).ok()?;
+    attach_references(ctx.connection, &vault, &edge, &mut payload);
     if ctx.conversation_id != payload["parent_conversation_id"].as_str() {
         return None;
     }

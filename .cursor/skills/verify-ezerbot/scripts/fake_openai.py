@@ -208,6 +208,54 @@ def recall_turn(items: list) -> bytes | None:
     return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
 
 
+CAPTURE_MARKER = "PREUVE-CAPTURES"
+
+
+def _strings(node: object):
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for value in node.values():
+            yield from _strings(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _strings(value)
+
+
+def _call(call_id: str, name: str, arguments: dict) -> bytes:
+    call = {"id": f"fc-{call_id}", "type": "function_call", "status": "completed", "call_id": call_id, "name": name, "arguments": json.dumps(arguments)}
+    return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
+
+
+def capture_turn(payload: dict, instructions: str, items: list) -> bytes | None:
+    """Un sous-bot dessine une image avant puis une après, tente une capture inventée, puis termine avec les vraies."""
+    asked = CAPTURE_MARKER in json.dumps(items, ensure_ascii=False)
+    outputs = [item for item in items if isinstance(item, dict) and item.get("type") == "function_call_output"]
+    last = outputs[-1].get("call_id") if outputs else None
+    if "You are executing a Task" in instructions and asked:
+        shot = lambda step: next((m for o in outputs if o.get("call_id") == step for m in re.findall(r"attachment_id[^A-Za-z0-9]+([A-Za-z0-9_.-]+)", str(o.get("output")))), "")
+        if last is None:
+            return _call("verify-cap-before", "generate_image", {"description": "la page avant le changement", "aspect_ratio": "16:9"})
+        if last == "verify-cap-before":
+            return _call("verify-cap-after", "generate_image", {"description": "la page après le changement", "aspect_ratio": "9:16"})
+        if last == "verify-cap-after":
+            return _call("verify-cap-bad", "complete_task", {"summary": "Page modifiée.", "captures": [{"id": "image-inventee", "label": "avant", "caption": "Capture inventée"}]})
+        if last == "verify-cap-bad":
+            captures = [
+                {"id": shot("verify-cap-before"), "label": "avant", "caption": "Page avant le changement"},
+                {"id": shot("verify-cap-after"), "label": "après", "caption": "Page après le changement"},
+            ]
+            return _call("verify-cap-done", "complete_task", {"summary": "Page modifiée, voir les captures.", "captures": captures})
+        return _sse([{"type": "response.output_text.delta", "delta": "Terminé."}, {"type": "response.completed"}])
+    if last == "verify-cap-delegate":
+        received = next((line for text in _strings(payload) for line in text.splitlines() if "child_results" in line), "")
+        return _sse([{"type": "response.output_text.delta", "delta": f"Résultat reçu du sous-bot : {received}"}, {"type": "response.completed"}])
+    if last is None and "délègue avec captures" in _last_user_text(items):
+        args = {"child_bot": "child", "objective": f"{CAPTURE_MARKER} : photographie l'écran avant puis après", "selected_context": {"texts": [], "entry_ids": [], "fact_ids": [], "skill_ids": []}}
+        return _call("verify-cap-delegate", "delegate", args)
+    return None
+
+
 def parent_message(instructions: str) -> str:
     """Le message parent d'un sous-fil : bloc de données externes JSON dans les instructions."""
     for found in re.finditer(r"<external_data[^>]*>\n(.*?)\n</external_data>", instructions, re.S):
@@ -268,6 +316,9 @@ def response_body(raw: bytes) -> bytes:
     yolo = yolo_turn(items)
     if yolo is not None:
         return yolo
+    captured = capture_turn(payload, instructions, items)
+    if captured is not None:
+        return captured
     recall = recall_turn(items)
     if recall is not None:
         return recall

@@ -1656,6 +1656,18 @@ impl RunServices for Services<'_> {
         }
         tools
     }
+    fn is_own_capture(
+        &self,
+        conn: &Connection,
+        run: &Run,
+        capture_id: &str,
+    ) -> grokbot_engine::contracts::Result<bool> {
+        Ok(super::screen::exists_in_thread(
+            conn,
+            &run.conversation_id,
+            capture_id,
+        )?)
+    }
     fn tools_for_run(&self, run: &Run) -> Vec<ToolSpec> {
         self.tools()
             .into_iter()

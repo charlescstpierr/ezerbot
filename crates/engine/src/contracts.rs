@@ -86,7 +86,91 @@ pub enum RunKind {
 pub enum TaskStatus {
     Working,
     NeedsInput,
-    Done { summary: String },
+    Done {
+        summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        captures: Vec<CaptureRef>,
+    },
+}
+
+impl TaskStatus {
+    /// Rewrites the free text of a finished task (summary and capture captions);
+    /// capture ids and labels stay. True when something changed.
+    pub fn map_text(&mut self, rewrite: impl Fn(&str) -> String) -> bool {
+        let Self::Done { summary, captures } = self else {
+            return false;
+        };
+        let mut changed = false;
+        for text in std::iter::once(summary).chain(captures.iter_mut().map(|c| &mut c.caption)) {
+            let rewritten = rewrite(text);
+            changed |= rewritten != *text;
+            *text = rewritten;
+        }
+        changed
+    }
+}
+
+pub const MAX_CAPTURES: usize = 4;
+pub const MAX_CAPTION_CHARACTERS: usize = 200;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureLabel {
+    #[serde(rename = "avant")]
+    Avant,
+    #[serde(rename = "après")]
+    Apres,
+}
+impl CaptureLabel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Avant => "avant",
+            Self::Apres => "après",
+        }
+    }
+}
+
+/// An image the task produced in its own thread, joined to its result by reference.
+/// `CaptureRef::parse_list` is the only way in from a model: everything past it
+/// (nonempty caption of at most `MAX_CAPTION_CHARACTERS`, at most `MAX_CAPTURES`
+/// per result) holds by construction. Ownership by the thread is the host's check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureRef {
+    pub id: String,
+    pub label: CaptureLabel,
+    pub caption: String,
+}
+impl CaptureRef {
+    pub fn parse_list(raw: Option<&Value>) -> std::result::Result<Vec<Self>, String> {
+        let list = match raw {
+            None | Some(Value::Null) => return Ok(vec![]),
+            Some(Value::Array(list)) => list,
+            Some(_) => return Err("captures doit être une liste.".into()),
+        };
+        if list.len() > MAX_CAPTURES {
+            return Err(format!(
+                "Au plus {MAX_CAPTURES} captures peuvent être jointes."
+            ));
+        }
+        list.iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let number = index + 1;
+                let mut capture: Self = serde_json::from_value(item.clone()).map_err(|_| {
+                    format!("La capture n° {number} doit avoir un identifiant (id), une étiquette (label : « avant » ou « après ») et une légende (caption).")
+                })?;
+                capture.caption = capture.caption.trim().into();
+                if capture.id.trim().is_empty() {
+                    return Err(format!("La capture n° {number} n’a pas d’identifiant."));
+                }
+                let length = capture.caption.chars().count();
+                if length == 0 || length > MAX_CAPTION_CHARACTERS {
+                    return Err(format!("La légende de la capture n° {number} doit faire de 1 à {MAX_CAPTION_CHARACTERS} caractères."));
+                }
+                Ok(capture)
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

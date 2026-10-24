@@ -591,6 +591,7 @@ mod tests {
             "UPDATE delegation_graph SET status = ?1 WHERE id = 'a'",
             [serde_json::to_string(&DelegationStatus::Done {
                 result: "done".into(),
+                captures: vec![],
             })
             .unwrap()],
         )
@@ -646,6 +647,7 @@ mod tests {
         for status in [
             DelegationStatus::Done {
                 result: "child summary 🖼".into(),
+                captures: vec![],
             },
             DelegationStatus::Failed {
                 reason: "failure".into(),
@@ -725,6 +727,7 @@ mod tests {
             "a",
             &DelegationStatus::Done {
                 result: "done".into(),
+                captures: vec![],
             },
         )
         .unwrap();
@@ -746,7 +749,8 @@ mod tests {
         assert_eq!(
             admit(&conn, &delegation("a", "root"), &AdmissionLimits::default()).unwrap(),
             Admission::Existing(DelegationStatus::Done {
-                result: "done".into()
+                result: "done".into(),
+                captures: vec![],
             })
         );
     }

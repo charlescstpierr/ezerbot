@@ -233,6 +233,7 @@ struct Enable {
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     routine::migrate(conn)?;
     occurrences::migrate(conn)?;
+    conn.execute_batch(super::routine_cost::SCHEMA)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS wrapper_routine_confirmation (
         routine_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,

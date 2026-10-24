@@ -33,6 +33,10 @@ use crate::{cron, routine};
 use grokbot_engine::contracts::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock, PoisonError},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatchUpPolicy {
@@ -552,37 +556,100 @@ pub fn next_slot(conn: &Connection, routine: &routine::Routine) -> Result<Option
     Ok(first)
 }
 
-/// How many slots the triggers of `routine` plan in `(after_ms, until_ms]`, each trigger
-/// counted on its own cursor as [`materialize`] does (a group's members are separate
-/// streams, and an interval keeps its anchor). `None` once more than `cap` slots were
-/// walked, those between a cursor and `after_ms` included. A paused routine restarts its
-/// cursors on resume, so it is counted from `after_ms`.
+/// A trigger's future slots, walked once and kept so that a read is a binary search.
+struct Plan {
+    from: i64,
+    until: i64,
+    slots: Vec<i64>,
+}
+/// How far past the read that walked it a plan reaches: a plan answers a 7-day question for a week.
+const PLAN_HORIZON_MS: i64 = 14 * 86_400_000;
+/// Slots walked from a cursor to the horizon, a long-closed app's backlog included. An interval is at
+/// least a minute, so the horizon alone holds at most 20 160.
+const MAX_WALKED_SLOTS: u64 = 100_000;
+const MAX_PLANS: usize = 512;
+type PlanKey = (String, String, String, String, Option<i64>);
+static PLANS: OnceLock<Mutex<HashMap<PlanKey, Plan>>> = OnceLock::new();
+
+/// How many slots the triggers of `routine` plan in `(now_ms, now_ms + span_ms]` (`span_ms` at most
+/// a week), each trigger counted on its own cursor as [`materialize`] does: a group's members are
+/// separate streams, and an interval keeps its anchor. A paused routine plans none. `None` when a
+/// trigger's backlog is too long to walk. The walk is the scheduler's own `next_after`, so weekdays and zone
+/// changes count as they will run; it is kept per trigger, and an interval is keyed by its anchor
+/// rather than its cursor, which moves with every slot.
 pub fn planned(
     conn: &Connection,
     routine: &routine::Routine,
-    after_ms: i64,
-    until_ms: i64,
-    cap: u64,
+    now_ms: i64,
+    span_ms: i64,
 ) -> Result<Option<u64>> {
-    let (mut walked, mut planned) = (0_u64, 0_u64);
+    if !routine.enabled {
+        return Ok(Some(0));
+    }
+    let plans = PLANS.get_or_init(Default::default);
+    let lock = || plans.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut planned = 0;
     for source in sources(conn, routine)? {
-        let mut at = if routine.enabled {
-            source.cursor
-        } else {
-            after_ms
+        let anchor = match &source.trigger {
+            cron::Schedule::Every {
+                interval_ms,
+                phase_ms: None,
+            } => Some(
+                source
+                    .cursor
+                    .rem_euclid(i64::try_from(*interval_ms).unwrap_or(i64::MAX)),
+            ),
+            _ => None,
         };
-        while let Some(next) = cron::next_after(&source.trigger, &routine.time_zone, at)?
-            .filter(|next| *next <= until_ms)
-        {
-            walked += 1;
-            if walked > cap {
+        let key = (
+            routine.routine_id.clone(),
+            source.member_id.clone(),
+            serde_json::to_string(&source.trigger)?,
+            routine.time_zone.clone(),
+            anchor,
+        );
+        let usable = |plan: &Plan| plan.from <= now_ms && now_ms + span_ms <= plan.until;
+        if !lock().get(&key).is_some_and(usable) {
+            let Some(plan) = walk(routine, &source, now_ms)? else {
                 return Ok(None);
+            };
+            let mut plans = lock();
+            if plans.len() >= MAX_PLANS {
+                plans.clear();
             }
-            planned += u64::from(next > after_ms);
-            at = next;
+            plans.insert(key.clone(), plan);
         }
+        let plans = lock();
+        let slots = &plans[&key].slots;
+        let (before, until) = (
+            slots.partition_point(|slot| *slot <= now_ms),
+            slots.partition_point(|slot| *slot <= now_ms + span_ms),
+        );
+        planned += (until - before) as u64;
     }
     Ok(Some(planned))
+}
+
+fn walk(routine: &routine::Routine, source: &Source, now_ms: i64) -> Result<Option<Plan>> {
+    let until = now_ms + PLAN_HORIZON_MS;
+    let (mut at, mut walked, mut slots) = (source.cursor, 0_u64, Vec::new());
+    while let Some(next) =
+        cron::next_after(&source.trigger, &routine.time_zone, at)?.filter(|next| *next <= until)
+    {
+        walked += 1;
+        if walked > MAX_WALKED_SLOTS {
+            return Ok(None);
+        }
+        if next > now_ms {
+            slots.push(next);
+        }
+        at = next;
+    }
+    Ok(Some(Plan {
+        from: now_ms,
+        until,
+        slots,
+    }))
 }
 
 /// The limited rule on `first..=latest`: only `latest` can run, and only inside
@@ -2588,5 +2655,116 @@ mod occurrences_tests {
             &CatchUpPolicy::default()
         )
         .is_err());
+    }
+
+    const WEEK: i64 = 7 * 86_400_000;
+    const SATURDAY_NOON: i64 = 1_792_843_200_000;
+    const MONDAY_NOON: i64 = 1_793_016_000_000;
+    const WEDNESDAY_NOON: i64 = 1_793_188_800_000;
+
+    /// A routine alone in a fresh database; the plans are kept per routine id across tests.
+    fn planned_routine(
+        id: &str,
+        trigger: cron::Schedule,
+        zone: &str,
+        since: i64,
+    ) -> (Connection, Routine) {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migrate(&conn).unwrap();
+        let routine = routine::create(
+            &conn,
+            &Routine {
+                routine_id: id.into(),
+                conversation_id: format!("thread-{id}"),
+                trigger,
+                time_zone: zone.into(),
+                modified_at: since,
+                ..fixture()
+            },
+        )
+        .unwrap();
+        (conn, routine)
+    }
+
+    /// The scheduler's own walk, slot by slot: what `planned` must agree with.
+    fn walked(routine: &Routine, after: i64) -> u64 {
+        let (mut at, mut count) = (after, 0);
+        while let Some(next) = cron::next_after(&routine.trigger, &routine.time_zone, at)
+            .unwrap()
+            .filter(|next| *next <= after + WEEK)
+        {
+            count += 1;
+            at = next;
+        }
+        count
+    }
+
+    fn cron(expression: &str) -> cron::Schedule {
+        cron::parse(expression).unwrap()
+    }
+
+    #[test]
+    fn planned_counts_weekdays_and_zone_changes_as_the_walk_does() {
+        let (conn, weekdays) =
+            planned_routine("plan-weekdays", cron("* * * * 1-5"), "UTC", SATURDAY_NOON);
+        for now in [SATURDAY_NOON, MONDAY_NOON] {
+            assert_eq!(planned(&conn, &weekdays, now, WEEK).unwrap(), Some(7200));
+        }
+        // The week of the clock change in Toronto (2026-11-01).
+        let (conn, dst) = planned_routine(
+            "plan-dst",
+            cron("* * * * *"),
+            "America/Toronto",
+            WEDNESDAY_NOON,
+        );
+        let expected = walked(&dst, WEDNESDAY_NOON);
+        assert_ne!(expected, 10_080, "the week must hold the clock change");
+        assert_eq!(
+            planned(&conn, &dst, WEDNESDAY_NOON, WEEK).unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn planned_counts_each_group_member_and_keeps_an_interval_anchor() {
+        let daily = |id: &str| crate::cron::Member {
+            id: id.into(),
+            trigger: cron("0 9 * * *"),
+        };
+        let group = cron::Schedule::Group {
+            members: vec![daily("first"), daily("second")],
+        };
+        let (conn, routine) = planned_routine("plan-group", group, "UTC", SATURDAY_NOON);
+        assert_eq!(
+            planned(&conn, &routine, SATURDAY_NOON, WEEK).unwrap(),
+            Some(14)
+        );
+        // Every ten days, last due nine days ago: the next slot is tomorrow.
+        let every = cron::Schedule::Every {
+            interval_ms: 10 * 86_400_000,
+            phase_ms: None,
+        };
+        let (conn, routine) =
+            planned_routine("plan-anchor", every, "UTC", SATURDAY_NOON - 9 * 86_400_000);
+        assert_eq!(
+            planned(&conn, &routine, SATURDAY_NOON, WEEK).unwrap(),
+            Some(1)
+        );
+        // A backlog too long to walk, and a paused routine plans nothing.
+        let (conn, mut routine) = planned_routine(
+            "plan-dense",
+            cron::Schedule::Every {
+                interval_ms: 60_000,
+                phase_ms: None,
+            },
+            "UTC",
+            SATURDAY_NOON - 100 * 86_400_000,
+        );
+        assert_eq!(planned(&conn, &routine, SATURDAY_NOON, WEEK).unwrap(), None);
+        routine.enabled = false;
+        assert_eq!(
+            planned(&conn, &routine, SATURDAY_NOON, WEEK).unwrap(),
+            Some(0)
+        );
     }
 }

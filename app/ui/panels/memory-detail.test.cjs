@@ -42,7 +42,7 @@ async function harness({ refuse = null, opened = ["c1"] } = {}) {
       calls.api.push([path, JSON.parse(JSON.stringify(body || {}))]);
       if (path === "/api/memory/all") return net.down ? Promise.reject(new Error("hors ligne")) : { facts: facts.map((item) => ({ ...item })) };
       if (refuse) throw new Error(refuse);
-      if (path === "/api/memory/correct") { const old = facts.find((item) => item.fact_id === body.fact_id), next = { ...old, fact_id: `n${++n}`, text: body.text }; facts = [next, ...facts.filter((item) => item !== old)]; return { fact: next }; }
+      if (path === "/api/memory/correct") { const old = facts.find((item) => item.fact_id === body.fact_id), next = { ...old, fact_id: `n${++n}`, text: body.text }; facts = [next, ...facts.filter((item) => item !== old)]; await net.hold; return { fact: next }; }
       facts = facts.filter((item) => item.fact_id !== body.fact_id);
       return { forgotten: [body.fact_id] };
     },
@@ -56,7 +56,7 @@ async function harness({ refuse = null, opened = ["c1"] } = {}) {
   sidebar.querySelector(".memory-entry").click();
   await settle();
   const h = {
-    calls, settle, main, net, svg: () => main.querySelector(".memory-graph-canvas"),
+    calls, settle, main, net, reload: () => registered[0].onState({ bots: [{ id: "grokbot", name: "Ezerbot" }], memory_auto: { revision: Math.random() } }, {}), svg: () => main.querySelector(".memory-graph-canvas"),
     tab: (view) => main.querySelector(`.is-${view}`).click(),
     point: (id) => main.querySelector(`.memory-graph-point[data-id="${id}"]`),
     item: (id) => main.querySelector(`.memory-space-item[data-fact-id="${id}"]`),
@@ -154,6 +154,18 @@ test("une relecture manquée ne masque pas une correction réussie ; une action 
   await h.type("Enregistrer", "Aime le thé");
   assert.match(h.panel().textContent, /Souvenir modifié, mais la liste n’a pas pu être relue/);
   assert.equal(h.open(), true);
+  const slow = await harness(); // une relecture arrive entre l'écriture du moteur et sa réponse
+  let release;
+  slow.net.hold = new Promise((resolve) => { release = resolve; });
+  slow.item("f1").click();
+  slow.button("Modifier").click();
+  await slow.type("Enregistrer", "Aime le thé");
+  slow.reload();
+  await slow.settle();
+  assert.equal(slow.open(), true, "le panneau attend la réponse du moteur");
+  release();
+  await slow.settle();
+  assert.deepEqual([slow.open(), slow.text("text")], [true, "Aime le thé"]);
   const race = await harness();
   race.item("f1").click();
   race.button("Modifier").click();

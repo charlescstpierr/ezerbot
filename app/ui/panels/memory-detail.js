@@ -93,8 +93,10 @@
       if (data?.fact?.fact_id) moved.set(request.fact_id, data.fact.fact_id); // corriger remplace le souvenir par un nouveau
       if (mine === epoch) { mode = "view"; note = done; draft = ""; }
       await reload();
+      refresh(); // la liste relue peut être identique à la précédente : l'écran n'appelle alors pas refresh
       if (mine !== epoch) return;
       busy = false;
+      if (!current()) { close(true); return; } // oublié, et la relecture le confirme
       // Toujours là après la relecture : elle a échoué, et le panneau le dit au lieu de se taire.
       if (current()?.fact_id === request.fact_id) note = `${done.slice(0, -1)}, mais la liste n’a pas pu être relue : actualisez-la.`;
       render(forgetting ? "title" : "edit");
@@ -115,6 +117,7 @@
       if (id === null) return;
       if (!current() && (facts() || []).some((item) => item.fact_id === moved.get(id))) id = moved.get(id);
       const fact = current();
+      if (!fact && busy) return; // l'action en cours décide, une fois sa réponse reçue
       if (!fact) close(!document.activeElement || document.activeElement === document.body || root.contains(document.activeElement));
       else if (JSON.stringify(fact) !== shown) render();
       else mark(); // la vue a pu être reconstruite (Graphe ↔ Liste)

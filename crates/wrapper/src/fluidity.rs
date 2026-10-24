@@ -1,6 +1,6 @@
 //! Display fluidity measurements (#255). Durations, counts and opaque digests
 //! only: never a message body, a conversation title or a credential.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +17,9 @@ struct Watched {
 #[derive(Default)]
 pub(crate) struct StreamWatch {
     live: BTreeMap<String, Watched>,
+    // Every reply id already served, so a reply that starts and settles
+    // between two reads is told apart from history. `None` before the first read.
+    known: Option<BTreeSet<String>>,
 }
 
 impl StreamWatch {
@@ -36,7 +39,23 @@ impl StreamWatch {
                 seen.insert(id.to_owned(), (text, message["state"] == "streaming"));
             }
         }
+        // The first read is history; afterwards, a new reply already settled
+        // was one final block, never seen growing.
+        let known = self
+            .known
+            .get_or_insert_with(|| seen.keys().cloned().collect());
         for (id, &(text, streaming)) in &seen {
+            if known.insert(id.clone()) && !streaming {
+                self.live.insert(
+                    id.clone(),
+                    Watched {
+                        text: 0,
+                        changed: None,
+                        updates: 0,
+                        max_gap: Duration::ZERO,
+                    },
+                );
+            }
             if streaming {
                 let watched = self.live.entry(id.clone()).or_insert(Watched {
                     text: 0,
@@ -109,4 +128,57 @@ fn timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn state(replies: &[(&str, &str, &str)]) -> Value {
+        let messages: Vec<Value> = replies
+            .iter()
+            .map(|(id, body, state)| json!({"id": id, "role": "assistant", "body": body, "state": state}))
+            .collect();
+        json!({"conversations": [{"messages": messages}]})
+    }
+
+    #[test]
+    fn a_reply_settled_between_two_reads_is_one_block_and_history_is_silent() {
+        let directory =
+            std::env::temp_dir().join(format!("ezerbot-fluidity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let mut watch = StreamWatch::default();
+        let now = Instant::now();
+        watch.observe(
+            &directory,
+            &state(&[("ancienne", "Déjà là", "echoed")]),
+            now,
+        );
+        watch.observe(
+            &directory,
+            &state(&[
+                ("ancienne", "Déjà là", "echoed"),
+                ("rapide", "Tout d'un coup", "echoed"),
+            ]),
+            now + Duration::from_millis(200),
+        );
+        watch.observe(
+            &directory,
+            &state(&[
+                ("ancienne", "Déjà là", "echoed"),
+                ("rapide", "Tout d'un coup", "echoed"),
+            ]),
+            now + Duration::from_millis(400),
+        );
+        let log = std::fs::read_to_string(directory.join("logs/engine.log")).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        let lines: Vec<_> = log.lines().collect();
+        assert_eq!(lines.len(), 1, "{log}");
+        assert!(lines[0].ends_with(&format!(
+            "affichage réponse={} mises_a_jour=1 ecart_max_ms=0",
+            digest("rapide")
+        )));
+        assert!(!log.contains("Tout d'un coup"));
+    }
 }

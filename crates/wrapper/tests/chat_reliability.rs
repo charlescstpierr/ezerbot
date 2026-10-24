@@ -1305,7 +1305,7 @@ fn a_streamed_reply_is_seen_growing_not_as_one_final_block() {
 }
 
 #[test]
-#[ignore = "défaut connu #255 : avec 200 messages, /api/state sérialise tout l'historique et l'interface voit moins de 15 textes"]
+#[ignore = "défaut connu #255 : avec 200 messages, /api/state sérialise tout l'historique et l'interface voit moins de 15 textes ou des sauts de plus de 300 ms"]
 fn a_long_history_still_shows_the_reply_growing_without_long_jumps() {
     let mut f = Fixture::with_deadline(true, Duration::from_secs(10));
     for turn in 0..100 {

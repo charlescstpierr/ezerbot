@@ -91,6 +91,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     .entry(key.clone())
                     .or_insert_with(|| value.clone());
             }
+            let elapsed = started.elapsed();
             let directory = app.db_path.parent().unwrap_or(std::path::Path::new("."));
             let events: u64 = app
                 .connection
@@ -98,7 +99,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     row.get(0)
                 })
                 .unwrap_or(0);
-            crate::fluidity::state_served(directory, started.elapsed(), events);
+            crate::fluidity::state_served(directory, elapsed, events);
             app.stream_watch
                 .observe(directory, &state, std::time::Instant::now());
             Ok(state)

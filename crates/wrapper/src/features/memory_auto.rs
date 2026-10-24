@@ -193,7 +193,9 @@ pub fn tick(ctx: &Context<'_>) {
         let result = (|| -> Result<(), ApiError> {
             let conn = Connection::open(&path)?;
             conn.busy_timeout(Duration::from_secs(3))?;
-            let result = extract(&conn, &provider, &path, &id);
+            let result = extract(&conn, &path, &id, |prompt, input| {
+                provider.extract_memory(prompt, input)
+            });
             conn.execute(
                 "UPDATE memory_auto_jobs SET state='done',updated_at=?2 WHERE run_id=?1",
                 params![id, crate::now()],
@@ -601,7 +603,12 @@ fn authored_input(
         ApiError::new(500, "Données indisponibles.")
     })?))
 }
-fn extract(conn: &Connection, provider: &Provider, path: &Path, id: &str) -> Result<(), ApiError> {
+fn extract(
+    conn: &Connection,
+    path: &Path,
+    id: &str,
+    provider: impl FnOnce(&str, &str) -> Result<String, crate::provider::Failure>,
+) -> Result<(), ApiError> {
     let run = store::required(conn, id)?;
     let (on, revision) = enabled(conn, &run.bot_id)?;
     if !on || !available(conn, &run.bot_id, &run.conversation_id)? {
@@ -650,9 +657,8 @@ fn extract(conn: &Connection, provider: &Provider, path: &Path, id: &str) -> Res
         .collect();
     let body = json!({"message":input.text,"known":known});
     let safe_body = redact::redact(&vault, &body.to_string())?;
-    let result = provider
-        .extract_memory(PROMPT, &safe_body)
-        .map_err(|_| ApiError::new(500, "Extraction indisponible."))?;
+    let result =
+        provider(PROMPT, &safe_body).map_err(|_| ApiError::new(500, "Extraction indisponible."))?;
     let proposals: Extraction =
         serde_json::from_str(&result).map_err(|_| ApiError::new(500, "Extraction invalide."))?;
     let tx = super::write_transaction(conn)?;
@@ -838,6 +844,9 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         attachments: vec![],
     })
 }
+
+#[cfg(test)]
+mod evaluation;
 
 #[cfg(test)]
 mod group_tests {

@@ -29,15 +29,16 @@ const fact = (id, bot, scope, text, source, conversation, extra = {}) => ({ fact
 const FACTS = [fact("f1", "grokbot", "private", "Aime le café <b>noir</b>", "user_stated", "c1"), fact("f2", "chef", "team", "L’équipe déjeune à midi", "model_inferred", null), fact("f3", "chef", "topic", "Le garde-meuble ferme à 18 h", "user_stated", null, { topic_id: "t1", topic_name: "Déménagement" })];
 // `refuse` : le moteur répond à toute action par cette erreur ; `opened` : les fils que l'application sait ouvrir.
 // `lose` : le moteur applique l'action mais la réponse se perd (erreur réseau sans `status`).
-async function harness({ refuse = null, opened = ["c1"], lose = null } = {}) {
+async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFails = false } = {}) {
   const sidebar = new Element("aside"), main = new Element("main"), dock = new Element("div"), bots = new Element("div"), keys = [], registered = [];
   bots.className = "sidebar-bots"; dock.className = "composer-dock"; sidebar.append(bots); main.append(dock);
   const nodes = { sidebar, "conversation-title": new Element("h1"), "workspace-label": new Element("button") };
   const document = { createElement: (tag) => new Element(tag), createElementNS: (_, tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (s) => (s === ".main-panel" ? main : s === "dialog[open]" ? null : dock), addEventListener: (_, action) => keys.push(action), get activeElement() { return Element.active; }, body: new Element("body") };
   let facts = FACTS.map((item) => ({ ...item })), n = 0;
-  const calls = { api: [], opened: [] }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); }, touch: (id) => { facts = facts.map((item) => (item.fact_id === id ? { ...item, needs_review: true } : item)); } };
+  const calls = { api: [], opened: [], refresh: 0 }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); }, touch: (id) => { facts = facts.map((item) => (item.fact_id === id ? { ...item, needs_review: true } : item)); } };
   const panels = {
     register: (panel) => registered.push(panel), leaveConversation() {},
+    async refresh() { calls.refresh += 1; if (refreshFails) throw new Error("état indisponible"); }, // l'état partagé de l'application (fils en cache, reçus)
     openConversation: (id) => { calls.opened.push(id); return opened.includes(id); },
     async api(path, body) {
       calls.api.push([path, JSON.parse(JSON.stringify(body || {}))]);
@@ -375,6 +376,32 @@ test("la fin d'une action ne vole pas le focus à quelqu'un qui est passé aille
   release();
   await h.settle();
   assert.deepEqual([h.text("text"), Element.active === search], ["Café au lait", true], "la correction aboutit, le focus reste dans la recherche");
+});
+
+test("après Modifier ou Oublier, l'état partagé de l'application est relu aussi (les fils en cache ne gardent pas un reçu périmé) ; son échec n'est pas celui de l'action", async () => {
+  const h = await harness();
+  h.tab("graph");
+  h.point("f1").click();
+  h.button("Modifier").click();
+  await h.type("Enregistrer", "Café au lait");
+  assert.equal(h.calls.refresh, 1, "Modifier relit l'état partagé");
+  h.button("Oublier…").click();
+  h.button("Oublier ce souvenir").click();
+  await h.settle();
+  assert.deepEqual([h.calls.refresh, h.open()], [2, false], "Oublier aussi");
+  const broken = await harness({ refreshFails: true });
+  broken.tab("graph");
+  broken.point("f1").click();
+  broken.button("Modifier").click();
+  await broken.type("Enregistrer", "Café au lait");
+  assert.deepEqual([broken.text("text"), broken.text("error"), broken.button("Modifier").disabled], ["Café au lait", "", false], "l'état n'a pas pu être relu : la correction reste confirmée, sans erreur d'action");
+  const lost = await harness({ lose: "Réseau coupé" });
+  lost.tab("graph");
+  lost.point("f2").click();
+  lost.button("Oublier…").click();
+  lost.button("Oublier ce souvenir").click();
+  await lost.settle();
+  assert.equal(lost.calls.refresh, 1, "même une réponse perdue relit l'état partagé");
 });
 
 test("réponse perdue après Oublier : le moteur a oublié, le panneau relit la liste, se ferme et le graphe et la Liste sont à jour", async () => {

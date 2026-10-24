@@ -77,6 +77,9 @@
       ({ title, body, back, edit, ask, origin })[want]?.focus();
       if (!want) controls()[held]?.focus();
     }
+    // Après une action, la liste ET l'état partagé de l'application sont relus : un fil en cache afficherait sinon un reçu de mémoire périmé (un texte oublié, des commandes actives).
+    // L'échec de cette relecture ne devient pas celui de l'action : le panneau ne l'affiche pas comme une erreur.
+    const sync = () => Promise.allSettled([reload(), panels.refresh?.()]);
     // Au retour d'une action, le focus ne va au panneau que s'il y était (ou nulle part) : quelqu'un qui a cherché ailleurs entre-temps le garde.
     const focusing = (want) => (!document.activeElement || document.activeElement === document.body || root.contains(document.activeElement) ? want : "");
     // Le panneau suit le moteur : il ne montre que ce que la dernière lecture contient.
@@ -91,7 +94,7 @@
         data = await panels.api(path, request);
       } catch (error) {
         // Une erreur ne dit pas si le moteur a appliqué l'action (réponse perdue) : on relit avant de rendre la main, puis le panneau se règle sur la relecture.
-        await reload();
+        await sync();
         busy = false;
         // Une correction appliquée remplace le souvenir par un nouveau, de même bot, de même portée et de même texte, absent de la liste d'avant. Deux candidats : on ne devine pas.
         const same = request.text === undefined || !origin ? [] : (facts() || []).filter((item) => !before.has(item.fact_id) && item.bot_id === request.bot_id && item.scope === origin.scope && item.text === request.text);
@@ -106,7 +109,7 @@
       }
       if (data?.fact?.fact_id) moved.set(request.fact_id, data.fact.fact_id); // corriger remplace le souvenir par un nouveau
       if (mine === epoch) { mode = "view"; note = done; draft = ""; }
-      await reload();
+      await sync();
       busy = false;
       refresh(); // la liste relue peut être identique à la précédente : l'écran n'appelle alors pas refresh
       if (mine !== epoch) return;

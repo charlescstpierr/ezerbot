@@ -1,0 +1,11 @@
+/* Mémoire : bouton et formulaire « Ajouter un souvenir ». Jetons Galet uniquement. */
+.memory-space-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.memory-add { display: grid; gap: 14px; margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--pane); }
+.memory-add[hidden] { display: none; }
+.memory-add .form-label { margin-bottom: 6px; }
+.memory-add textarea.text-input { min-height: 88px; font-family: inherit; }
+.memory-add-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.memory-add-error { margin: 0; font-size: 12px; line-height: 1.5; color: var(--danger-text); overflow-wrap: anywhere; }
+.memory-add-error:empty { display: none; }
+.memory-add-footer { display: flex; justify-content: flex-end; gap: 8px; }
+.memory-add-footer .primary-button:disabled { opacity: .5; cursor: default; }

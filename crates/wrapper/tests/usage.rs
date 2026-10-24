@@ -373,6 +373,16 @@ impl Cost {
     }
     /// One passage whose run started `age_ms` ago and used `tokens` in total.
     fn pass(&self, id: &str, status: &str, age_ms: i64, tokens: Option<u64>) -> &Self {
+        self.pass_for(&self.routine, id, status, age_ms, tokens)
+    }
+    fn pass_for(
+        &self,
+        routine: &str,
+        id: &str,
+        status: &str,
+        age_ms: i64,
+        tokens: Option<u64>,
+    ) -> &Self {
         let started = (now() * 1000) as i64 - age_ms;
         insert_run(
             &self.conn,
@@ -385,19 +395,55 @@ impl Cost {
         if let Some(tokens) = tokens {
             add_usage(&self.conn, id, tokens / 2 - 100, 100, 0);
         }
-        self.conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,run_id,reason) VALUES (?1,?2,1,?3,?4,?1,'test')", params![id, self.routine, started, status]).unwrap();
+        self.conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,run_id,reason) VALUES (?1,?2,1,?3,?4,?1,'test')", params![id, routine, started, status]).unwrap();
         self
+    }
+    /// A local run with `tokens` in total, started a day ago, that no routine owns.
+    fn chat(&self, tokens: u64) {
+        let started = (now() * 1000) as i64 - DAY_MS;
+        insert_run(
+            &self.conn,
+            "chat",
+            &self.bot,
+            &self.conversation,
+            "chat",
+            started,
+        );
+        add_usage(&self.conn, "chat", tokens / 2 - 100, 100, 0);
+    }
+    /// Reads once so the app notes the signed-in account, then dates that sign-in long ago.
+    fn trust_account(&mut self) {
+        self.cost();
+        self.conn
+            .execute("UPDATE wrapper_routine_cost_account SET since=0", [])
+            .unwrap();
     }
     /// The cost the routine list and the routines state both return, which must agree.
     fn cost(&mut self) -> Value {
+        let ours = |routines: &Value, routine: &str| {
+            routines
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["routine_id"] == routine)
+                .unwrap()["cost"]
+                .clone()
+        };
         let list = self
             .app
             .api("GET", &format!("/api/routines?bot_id={}", self.bot), b"")
-            .unwrap()["routines"][0]["cost"]
+            .unwrap()["routines"]
             .clone();
-        let state = self.app.api("GET", "/api/state", b"").unwrap()["routines"]["items"][0]
-            ["routine"]["cost"]
-            .clone();
+        let state = self.app.api("GET", "/api/state", b"").unwrap()["routines"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["routine"].clone())
+            .collect::<Vec<_>>();
+        let (list, state) = (
+            ours(&list, &self.routine),
+            ours(&json!(state), &self.routine),
+        );
         assert_eq!(list, state);
         list
     }
@@ -436,6 +482,31 @@ fn a_subtask_and_its_own_subtask_count_once_in_the_passage_that_started_them() {
         add_usage(&c.conn, id, tokens / 2 - 50, 50, 0);
         edge(&c.conn, parent, id);
     }
+    // Another routine's passage, with its own subtask, is not ours.
+    let other = c
+        .app
+        .api(
+            "POST",
+            "/api/routines",
+            json!({"bot_id":c.bot,"name":"Autre","prompt":"Résume.","schedule":"@every 1h"})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap()["routine"]["routine_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    c.pass_for(&other, "foreign", "done", 3_600_000, Some(5000));
+    insert_run(
+        &c.conn,
+        "foreign-child",
+        &c.bot,
+        &c.conversation,
+        "delegation",
+        1,
+    );
+    add_usage(&c.conn, "foreign-child", 1450, 50, 0);
+    edge(&c.conn, "foreign", "foreign-child");
     let cost = c.cost();
     assert_eq!(cost["average_tokens"], 1750);
     assert_eq!(cost["tokens_7d"], 1750);
@@ -509,6 +580,74 @@ fn the_forecast_follows_the_scheduler_cursor_and_counts_each_group_member_on_its
     assert_eq!(c.cost()["forecast"]["runs_next_7d"], 14);
 }
 
+#[test]
+fn a_weekday_schedule_is_counted_whatever_the_day_it_is_read() {
+    // Any 7 days hold five weekdays of 1 440 minutes.
+    let mut c = Cost::new(
+        valid(),
+        json!({"kind":"cron","expression":"* * * * 1-5","time_zone":"UTC"}),
+    );
+    c.pass("a", "done", 3_600_000, Some(2000));
+    let forecast = c.cost()["forecast"].clone();
+    assert_eq!(forecast["runs_next_7d"], 7200);
+    assert_eq!(forecast["tokens_next_7d"], 14_400_000);
+    // Nothing is planned while the routine is paused.
+    c.conn
+        .execute("UPDATE scheduler_routines SET enabled=0", [])
+        .unwrap();
+    assert_eq!(c.cost()["forecast"]["runs_next_7d"], 0);
+}
+
+#[test]
+fn the_quota_share_needs_five_percent_used_and_fifty_thousand_local_tokens() {
+    // The routine's own passage ("a", 2 000 tokens) is local too: chat + 2 000 = local.
+    for (used, chat, share) in [
+        (4.9, 98_000, "unknown"),
+        (5.0, 98_000, "estimated"),
+        (20.0, 47_998, "unknown"),
+        (20.0, 48_000, "estimated"),
+    ] {
+        let mut c = Cost::new(
+            weekly(used),
+            json!({"kind":"every","interval_ms":1_800_000}),
+        );
+        c.chat(chat);
+        c.pass("a", "done", 3_600_000, Some(2000));
+        c.trust_account();
+        let quota_share = c.cost()["quota_share"].clone();
+        assert_eq!(
+            quota_share["state"], share,
+            "{used} % {chat}: {quota_share}"
+        );
+        if share == "unknown" {
+            assert_eq!(quota_share["reason"], "calibration_weak");
+        }
+    }
+}
+
+#[test]
+fn another_account_never_calibrates_this_ones_quota() {
+    // Account A ran 2 000 000 tokens; account B signs in, and its gauge says 20 % used.
+    let mut c = Cost::new(
+        weekly(20.0),
+        json!({"kind":"every","interval_ms":1_800_000}),
+    );
+    c.chat(2_000_000);
+    c.pass("a", "done", 3_600_000, Some(2000));
+    c.conn
+        .execute(
+            "INSERT OR REPLACE INTO wrapper_routine_cost_account(id,identity,since) VALUES (1,'account-a',0)",
+            [],
+        )
+        .unwrap();
+    let share = c.cost()["quota_share"].clone();
+    assert_eq!(share["state"], "unknown");
+    assert_eq!(share["reason"], "account_unconfirmed");
+    assert!(share["percent"].is_null());
+    // The sign-in is noted from this read on: still unconfirmed for the window it began in.
+    assert_eq!(c.cost()["quota_share"]["reason"], "account_unconfirmed");
+}
+
 fn is_money(key: &str) -> bool {
     ["usd", "dollar", "price", "prix", "eur", "currency"]
         .iter()
@@ -531,7 +670,7 @@ fn money_keys(value: &Value) -> Vec<String> {
     }
 }
 
-fn weekly(used: u64) -> Value {
+fn weekly(used: f64) -> Value {
     json!({"rate_limit":{"primary_window":{"used_percent":used,"limit_window_seconds":604800,"reset_at":now()+3*86400}}})
 }
 
@@ -539,7 +678,10 @@ fn weekly(used: u64) -> Value {
 fn the_weekly_quota_share_is_estimated_from_this_weeks_local_tokens_and_has_no_dollar_field() {
     // 20 % of the window used while 2 000 000 tokens ran locally since it began:
     // 100 000 tokens per percent, so a 672 000-token week is 6.72 %.
-    let mut c = Cost::new(weekly(20), json!({"kind":"every","interval_ms":1_800_000}));
+    let mut c = Cost::new(
+        weekly(20.0),
+        json!({"kind":"every","interval_ms":1_800_000}),
+    );
     assert_eq!(c.f.quota()["status"], "ready");
     insert_run(
         &c.conn,
@@ -551,17 +693,19 @@ fn the_weekly_quota_share_is_estimated_from_this_weeks_local_tokens_and_has_no_d
     );
     add_usage(&c.conn, "chat", 999_900, 100, 0);
     c.pass("a", "done", 3_600_000, Some(2000));
+    c.trust_account();
     let cost = c.cost();
     assert_eq!(cost["quota_share"]["state"], "estimated");
     assert_eq!(cost["quota_share"]["percent"], 6.7);
     assert!(money_keys(&cost).is_empty(), "{cost}");
     // Too little use of the window, or no quota at all: no share, tokens stay.
     for (quota, reason) in [
-        (weekly(1), "calibration_weak"),
+        (weekly(1.0), "calibration_weak"),
         (json!({}), "quota_unavailable"),
     ] {
         let mut c = Cost::new(quota, json!({"kind":"every","interval_ms":1_800_000}));
         c.pass("a", "done", 3_600_000, Some(2000));
+        c.trust_account();
         let cost = c.cost();
         assert_eq!(cost["quota_share"]["state"], "unknown");
         assert_eq!(cost["quota_share"]["reason"], reason);

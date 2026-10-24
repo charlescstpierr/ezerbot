@@ -847,11 +847,8 @@ impl App {
         let account_id = AccountId::new(ACCOUNT).expect("constant account ID");
         let reader = SessionStore::open(path, &account_id)?;
         let generation = reader
-            .list_submissions()?
-            .iter()
-            .map(|item| item.generation.0)
-            .max()
-            .unwrap_or(0)
+            .latest_generation()?
+            .map_or(0, |generation| generation.0)
             .checked_add(1)
             .filter(|value| *value <= i64::MAX as u64)
             .ok_or_else(|| ApiError::new(500, "La génération locale est épuisée."))?;

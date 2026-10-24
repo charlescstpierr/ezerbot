@@ -1003,3 +1003,62 @@ fn a_refused_blank_call_neither_creates_nor_replaces_a_question() {
     assert!(matches!(outcome, ToolOutcome::Failed { .. }));
     assert_eq!(f.questions()[0]["question"], "Quelle option ?");
 }
+
+#[test]
+fn a_question_longer_than_the_bound_is_refused_and_creates_or_replaces_nothing() {
+    let mut f = Fixture::new();
+    f.turn("turn", 1000);
+    let refused = f.call(
+        "turn",
+        "attendre_reponse",
+        json!({"question": "a".repeat(501)}),
+    );
+    assert!(matches!(refused, ToolOutcome::Failed { .. }));
+    assert!(f.questions().is_empty());
+    f.ask("turn", &"é".repeat(500));
+    let refused = f.call(
+        "turn",
+        "attendre_reponse",
+        json!({"question": "é".repeat(501)}),
+    );
+    assert!(matches!(refused, ToolOutcome::Failed { .. }));
+    assert_eq!(
+        f.questions()[0]["question"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        140
+    );
+}
+
+/// VM instructions of one `GET /api/taches` with an open question after `old` older entries of its thread.
+fn thread_cost(old: usize) -> i32 {
+    let f = Fixture::new();
+    f.turn("turn", 1000);
+    with_tx(&f.conn, |c| {
+        for i in 0..old {
+            let kind = if i % 2 == 0 { "submission" } else { "engine_tool" };
+            c.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,kind,created_at) VALUES ('local-workspace',?1,?2,?3,1)", params![f.conversation, format!("old-{i}"), kind])?;
+        }
+        Ok::<_, grokbot_engine::contracts::Error>(())
+    })
+    .unwrap();
+    f.ask("turn", "Quelle option ?");
+    let mut statement = f.conn.prepare(tasks::SNAPSHOT).unwrap();
+    let rows = statement
+        .query_map(params!["local-workspace", 2_000_000_000i64], |_| Ok(()))
+        .unwrap()
+        .count();
+    assert_eq!(rows, 2);
+    statement.get_status(StatementStatus::VmStep)
+}
+
+#[test]
+fn an_open_question_costs_the_same_whatever_the_age_of_its_thread() {
+    let (small, large) = (thread_cost(1000), thread_cost(10_000));
+    assert!(
+        large <= 3 * small,
+        "1000 older entries: {small} VM instructions, 10000: {large}"
+    );
+}

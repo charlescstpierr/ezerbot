@@ -13,14 +13,17 @@ empty_hooks!(state, tick, context, entry, on_run_event, link_attachments);
 
 const QUESTION_TOOL: &str = "attendre_reponse";
 const QUESTION_CHARACTERS: usize = 140;
+const QUESTION_BOUND: usize = 500;
 
 // The journal already holds every question: the tool call is an engine event (its
 // arguments) and a timeline entry `run:seq`. The partial index finds those calls
-// without reading every event.
+// without reading every event; the thread index finds what follows a question
+// (Charles's message, a reset) without reading what came before it.
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS wrapper_question_calls ON engine_run_events(run_id,seq)
-         WHERE kind='tool_call' AND json_extract(payload,'$.name')='attendre_reponse'",
+         WHERE kind='tool_call' AND json_extract(payload,'$.name')='attendre_reponse';
+         CREATE INDEX IF NOT EXISTS wrapper_messages_thread ON wrapper_messages(account_id,conversation_id,ordinal)",
     )?;
     Ok(())
 }
@@ -29,7 +32,7 @@ pub fn tools() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: QUESTION_TOOL.into(),
         description: "Signale que tu ne peux pas avancer sans la réponse de Charles : ta question apparaît dans « À décider » jusqu'à ce qu'il écrive. Une question posée seulement dans ton texte n'est pas signalée. N'appelle cet outil que si tu es bloqué, sinon avance. Pas dans une sous-tâche. Pose une question courte, puis termine ton tour.".into(),
-        schema: json!({"type":"object","additionalProperties":false,"properties":{"question":{"type":"string","minLength":1}},"required":["question"]}),
+        schema: json!({"type":"object","additionalProperties":false,"properties":{"question":{"type":"string","minLength":1,"maxLength":QUESTION_BOUND}},"required":["question"]}),
         requires_approval: false,
     }]
 }
@@ -40,16 +43,16 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
     if call.name != QUESTION_TOOL {
         return None;
     }
-    let asked = call.arguments["question"]
-        .as_str()
-        .is_some_and(|question| !question.trim().is_empty());
+    let asked = call.arguments["question"].as_str().is_some_and(|question| {
+        !question.trim().is_empty() && question.chars().count() <= QUESTION_BOUND
+    });
     let delegated = ctx
         .run_id
         .and_then(|id| store::get(ctx.connection, id).ok().flatten())
         .is_some_and(|run| matches!(run.trigger, Trigger::Delegation { .. }));
     Some(if !asked {
         ToolOutcome::Failed {
-            reason: "La question est obligatoire.".into(),
+            reason: format!("La question est obligatoire, de {QUESTION_BOUND} caractères au plus."),
         }
     } else if delegated {
         ToolOutcome::Failed { reason: "Une sous-tâche ne peut pas attendre Charles : termine-la avec complete_task en disant ce qui manque.".into() }
@@ -74,7 +77,7 @@ fn shortened(text: &str) -> String {
 // boundary. Never project objectives, commands, results, form fields or secrets.
 // The one free text is the question of `attendre_reponse`; the route masks vault
 // secrets in the whole question before cutting it, never the other way round.
-// `questions` repeats the tool's blank test: the characters of `char::is_whitespace`.
+// `questions` repeats the tool's test: not blank (the characters of `char::is_whitespace`), at most 500 characters.
 // `live_runs` is the one definition of a visible run: a run of a delegation (its
 // own, or a later turn in its task conversation, such as a late approval) is
 // visible only through a chain of visible edges up to a run that was not delegated.
@@ -116,6 +119,7 @@ WITH RECURSIVE open_runs AS (
  WHERE e.kind='tool_call' AND json_extract(e.payload,'$.name')='attendre_reponse'
  AND json_type(e.payload,'$.arguments.question')='text'
  AND trim(json_extract(e.payload,'$.arguments.question'),char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))<>''
+ AND length(json_extract(e.payload,'$.arguments.question'))<=500
  AND r.trigger_kind<>'delegation'
 ), pending AS (
  SELECT q.id,q.run_id,q.entry_id,r.bot_id,c.id AS conversation_id,

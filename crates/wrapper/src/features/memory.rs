@@ -26,8 +26,10 @@
 //! Grok server algorithm (CM12). User-authored transcript entries are unchanged.
 use super::Context;
 use crate::{parse, validate_id, ApiError, ApiResponse, App, ACCOUNT, DEFAULT_BOT};
+use grokbot_delegation::graph::DelegationStatus;
 use grokbot_engine::contracts::{
     ContextBlock, ContextRequest, ContextSource, RunEventKind, ToolCall, ToolOutcome, ToolSpec,
+    Trigger,
 };
 use grokbot_memory::{
     facts::{self, Fact, FactStatus, Provenance, Scope, Source},
@@ -1196,6 +1198,29 @@ fn redact_run(conn: &Connection, run_id: &str, texts: &BTreeSet<String>) -> Resu
                 serde_json::to_string(&run).map_err(grokbot_engine::contracts::Error::from)?
             ],
         )?;
+    }
+    // A finished delegation keeps its own copy of the capture captions.
+    if let Trigger::Delegation { delegation_id } = &run.trigger {
+        if let Some(mut edge) = grokbot_delegation::graph::get(conn, delegation_id)? {
+            if let DelegationStatus::Done { captures, .. } = &mut edge.status {
+                let mut changed = false;
+                for capture in captures {
+                    let redacted = redact_string(&capture.caption, texts);
+                    changed |= redacted != capture.caption;
+                    capture.caption = redacted;
+                }
+                if changed {
+                    conn.execute(
+                        "UPDATE delegation_graph SET status=?2 WHERE id=?1",
+                        params![
+                            delegation_id,
+                            serde_json::to_string(&edge.status)
+                                .map_err(grokbot_engine::contracts::Error::from)?
+                        ],
+                    )?;
+                }
+            }
+        }
     }
     Ok(())
 }

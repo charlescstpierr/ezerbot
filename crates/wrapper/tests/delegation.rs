@@ -4156,4 +4156,56 @@ mod captures {
         assert!(url.contains("screen%3Arun%3Abefore"), "{url}");
         assert!(image(&mut f, &url).starts_with(b"\x89PNG"));
     }
+
+    #[test]
+    fn forgetting_a_fact_also_clears_it_from_the_captions_the_card_shows() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "oubli", args("child"));
+        let thread = edge.conversation_id.clone().unwrap();
+        shot(&f, &thread, "screen:run:own");
+        let secret = "Allergique aux kumquats mauves.";
+        f.events(vec![
+            call(
+                "learn",
+                "remember",
+                json!({"text":secret,"sensitive":true}),
+            ),
+            call(
+                "finish-child",
+                "complete_task",
+                json!({"summary":"fini","captures":[capture("screen:run:own", "avant", &format!("Vu : {secret}"))]}),
+            ),
+            completed(),
+        ]);
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        assert!(card(&mut f, &edge)["status"]["captures"][0]["caption"]
+            .as_str()
+            .unwrap()
+            .contains(secret));
+        let fact = grokbot_memory::facts::list_active(&f.db(), "child").unwrap()[0]
+            .fact_id
+            .clone();
+        f.post(
+            "/api/memory/forget",
+            json!({"bot_id":"child","fact_id":fact}),
+        );
+        let shown = card(&mut f, &edge);
+        let reference = &shown["status"]["captures"][0];
+        assert_eq!(reference["id"], "screen:run:own");
+        assert_eq!(reference["label"], "avant");
+        assert!(!reference["caption"].as_str().unwrap().contains(secret));
+        let stored: String = f
+            .db()
+            .query_row(
+                "SELECT status FROM delegation_graph WHERE id=?1",
+                [&edge.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains(secret), "{stored}");
+    }
 }

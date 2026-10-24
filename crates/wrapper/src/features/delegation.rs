@@ -273,8 +273,8 @@ pub fn tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "check_delegations".into(),
-            description: "Read this run's child task statuses and completed summaries.".into(),
-            schema: json!({"type":"object","additionalProperties":false,"properties":{}}),
+            description: "Read this run's child task statuses and completed summaries. With portee \"fil\", list instead every task launched from this conversation in the last 24 hours (sub-tasks and background commands, at most 10, newest first): what it does, which bot, status, start time and, once finished, the first sentence of the result or the exit code.".into(),
+            schema: json!({"type":"object","additionalProperties":false,"properties":{"portee":{"type":"string","enum":["fil"]}}}),
             requires_approval: false,
         },
     ]
@@ -409,6 +409,18 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
             return delegation_catalog(ctx, &parent, &call.arguments);
         }
         if call.name == "check_delegations" {
+            if call.arguments == json!({"portee":"fil"}) {
+                let tasks = thread_tasks(
+                    ctx.connection,
+                    &parent.conversation_id,
+                    &parent.bot_id,
+                    ctx.now_ms,
+                )?;
+                let vault = super::forms::vault(ctx).map_err(|_| invalid("vault unavailable"))?;
+                return Ok(ToolOutcome::Done {
+                    output: redact_value(&vault, &thread_output(&tasks))?,
+                });
+            }
             if call.arguments != json!({}) {
                 return Err(invalid("check_delegations takes no arguments"));
             }
@@ -1561,6 +1573,158 @@ fn live_selection(
     ))
 }
 
+const THREAD_TASKS: usize = 10;
+const THREAD_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// A task launched from a thread: a delegated sub-task or a background command (#88).
+/// A command has no start time of its own; it carries the start of the run that launched it.
+struct ThreadTask {
+    command: bool,
+    summary: String,
+    bot: String,
+    status: &'static str,
+    started_ms: i64,
+    result: Option<String>,
+    exit_code: Option<i64>,
+}
+
+/// Tasks this bot launched from this conversation in the last 24 hours, newest first.
+/// The one read behind both the `check_delegations` scope and the context block.
+fn thread_tasks(
+    conn: &Connection,
+    conversation: &str,
+    bot: &str,
+    now_ms: u64,
+) -> Result<Vec<ThreadTask>> {
+    let since = now_ms.saturating_sub(THREAD_WINDOW_MS).min(i64::MAX as u64) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT d.id,c.objective,c.created_at FROM delegation_graph d
+        JOIN wrapper_delegation_calls c ON c.id=d.id JOIN engine_runs r ON r.run_id=d.parent_run_id
+        WHERE r.conversation_id=?1 AND d.parent_bot=?2 AND c.created_at>=?3
+        ORDER BY c.created_at DESC,d.id LIMIT ?4",
+    )?;
+    let rows = stmt
+        .query_map(params![conversation, bot, since, THREAD_TASKS], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut tasks = Vec::new();
+    for (id, objective, started_ms) in rows {
+        let edge = graph::get(conn, &id)?.ok_or_else(|| invalid("missing task"))?;
+        let (status, result) = match edge.status {
+            DelegationStatus::Queued => ("en file", None),
+            DelegationStatus::Running => ("en cours", None),
+            DelegationStatus::Done { result } => ("terminée", Some(result)),
+            DelegationStatus::Failed { reason } | DelegationStatus::Refused { reason } => {
+                ("échec", Some(reason))
+            }
+            DelegationStatus::Cancelled => ("annulée", None),
+        };
+        tasks.push(ThreadTask {
+            command: false,
+            summary: bounded(&objective, 240),
+            bot: edge.child_bot,
+            status,
+            started_ms,
+            result: result.map(|text| first_sentence(&text)),
+            exit_code: None,
+        });
+    }
+    let mut stmt = conn.prepare(
+        "SELECT json_extract(x.outcome,'$.output.command'),t.status,t.exit_code,
+            CAST(json_extract(r.record,'$.started_at') AS INTEGER) AS launched
+        FROM wrapper_shell_tasks t JOIN engine_runs r ON r.run_id=t.run_id
+        LEFT JOIN engine_external_tools x ON x.run_id=t.run_id AND x.call_id=t.call_id
+        WHERE r.conversation_id=?1 AND r.bot_id=?2 AND launched>=?3
+        ORDER BY launched DESC,t.call_id LIMIT ?4",
+    )?;
+    let rows = stmt
+        .query_map(params![conversation, bot, since, THREAD_TASKS], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (command, status, exit_code, started_ms) in rows {
+        tasks.push(ThreadTask {
+            command: true,
+            summary: bounded(&command.unwrap_or_default(), 120),
+            bot: bot.into(),
+            status: match status.as_str() {
+                "en cours" => "en cours",
+                "terminé" => "terminée",
+                "échec" => "échec",
+                _ => "annulée",
+            },
+            started_ms,
+            result: None,
+            exit_code,
+        });
+    }
+    tasks.sort_by_key(|task| std::cmp::Reverse(task.started_ms));
+    tasks.truncate(THREAD_TASKS);
+    Ok(tasks)
+}
+
+fn first_sentence(text: &str) -> String {
+    let text = text.trim();
+    let mut chars = text.char_indices().peekable();
+    let mut end = text.len();
+    while let Some((i, c)) = chars.next() {
+        let stops =
+            matches!(c, '.' | '!' | '?') && chars.peek().is_none_or(|(_, n)| n.is_whitespace());
+        if c == '\n' || stops {
+            end = i + if c == '\n' { 0 } else { c.len_utf8() };
+            break;
+        }
+    }
+    bounded(&text[..end], 240)
+}
+
+fn thread_output(tasks: &[ThreadTask]) -> Value {
+    let tasks: Vec<_> = tasks
+        .iter()
+        .map(|task| {
+            let started = jiff::Timestamp::from_millisecond(task.started_ms).map(|t| t.to_string());
+            let mut line = json!({"kind":if task.command {"command"} else {"delegation"},
+                "summary":task.summary,"bot":task.bot,"status":task.status,
+                "started_at":started.unwrap_or_default()});
+            if let Some(result) = &task.result {
+                line["result"] = json!(result);
+            }
+            if let Some(code) = task.exit_code {
+                line["exit_code"] = json!(code);
+            }
+            line
+        })
+        .collect();
+    json!({"portee":"fil","tasks":tasks})
+}
+
+fn thread_summary(tasks: &[ThreadTask]) -> Option<String> {
+    let parts: Vec<_> = [
+        ("en file", "en file", "en file"),
+        ("en cours", "en cours", "en cours"),
+        ("terminée", "terminée", "terminées"),
+        ("échec", "en échec", "en échec"),
+        ("annulée", "annulée", "annulées"),
+    ]
+    .into_iter()
+    .filter_map(|(status, one, many)| {
+        let n = tasks.iter().filter(|task| task.status == status).count();
+        (n > 0).then(|| format!("{n} {}", if n == 1 { one } else { many }))
+    })
+    .collect();
+    (!parts.is_empty()).then(|| format!("Tâches lancées depuis ce fil : {}.", parts.join(", ")))
+}
+
 fn result_context(conn: &Connection, request: &ContextRequest) -> Result<Option<String>> {
     let events = store::events(conn, &request.run_id, 0)?;
     let mut ids = Vec::new();
@@ -1771,6 +1935,20 @@ fn context_checked(ctx: &Context<'_>, request: &ContextRequest) -> Result<Vec<Co
         blocks.push(ContextBlock {
             source: ContextSource::DelegatedContext,
             priority: 94,
+            budget: CONTEXT_BUDGET * 2,
+            text,
+        });
+    }
+    let tasks = thread_tasks(
+        ctx.connection,
+        &request.conversation_id,
+        &request.bot_id,
+        ctx.now_ms,
+    )?;
+    if let Some(text) = thread_summary(&tasks) {
+        blocks.push(ContextBlock {
+            source: ContextSource::DelegatedContext,
+            priority: 96,
             budget: CONTEXT_BUDGET * 2,
             text,
         });

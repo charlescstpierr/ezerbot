@@ -16,7 +16,8 @@
   let latest = null; // { state } du dernier onState
   let facts = null; // null tant que la liste n’est pas arrivée
   let failed = false, open = false, view = "list", generation = 0;
-  let mark = null, painted = null, entry = null, screen = null;
+  let mark = null, painted = null, entry = null, screen = null, found = null; // found : ids trouvés (Set), null sans filtre
+  const filter = window.EzerbotMemoryFilter?.create(() => paint());
   async function load() {
     const token = ++generation;
     try {
@@ -38,7 +39,7 @@
     painted = null;
     load();
     paint();
-    screen.querySelector(".is-list").focus?.();
+    screen.querySelector(`.is-${view}`).focus?.(); // l'onglet actif : sur « Liste » alors que « Graphe » est affiché, l'anneau passerait pour un état actif
   }
   function close() {
     if (!open) return;
@@ -78,7 +79,7 @@
     const add = window.EzerbotMemoryAdd?.create(load);
     const head = node("div", "memory-space-head");
     head.append(switcher, ...(add ? [add.button] : []));
-    screen.append(head, ...(add ? [add.form] : []), node("p", "memory-space-help", "Tout ce que vos bots ont retenu : souvenirs privés, d’équipe et de sujet."), node("div", "memory-space-body"));
+    screen.append(head, ...(add ? [add.form] : []), node("p", "memory-space-help", "Tout ce que vos bots ont retenu : souvenirs privés, d’équipe et de sujet."), ...(filter ? [filter.element] : []), node("div", "memory-space-body"));
     dock.parentElement.insertBefore(screen, dock);
     return true;
   }
@@ -86,13 +87,15 @@
     const empty = (text) => [node("p", "memory-space-empty", text)];
     const note = failed ? [node("p", "memory-space-help", "La mémoire n’a pas pu être actualisée : voici le dernier état connu.")] : [];
     // Graphe : sans souvenir (ou pas encore chargé), les messages de la Liste s'appliquent.
-    const graph = view === "graph" && facts?.length ? window.GrokbotMemoryGraph?.view(facts, { bots: latest?.state?.bots || [] }) : null;
+    if (found && !found.size && facts?.length) return [...note, ...empty("Aucun souvenir ne correspond à ces filtres.")];
+    const graph = view === "graph" && facts?.length ? window.GrokbotMemoryGraph?.view(facts, { bots: latest?.state?.bots || [], matches: found }) : null;
     if (graph) return [...note, graph];
     if (!facts) return empty(failed ? "La mémoire n’a pas pu être chargée." : "Chargement…");
     if (!facts.length) return [...note, ...empty("Aucun souvenir pour l’instant. Vos bots retiendront ici ce qui compte pour vous.")];
     const list = node("ul", "memory-space-list");
     list.setAttribute("aria-label", "Souvenirs");
     for (const fact of facts) {
+      if (found && !found.has(String(fact.fact_id))) continue;
       const item = node("li", "memory-space-item");
       item.dataset.factId = fact.fact_id;
       const meta = node("div", "memory-space-meta");
@@ -120,7 +123,8 @@
     label.disabled = true;
     document.title = "Mémoire · Ezerbot";
     for (const tab of screen.querySelectorAll(".memory-space-tab")) tab.setAttribute("aria-pressed", String(tab.dataset.view === view));
-    const signature = JSON.stringify([view, failed, facts, (latest?.state?.bots || []).map((bot) => [bot.id, bot.name])]);
+    found = filter ? filter.sync(facts, latest?.state?.bots || [], botLabel) : null;
+    const signature = JSON.stringify([view, failed, facts, (latest?.state?.bots || []).map((bot) => [bot.id, bot.name]), filter?.state]);
     if (signature === painted) return;
     painted = signature;
     screen.querySelector(".memory-space-body").replaceChildren(...body());

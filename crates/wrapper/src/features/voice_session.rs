@@ -1,6 +1,9 @@
 //! Voice preferences and the debug-only recording synthesizer/live transcription adapter.
 //! Real audio remains in the Cocoa process, never in HTTP or model input.
+use super::Context;
 use crate::{parse, ApiError, ACCOUNT};
+use grokbot_engine::contracts::{ContextBlock, ContextRequest, ContextSource, Trigger};
+use grokbot_engine::store;
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -20,8 +23,81 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         INSERT OR IGNORE INTO wrapper_voice_settings VALUES(1,'',1.0);
         CREATE TABLE IF NOT EXISTS wrapper_voice_bots (bot_id TEXT PRIMARY KEY, voice TEXT NOT NULL, speed REAL NOT NULL, language TEXT NOT NULL, chosen INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS wrapper_voice_catalogue (id INTEGER PRIMARY KEY CHECK(id=1), voices TEXT NOT NULL);
-        INSERT OR IGNORE INTO wrapper_voice_catalogue VALUES(1,'[]');")?;
+        INSERT OR IGNORE INTO wrapper_voice_catalogue VALUES(1,'[]');
+        CREATE TABLE IF NOT EXISTS wrapper_voice_turns (conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY (conversation_id, message_id));")?;
     carry_global_setting(conn)
+}
+
+/// The message came from the voice mode: its answer is read aloud, so it stays short.
+pub(super) fn record_turn(
+    conn: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+) -> Result<(), ApiError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO wrapper_voice_turns (conversation_id, message_id) VALUES (?1, ?2)",
+        params![conversation_id, message_id],
+    )?;
+    Ok(())
+}
+
+pub fn discard_conversation(conn: &Connection, conversation: &str) -> Result<(), ApiError> {
+    conn.execute(
+        "DELETE FROM wrapper_voice_turns WHERE conversation_id = ?1",
+        [conversation],
+    )?;
+    Ok(())
+}
+
+pub fn discard_message(
+    conn: &Connection,
+    conversation: &str,
+    message: &str,
+) -> Result<(), ApiError> {
+    conn.execute(
+        "DELETE FROM wrapper_voice_turns WHERE conversation_id = ?1 AND message_id = ?2",
+        params![conversation, message],
+    )?;
+    Ok(())
+}
+
+/// The human message this turn answers. A turn opened by a late approval is named by the
+/// decision, so it takes the message of the turn that posted the card.
+fn spoken_message(conn: &Connection, request: &ContextRequest) -> Option<String> {
+    let mut run = request.run_id.clone();
+    let mut entry = request.current_message.entry_id.clone();
+    while let Some(origin) = super::forms::late_origin(conn, &run) {
+        let Trigger::UserMessage { message_id, .. } = store::required(conn, &origin).ok()?.trigger
+        else {
+            return None;
+        };
+        entry = message_id.split_once('/')?.1.to_owned();
+        run = origin;
+    }
+    super::multibot::source_message(conn, &run, &entry).ok()
+}
+
+pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock> {
+    let Some(message) = spoken_message(ctx.connection, request) else {
+        return Vec::new();
+    };
+    let spoken: bool = ctx
+        .connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM wrapper_voice_turns WHERE conversation_id=?1 AND message_id=?2)",
+            params![request.conversation_id, message],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !spoken {
+        return Vec::new();
+    }
+    vec![ContextBlock {
+        source: ContextSource::BotInstructions,
+        priority: super::priority::INSTRUCTIONS - 1,
+        budget: 16_384,
+        text: "Cette phrase vient du mode voix : ta réponse sera lue à voix haute. Réponds en une ou deux phrases courtes, sans liste ni mise en forme. Pour toute question sur une tâche lancée depuis ce fil, appelle check_delegations avec portee \"fil\" au lieu de deviner.".into(),
+    }]
 }
 
 /// The global voice and speed become, once, those of the bots that have none.
@@ -289,11 +365,26 @@ pub(crate) struct DebugSession {
     spoken: Vec<String>,
     voices: Vec<Value>,
     until: u64,
+    /// Sentence numbers, as the native bridge gives them: the last queued, the last read to
+    /// the end, and the first one the last cut dropped.
+    speeches: u64,
+    heard: u64,
+    cut: u64,
 }
 #[cfg(debug_assertions)]
 impl DebugSession {
     pub fn active(&self) -> bool {
         self.active
+    }
+    /// The number of the sentence at the head of the queue.
+    fn head(&self) -> u64 {
+        self.speeches + 1 - self.queue.len() as u64
+    }
+    fn cut_queue(&mut self) {
+        if !self.queue.is_empty() {
+            self.cut = self.head();
+            self.queue.clear();
+        }
     }
     /// The voice call holds the microphone while it lasts: `call_active` tells the mode to wait.
     pub fn command(&mut self, body: &[u8], call_active: bool) -> Result<Value, ApiError> {
@@ -326,6 +417,7 @@ impl DebugSession {
             1.0
         }
         let c: Command = parse(body)?;
+        let mut queued = None;
         if c.command == "options" {
             return Ok(
                 json!({"voices":FAKE_VOICES.map(|(id,name,language)| json!({"id":id,"name":name,"language":language})),"fake":true}),
@@ -352,6 +444,7 @@ impl DebugSession {
             self.queue.clear();
             self.spoken.clear();
             self.voices.clear();
+            (self.speeches, self.heard, self.cut) = (0, 0, 0);
             self.paused = false;
             self.muted = false;
             self.fault = None;
@@ -369,7 +462,7 @@ impl DebugSession {
                 "feed" => {
                     self.transcript = c.text;
                     if !self.transcript.is_empty() {
-                        self.queue.clear();
+                        self.cut_queue();
                         self.barged += 1;
                     }
                     if c.final_result {
@@ -397,12 +490,14 @@ impl DebugSession {
                         .push(json!({"voice":c.voice,"speed":c.speed,"language":c.language}));
                     self.spoken.push(c.text.clone());
                     self.queue.push(c.text);
+                    self.speeches += 1;
+                    queued = Some(self.speeches);
                     if self.queue.len() == 1 {
                         self.until = crate::now() + 2000;
                     }
                 }
                 "interrupt" => {
-                    self.queue.clear();
+                    self.cut_queue();
                     self.transcript.clear();
                 }
                 "pause" => self.paused = true,
@@ -429,7 +524,7 @@ impl DebugSession {
                 "cancel" => {
                     self.active = false;
                     self.muted = false;
-                    self.queue.clear();
+                    self.cut_queue();
                     self.transcript.clear();
                     self.final_text.clear();
                     self.source.command(
@@ -437,23 +532,30 @@ impl DebugSession {
                             .unwrap(),
                     )?;
                 }
-                "finish_speech" => self.queue.clear(),
+                "finish_speech" if !self.queue.is_empty() => {
+                    self.heard = self.speeches;
+                    self.queue.clear();
+                }
+                "finish_speech" => {}
                 "status" | "settings" => {}
                 "fail" => {
-                    self.queue.clear();
+                    self.cut_queue();
                     self.fault = Some("failed".into());
                 }
                 _ => return Err(ApiError::new(400, "Commande du mode voix inconnue.")),
             }
         }
         if !self.paused && !self.queue.is_empty() && crate::now() >= self.until {
+            self.heard = self.head();
             self.queue.remove(0);
             self.until = crate::now() + 2000;
         }
-        Ok(
-            json!({"status":if self.active {self.fault.as_deref().unwrap_or("listening")} else {"idle"},"token":self.token,"transcript":self.transcript,
+        let mut status = json!({"status":if self.active {self.fault.as_deref().unwrap_or("listening")} else {"idle"},"token":self.token,"transcript":self.transcript,
             "utterance_id":self.utterance,"final_text":self.final_text,"barged":self.barged,"speaking":!self.queue.is_empty() && !self.paused,
-            "paused":self.paused,"muted":self.muted,"recorded_speech":self.spoken,"recorded_voices":self.voices,"microphone_id":self.microphone["microphone_id"],"microphone_name":self.microphone["microphone_name"],"microphone_fallback":self.microphone["microphone_fallback"],"fake":true}),
-        )
+            "paused":self.paused,"muted":self.muted,"recorded_speech":self.spoken,"recorded_voices":self.voices,"microphone_id":self.microphone["microphone_id"],"microphone_name":self.microphone["microphone_name"],"microphone_fallback":self.microphone["microphone_fallback"],"speech_heard":self.heard,"speech_cut":self.cut,"fake":true});
+        if let Some(id) = queued {
+            status["speech_id"] = id.into();
+        }
+        Ok(status)
     }
 }

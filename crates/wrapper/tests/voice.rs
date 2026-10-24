@@ -1056,3 +1056,87 @@ fn the_fake_recognizer_hands_a_memo_its_words_and_a_dictation_none() {
         .unwrap();
     assert!(last < 20_000);
 }
+
+const MODE: &str = "/api/voice/session/debug";
+fn mode(f: &mut Fixture, command: &str) -> Value {
+    f.post(MODE, json!({"command":command,"token":"m"}))
+}
+fn mode_hears(f: &mut Fixture, text: &str) -> Value {
+    f.post(
+        MODE,
+        json!({"command":"feed","token":"m","text":text,"final_result":true}),
+    )
+}
+
+#[test]
+fn a_muted_mode_hears_nothing_and_unmute_listens_again_on_the_chosen_microphone() {
+    let mut f = Fixture::new();
+    let started = f.post(
+        MODE,
+        json!({"command":"start","token":"m","microphone":"fake-usb"}),
+    );
+    assert_eq!(started["muted"], false);
+    f.post(
+        MODE,
+        json!({"command":"feed","token":"m","text":"Je parle à"}),
+    );
+    let muted = mode(&mut f, "mute");
+    assert_eq!(muted["muted"], true);
+    assert_eq!(muted["status"], "listening");
+    assert_eq!(muted["transcript"], "", "nothing said is kept");
+    assert_eq!(
+        mode(&mut f, "mute")["muted"],
+        true,
+        "muting twice is a no-op"
+    );
+    let missed = mode_hears(&mut f, "Je parle à quelqu’un");
+    assert_eq!(
+        missed["utterance_id"], 0,
+        "the UI sends only on a new utterance"
+    );
+    assert_eq!(missed["transcript"], "");
+    assert_eq!(missed["barged"], 1, "a muted sentence cannot barge in");
+    let back = mode(&mut f, "unmute");
+    assert_eq!(back["muted"], false);
+    assert_eq!(back["microphone_id"], "fake-usb");
+    let heard = mode_hears(&mut f, "Bonjour");
+    assert_eq!(heard["utterance_id"], 1);
+    assert_eq!(heard["final_text"], "Bonjour");
+}
+
+#[test]
+fn muting_while_the_bot_speaks_does_not_cut_its_voice() {
+    let mut f = Fixture::new();
+    f.post(MODE, json!({"command":"start","token":"m"}));
+    f.post(
+        MODE,
+        json!({"command":"speak","token":"m","text":"Voici la réponse.","voice":"fake-fr-CA","speed":1.0}),
+    );
+    let muted = mode(&mut f, "mute");
+    assert_eq!(muted["speaking"], true);
+    assert_eq!(muted["recorded_speech"], json!(["Voici la réponse."]));
+}
+
+#[test]
+fn mute_and_the_pause_of_a_waiting_card_are_independent() {
+    let mut f = Fixture::new();
+    f.post(MODE, json!({"command":"start","token":"m"}));
+    f.post(
+        MODE,
+        json!({"command":"speak","token":"m","text":"Une carte attend.","voice":"fake-fr-CA","speed":1.0}),
+    );
+    mode(&mut f, "pause");
+    let muted = mode(&mut f, "mute");
+    assert_eq!(
+        (muted["muted"].clone(), muted["paused"].clone()),
+        (json!(true), json!(true))
+    );
+    let back = mode(&mut f, "unmute");
+    assert_eq!(back["muted"], false);
+    assert_eq!(back["paused"], true, "unmute never resumes a waiting card");
+    assert_eq!(back["speaking"], false);
+    mode(&mut f, "mute");
+    let resumed = mode(&mut f, "resume");
+    assert_eq!(resumed["paused"], false);
+    assert_eq!(resumed["muted"], true, "resume never unmutes");
+}

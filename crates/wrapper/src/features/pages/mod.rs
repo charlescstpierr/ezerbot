@@ -1,6 +1,7 @@
 //! Local Page: the bot writes a `.page.tsx`, Ezerbot compiles it, and the
 //! result stays on this Mac. A compile error names the line and character so
 //! the bot can rewrite the file. There is no public address.
+pub(super) mod anchors;
 mod compile;
 
 use super::{priority, write_transaction, Context};
@@ -43,7 +44,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             UNIQUE (bot_id, filename)
         );",
     )?;
-    Ok(())
+    anchors::migrate(conn)
 }
 
 pub fn tools() -> Vec<ToolSpec> {
@@ -151,6 +152,9 @@ fn persist(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
             ctx.now_ms
         ],
     )?;
+    if compiled.is_ok() {
+        anchors::settle(ctx, &id, &args.source)?;
+    }
     match compiled {
         Ok(_) => Ok(json!({
             "id": id,
@@ -223,12 +227,14 @@ pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock>
     // The instruction category cap is the minimum budget of its blocks. A short
     // budget would drop the bot's private instructions. Priority stays just
     // ahead of those instructions so they remain the last block.
-    vec![ContextBlock {
+    let mut blocks = vec![ContextBlock {
         source: ContextSource::BotInstructions,
         priority: priority::INSTRUCTIONS - 1,
         budget: 16_384,
         text,
-    }]
+    }];
+    blocks.extend(anchors::context(ctx, request));
+    blocks
 }
 
 #[derive(Deserialize)]
@@ -311,9 +317,14 @@ pub(super) fn load(conn: &Connection, id: &str) -> Result<Value, ApiError> {
         "status": status,
         "diagnostic": diagnostic,
         "preview": record.preview,
-        "source_version": format!("{:x}", Sha256::digest(record.source.as_bytes())),
+        "source_version": source_version(&record.source),
+        "anchors": anchors::list(conn, &record.id)?,
         "document": document
     }))
+}
+
+fn source_version(source: &str) -> String {
+    format!("{:x}", Sha256::digest(source.as_bytes()))
 }
 
 fn recursion_limit(error: &serde_json::Error) -> bool {

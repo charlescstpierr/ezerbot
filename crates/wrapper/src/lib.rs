@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod deep_links;
+mod fluidity;
 mod mcp;
 mod provider;
 mod upstream;
@@ -831,6 +832,10 @@ pub struct App {
     debug_voice_call: features::voice_call::DebugCall,
     // Host-owned: survives a WebView reload, never persisted across app starts.
     deep_link_seen: BTreeMap<String, u64>,
+    // Display fluidity (#255), per polling page; `state_client` is the page of
+    // the `/api/state` being served, set by the HTTP host.
+    stream_watches: BTreeMap<&'static str, fluidity::StreamWatch>,
+    state_client: &'static str,
 }
 
 impl App {
@@ -946,6 +951,8 @@ impl App {
             #[cfg(debug_assertions)]
             debug_voice_call: features::voice_call::DebugCall::default(),
             deep_link_seen: BTreeMap::new(),
+            stream_watches: BTreeMap::new(),
+            state_client: "principal",
         })
     }
 
@@ -1276,13 +1283,37 @@ impl App {
 
     /// JSON-only compatibility entry point; binary consumers use `api_response`.
     pub fn api(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiError> {
+        let started = std::time::Instant::now();
         match self.api_response(method, path, body)? {
-            ApiResponse::Json(value) => Ok(value),
+            ApiResponse::Json(value) => {
+                // In process, nothing is encoded: the HTTP host times its own encoding.
+                if (method, path) == ("GET", "/api/state") {
+                    self.log_state_served(started.elapsed());
+                }
+                Ok(value)
+            }
             ApiResponse::Bytes { .. } => Err(ApiError::new(
                 406,
                 "Cette route renvoie des octets, pas du JSON.",
             )),
         }
+    }
+
+    /// Display fluidity (#255): the page the next `/api/state` is served to.
+    pub fn set_state_client(&mut self, remote: bool, header: Option<&str>) {
+        self.state_client = fluidity::client(remote, header);
+    }
+
+    /// Display fluidity (#255): the duration of the last served `/api/state`.
+    pub fn log_state_served(&mut self, elapsed: Duration) {
+        let directory = self.db_path.parent().unwrap_or(Path::new("."));
+        let client = self.state_client;
+        self.stream_watches.entry(client).or_default().served(
+            directory,
+            client,
+            elapsed,
+            std::time::Instant::now(),
+        );
     }
 
     fn require_conversation(&self, id: &str) -> Result<(), ApiError> {

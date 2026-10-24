@@ -22,17 +22,12 @@ struct Fixture {
     provider: Provider,
     server: FakeOpenAi,
     path: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new(live: bool) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir()
-            .join(format!(
-                "grokbot-engine-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ))
-            .join("app.sqlite");
+        let guard = grokbot_test_support::TestDir::new("grokbot-engine");
+        let path = guard.to_path_buf().join("app.sqlite");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         if live {
@@ -52,6 +47,7 @@ impl Fixture {
             provider,
             server,
             path,
+            _dir: guard,
         }
     }
     fn post(&mut self, path: &str, value: Value) -> Value {
@@ -131,11 +127,6 @@ impl Fixture {
         wait("catalogue restored", || {
             self.provider.status()["models_ready"] == true
         });
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 fn call(id: &str, name: &str, args: Value) -> Value {

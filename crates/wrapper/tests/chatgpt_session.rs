@@ -4,7 +4,7 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,16 +12,11 @@ use grokbot_wrapper::{Endpoints, Provider};
 use serde_json::{json, Value};
 use support::{form, wait, FakeOpenAi, Seen, CLIENT};
 
-fn scratch(label: &str) -> PathBuf {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "ezerbot-session-{label}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::SeqCst)
-    ));
-    let _ = fs::remove_dir_all(&path);
-    fs::create_dir_all(&path).unwrap();
-    path
+fn scratch(label: &str) -> grokbot_test_support::TestDir {
+    // La sonde de connexion du fournisseur est un thread détaché : elle écrit encore son journal
+    // après la fin du test, contre un faux serveur déjà fermé.
+    grokbot_test_support::TestDir::new(&format!("ezerbot-session-{label}"))
+        .settling_for(std::time::Duration::from_secs(2))
 }
 
 fn now() -> u64 {
@@ -243,7 +238,8 @@ fn a_refused_refresh_does_not_delete_a_token_saved_by_the_other_process() {
 
 #[test]
 fn legacy_sibling_folder_is_renamed_once_and_not_duplicated() {
-    let root = scratch("legacy").join("Library/Application Support");
+    let root_scratch = scratch("legacy");
+    let root = root_scratch.join("Library/Application Support");
     let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
     write_auth(
         &legacy,
@@ -277,7 +273,8 @@ fn legacy_sibling_folder_is_renamed_once_and_not_duplicated() {
         .join("NotGrokbot/workspace.chatgpt-auth.json")
         .exists());
 
-    let backwards = scratch("backwards").join("Library/Application Support");
+    let backwards_scratch = scratch("backwards");
+    let backwards = backwards_scratch.join("Library/Application Support");
     write_auth(
         &backwards.join("Grokbot/workspace.chatgpt-auth.json"),
         &auth("real-refresh", now().saturating_add(86_400)),
@@ -296,7 +293,8 @@ fn legacy_sibling_folder_is_renamed_once_and_not_duplicated() {
 
 #[test]
 fn charles_codex_file_in_application_support_is_found_without_reconnect() {
-    let root = scratch("charles").join("Library/Application Support/Grokbot");
+    let root_scratch = scratch("charles");
+    let root = root_scratch.join("Library/Application Support/Grokbot");
     let db = root.join("workspace.sqlite");
     let auth_path = root.join("workspace.codex-auth.json");
     write_auth(
@@ -561,7 +559,8 @@ fn sign_in_write_requires_the_lock_and_keeps_a_newer_pair() {
 
 #[test]
 fn legacy_refresh_is_merged_when_the_destination_has_no_token() {
-    let root = scratch("merge").join("Library/Application Support");
+    let root_scratch = scratch("merge");
+    let root = root_scratch.join("Library/Application Support");
     let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
     write_auth(
         &legacy,
@@ -594,7 +593,8 @@ fn legacy_refresh_is_merged_when_the_destination_has_no_token() {
 
 #[test]
 fn destination_refresh_wins_and_the_source_is_tombstoned() {
-    let root = scratch("dest-wins").join("Library/Application Support");
+    let root_scratch = scratch("dest-wins");
+    let root = root_scratch.join("Library/Application Support");
     let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
     let mut older = auth("legacy-refresh", now().saturating_add(86_400));
     older["saved_at"] = json!(10);
@@ -615,7 +615,8 @@ fn destination_refresh_wins_and_the_source_is_tombstoned() {
 
 #[test]
 fn a_newer_source_refresh_replaces_the_older_destination() {
-    let root = scratch("source-newer").join("Library/Application Support");
+    let root_scratch = scratch("source-newer");
+    let root = root_scratch.join("Library/Application Support");
     let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
     let mut newer = auth("new-refresh", now().saturating_add(86_400));
     newer["saved_at"] = json!(80);
@@ -649,7 +650,8 @@ fn a_newer_source_refresh_replaces_the_older_destination() {
 
 #[test]
 fn migration_locks_the_source_before_moving_the_token() {
-    let root = scratch("migrate-lock").join("Library/Application Support");
+    let root_scratch = scratch("migrate-lock");
+    let root = root_scratch.join("Library/Application Support");
     let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
     write_auth(
         &legacy,

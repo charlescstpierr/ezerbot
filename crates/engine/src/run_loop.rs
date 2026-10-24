@@ -3470,14 +3470,8 @@ mod tests {
                 emit(ModelEvent::Completed)
             }
         }
-        let path = std::env::temp_dir().join(format!(
-            "engine-loop-{}-{}.sqlite",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory = grokbot_test_support::TestDir::new("engine-loop");
+        let path = directory.join("engine.sqlite");
         let conn = setup(Connection::open(&path)?, false, RunBudgets::default())?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         with_tx(&conn, |conn| {
@@ -3513,7 +3507,6 @@ mod tests {
             worker.join().unwrap()?;
         }
         drop(conn);
-        std::fs::remove_file(path)?;
         Ok(())
     }
 

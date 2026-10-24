@@ -387,9 +387,8 @@ mod tests {
 
     #[test]
     fn codex_image_fallback_and_retired_selection_use_supported_default_only() {
-        let db = std::env::temp_dir()
-            .join(format!("ezerbot-model-selection-{}", new_host_id()))
-            .join("workspace.sqlite");
+        let directory = grokbot_test_support::TestDir::new("ezerbot-model-selection");
+        let db = directory.join("workspace.sqlite");
         let provider =
             Provider::with_backends(&db, Endpoints::default(), Endpoints::codex(), false);
         assert!(provider.accepts_images(codex::DEFAULT_MODEL));

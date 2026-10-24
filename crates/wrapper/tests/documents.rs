@@ -16,17 +16,12 @@ struct Fixture {
     provider: Provider,
     server: FakeOpenAi,
     path: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let path = std::env::temp_dir()
-            .join(format!(
-                "document-run-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            ))
-            .join("workspace.sqlite");
+        let guard = grokbot_test_support::TestDir::new("document-run");
+        let path = guard.to_path_buf().join("workspace.sqlite");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         std::fs::write(path.with_extension("chatgpt-auth.json"), json!({"host_id":"test-host", "client_id":CLIENT, "access_token":"fake-access", "refresh_token":"fake-refresh", "expires_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()+3600, "scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
@@ -38,6 +33,7 @@ impl Fixture {
             provider,
             server,
             path,
+            _dir: guard,
         }
     }
     fn post(&mut self, route: &str, body: Value) -> Value {
@@ -102,7 +98,6 @@ impl Drop for Fixture {
                     == 0
             });
         }
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 

@@ -8,7 +8,6 @@ use serde_json::{json, Value};
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, SystemTime},
 };
 
@@ -16,20 +15,17 @@ const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x01\0\0\0\x01storage"
 struct Fixture {
     app: App,
     path: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "ezerbot-storage-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-storage");
+        let dir = guard.to_path_buf();
         let path = dir.join("workspace.sqlite");
         let fixture = Self {
             app: App::open(&path).unwrap(),
             path,
+            _dir: guard,
         };
         // Draft bindings must belong to a real, non-deleted conversation. Keep
         // stable identities for these fixtures; missing/deleted cases use others.
@@ -106,12 +102,6 @@ impl Fixture {
         .unwrap()
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(self.path.parent().unwrap());
-    }
-}
-
 #[test]
 fn dry_run_refusal_confirmation_usage_and_audit_survive_restart() {
     let mut f = Fixture::new();

@@ -16,17 +16,13 @@ struct Fixture {
     provider: Provider,
     server: FakeOpenAi,
     dir: std::path::PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 
 impl Fixture {
     fn new() -> Self {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "threads-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("threads-test");
+        let dir = guard.to_path_buf();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let provider =
             Provider::with_endpoints(&dir.join("workspace.sqlite"), server.endpoints(), false);
@@ -36,6 +32,7 @@ impl Fixture {
             provider,
             server,
             dir,
+            _dir: guard,
         }
     }
 
@@ -167,12 +164,6 @@ impl Fixture {
             .map(|block| block.text)
             .collect::<Vec<_>>()
             .join("\n")
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 

@@ -458,12 +458,8 @@ mod elapsed_interval {
                 thread::spawn(move || respond(&mut socket, &flag));
             }
         });
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-elapsed-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-elapsed");
+        let root = guard.to_path_buf();
         let db = root.join("app.sqlite");
         let base = format!("http://{address}");
         std::fs::write(
@@ -543,7 +539,6 @@ mod elapsed_interval {
             elapsed >= 700 && blocked.elapsed() >= Duration::from_millis(700),
             "elapsed interval lost: {elapsed}"
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A transport that delivered its last event has nothing left to close: a burst
@@ -560,12 +555,8 @@ mod elapsed_interval {
                 thread::spawn(move || respond(&mut socket, &AtomicBool::new(false)));
             }
         });
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-burst-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-burst");
+        let root = guard.to_path_buf();
         let db = root.join("app.sqlite");
         std::fs::write(
             root.join("app.codex-auth.json"),
@@ -613,7 +604,6 @@ mod elapsed_interval {
         }
         session.hold_worker_exits(false);
         assert!(peak <= 4, "closing peaked at {peak}");
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The title cap bounds the request itself, not only the caller's wait: a
@@ -651,12 +641,8 @@ mod elapsed_interval {
             }
             let _ = closed_tx.send(Instant::now());
         });
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-title-cap-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-title-cap");
+        let root = guard.to_path_buf();
         let db = root.join("app.sqlite");
         std::fs::write(
             root.join("app.codex-auth.json"),
@@ -712,7 +698,6 @@ mod elapsed_interval {
             open <= Duration::from_secs(4),
             "the request outlived the title cap by {open:?}"
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -779,12 +764,7 @@ mod elapsed_interval {
         const TOTAL: Duration = Duration::from_secs(2);
         let (closed_tx, closed) = std::sync::mpsc::channel();
         let address = dripping_server(mode, closed_tx);
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-drip-{mode:?}-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = grokbot_test_support::TestDir::new(&format!("ezerbot-drip-{mode:?}"));
         let db = root.join("app.sqlite");
         std::fs::write(
             root.join("app.codex-auth.json"),
@@ -871,7 +851,6 @@ mod elapsed_interval {
             ),
             "a fifth turn was refused as busy after the four slots were freed: {next:?}"
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -953,12 +932,8 @@ mod elapsed_interval {
                 thread::spawn(move || hold_chat(&mut socket, &flag, &count));
             }
         });
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-cancel-gate-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-cancel-gate");
+        let root = guard.to_path_buf();
         let db = root.join("app.sqlite");
         let base = format!("http://{address}");
         std::fs::write(
@@ -1082,7 +1057,6 @@ mod elapsed_interval {
             seen,
             "refused turn reached the model"
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     fn conversation_message(app: &mut App, chat: &str, id: &str) -> serde_json::Value {

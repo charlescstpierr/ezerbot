@@ -344,35 +344,28 @@ pub fn for_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grokbot_test_support::TestDir;
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x01\0\0\0\x01image payload";
     const GIF: &[u8] = b"GIF89a\x01\0\x01\0\0\0\0payload";
 
     struct Fixture {
-        directory: PathBuf,
-        base: PathBuf,
         conn: Connection,
+        base: PathBuf,
+        // Dernier champ : la connexion se ferme avant la suppression du dossier.
+        _directory: TestDir,
     }
     impl Fixture {
         fn new() -> Self {
-            let mut nonce = [0; 16];
-            getrandom::getrandom(&mut nonce).unwrap();
-            let directory =
-                std::env::temp_dir().join(format!("grokbot-attachments-{}", digest(&nonce)));
-            fs::create_dir_all(&directory).unwrap();
+            let directory = TestDir::new("grokbot-attachments");
             let base = directory.join("workspace.sqlite");
             let conn = Connection::open(&base).unwrap();
             migrate(&conn).unwrap();
             Self {
-                directory,
-                base,
                 conn,
+                base,
+                _directory: directory,
             }
-        }
-    }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.directory);
         }
     }
 

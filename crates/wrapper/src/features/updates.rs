@@ -482,7 +482,8 @@ mod tests {
 
     #[test]
     fn le_redemarrage_attend_la_fin_de_la_reunion() {
-        let root = std::env::temp_dir().join(format!("ezerbot-maj-reunion-{}", std::process::id()));
+        let guard = grokbot_test_support::TestDir::new("ezerbot-maj-reunion");
+        let root = guard.to_path_buf();
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let mut app = crate::App::open(&root.join("workspace.sqlite")).unwrap();

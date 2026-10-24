@@ -3,17 +3,13 @@
 #![cfg(debug_assertions)]
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use grokbot_wrapper::{
     body_limit, header_safe, too_large, validate_headers_for_path, ApiResponse, BODY_LIMIT,
 };
 use serde_json::{json, Value};
-
-static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 struct Running(Child);
 impl Drop for Running {
@@ -25,9 +21,8 @@ impl Drop for Running {
 
 #[test]
 fn first_line_announces_loopback_and_http_enforces_origin_and_size() {
-    let directory =
-        std::env::temp_dir().join(format!("grokbot-wrapper-http-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).unwrap();
+    let guard = grokbot_test_support::TestDir::new("grokbot-wrapper-http");
+    let directory = guard.to_path_buf();
     let db = directory.join("app.sqlite");
     let child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
         .args(["--port", "0", "--db"])
@@ -99,18 +94,14 @@ fn first_line_announces_loopback_and_http_enforces_origin_and_size() {
 
 struct Host {
     child: Child,
-    directory: PathBuf,
     url: String,
+    _dir: grokbot_test_support::TestDir,
 }
 
 impl Host {
     fn new() -> Self {
-        let directory = std::env::temp_dir().join(format!(
-            "grokbot-http-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
+        let guard = grokbot_test_support::TestDir::new("grokbot-http");
+        let directory = guard.to_path_buf();
         let child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
             .args(["--port", "0", "--db"])
             .arg(directory.join("app.sqlite"))
@@ -124,8 +115,8 @@ impl Host {
             .unwrap();
         let mut host = Self {
             child,
-            directory,
             url: String::new(),
+            _dir: guard,
         };
         let mut line = String::new();
         BufReader::new(host.child.stdout.take().unwrap())
@@ -170,7 +161,6 @@ impl Drop for Host {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
 

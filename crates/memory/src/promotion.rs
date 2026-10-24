@@ -320,20 +320,12 @@ mod tests {
 
     #[test]
     fn facts_and_replay_survive_reopening_database() {
-        struct TempDatabase(std::path::PathBuf);
-        impl Drop for TempDatabase {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_file(&self.0);
-            }
-        }
-        let path = TempDatabase(std::env::temp_dir().join(format!(
-            "grokbot-memory-{}-{}.sqlite",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        )));
+        struct TempDatabase(
+            std::path::PathBuf,
+            #[allow(dead_code)] grokbot_test_support::TestDir,
+        );
+        let directory = grokbot_test_support::TestDir::new("grokbot-memory");
+        let path = TempDatabase(directory.join("memory.sqlite"), directory);
         let ids = vec![fact(1, "a").fact_id];
         let report = {
             let conn = Connection::open(&path.0).unwrap();

@@ -77,7 +77,7 @@ fn shortened(text: &str) -> String {
 // boundary. Never project objectives, commands, results, form fields or secrets.
 // The one free text is the question of `attendre_reponse`; the route masks vault
 // secrets in the whole question before cutting it, never the other way round.
-// `questions` repeats the tool's test: not blank (the characters of `char::is_whitespace`), at most 500 characters.
+// `questions` are the calls whose journaled result is `done`: the tool alone decides what it accepts.
 // `live_runs` is the one definition of a visible run: a run of a delegation (its
 // own, or a later turn in its task conversation, such as a late approval) is
 // visible only through a chain of visible edges up to a run that was not delegated.
@@ -117,10 +117,8 @@ WITH RECURSIVE open_runs AS (
  FROM engine_run_events e INDEXED BY wrapper_question_calls CROSS JOIN live_runs r ON r.run_id=e.run_id
  JOIN wrapper_messages m ON m.account_id=?1 AND m.conversation_id=r.conversation_id AND m.message_id=e.run_id||':'||e.seq AND m.kind='engine_tool'
  WHERE e.kind='tool_call' AND json_extract(e.payload,'$.name')='attendre_reponse'
- AND json_type(e.payload,'$.arguments.question')='text'
- AND trim(json_extract(e.payload,'$.arguments.question'),char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))<>''
- AND length(json_extract(e.payload,'$.arguments.question'))<=500
- AND r.trigger_kind<>'delegation'
+ AND EXISTS (SELECT 1 FROM engine_run_events x WHERE x.run_id=e.run_id AND x.seq>e.seq AND x.kind='tool_result'
+ AND json_extract(x.payload,'$.call_id')=json_extract(e.payload,'$.call_id') AND json_extract(x.payload,'$.outcome.status')='done')
 ), pending AS (
  SELECT q.id,q.run_id,q.entry_id,r.bot_id,c.id AS conversation_id,
  CASE r.trigger_kind WHEN 'delegation' THEN 'delegation' WHEN 'occurrence' THEN 'routine' ELSE 'task' END AS kind,

@@ -189,11 +189,14 @@ impl Fixture {
             )
             .unwrap();
     }
-    /// A tool call as the engine journals it: the event, then its timeline entry `run:seq`.
+    /// A tool call as the engine journals it: the event, its timeline entry `run:seq`, then its result.
     fn call(&self, run: &str, name: &str, arguments: Value) -> ToolOutcome {
         let run = store::required(&self.conn, run).unwrap();
         let call = ToolCall {
-            call_id: "call".into(),
+            call_id: format!(
+                "call-{}",
+                store::events(&self.conn, &run.run_id, 0).unwrap().len()
+            ),
             name: name.into(),
             arguments,
         };
@@ -218,6 +221,8 @@ impl Fixture {
             ..self.app.feature_context()
         };
         let outcome = features::call_tool(&ctx, &call).unwrap();
+        let result = json!({"call_id": call.call_id, "outcome": outcome});
+        store::append_event(&tx, &run.run_id, RunEventKind::ToolResult, &result).unwrap();
         tx.commit().unwrap();
         outcome
     }
@@ -763,6 +768,8 @@ fn snapshot_cost(n: usize) -> (i32, usize) {
             c.execute("INSERT INTO delegation_graph(id,parent_run_id,root_run_id,parent_bot,child_bot,depth,child_run_id,conversation_id,selected_context,status) VALUES (?1,?2,?2,?3,'grokbot',1,?1,?4,?5,'{\"status\":\"done\"}')", params![child, parent, bot, task, edge])?;
             let ask = json!({"call_id":"ask","name":"attendre_reponse","arguments":{"question":"Quelle option ?"}});
             let event = store::append_event(c, &parent, RunEventKind::ToolCall, &ask)?;
+            let done = json!({"call_id":"ask","outcome":ToolOutcome::Done{output:json!({})}});
+            store::append_event(c, &parent, RunEventKind::ToolResult, &done)?;
             let entry = format!("{parent}:{}", event.seq);
             features::conversations::append_entry(c, &f.conversation, "engine_tool", &entry, 1).unwrap();
         }
@@ -1030,6 +1037,49 @@ fn a_question_longer_than_the_bound_is_refused_and_creates_or_replaces_nothing()
             .count(),
         140
     );
+}
+
+#[test]
+fn a_refused_call_neither_creates_nor_replaces_a_question_whatever_the_cause() {
+    // 501 characters, but a nul in the second one: `length()` of SQLite stops there and counts 1.
+    let nul_then_too_long = format!("A\0{}", "é".repeat(499));
+    assert_eq!(nul_then_too_long.chars().count(), 501);
+    let causes = [
+        (
+            "unicode blank",
+            "parent",
+            json!({"question": "\u{3000}\u{a0}\u{2028}"}),
+        ),
+        (
+            "nul then too long",
+            "parent",
+            json!({"question": nul_then_too_long}),
+        ),
+        ("too long", "parent", json!({"question": "a".repeat(501)})),
+        ("empty", "parent", json!({"question": ""})),
+        ("not a text", "parent", json!({"question": 7})),
+        ("missing", "parent", json!({})),
+        ("delegated run", "edge", json!({"question": "Puis-je ?"})),
+    ];
+    for replacing in [false, true] {
+        for (cause, run, arguments) in &causes {
+            let mut f = Fixture::new();
+            f.turn("parent", 1000);
+            f.delegate("edge", "parent", "grokbot", &f.conversation, 1);
+            if replacing {
+                f.ask("parent", "Quelle option ?");
+            }
+            let outcome = f.call(run, "attendre_reponse", arguments.clone());
+            assert!(matches!(outcome, ToolOutcome::Failed { .. }), "{cause}");
+            let questions = f.questions();
+            if replacing {
+                assert_eq!(questions.len(), 1, "{cause}");
+                assert_eq!(questions[0]["question"], "Quelle option ?", "{cause}");
+            } else {
+                assert!(questions.is_empty(), "{cause}");
+            }
+        }
+    }
 }
 
 /// VM instructions of one `GET /api/taches` with an open question after `old` older entries of its thread.

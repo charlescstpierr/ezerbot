@@ -238,6 +238,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             }
             tx.execute("UPDATE wrapper_conversations SET deleted = 1, updated_at = ?3 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, now()])?;
             super::storage::discard_conversation_draft(&tx, &input.id)?;
+            super::pages::anchors::discard_conversation(&tx, &input.id)?;
             tx.execute("UPDATE wrapper_meetings SET audio=NULL,expires_at=NULL,status=CASE WHEN status='recording' THEN 'interrupted' ELSE status END WHERE conversation_id=?1", [&input.id])?;
             tx.commit()?;
             Ok(json!({"ok": true}))

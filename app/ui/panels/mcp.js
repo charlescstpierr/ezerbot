@@ -8,6 +8,19 @@
   const input = (name, placeholder, type = "text") => { const n = node("input"); n.type = type; n.name = name; n.placeholder = placeholder; n.autocomplete = "off"; n.spellcheck = false; return n; };
   let section, list, catalogue, catalogueHeader, catalogueSearch, catalogueEmpty, feedback, key;
   const catalogueCards = new Map();
+  // Le texte d'installation des cartes (setup, scopes_label, license, source) ne voyage pas dans /api/state :
+  // il est identique à chaque lecture, la page le demande une fois (#374).
+  let details = null, detailsLoading = false, detailsRetryAt = 0;
+  async function loadDetails() {
+    if (details || detailsLoading || Date.now() < detailsRetryAt) return;
+    detailsLoading = true;
+    try {
+      const result = await panels.api("/api/connectors/details", {});
+      details = Object.fromEntries((result.details || []).map(entry => [entry.id, entry]));
+      render(panels.state);
+    } catch { detailsRetryAt = Date.now() + 10000; }
+    finally { detailsLoading = false; }
+  }
   const catalogueGroups = new Map();
   const normalize = text => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("fr");
   // Les cartes filtrées restent dans la page, masquées : un brouillon de client OAuth ou le focus ne se perdent pas.
@@ -106,7 +119,8 @@
     const live = Boolean(meeting?.active);
     const actions = node("div", null, "mcp-actions");
     if (item.status !== "connected") {
-      const setup = node("details"); setup.append(node("summary", "Installation et autorisations détaillées"), node("p", item.setup, "mcp-note"), node("p", `${item.license} · ${item.source}`, "mcp-note"));
+      const setup = node("details"); setup.append(node("summary", "Installation et autorisations détaillées"));
+      if (item.setup !== undefined) setup.append(node("p", item.setup, "mcp-note"), node("p", `${item.license} · ${item.source}`, "mcp-note"));
       const form = node("form", null, "mcp-form"); form.id = `connector-setup-${item.id}`;
       const field = input(`${item.id}-key`, "Clé API Recall.ai", "password"); field.maxLength = 256;
       form.append(label("Clé API Recall.ai — jamais réaffichée", field));
@@ -198,7 +212,8 @@
     for (const group of catalogueGroups.values()) if (!group.parentNode) catalogue.append(group);
     const ids = new Set(items.map(item => item.id));
     for (const [id, previous] of catalogueCards) { if (!ids.has(id)) { previous.node.remove(); catalogueCards.delete(id); } }
-    for (const item of items) {
+    for (const listed of items) {
+      const item = details?.[listed.id] ? {...listed, ...details[listed.id]} : listed;
       // La carte Recall n'affiche aucun bot : sa clé les ignore, pour ne pas fermer le formulaire de clé en cours de saisie.
       const cardKey = JSON.stringify(item.kind === "recall" ? [item] : [item,bots.map(b => [b.id,b.name])]);
       const previous = catalogueCards.get(item.id);
@@ -230,7 +245,9 @@
       card.append(heading, node("p", item.description), node("p", `Autorisations : ${item.permissions}`, "mcp-note"));
       if (item.account) card.append(node("p", `Compte connecté : ${item.account}`, "mcp-note"));
       if (item.message && !(item.device_flow && item.device)) card.append(node("p", item.message, item.warning ? "mcp-warning" : ["error","reconnect"].includes(item.status) ? "mcp-error" : "mcp-note"));
-      const setup = node("details"); setup.append(node("summary", "Installation et autorisations détaillées"), node("p", item.setup, "mcp-note"));
+      const loaded = item.setup !== undefined;
+      const setup = node("details"); setup.append(node("summary", "Installation et autorisations détaillées"));
+      if (loaded) setup.append(node("p", item.setup, "mcp-note"));
       const copyButton = (caption, value, name = item.name) => {
         let resetCopy;
         const copy = button("Copier", async () => {
@@ -248,9 +265,9 @@
       };
       if (item.redirect_uri) copyable("URL de retour OAuth", item.redirect_uri);
       if (item.id === "notion") setup.append(node("p", "Autorisations choisies pendant le consentement Notion.", "mcp-note"));
-      else if (item.device_flow || !item.needs_client) setup.append(node("p", `${item.scopes_label} · aucune application OAuth à créer, aucun secret à saisir.`, "mcp-note"));
+      else if (item.device_flow || !item.needs_client) { if (loaded) setup.append(node("p", `${item.scopes_label} · aucune application OAuth à créer, aucun secret à saisir.`, "mcp-note")); }
       else copyable("Portées OAuth", item.scopes_label || item.scopes);
-      setup.append(node("p", `${item.license} · ${item.source}`, "mcp-note"));
+      if (loaded) setup.append(node("p", `${item.license} · ${item.source}`, "mcp-note"));
       let form, client, secret;
       if (item.needs_client && item.has_tokens) setup.append(node("p", "Pour changer d’application OAuth, déconnectez d’abord le service.", "mcp-note"));
       if (item.needs_client && !item.has_tokens && item.status !== "authorizing") {
@@ -400,6 +417,7 @@
   function render(state) {
     if (!list) return;
     const items = state.mcp?.catalogue || [];
+    if (items.length) loadDetails();
     const catalogueIds = new Set(items.flatMap(i => [i.server?.id, ...(i.accounts || []).map(a => a.server?.id), ...(i.slot_servers || [])]).filter(Boolean));
     const servers = (state.mcp?.servers || []).filter(s => !catalogueIds.has(s.id));
     const bots = (state.bots || []).filter(b => !b.deleted);

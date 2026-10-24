@@ -25,15 +25,19 @@ class Node {
   setSelectionRange(start,end,direction) { this.selectionStart=start; this.selectionEnd=end; this.selectionDirection=direction; }
   requestSubmit() { return this.events.submit({preventDefault(){}}); }
 }
-async function mount(servers = [], actionResult = {}, catalogue = []) {
+async function mount(servers = [], actionResult = {}, catalogue = [], detailsResult) {
   const root = new Node("section"), calls = [], notifications = [], opened = [], copies = [], timers = new Map();
-  let nextTimer=0;
+  let nextTimer=0, detailsReads=0;
   const dialog = { open: true, close() { this.open = false; } };
   let panel;
   const panels = {
     state: { bots: [{ id: "grokbot", name: "Ezerbot" }], mcp: { servers, catalogue } },
     register(value) { panel = value; },
-    async api(path, body) { calls.push({ path, body: JSON.parse(JSON.stringify(body)) }); if (panels.failRequest) throw new Error("Action refusée."); return actionResult; },
+    // Le texte d'installation vient de /api/connectors/details, pas de /api/state : cette lecture n'est pas une action.
+    async api(path, body) {
+      if (path === "/api/connectors/details") { detailsReads++; if (detailsResult) return detailsResult; return { details: panels.state.mcp.catalogue.filter(i => i.setup !== undefined).map(({ id, setup, scopes_label, license, source }) => ({ id, setup, scopes_label, license, source })) }; }
+      calls.push({ path, body: JSON.parse(JSON.stringify(body)) }); if (panels.failRequest) throw new Error("Action refusée."); return actionResult;
+    },
     async copyText(text) { copies.push(text); },
     async refresh() {}, notify(text) { notifications.push(text); },
     openConversation(id) { opened.push(id); return true; },
@@ -43,7 +47,8 @@ async function mount(servers = [], actionResult = {}, catalogue = []) {
   const context = vm.createContext({ window: { GrokbotPanels: panels }, document, setTimeout(fn) { const id=++nextTimer;timers.set(id,fn);return id; },clearTimeout(id){timers.delete(id);} });
   vm.runInContext(await readFile(new URL("../../ui/panels/mcp.js", import.meta.url), "utf8"), context);
   panel.settingsSection(root);
-  return { root, calls, notifications, opened, dialog, copies, document, panels, setState(state) {panels.state=state;panel.onState(state);},runTimers(){const callbacks=[...timers.values()];timers.clear();callbacks.forEach(fn=>fn());} };
+  await new Promise(resolve => setImmediate(resolve));
+  return { root, calls, detailsReads: () => detailsReads, notifications, opened, dialog, copies, document, panels, setState(state) {panels.state=state;panel.onState(state);},runTimers(){const callbacks=[...timers.values()];timers.clear();callbacks.forEach(fn=>fn());} };
 }
 
 test("MCP management opens its approval without a toast over the decision buttons", async () => {
@@ -745,4 +750,42 @@ test("a connected Microsoft 365 card names the account and a client that is not 
   const card = catalogueCard(root,"microsoft365");
   assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
   assert.equal(card.all().find(n => n.className === "mcp-warning").textContent, said);
+});
+
+const without = ({ setup, license, source, scopes_label, ...listed }) => listed;
+const served = { details: [{ id: "gmail", setup: "Texte d'installation lu à part", scopes_label: "gmail.modify", license: "MIT", source: "https://example.test" }] };
+
+test("le texte d'installation vient d'une seule lecture à part, pas de /api/state (#374)", async () => {
+  const listed = without(service);
+  const f = await mount([], {}, [listed], served);
+  assert.equal(f.panels.state.mcp.catalogue[0].setup, undefined);
+  const card = catalogueCard(f.root, "gmail");
+  assert.match(card.textContent, /Texte d'installation lu à part/);
+  assert.match(card.textContent, /MIT · https:\/\/example.test/);
+  assert.doesNotMatch(card.textContent, /undefined/);
+  assert.equal(f.detailsReads(), 1);
+  // Chaque sondage rend un état sans ces champs : le texte est gardé et rien n'est relu.
+  f.setState({ ...f.panels.state, mcp: { servers: [], catalogue: [{ ...listed, status: "disconnected" }] } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.detailsReads(), 1);
+  assert.match(catalogueCard(f.root, "gmail").textContent, /Texte d'installation lu à part/);
+  assert.deepEqual(f.calls, []);
+});
+
+test("avant le retour de la lecture la carte n'affiche aucun texte vide, puis le texte arrive (#374)", async () => {
+  let arrive;
+  const late = new Promise(resolve => { arrive = resolve; });
+  const f = await mount([], {}, [without(service)], late);
+  assert.doesNotMatch(catalogueCard(f.root, "gmail").textContent, /undefined|Texte d'installation/);
+  assert.match(catalogueCard(f.root, "gmail").textContent, /Autorisations : Lecture et envoi/);
+  arrive(served);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(catalogueCard(f.root, "gmail").textContent, /Texte d'installation lu à part/);
+});
+
+test("une lecture refusée laisse la carte utilisable (#374)", async () => {
+  const f = await mount([], {}, [without(service)], { then(_, reject) { reject(new Error("Indisponible.")); } });
+  const card = catalogueCard(f.root, "gmail");
+  assert.doesNotMatch(card.textContent, /undefined/);
+  assert.ok(card.all().some(n => n.tag === "form"));
 });

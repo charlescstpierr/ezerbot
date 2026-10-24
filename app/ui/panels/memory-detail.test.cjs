@@ -34,14 +34,14 @@ async function harness({ refuse = null, opened = ["c1"] } = {}) {
   const nodes = { sidebar, "conversation-title": new Element("h1"), "workspace-label": new Element("button") };
   const document = { createElement: (tag) => new Element(tag), createElementNS: (_, tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (s) => (s === ".main-panel" ? main : s === "dialog[open]" ? null : dock), addEventListener: (_, action) => keys.push(action), get activeElement() { return Element.active; }, body: new Element("body") };
   let facts = FACTS.map((item) => ({ ...item })), n = 0;
-  const calls = { api: [], opened: [] }, net = { down: false };
+  const calls = { api: [], opened: [] }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); } };
   const panels = {
     register: (panel) => registered.push(panel), leaveConversation() {},
     openConversation: (id) => { calls.opened.push(id); return opened.includes(id); },
     async api(path, body) {
       calls.api.push([path, JSON.parse(JSON.stringify(body || {}))]);
       if (path === "/api/memory/all") return net.down ? Promise.reject(new Error("hors ligne")) : { facts: facts.map((item) => ({ ...item })) };
-      if (refuse) throw new Error(refuse);
+      if (refuse) { await net.hold; throw new Error(refuse); }
       if (path === "/api/memory/correct") { const old = facts.find((item) => item.fact_id === body.fact_id), next = { ...old, fact_id: `n${++n}`, text: body.text }; facts = [next, ...facts.filter((item) => item !== old)]; await net.hold; return { fact: next }; }
       facts = facts.filter((item) => item.fact_id !== body.fact_id);
       return { forgotten: [body.fact_id] };
@@ -166,6 +166,17 @@ test("une relecture manquée ne masque pas une correction réussie ; une action 
   release();
   await slow.settle();
   assert.deepEqual([slow.open(), slow.text("text")], [true, "Aime le thé"]);
+  const lost = await harness({ refuse: "Souvenir introuvable." }); // refusé, alors qu'une relecture a déjà retiré le souvenir
+  lost.net.hold = new Promise((resolve) => { release = resolve; });
+  lost.item("f2").click();
+  lost.button("Oublier…").click();
+  lost.button("Oublier ce souvenir").click();
+  lost.net.drop("f2");
+  lost.reload();
+  await lost.settle();
+  release();
+  await lost.settle();
+  assert.equal(lost.open(), false, "pas de panneau figé");
   const race = await harness();
   race.item("f1").click();
   race.button("Modifier").click();

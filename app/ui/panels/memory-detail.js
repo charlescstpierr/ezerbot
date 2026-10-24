@@ -86,6 +86,7 @@
       } catch (error) {
         if (mine !== epoch) return;
         busy = false;
+        if (!current()) { close(true); return; } // le souvenir a disparu pendant l'envoi : rien à corriger
         problem = error?.message || "L’action n’a pas abouti.";
         render(mode === "edit" ? "body" : "back");
         return;

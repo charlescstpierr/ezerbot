@@ -436,3 +436,28 @@ fn the_call_is_offered_on_the_mac_only() {
     assert_eq!(state["voice_call"]["available"], true);
     assert!(state["voice_call"]["debug_fake"].as_bool().unwrap());
 }
+
+#[test]
+fn a_muted_call_hears_nothing_while_the_bot_keeps_talking_and_unmute_listens_again() {
+    let mut f = Fixture::new();
+    let conversation = f.conversation();
+    let (id, _) = f.call(&conversation);
+    f.say(&id, "Raconte-moi une histoire.");
+    let muted = f.post(CALL, json!({"command":"mute","token":id}));
+    assert_eq!(muted["muted"], true);
+    assert_eq!(muted["speaking"], true, "the bot's voice goes on");
+    let missed = f.say(&id, "Je parle à quelqu’un.");
+    assert_eq!(missed["lines"].as_array().unwrap().len(), 2);
+    assert_eq!(missed["held"], 0, "a muted sentence is not even held");
+    assert_eq!(missed["speaking"], true);
+    f.post(CALL, json!({"command":"pause","token":id}));
+    let back = f.post(CALL, json!({"command":"unmute","token":id}));
+    assert_eq!(back["muted"], false);
+    assert_eq!(back["paused"], true, "unmute never resumes a waiting card");
+    assert_eq!(back["microphone_id"], "fake-usb");
+    f.post(CALL, json!({"command":"resume","token":id}));
+    let heard = f.say(&id, "Merci.");
+    let lines = heard["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 4);
+    assert_eq!(lines[2]["text"], "Merci.");
+}

@@ -266,6 +266,11 @@ const FAKE_VOICES: [(&str, &str, &str); 2] = [
 ];
 
 #[cfg(debug_assertions)]
+pub(super) fn microphone_of(source: &Value) -> Value {
+    json!({"microphone_id":source["microphone_id"],"microphone_name":source["microphone_name"],"microphone_fallback":source["microphone_fallback"]})
+}
+
+#[cfg(debug_assertions)]
 #[derive(Default)]
 pub(crate) struct DebugSession {
     source: super::voice::DebugVoice,
@@ -276,7 +281,9 @@ pub(crate) struct DebugSession {
     final_text: String,
     barged: u64,
     paused: bool,
+    muted: bool,
     fault: Option<String>,
+    requested_microphone: String,
     microphone: Value,
     queue: Vec<String>,
     spoken: Vec<String>,
@@ -335,7 +342,8 @@ impl DebugSession {
                 .unwrap(),
             )?;
             self.token = c.token;
-            self.microphone = json!({"microphone_id":source["microphone_id"],"microphone_name":source["microphone_name"],"microphone_fallback":source["microphone_fallback"]});
+            self.requested_microphone = c.microphone;
+            self.microphone = microphone_of(&source);
             self.active = source["status"] == "recording";
             self.transcript.clear();
             self.final_text.clear();
@@ -345,6 +353,7 @@ impl DebugSession {
             self.spoken.clear();
             self.voices.clear();
             self.paused = false;
+            self.muted = false;
             self.fault = None;
             if !self.active {
                 return Ok(json!({"status":source["status"],"token":self.token,"fake":true}));
@@ -355,6 +364,8 @@ impl DebugSession {
             return Err(ApiError::new(409, "Ce mode voix n’est plus actif."));
         } else {
             match c.command.as_str() {
+                // Muted, nothing is heard: no transcript, no barge-in, no utterance.
+                "feed" if self.muted => {}
                 "feed" => {
                     self.transcript = c.text;
                     if !self.transcript.is_empty() {
@@ -399,8 +410,25 @@ impl DebugSession {
                     self.paused = false;
                     self.until = crate::now() + 2000;
                 }
+                "mute" | "unmute" if (c.command == "mute") != self.muted => {
+                    self.muted = !self.muted;
+                    let request = if self.muted {
+                        self.transcript.clear();
+                        json!({"command":"cancel","token":self.token})
+                    } else {
+                        json!({"command":"start","token":self.token,"microphone":self.requested_microphone})
+                    };
+                    let source = self
+                        .source
+                        .command(&serde_json::to_vec(&request).unwrap())?;
+                    if !self.muted {
+                        self.microphone = microphone_of(&source);
+                    }
+                }
+                "mute" | "unmute" => {}
                 "cancel" => {
                     self.active = false;
+                    self.muted = false;
                     self.queue.clear();
                     self.transcript.clear();
                     self.final_text.clear();
@@ -425,7 +453,7 @@ impl DebugSession {
         Ok(
             json!({"status":if self.active {self.fault.as_deref().unwrap_or("listening")} else {"idle"},"token":self.token,"transcript":self.transcript,
             "utterance_id":self.utterance,"final_text":self.final_text,"barged":self.barged,"speaking":!self.queue.is_empty() && !self.paused,
-            "paused":self.paused,"recorded_speech":self.spoken,"recorded_voices":self.voices,"microphone_id":self.microphone["microphone_id"],"microphone_name":self.microphone["microphone_name"],"microphone_fallback":self.microphone["microphone_fallback"],"fake":true}),
+            "paused":self.paused,"muted":self.muted,"recorded_speech":self.spoken,"recorded_voices":self.voices,"microphone_id":self.microphone["microphone_id"],"microphone_name":self.microphone["microphone_name"],"microphone_fallback":self.microphone["microphone_fallback"],"fake":true}),
         )
     }
 }

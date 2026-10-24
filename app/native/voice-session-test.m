@@ -41,6 +41,29 @@ int main(void) {
         [voice command:@{@"command":@"start",@"token":@"gone",@"microphone":@"fake-usb"} reply:reply];
         assert([result[@"status"] isEqual:@"listening"] && [result[@"microphone_id"] isEqual:@"fake-built-in"] && [result[@"microphone_fallback"] boolValue]);
         EzerbotMicrophones.fakeUnplugged = @[]; [voice cancel];
-        puts("voice session native debug: two voice options, recording synthesis, live transcript, immediate barge-in, stale chunk, cleanup OK; no permissions or audio");
+        // Mute really stops the capture; the bot keeps talking and the pause of a waiting card is untouched.
+        [voice command:@{@"command":@"start",@"token":@"mute",@"microphone":@"fake-usb"} reply:reply];
+        assert([voice.fakeSource.status isEqual:@"recording"] && ![result[@"muted"] boolValue]);
+        [voice command:@{@"command":@"speak",@"token":@"mute",@"text":@"Je parle.",@"voice":@"fake-fr-CA",@"speed":@1,@"barge":@0} reply:reply];
+        [voice command:@{@"command":@"feed",@"token":@"mute",@"text":@"Presque",@"final_result":@NO} reply:reply];
+        [voice command:@{@"command":@"speak",@"token":@"mute",@"text":@"Encore.",@"voice":@"fake-fr-CA",@"speed":@1} reply:reply];
+        [voice command:@{@"command":@"mute",@"token":@"mute"} reply:reply];
+        assert([result[@"muted"] boolValue] && voice.fakeSource == nil && [result[@"status"] isEqual:@"listening"]);
+        assert([result[@"transcript"] length] == 0 && [result[@"speaking"] boolValue]);
+        [voice command:@{@"command":@"mute",@"token":@"mute"} reply:reply];
+        assert([result[@"muted"] boolValue] && voice.fakeSource == nil);
+        [voice command:@{@"command":@"feed",@"token":@"mute",@"text":@"Pas pour toi",@"final_result":@YES} reply:reply];
+        assert([result[@"utterance_id"] unsignedIntegerValue] == 0 && [result[@"transcript"] length] == 0 && [result[@"speaking"] boolValue]);
+        [voice command:@{@"command":@"pause",@"token":@"mute"} reply:reply];
+        [voice command:@{@"command":@"unmute",@"token":@"mute"} reply:reply];
+        assert(![result[@"muted"] boolValue] && [result[@"paused"] boolValue] && [voice.fakeSource.status isEqual:@"recording"]);
+        assert([result[@"microphone_id"] isEqual:@"fake-usb"] && [result[@"status"] isEqual:@"listening"]);
+        [voice command:@{@"command":@"feed",@"token":@"mute",@"text":@"Pour toi",@"final_result":@YES} reply:reply];
+        assert([result[@"utterance_id"] unsignedIntegerValue] == 1 && [result[@"final_text"] isEqual:@"Pour toi"]);
+        [voice command:@{@"command":@"mute",@"token":@"mute"} reply:reply];
+        [voice command:@{@"command":@"start",@"token":@"again"} reply:reply];
+        assert(![result[@"muted"] boolValue] && [voice.fakeSource.status isEqual:@"recording"]);
+        [voice cancel];
+        puts("voice session native debug: two voice options, recording synthesis, live transcript, immediate barge-in, stale chunk, mute and unmute, cleanup OK; no permissions or audio");
     }
 }

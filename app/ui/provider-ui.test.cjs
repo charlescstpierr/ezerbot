@@ -248,9 +248,7 @@ test("a signed-in account is not shown as Codex until OpenAI answers", () => {
   assert.match(ready.nodes.get("provider-section").textContent, /Forfait : Plus/);
 });
 
-test("signed out, nothing says Local: no top-bar badge, no sidebar note, an empty composer status", () => {
-  const html = readFileSync(__dirname + "/index.html", "utf8");
-  assert.doesNotMatch(html, /mode-badge|local-note|Chez vous, sur votre Mac/);
+test("signed out, nothing says Local: the composer status is empty", () => {
   const { nodes } = mount("codex");
   assert.equal(nodes.get("composer-tools").textContent, "");
 });

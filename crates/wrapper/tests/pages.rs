@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -118,6 +118,37 @@ impl Fixture {
         let c = Connection::open(&self.path).unwrap();
         c.busy_timeout(Duration::from_secs(3)).unwrap();
         c
+    }
+    /// Contenu complet des tables que `/api/send` écrit.
+    fn snapshot(&self) -> Vec<(&'static str, Vec<String>)> {
+        let db = self.db();
+        [
+            "submissions",
+            "wrapper_remote",
+            "wrapper_messages",
+            "wrapper_group_inputs",
+            "wrapper_skill_launches",
+            "wrapper_page_anchors",
+            "attachments_message_links",
+            "wrapper_conversations",
+        ]
+        .map(|table| {
+            let mut statement = db.prepare(&format!("SELECT * FROM {table}")).unwrap();
+            let columns = statement.column_count();
+            let mut rows: Vec<String> = statement
+                .query_map([], |row| {
+                    Ok((0..columns)
+                        .map(|i| format!("{:?}", row.get_ref(i).unwrap()))
+                        .collect::<Vec<_>>()
+                        .join("|"))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            rows.sort();
+            (table, rows)
+        })
+        .into()
     }
     fn post(&mut self, path: &str, body: Value) -> Value {
         self.app
@@ -569,10 +600,115 @@ fn retrying_an_accepted_anchored_message_survives_the_edit_that_removed_its_pass
     f.send_in(&chat, "retouche", Some(anchor.clone())).unwrap();
     f.finish("retouche");
 
-    f.send_in(&chat, "retouche", Some(anchor)).unwrap();
+    let settled = f.page()["anchors"].clone();
+    let padded = Fixture::anchor(&page, "  Confort ");
+    f.send_in(&chat, "retouche", Some(padded)).unwrap();
     let anchors = f.page()["anchors"].clone();
     assert_eq!(anchors.as_array().unwrap().len(), 1);
     assert_eq!(anchors[0]["state"], "done");
+    assert_eq!(anchors, settled);
+}
+
+#[test]
+fn a_resend_cannot_add_remove_or_change_the_anchor_of_the_first_send() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.answer(None);
+    f.answer(None);
+    let chat = f.chat.clone();
+    f.send_in(&chat, "sans-ancre", None).unwrap();
+    f.finish("sans-ancre");
+    f.send_in(&chat, "ancre", Some(Fixture::anchor(&page, "Confort")))
+        .unwrap();
+    f.finish("ancre");
+    let skill = f.post(
+        "/api/skills",
+        json!({"bot_id": "grokbot", "name": "Résumé", "body": "Résume.", "description": "Test"}),
+    )["skill"]["skill_id"]
+        .clone();
+    let before = f.snapshot();
+    assert!(before
+        .iter()
+        .filter(|(table, _)| *table == "wrapper_page_anchors" || *table == "wrapper_group_inputs")
+        .all(|(_, rows)| !rows.is_empty()));
+
+    let elsewhere = json!({"page_id": format!("page_{}", "0".repeat(64)), "source_version": page["source_version"], "passage": "Confort"});
+    let cases = [
+        ("sans-ancre", Some(Fixture::anchor(&page, "Confort"))),
+        ("ancre", None),
+        ("ancre", Some(Fixture::anchor(&page, "Trois forfaits"))),
+        ("ancre", Some(elsewhere)),
+    ];
+    for (id, anchor) in cases {
+        let mut body = json!({"conversation_id": chat, "message_id": id, "body": "Retouche ce passage", "apply_skill_id": skill});
+        if let Some(anchor) = anchor {
+            body["page_anchor"] = anchor;
+        }
+        let error = f
+            .app
+            .api("POST", "/api/send", body.to_string().as_bytes())
+            .unwrap_err();
+        assert_eq!(error.status, 409, "{id} : {error}");
+        assert!(error.to_string().contains("autre ancre"), "{error}");
+        assert_eq!(f.snapshot(), before, "{id}");
+    }
+}
+
+#[test]
+fn a_resend_is_judged_while_the_first_answer_is_still_running() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.answer(None);
+    let gate = Arc::new(AtomicBool::new(false));
+    let at = f.server.seen.lock().unwrap().bodies.len() + 1;
+    f.server.seen.lock().unwrap().response_gate = Some((at, gate.clone()));
+    let chat = f.chat.clone();
+    f.send_in(&chat, "ancre", Some(Fixture::anchor(&page, "Confort")))
+        .unwrap();
+    wait("réponse retenue", || {
+        f.server.seen.lock().unwrap().bodies.len() >= at
+    });
+    assert!(!f.run("ancre").status.is_terminal());
+    let kept = f.page()["anchors"].clone();
+    assert_eq!(kept.as_array().unwrap().len(), 1);
+
+    for anchor in [None, Some(Fixture::anchor(&page, "Famille"))] {
+        let error = f.send_in(&chat, "ancre", anchor).unwrap_err();
+        assert_eq!(error.status, 409, "{error}");
+        assert_eq!(f.page()["anchors"], kept);
+    }
+    f.send_in(&chat, "ancre", Some(Fixture::anchor(&page, " Confort ")))
+        .unwrap();
+    assert_eq!(f.page()["anchors"], kept);
+    gate.store(true, Ordering::SeqCst);
+    f.finish("ancre");
+    assert_eq!(f.page()["anchors"], kept);
+}
+
+#[test]
+fn the_same_message_id_in_another_conversation_is_a_first_send() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.answer(None);
+    f.answer(None);
+    let chat = f.chat.clone();
+    f.send_in(&chat, "ancre", Some(Fixture::anchor(&page, "Confort")))
+        .unwrap();
+    f.finish("ancre");
+    let other = f.post("/api/conversations", json!({"title": "Autre"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.send_in(&other, "ancre", Some(Fixture::anchor(&page, "Famille")))
+        .unwrap();
+    let mut passages: Vec<_> = f.page()["anchors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|anchor| anchor["passage"].as_str().unwrap().to_owned())
+        .collect();
+    passages.sort();
+    assert_eq!(passages, ["Confort", "Famille"]);
 }
 
 #[test]

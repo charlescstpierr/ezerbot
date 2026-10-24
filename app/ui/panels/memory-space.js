@@ -16,17 +16,22 @@
   let latest = null; // { state } du dernier onState
   let facts = null; // null tant que la liste n’est pas arrivée
   let failed = false, open = false, view = "list", generation = 0;
-  let mark = null, painted = null, entry = null, screen = null, found = null; // found : ids trouvés (Set), null sans filtre
+  let mark = null, painted = null, entry = null, screen = null, detail = null, found = null; // found : ids trouvés (Set), null sans filtre
   const filter = window.EzerbotMemoryFilter?.create(() => paint());
-  async function load() {
+  let loading = Promise.resolve();
+  // `load` rend la main quand la liste est à jour : une lecture dépassée par une plus récente attend celle-ci, sans quoi un appelant (le panneau de détail) croirait la liste relue.
+  function load() {
     const token = ++generation;
+    return (loading = read(token));
+  }
+  async function read(token) {
     try {
       const response = await panels.api("/api/memory/all");
-      if (token !== generation) return;
+      if (token !== generation) return loading;
       facts = Array.isArray(response?.facts) ? response.facts : [];
       failed = false;
     } catch {
-      if (token !== generation) return;
+      if (token !== generation) return loading;
       failed = true;
     }
     paint();
@@ -44,6 +49,7 @@
   function close() {
     if (!open) return;
     open = false;
+    detail?.close();
     paint();
   }
   function botLabel(fact) {
@@ -77,9 +83,11 @@
     }
     // Le bouton « Ajouter un souvenir » (memory-add.js) rejoint les onglets ; son formulaire s’ouvre dessous.
     const add = window.EzerbotMemoryAdd?.create(load);
+    // Le panneau de détail (memory-detail.js) s'ouvre à droite de la vue ; il fait relire la liste après chaque action.
+    detail = window.EzerbotMemoryDetail?.create({ facts: () => facts, reload: load, label: { bot: botLabel, scope: scopeLabel, date: factDate } });
     const head = node("div", "memory-space-head");
     head.append(switcher, ...(add ? [add.button] : []));
-    screen.append(head, ...(add ? [add.form] : []), node("p", "memory-space-help", "Tout ce que vos bots ont retenu : souvenirs privés, d’équipe et de sujet."), ...(filter ? [filter.element] : []), node("div", "memory-space-body"));
+    screen.append(head, ...(add ? [add.form] : []), node("p", "memory-space-help", "Tout ce que vos bots ont retenu : souvenirs privés, d’équipe et de sujet."), ...(filter ? [filter.element] : []), node("div", "memory-space-body"), ...(detail ? [detail.element] : []));
     dock.parentElement.insertBefore(screen, dock);
     return true;
   }
@@ -88,7 +96,7 @@
     const note = failed ? [node("p", "memory-space-help", "La mémoire n’a pas pu être actualisée : voici le dernier état connu.")] : [];
     // Graphe : sans souvenir (ou pas encore chargé), les messages de la Liste s'appliquent.
     if (found && !found.size && facts?.length) return [...note, ...empty("Aucun souvenir ne correspond à ces filtres.")];
-    const graph = view === "graph" && facts?.length ? window.GrokbotMemoryGraph?.view(facts, { bots: latest?.state?.bots || [], matches: found }) : null;
+    const graph = view === "graph" && facts?.length ? window.GrokbotMemoryGraph?.view(facts, { bots: latest?.state?.bots || [], matches: found, onSelect: (id) => detail?.open(id) }) : null;
     if (graph) return [...note, graph];
     if (!facts) return empty(failed ? "La mémoire n’a pas pu être chargée." : "Chargement…");
     if (!facts.length) return [...note, ...empty("Aucun souvenir pour l’instant. Vos bots retiendront ici ce qui compte pour vous.")];
@@ -98,9 +106,12 @@
       if (found && !found.has(String(fact.fact_id))) continue;
       const item = node("li", "memory-space-item");
       item.dataset.factId = fact.fact_id;
+      detail?.bind(item, fact.fact_id);
       const meta = node("div", "memory-space-meta");
       meta.append(node("span", "memory-space-chip memory-space-bot", botLabel(fact)), node("span", "memory-space-chip memory-space-scope", scopeLabel(fact)), node("small", "memory-space-date", factDate(fact.learned_at)));
-      item.append(node("p", "memory-space-text", String(fact.text ?? "")), meta);
+      const text = node("button", "memory-space-text", String(fact.text ?? ""));
+      text.type = "button";
+      item.append(text, meta);
       list.append(item);
     }
     return [...note, list];
@@ -128,6 +139,7 @@
     if (signature === painted) return;
     painted = signature;
     screen.querySelector(".memory-space-body").replaceChildren(...body());
+    detail?.refresh();
   }
   const registered = panels.register({
     id: "memory-space",

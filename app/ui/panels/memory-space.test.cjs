@@ -175,3 +175,13 @@ test("Graphe : sans souvenir, la Liste affiche son état vide au lieu d’un gra
   assert.equal(named(h.screen(), "memory-graph-point").length, 0);
   assert.match(named(h.screen(), "memory-space-empty")[0].textContent, /Aucun souvenir pour l’instant/);
 });
+test("Graphe : un rechargement manqué garde le graphe et le signale comme dernier état connu", async () => {
+  const h = harness();
+  await h.open();
+  named(h.screen(), "memory-space-tab")[0].click();
+  h.panels.down = true;
+  h.panel().onState({ bots: [], memory_auto: { revision: 2 } });
+  await h.settle();
+  assert.equal(named(h.screen(), "memory-graph-point").length, 3);
+  assert.match(h.screen().textContent, /dernier état connu/);
+});

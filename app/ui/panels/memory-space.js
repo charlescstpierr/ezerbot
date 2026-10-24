@@ -80,11 +80,11 @@
   }
   function body() {
     const empty = (text) => [node("p", "memory-space-empty", text)];
+    const note = failed ? [node("p", "memory-space-help", "La mémoire n’a pas pu être actualisée : voici le dernier état connu.")] : [];
     // Graphe : sans souvenir (ou pas encore chargé), les messages de la Liste s'appliquent.
     const graph = view === "graph" && facts?.length ? window.GrokbotMemoryGraph?.view(facts, { bots: latest?.state?.bots || [] }) : null;
-    if (graph) return [graph];
+    if (graph) return [...note, graph];
     if (!facts) return empty(failed ? "La mémoire n’a pas pu être chargée." : "Chargement…");
-    const note = failed ? [node("p", "memory-space-help", "La mémoire n’a pas pu être actualisée : voici le dernier état connu.")] : [];
     if (!facts.length) return [...note, ...empty("Aucun souvenir pour l’instant. Vos bots retiendront ici ce qui compte pour vous.")];
     const list = node("ul", "memory-space-list");
     list.setAttribute("aria-label", "Souvenirs");

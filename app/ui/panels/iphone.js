@@ -3,7 +3,7 @@
   const host = window.GrokbotPanels;
   const remote = window.EzerbotIPhone?.remote;
   const node = (tag, text, cls) => { const el = document.createElement(tag); if (text) el.textContent = text; if (cls) el.className = cls; return el; };
-  let section, data, tailscale, code, expires, confirmation, context;
+  let section, data, tailscale, code, expires, qr, confirmation, context;
   let message = "", messageArea = "devices", codeNotice = "", busy = false, signature = "", failed = false, pushEnabled = null;
   let codeDevices = new Set();
   let pendingNotification = remote ? new URL(location.href).searchParams.get("notification") : null;
@@ -59,9 +59,9 @@
   function expireCode() {
     if (!code) return;
     if (data?.devices?.some(d => !codeDevices.has(d.id))) {
-      code = null; expires = null; codeNotice = "Code utilisé — vérifiez l’appareil ci-dessous.";
+      code = null; expires = null; qr = null; codeNotice = "Code utilisé — vérifiez l’appareil ci-dessous.";
     } else if (Date.now() >= expires) {
-      code = null; expires = null; codeNotice = "Code expiré — créez-en un nouveau.";
+      code = null; expires = null; qr = null; codeNotice = "Code expiré — créez-en un nouveau.";
     }
   }
   async function update() {
@@ -92,7 +92,7 @@
     section.append(node("p", "Le Mac reste le moteur. Accès privé et chiffré par Tailscale, sans exposition publique. Chaque appareil doit être confirmé ici."));
     const label = node("label", null, "setting-toggle"); const input = node("input");
     input.type = "checkbox"; input.checked = !!data?.enabled; input.disabled = busy || !data; input.role = "switch";
-    input.onchange = () => run(async () => { code = null; expires = null; codeNotice = ""; await set("/api/iphone/enabled", { enabled: input.checked }); });
+    input.onchange = () => run(async () => { code = null; expires = null; qr = null; codeNotice = ""; await set("/api/iphone/enabled", { enabled: input.checked }); });
     const track = node("span", null, "toggle-track"); track.setAttribute("aria-hidden", "true");
     label.append(node("span", "Activer l’accès depuis l’iPhone"), input, track); section.append(label);
     if (data?.enabled) {
@@ -102,7 +102,7 @@
         "Installez Tailscale sur le Mac et l’iPhone et connectez-les au même compte. Activez MagicDNS et HTTPS dans votre tailnet si Tailscale le demande.",
         "Sur le Mac, vérifiez Tailscale ci-dessous. Publiez uniquement le port privé d’Ezerbot (jamais Tailscale Funnel).",
         "Ouvrez l’adresse HTTPS ci-dessous dans Safari sur l’iPhone. Choisissez Partager › Sur l’écran d’accueil › Ajouter, puis ouvrez Ezerbot depuis son icône.",
-        "Dans l’app installée : créez un code sur le Mac, saisissez-le sur l’iPhone, puis confirmez la demande ici. Si Safari et l’app ne partagent pas leur session, associez l’app séparément. La dictée utilise le micro du clavier iOS.",
+        "Créez un QR ci-dessous et scannez-le avec l’appareil photo de l’iPhone : Ezerbot s’ouvre avec l’adresse et le code déjà remplis. Confirmez ensuite la demande ici. Si iOS ne transmet pas le code à l’app installée, tapez-le une seule fois dans l’app. La dictée utilise le micro du clavier iOS.",
       ]) steps.append(node("li", text));
       section.append(steps, button("Vérifier Tailscale", async () => { tailscale = await host.api("/api/iphone/tailscale"); }, "secondary-button", "tailscale"));
       if (tailscale) {
@@ -117,12 +117,20 @@
         askButton("Arrêter le service HTTPS Tailscale", "Arrêter le service HTTPS 443 ?", "Le service HTTPS privé de ce Mac sera arrêté, y compris les autres apps qui l’utilisent.", "Arrêter", () => serve(false), "tailscale", true),
       );
       section.append(actions); appendConfirmation(section, "tailscale"); appendNotice(section, "tailscale");
-      section.append(button("Créer un code d’association", async () => {
-        const value = await host.api("/api/iphone/code", {}); code = value.code; expires = value.expires; codeNotice = "";
+      section.append(button(code ? "Créer un nouveau QR" : "Créer un QR de jumelage", async () => {
+        const value = await host.api("/api/iphone/code", {}); code = value.code; expires = value.expires; qr = value.qr || null; codeNotice = "";
         codeDevices = new Set((data?.devices || []).map(d => d.id));
       }));
       if (code) {
-        section.append(node("p", code.match(/.{1,4}/g).join(" "), "iphone-code"), node("p", `Code à usage unique · expire à ${new Date(expires).toLocaleTimeString("fr-CA", { hour: "2-digit", minute: "2-digit" })}. Ne le partagez pas.`));
+        // The QR and the code are secrets: shown here only, never logged.
+        const card = node("div", null, "iphone-pairing-card"); const copy = node("div", null, "iphone-pairing-copy");
+        if (qr) {
+          const image = node("img", null, "iphone-qr"); image.src = qr; image.alt = "QR de jumelage à scanner avec l’appareil photo de l’iPhone";
+          image.width = image.height = 168; card.append(image);
+          copy.append(node("strong", "Scannez avec l’appareil photo de l’iPhone"), node("p", "Ezerbot s’ouvre avec l’adresse de ce Mac et le code déjà remplis."));
+        } else copy.append(node("strong", "Saisissez ce code sur l’iPhone"), node("p", "QR indisponible : Tailscale n’a pas donné l’adresse HTTPS de ce Mac. Vérifiez Tailscale ci-dessus, puis créez un nouveau QR."));
+        copy.append(node("p", code.match(/.{1,4}/g).join(" "), "iphone-code"), node("p", `Usage unique · expire à ${new Date(expires).toLocaleTimeString("fr-CA", { hour: "2-digit", minute: "2-digit" })}. Ne le partagez pas.`));
+        card.append(copy); section.append(card);
       } else if (codeNotice) section.append(node("p", codeNotice, "iphone-code-status"));
     }
     section.append(node("h4", "Appareils associés"));

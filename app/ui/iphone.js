@@ -3,8 +3,15 @@
 (() => {
   const remote = location.hostname.endsWith(".ts.net") || (location.hostname === "127.0.0.1" && location.port === "47863");
   const node = (tag, text, className) => { const e = document.createElement(tag); if (text) e.textContent = text; if (className) e.className = className; return e; };
-  let overlay, error, receipt, timer, working = false, authenticated = false;
+  let overlay, error, receipt, timer, working = false, authenticated = false, scanned = null;
   const rawFetch = window.fetch.bind(window);
+  // The Mac's QR carries the code in the fragment, which no request sends.
+  // Read it once and drop it from the address before anything else runs.
+  if (remote) {
+    const match = /^#jumelage=([0-9A-F]{10})$/i.exec(location.hash);
+    if (location.hash.startsWith("#jumelage=")) history.replaceState(null, "", location.pathname + location.search);
+    if (match) scanned = match[1].toUpperCase();
+  }
   function status(text, failed = false) {
     error.textContent = text; error.className = failed ? "iphone-warning" : "";
     error.role = failed ? "alert" : "status";
@@ -25,13 +32,17 @@
     box.append(brand, title);
     if (!matchMedia("(display-mode: standalone)").matches && !navigator.standalone) {
       const install = node("div", null, "iphone-install-note");
-      install.append(node("strong", "Installez d’abord Ezerbot"), node("p", "Dans Safari : Partager › Sur l’écran d’accueil › Ajouter. Ouvrez ensuite l’app depuis son icône pour l’associer.")); box.append(install);
+      install.append(node("strong", "Installez d’abord Ezerbot"), node("p", scanned
+        ? "Dans Safari : Partager › Sur l’écran d’accueil › Ajouter, puis ouvrez l’app depuis son icône. iOS ne lui transmet pas ce QR : tapez-y une seule fois le code affiché sur le Mac."
+        : "Dans Safari : Partager › Sur l’écran d’accueil › Ajouter. Ouvrez ensuite l’app depuis son icône pour l’associer.")); box.append(install);
     }
-    box.append(node("p", "Sur le Mac : Paramètres › iPhone › Créer un code. Saisissez-le ici, puis confirmez le nom de cet appareil sur le Mac."));
+    box.append(node("p", scanned ? "Adresse et code remplis depuis le QR du Mac. Vérifiez le nom, demandez l’association, puis confirmez-la sur le Mac."
+      : "Sur le Mac : Paramètres › iPhone › Créer un QR de jumelage. Scannez-le avec l’appareil photo, ou saisissez son code ici, puis confirmez le nom de cet appareil sur le Mac."));
     const nameLabel = node("label", "Nom de l’appareil"); const name = node("input"); name.className = "text-input";
     let savedName; try { savedName = localStorage.getItem("ezerbot.iphone.name"); } catch { /* private browsing */ }
     name.value = savedName || "Mon iPhone"; name.maxLength = 60; name.required = true; name.autocomplete = "off"; nameLabel.append(name);
     const codeLabel = node("label", "Code affiché sur le Mac"); const code = node("input"); code.className = "text-input"; code.required = true; code.maxLength = 14; code.autocapitalize = "characters"; code.autocomplete = "one-time-code"; code.spellcheck = false; codeLabel.append(code);
+    if (scanned) { code.value = scanned; scanned = null; }
     const send = node("button", "Demander l’association", "primary-button"); send.type = "submit";
     error = node("p"); error.role = "status";
     const retry = node("button", "Recommencer", "secondary-button"); retry.type = "button"; retry.hidden = true;

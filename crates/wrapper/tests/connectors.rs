@@ -1475,8 +1475,11 @@ impl Fixture {
             .unwrap()
             .into()
     }
-    fn finish(&self, run: &str) {
+    fn finish(&mut self, run: &str) {
+        // An approval can be visible before its worker releases run ownership.
+        // Retry wake delivery if the initial host tick raced that release.
         wait("terminal host action", || {
+            self.app.tick_suspended(0);
             store::required(&self.db(), run)
                 .unwrap()
                 .status
@@ -1602,6 +1605,28 @@ impl Drop for Fixture {
         std::env::remove_var("EZERBOT_MICROSOFT_CLIENT_ID");
         let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
+}
+
+#[test]
+fn finishing_a_host_action_delivers_its_pending_approval_wake() {
+    let mut f = Fixture::new();
+    let run = f.connect("calendar");
+    f.wait_approval(&run);
+    let request = requests::list_for_run(&f.db(), &run).unwrap().remove(0);
+    f.post(
+        "/api/approvals/resolve",
+        json!({
+            "entry_id": request.entry_id,
+            "conversation_id": request.route.target_conversation_id,
+            "submission_id": "finish-without-an-initial-tick",
+            "decision": "allow_once"
+        }),
+    );
+    // No initial host tick: finishing must deliver the durable approval wake,
+    // not merely observe the database until its deadline expires.
+    f.finish(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Done { .. }));
+    assert_eq!(f.item("calendar")["status"], "authorizing");
 }
 
 #[test]

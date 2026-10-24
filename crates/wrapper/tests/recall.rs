@@ -257,7 +257,9 @@ impl Fixture {
         let r = self.request(run);
         self.post("/api/approvals/resolve",json!({"entry_id":r.entry_id,"conversation_id":r.route.target_conversation_id,"submission_id":format!("decide-{run}"),"decision":decision}));
         self.app.tick(0);
+        // The first tick can race the suspended worker's ownership release.
         wait("terminal host action", || {
+            self.app.tick_suspended(0);
             store::required(&self.db(), run)
                 .unwrap()
                 .status

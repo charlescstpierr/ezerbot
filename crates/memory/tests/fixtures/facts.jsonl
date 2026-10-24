@@ -1,0 +1,200 @@
+{"id":1,"text":"Le projet Boréal écoute sur le port 4317."}
+{"id":2,"text":"Le projet Boréal utilise SQLite pour son cache."}
+{"id":3,"text":"Le projet Austral écoute sur le port 8080."}
+{"id":4,"text":"Le port du tableau de bord est 3000."}
+{"id":5,"text":"L'équipe Boréal se réunit le mardi."}
+{"id":6,"text":"Le titre de l'œuvre murale est Jardin de brume."}
+{"id":7,"text":"Le musée ouvre à neuf heures."}
+{"id":8,"text":"La fresque du hall représente un voilier."}
+{"id":9,"text":"L'atelier de peinture est au deuxième étage."}
+{"id":10,"text":"L'œuvre musicale du concert s'appelle Aurore."}
+{"id":11,"text":"Le curriculum vitæ de Noémie est rangé dans le dossier candidatures."}
+{"id":12,"text":"Le curriculum de Simon est rangé dans les archives."}
+{"id":13,"text":"Noémie anime le cercle de lecture."}
+{"id":14,"text":"Le dossier candidatures ferme vendredi."}
+{"id":15,"text":"Le certificat de formation est dans le coffre."}
+{"id":16,"text":"Le projet Atlas utilise le port 9001."}
+{"id":17,"text":"Le projet Atlas est maintenu en Rust."}
+{"id":18,"text":"Le projet Atlas a un dépôt miroir."}
+{"id":19,"text":"Le serveur Atlas sauvegarde ses journaux le soir."}
+{"id":20,"text":"Le projet Orion utilise le port 9002."}
+{"id":21,"text":"La bascule cuivre en production demande une validation manuelle."}
+{"id":22,"text":"La bascule cuivre en préproduction est automatique."}
+{"id":23,"text":"La bascule argent en production est automatique."}
+{"id":24,"text":"Le cuivre du laboratoire est recyclable."}
+{"id":25,"text":"La production de l'atelier s'arrête à dix-sept heures."}
+{"id":26,"text":"La responsable du projet Lumen est Inès."}
+{"id":27,"text":"Le responsable du projet Lumen côté support est Malik."}
+{"id":28,"text":"Le budget Lumen est suivi par la comptabilité."}
+{"id":29,"text":"La responsable du projet Sillage est Léa."}
+{"id":30,"text":"Lumen possède un environnement de démonstration."}
+{"id":31,"text":"Le dépôt Mistral est hébergé sur la forge interne."}
+{"id":32,"text":"Le dépôt Mistral des exemples est public."}
+{"id":33,"text":"Le dépôt Mistral des scripts est privé."}
+{"id":34,"text":"Le service Mistral fonctionne hors ligne."}
+{"id":35,"text":"Le dépôt Tramontane est archivé."}
+{"id":36,"text":"La réunion planning se tient le lundi à dix heures."}
+{"id":37,"text":"La réunion planning technique se tient le mercredi."}
+{"id":38,"text":"La réunion planning commercial se tient le jeudi."}
+{"id":39,"text":"La réunion planning logistique se tient le vendredi."}
+{"id":40,"text":"Le planning des congés est validé en avril."}
+{"id":41,"text":"Le café préféré de Camille est un espresso."}
+{"id":42,"text":"Camille préfère son café sans sucre."}
+{"id":43,"text":"Camille boit du thé le soir."}
+{"id":44,"text":"Le café du rez-de-chaussée ferme tôt."}
+{"id":45,"text":"Robin préfère le chocolat chaud."}
+{"id":46,"text":"La palette du tableau de bord Olive emploie le vert sauge."}
+{"id":47,"text":"La palette Olive possède aussi une variante sombre."}
+{"id":48,"text":"Le tableau de bord Indigo utilise le bleu nuit."}
+{"id":49,"text":"Les graphiques du tableau de bord sont exportables."}
+{"id":50,"text":"Le thème papier utilise un fond crème."}
+{"id":51,"text":"Les sauvegardes du serveur Sureau tournent à trois heures."}
+{"id":52,"text":"Le serveur Sureau garde trente sauvegardes."}
+{"id":53,"text":"Le serveur Sureau envoie un rapport quotidien."}
+{"id":54,"text":"Les sauvegardes du serveur Hêtre tournent à minuit."}
+{"id":55,"text":"La restauration de secours est testée en juin."}
+{"id":56,"text":"Le renouvellement du certificat Quartz a lieu en septembre."}
+{"id":57,"text":"Le certificat Quartz est conservé dans le coffre local."}
+{"id":58,"text":"Le renouvellement du certificat Opale a lieu en novembre."}
+{"id":59,"text":"Quartz utilise une autorité de certification interne."}
+{"id":60,"text":"La rotation des clefs se fait au printemps."}
+{"id":61,"text":"Le lot de capteurs Nacre se livre au quai sept."}
+{"id":62,"text":"Le lot Nacre contient douze capteurs."}
+{"id":63,"text":"Le lot de capteurs Ambre se livre au quai neuf."}
+{"id":64,"text":"Les capteurs sont calibrés avant expédition."}
+{"id":65,"text":"Le quai principal accepte les livraisons le matin."}
+{"id":66,"text":"La documentation du protocole Tilleul est rédigée en français."}
+{"id":67,"text":"Le protocole Tilleul transporte des messages JSON."}
+{"id":68,"text":"La documentation du protocole Aulne est rédigée en anglais."}
+{"id":69,"text":"Le protocole Tilleul possède un exemple Python."}
+{"id":70,"text":"La documentation de déploiement est relue chaque mois."}
+{"id":71,"text":"Le vélo de Maëlle est rangé dans le local ouest."}
+{"id":72,"text":"Maëlle vient au bureau le jeudi."}
+{"id":73,"text":"Le vélo de Jules est rangé dans le local nord."}
+{"id":74,"text":"Le local ouest ferme avec une clef mécanique."}
+{"id":75,"text":"Le parking des visiteurs se trouve au sud."}
+{"id":76,"text":"La plante du bureau Érable est un ficus."}
+{"id":77,"text":"Le bureau Érable est au premier étage."}
+{"id":78,"text":"La plante du bureau Cyprès est un lierre."}
+{"id":79,"text":"Le ficus reçoit de l'eau le mardi."}
+{"id":80,"text":"Le bureau Cyprès dispose d'une fenêtre sur cour."}
+{"id":81,"text":"Le format d'export du registre Delta est CSV."}
+{"id":82,"text":"Le registre Delta contient les inventaires."}
+{"id":83,"text":"Le format d'export du registre Sigma est JSON."}
+{"id":84,"text":"Le registre Delta est relu chaque trimestre."}
+{"id":85,"text":"L'export des graphiques produit des images PNG."}
+{"id":86,"text":"La limite de pièces jointes du canal Galet est quinze mégaoctets."}
+{"id":87,"text":"Le canal Galet accueille les comptes rendus."}
+{"id":88,"text":"La limite de pièces jointes du canal Dune est huit mégaoctets."}
+{"id":89,"text":"Le canal Galet est modéré par Anaïs."}
+{"id":90,"text":"Les pièces jointes expirent après une année."}
+{"id":91,"text":"Le test de charge du service Équinoxe dure vingt minutes."}
+{"id":92,"text":"Le service Équinoxe possède trois répliques."}
+{"id":93,"text":"Le test de charge du service Solstice dure une heure."}
+{"id":94,"text":"Le service Équinoxe utilise une file locale."}
+{"id":95,"text":"Les tests unitaires tournent avant la publication."}
+{"id":96,"text":"Le manuel de l'imprimante Iris est dans le tiroir bleu."}
+{"id":97,"text":"L'imprimante Iris imprime en recto verso."}
+{"id":98,"text":"Le manuel de l'imprimante Lilas est dans le tiroir rouge."}
+{"id":99,"text":"L'imprimante Iris utilise du papier recyclé."}
+{"id":100,"text":"Le tiroir bleu contient aussi des enveloppes."}
+{"id":101,"text":"Le restaurant favori de Salomé sert des raviolis."}
+{"id":102,"text":"Salomé déjeune habituellement à midi."}
+{"id":103,"text":"Le restaurant du quartier ferme le dimanche."}
+{"id":104,"text":"Les raviolis de la cantine sont végétariens."}
+{"id":105,"text":"Le restaurant favori de Mehdi sert du couscous."}
+{"id":106,"text":"Le chantier Pollen utilise une grue électrique."}
+{"id":107,"text":"Le chantier Pollen commence en mars."}
+{"id":108,"text":"Le chantier Lichen utilise une grue mobile."}
+{"id":109,"text":"La grue électrique est inspectée chaque semaine."}
+{"id":110,"text":"Le chantier Pollen possède deux accès piétons."}
+{"id":111,"text":"Le mot de bienvenue du bot Azur est Bonjour équipage."}
+{"id":112,"text":"Le bot Azur répond en français."}
+{"id":113,"text":"Le mot de bienvenue du bot Corail est Salut atelier."}
+{"id":114,"text":"Le bot Azur résume les comptes rendus."}
+{"id":115,"text":"Les messages de bienvenue sont modifiables localement."}
+{"id":116,"text":"Le plan du jardin Saule réserve une parcelle aux fraisiers."}
+{"id":117,"text":"Le jardin Saule reçoit du soleil le matin."}
+{"id":118,"text":"Le plan du jardin Orme réserve une parcelle aux tomates."}
+{"id":119,"text":"Les fraisiers sont arrosés par goutte-à-goutte."}
+{"id":120,"text":"Le jardin Saule possède un composteur."}
+{"id":121,"text":"Le journal du service Brume est conservé sept jours."}
+{"id":122,"text":"Le journal du service Brume est compressé chaque soir."}
+{"id":123,"text":"Le service Brume écoute sur une socket locale."}
+{"id":124,"text":"Le journal du service Rosée est conservé un mois."}
+{"id":125,"text":"Les erreurs sont affichées dans le panneau diagnostic."}
+{"id":126,"text":"Le responsable de l'astreinte Mésange est Hugo."}
+{"id":127,"text":"L'astreinte Mésange change de responsable le lundi."}
+{"id":128,"text":"Le responsable de l'astreinte Hirondelle est Nour."}
+{"id":129,"text":"Mésange surveille les traitements différés."}
+{"id":130,"text":"Le calendrier des astreintes est affiché dans le hall."}
+{"id":131,"text":"Le dossier des contrats Aster est classé par année."}
+{"id":132,"text":"Le dossier Aster est accessible en lecture seule."}
+{"id":133,"text":"Le dossier des contrats Dahlia est classé par client."}
+{"id":134,"text":"Les contrats sont relus avant signature."}
+{"id":135,"text":"Aster possède un registre des modifications."}
+{"id":136,"text":"Le raccourci du panneau recherche est Commande K."}
+{"id":137,"text":"Le raccourci du panneau historique est Commande H."}
+{"id":138,"text":"Le panneau recherche accepte les accents."}
+{"id":139,"text":"Le panneau recherche affiche vingt résultats."}
+{"id":140,"text":"Le panneau historique conserve les dates locales."}
+{"id":141,"text":"L'adresse du bureau fictif Pinson est rue des Étoiles."}
+{"id":142,"text":"Le bureau Pinson accueille six personnes."}
+{"id":143,"text":"L'adresse du bureau fictif Merle est rue des Nuages."}
+{"id":144,"text":"Le bureau Pinson est proche de la gare."}
+{"id":145,"text":"Les visiteurs entrent par la cour."}
+{"id":146,"text":"Le budget du prototype Silex est de quatre mille euros."}
+{"id":147,"text":"Le prototype Silex est fabriqué en bois."}
+{"id":148,"text":"Le budget du prototype Basalte est de six mille euros."}
+{"id":149,"text":"Le prototype Silex est présenté en décembre."}
+{"id":150,"text":"Le budget formation est séparé des prototypes."}
+{"id":151,"text":"La fréquence du bulletin Récif est hebdomadaire."}
+{"id":152,"text":"Le bulletin Récif paraît le vendredi."}
+{"id":153,"text":"La fréquence du bulletin Lagon est mensuelle."}
+{"id":154,"text":"Le bulletin Récif est relu par Zoé."}
+{"id":155,"text":"Le bulletin interne ne contient pas de publicité."}
+{"id":156,"text":"La police du rapport Velours est Source Sans."}
+{"id":157,"text":"Le rapport Velours utilise des marges larges."}
+{"id":158,"text":"La police du rapport Satin est Noto Serif."}
+{"id":159,"text":"Le rapport Velours est diffusé en PDF."}
+{"id":160,"text":"Le rapport annuel utilise des graphiques sobres."}
+{"id":161,"text":"Le transport du lot Grenat se fait par train."}
+{"id":162,"text":"Le lot Grenat contient des maquettes."}
+{"id":163,"text":"Le transport du lot Topaze se fait par camion."}
+{"id":164,"text":"Le lot Grenat est assuré avant départ."}
+{"id":165,"text":"Le transport des visiteurs utilise une navette."}
+{"id":166,"text":"Le délai du traitement Nectar est de cinq secondes."}
+{"id":167,"text":"Le traitement Nectar est relancé après une erreur."}
+{"id":168,"text":"Le délai du traitement Sève est de huit secondes."}
+{"id":169,"text":"Le traitement Nectar écrit un journal local."}
+{"id":170,"text":"Les traitements nocturnes commencent à minuit."}
+{"id":171,"text":"Le casque de démonstration Vega utilise un câble USB."}
+{"id":172,"text":"Le casque Vega est rangé dans une boîte grise."}
+{"id":173,"text":"Le casque de démonstration Sirius utilise le Bluetooth."}
+{"id":174,"text":"Le câble USB mesure deux mètres."}
+{"id":175,"text":"Le casque Vega dispose de coussinets lavables."}
+{"id":176,"text":"Le four de l'atelier est réglé à cent quatre-vingts degrés."}
+{"id":177,"text":"L'atelier ouvre ses portes à huit heures."}
+{"id":178,"text":"La ventilation du local est contrôlée annuellement."}
+{"id":179,"text":"Le thermostat de la salle commune indique vingt degrés."}
+{"id":180,"text":"Les outils sont nettoyés après usage."}
+{"id":181,"text":"Le chien de Lucie s'appelle Biscotte."}
+{"id":182,"text":"Lucie pratique le dessin le samedi."}
+{"id":183,"text":"Le chat de Martin s'appelle Moka."}
+{"id":184,"text":"Les animaux restent dans la cour pendant les réunions."}
+{"id":185,"text":"Martin apporte des biscuits le vendredi."}
+{"id":186,"text":"La salle de sieste contient deux fauteuils inclinables."}
+{"id":187,"text":"La salle de musique possède un piano droit."}
+{"id":188,"text":"La bibliothèque propose des romans illustrés."}
+{"id":189,"text":"Le coin lecture est ouvert pendant la pause."}
+{"id":190,"text":"Les coussins sont lavés chaque mois."}
+{"id":191,"text":"Le déjeuner de jeudi comprend une soupe de lentilles."}
+{"id":192,"text":"La cuisine reçoit des légumes le mercredi."}
+{"id":193,"text":"Le dîner de vendredi comprend une tarte salée."}
+{"id":194,"text":"Les fruits sont placés près de la fontaine."}
+{"id":195,"text":"Le repas du dimanche est préparé collectivement."}
+{"id":196,"text":"Le code couleur des urgences est rouge."}
+{"id":197,"text":"Le code couleur des avertissements est orange."}
+{"id":198,"text":"Le code couleur des informations est bleu."}
+{"id":199,"text":"Le code couleur des confirmations est vert."}
+{"id":200,"text":"Le code couleur des brouillons est gris."}

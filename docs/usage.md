@@ -79,6 +79,10 @@ compaction. Ils valident le calcul, pas le vrai taux de cache ; les repères 70 
 (« bon ») et > 90 % (« excellent ») ne sont pas des critères de sortie ici.
 Le rejeu réel et les essais d'ordre du préfixe restent un travail séparé.
 
+## Évaluation sur faux serveur (opt-in)
+
+Le [lanceur d’évaluation — étape A](evaluation.md) rejoue un scénario de messages dans un espace neuf marqué, impose `EZERBOT_EVAL_MAX_CALLS` et écrit uniquement des chiffres dans `target/eval/`. Il ne se connecte à aucun compte réel.
+
 ## Test de dictée Mac (opt-in)
 
 Le test `french_audio_recognized_on_device_after_english` (crates/wrapper/tests/voice_ui.rs) est ignoré par défaut : il exige un Mac, la permission Speech et les locales en-US/fr-CA installées. Pour le lancer :

@@ -22,8 +22,9 @@ const WEEK_S: u64 = 7 * 86_400;
 const WEEK_MS: i64 = WEEK_S as i64 * 1000;
 /// Latest finished, measured passages the average is taken over.
 const AVERAGED_PASSAGES: u32 = 10;
-/// How many of a routine's latest finished passages those are sought in (a few may sent no usage).
-const RECENT_FINISHED: u32 = 200;
+/// How many of a routine's latest finished passages are looked through for them: a bound on the
+/// work of a read when a long run of passages sent no usage, not a sample size.
+const RECENT_FINISHED: u32 = 1000;
 /// The quota gauge is a rounded percentage: below these, tokens per percent is noise.
 const MIN_USED_PERCENT: f64 = 5.0;
 const MIN_LOCAL_TOKENS: u64 = 50_000;
@@ -41,15 +42,19 @@ CREATE INDEX IF NOT EXISTS wrapper_engine_runs_thread_started
     ON engine_runs(conversation_id, json_extract(record,'$.started_at'));";
 
 /// A passage is its run plus every run below it in the delegation graph, each counted once.
-/// `?1` routine, `?2` start of the week (in ms), `?3` passages averaged, `?4` finished passages
-/// they are sought in, `?5` the routine's thread. The week's passages are those whose run started
-/// in it, whatever slot they were owed for; both reads go through indexes, so old history is not read.
+/// `?1` routine, `?2` start of the week (in ms), `?3` passages averaged, `?4` latest finished
+/// passages looked through for measured ones (the measured filter comes before the `?3` limit, the
+/// `?4` bound is a slot date read off the index), `?5` the routine's thread. The week's passages are
+/// those whose run started in it, whatever slot they were owed for; both reads go through indexes,
+/// so old history is not read.
 const PASSAGES: &str = "WITH RECURSIVE recent(id) AS (
-        SELECT occurrence_id FROM (
-            SELECT occurrence_id, run_id, scheduled_at_utc FROM scheduler_occurrences
+        SELECT occurrence_id FROM scheduler_occurrences
+        WHERE routine_id=?1 AND status='done'
+          AND run_id IN (SELECT run_id FROM engine_response_usage)
+          AND scheduled_at_utc >= COALESCE((
+            SELECT scheduled_at_utc FROM scheduler_occurrences
             WHERE routine_id=?1 AND status='done'
-            ORDER BY scheduled_at_utc DESC, occurrence_id DESC LIMIT ?4)
-        WHERE run_id IN (SELECT run_id FROM engine_response_usage)
+            ORDER BY scheduled_at_utc DESC, occurrence_id DESC LIMIT 1 OFFSET ?4 - 1), 0)
         ORDER BY scheduled_at_utc DESC, occurrence_id DESC LIMIT ?3),
      tree(occurrence_id, root, run_id) AS (
         SELECT o.occurrence_id, o.run_id, o.run_id FROM engine_runs r
@@ -305,12 +310,10 @@ mod tests {
                 .unwrap()
                 .collect::<Result<_, _>>()
                 .unwrap();
-            // Only the recursive tree and the 200-row subquery are scanned.
+            // Only the recursive tree is scanned.
             let scans: Vec<_> = details
                 .iter()
-                .filter(|d| {
-                    d.starts_with("SCAN") && !["SCAN t", "SCAN (subquery-1)"].contains(&d.as_str())
-                })
+                .filter(|d| d.starts_with("SCAN") && d.as_str() != "SCAN t")
                 .collect();
             assert!(scans.is_empty(), "{scans:?} in {details:?}");
         }
@@ -430,7 +433,7 @@ mod tests {
     /// the work. The whole read takes about `READ_STEPS` instructions, whatever the history.
     #[test]
     fn old_history_ten_times_larger_costs_about_the_same_for_the_whole_read() {
-        let (read, read_10x) = (read_steps(500), read_steps(5000));
+        let (read, read_10x) = (read_steps(1500), read_steps(15_000));
         eprintln!("VMSTEPS whole read {read} -> {read_10x}");
         assert!(read_10x <= read + read / 10, "{read} -> {read_10x}");
         assert!(read_10x < READ_STEPS, "{read_10x}");

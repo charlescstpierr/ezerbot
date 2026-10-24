@@ -87,17 +87,18 @@ function dumpOnce({ file, profile, width, height, launchMs }) {
   });
 }
 
+// launchMs may be an array of per-launch deadlines (the tests use it to stay independent of load).
 async function dumpQaResult({ file, directory, width, height, label, launchMs = LAUNCH_MS }) {
   let last = "";
   try {
     for (let attempt = 1; attempt <= LAUNCH_ATTEMPTS; attempt += 1) {
-      const outcome = await dumpOnce({ file, profile: join(directory, `profile-${attempt}`), width, height, launchMs });
+      const outcome = await dumpOnce({ file, profile: join(directory, `profile-${attempt}`), width, height, launchMs: Array.isArray(launchMs) ? launchMs[attempt - 1] : launchMs });
       if (outcome.report) return outcome.report;
       if (outcome.exited) throw new Error(`chrome exited without ${label}\n${outcome.err.slice(-500)}`);
-      if (!outcome.silent) throw new Error(`chrome printed a page without ${label} in ${launchMs} ms\n${outcome.err.slice(-500)}`);
+      if (!outcome.silent) throw new Error(`chrome printed a page without ${label} within its deadline\n${outcome.err.slice(-500)}`);
       last = outcome.err;
     }
-    throw new Error(`chrome did not report ${label}: ${LAUNCH_ATTEMPTS} launches, none printed anything in ${launchMs} ms\n${last.slice(-500)}`);
+    throw new Error(`chrome did not report ${label}: ${LAUNCH_ATTEMPTS} launches, none printed anything within ${[].concat(launchMs).join("/")} ms\n${last.slice(-500)}`);
   } finally {
     try { rmSync(directory, { recursive: true, force: true }); } catch { /* temp dir, best effort */ }
   }

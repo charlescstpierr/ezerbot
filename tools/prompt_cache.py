@@ -49,7 +49,7 @@ def totals(responses):
     }
 
 
-def build_report(conn, *, fake=False):
+def build_report(conn):
     # rowid is the durable run insertion order; response is the model-call ordinal
     # within that run. Do not read message bodies, run records or summary text.
     conversations = {}
@@ -62,6 +62,7 @@ def build_report(conn, *, fake=False):
             "conversation": len(conversations) + 1,
             "compaction_count": 0,
             "unmeasured_runs": 0,
+            "has_measured": False,
             "turns": [],
         })
         if not item["turns"] or item["turns"][-1]["_run"] != run:
@@ -76,10 +77,11 @@ def build_report(conn, *, fake=False):
             "response": response,
             "input_tokens": inputs,
             "cached_input_tokens": cached,
-            "excluded_first": turn["turn"] == 1 and response == 1,
+            "excluded_first": not item["has_measured"],
             "below_1024": inputs < MIN_CACHEABLE_INPUT,
             "rate_percent": metric([{"input_tokens": inputs, "cached_input_tokens": cached}])["rate_percent"],
         })
+        item["has_measured"] = True
     for conversation, count in conn.execute(
         "SELECT conversation_id, COUNT(*) FROM engine_summaries GROUP BY conversation_id"
     ):
@@ -88,6 +90,7 @@ def build_report(conn, *, fake=False):
 
     all_responses = []
     for item in conversations.values():
+        del item["has_measured"]
         responses = []
         for turn in item["turns"]:
             del turn["_run"]
@@ -99,11 +102,8 @@ def build_report(conn, *, fake=False):
     return {
         "schema_version": 1,
         "source": "engine_response_usage (réponses principales seulement)",
-        "synthetic": fake,
-        "notice": (
-            "FakeOpenAi : télémétrie fixe simulée, aucun taux réel ni objectif de score validé."
-            if fake else "Rapport local, aucun appel fournisseur."
-        ),
+        "synthetic": True,
+        "notice": "FakeOpenAi : télémétrie fixe simulée, aucun taux réel ni objectif de score validé.",
         "minimum_cacheable_input_tokens": MIN_CACHEABLE_INPUT,
         "compaction_count": sum(item["compaction_count"] for item in items),
         "unmeasured_runs": sum(item["unmeasured_runs"] for item in items),
@@ -112,11 +112,11 @@ def build_report(conn, *, fake=False):
     }
 
 
-def report_database(db, *, fake=False):
+def report_database(db):
     # A read-only snapshot, including when the wrapper still has its database open.
     with sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro", uri=True) as conn:
         conn.execute("BEGIN")
-        return build_report(conn, fake=fake)
+        return build_report(conn)
 
 
 def replay():
@@ -139,12 +139,11 @@ def main():
     commands.add_parser("replay", help="five turns per scenario, FakeOpenAi only").add_argument(
         "--output", type=Path, required=True
     )
-    report = commands.add_parser("report", help="read a replay SQLite database, without network")
+    report = commands.add_parser("report", help="read a FakeOpenAi replay SQLite database, without network")
     report.add_argument("--db", type=Path, required=True)
     report.add_argument("--output", type=Path, required=True)
-    report.add_argument("--fake", action="store_true", help="mark synthetic FakeOpenAi telemetry")
     args = parser.parse_args()
-    result = replay() if args.command == "replay" else report_database(args.db, fake=args.fake)
+    result = replay() if args.command == "replay" else report_database(args.db)
     text = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(text)

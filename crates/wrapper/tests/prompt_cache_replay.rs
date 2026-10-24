@@ -111,7 +111,7 @@ fn five_turn_fake_replay_writes_private_report() {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/prompt_cache.py");
     let result = Command::new("python3")
         .arg(script)
-        .args(["report", "--fake", "--db"])
+        .args(["report", "--db"])
         .arg(&db)
         .arg("--output")
         .arg(&output)

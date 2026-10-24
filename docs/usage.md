@@ -45,15 +45,17 @@ Le JSON et la sortie standard contiennent le rapport global, par conversation
 (numérotée, sans identifiant brut), par tour et par réponse fournisseur :
 
 - `measured` = somme des tokens en cache ÷ somme des tokens d'entrée, **hors première
-  réponse de chaque conversation** (pas hors premier tour entier si un tour fait
-  plusieurs appels). Ce n'est pas la moyenne des pourcentages ;
+  réponse enregistrée de chaque conversation** (la plus ancienne ligne de
+  `engine_response_usage`, pas le premier tour entier si un tour fait plusieurs
+  appels). Ce n'est pas la moyenne des pourcentages ;
 - `cacheable` applique en plus le seuil d'entrée **≥ 1 024** ; `below_1024` donne
   séparément les réponses mesurées sous ce seuil. Chaque réponse porte aussi son
   indicateur `below_1024`, y compris la première, exclue du calcul ;
 - `excluded_first` identifie l'échauffement. Un dénominateur nul produit `null`,
   jamais un taux inventé. Les runs sans télémétrie sont comptés dans
-  `unmeasured_runs`, sans remplacer les tokens absents par zéro ni exclure à leur
-  place la réponse mesurée suivante ;
+  `unmeasured_runs`, sans remplacer les tokens absents par zéro ; si le premier run
+  d'une conversation n'a aucune télémétrie, c'est la première réponse enregistrée
+  ensuite qui est exclue ;
 - `compaction_count` compte les résumés durables dans `engine_summaries`, globalement
   et par conversation (même s'ils ont été invalidés depuis). Une compaction peut
   changer le préfixe et baisser le taux ; le rejeu court n'en déclenche normalement
@@ -64,10 +66,11 @@ l'ordinal de réponse fournisseur dans chaque run. Elle ne lit ni les messages, 
 les enregistrements de runs, ni les textes des résumés. Le fichier de résultats ne
 contient aucun texte de message, secret ou identifiant de conversation brut.
 Les appels auxiliaires (titre, mémoire automatique, résumé) n'entrent pas dans le
-dénominateur. Pour relire une base de rejeu conservée séparément, sans réseau :
+dénominateur. Pour relire une base de rejeu `FakeOpenAi` conservée séparément,
+sans réseau (le rapport est toujours marqué `synthetic: true`) :
 
 ```sh
-python3 tools/prompt_cache.py report --db /tmp/replay.sqlite --fake --output /tmp/cache.json
+python3 tools/prompt_cache.py report --db /tmp/replay.sqlite --output /tmp/cache.json
 ```
 
 **Ces taux sont synthétiques.** Le faux serveur renvoie des tokens fixes

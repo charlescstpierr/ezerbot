@@ -50,7 +50,7 @@ class PromptCacheReportTests(unittest.TestCase):
             output = Path(directory) / "results.json"
             command = subprocess.run([
                 sys.executable, str(Path(__file__).with_name("prompt_cache.py")),
-                "report", "--db", str(db), "--output", str(output), "--fake",
+                "report", "--db", str(db), "--output", str(output),
             ], check=True, capture_output=True, text=True)
             result = json.loads(output.read_text())
             self.assertIn("420 ÷ 600 = 70,0 %", command.stdout)
@@ -92,14 +92,30 @@ class PromptCacheReportTests(unittest.TestCase):
         self.assertNotIn("private summary", json.dumps(report))
         self.assertNotIn("secret", json.dumps(report))
 
+    def test_first_recorded_response_is_excluded_after_unmeasured_first_run(self):
+        self.conn.execute("INSERT INTO engine_runs VALUES ('failed', 'one')")
+        self.response("one", 2000, 0)
+        self.response("one", 2000, 1500)
+        report = build_report(self.conn)
+        turns = report["conversations"][0]["turns"]
+        self.assertEqual(report["unmeasured_runs"], 1)
+        self.assertEqual(turns[0]["responses"], [])
+        self.assertTrue(turns[1]["responses"][0]["excluded_first"])
+        self.assertFalse(turns[2]["responses"][0]["excluded_first"])
+        self.assertEqual(report["global"]["excluded_first_responses"], 1)
+        self.assertEqual(report["global"]["measured"]["calculation"], "1500 ÷ 2000 = 75,0 %")
+
     def test_zero_and_missing_telemetry_are_not_fabricated_ratios(self):
+        self.response("one", 2000, 0)
         self.conn.execute("INSERT INTO engine_runs VALUES ('missing', 'one')")
         self.response("one", 2000, 1000)
+        self.response("two", 0, 0)
         self.response("two", 0, 0)
         report = build_report(self.conn)
         self.assertEqual(report["unmeasured_runs"], 1)
         self.assertEqual(report["global"]["measured"]["rate_percent"], 50.0)
         self.assertIsNone(report["conversations"][1]["measured"]["rate_percent"])
+        self.assertTrue(report["synthetic"])
 
     def test_empty_replay_has_no_percentage(self):
         report = build_report(self.conn)

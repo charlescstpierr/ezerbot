@@ -390,8 +390,8 @@ test("une navigation refusée pendant une réponse prévient au lieu d’affiche
 
 const cell = (text) => ({ type: "element", tag: "td", children: [{ type: "text", text }] });
 const forfaits = {
-  id: "page_forfaits", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "ready", diagnostic: null,
-  preview: "Trois forfaitsForfait A9 €Forfait B19 €Forfait C29 €", source_version: "a".repeat(64),
+  id: "page_forfaits", bot_id: "grokbot", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "ready", diagnostic: null,
+  preview: `Trois forfaitsForfait A9 €Forfait B19 €Forfait C29 €${"long ".repeat(100)}fin${"é".repeat(501)}${"😀".repeat(501)}${"a".repeat(500)}\uFEFFabc`, source_version: "a".repeat(64),
   document: { states: [], view: { type: "element", tag: "article", children: [
     { type: "element", tag: "h1", children: [{ type: "text", text: "Trois forfaits" }] },
     { type: "element", tag: "table", children: [{ type: "element", tag: "tbody", children: [
@@ -601,4 +601,29 @@ test("une sélection sur plusieurs cellules et paragraphes donne le bouton et pa
   assert.equal(comment.hidden, false);
   comment.click();
   assert.equal(anchor().page_anchor.passage, "Trois forfaits\n\nForfait A\t9 €\nForfait B");
+});
+
+test("un texte changé par l’état interactif de la Page, absent de l’aperçu que contrôle le moteur, ne donne pas de bouton", async () => {
+  const { comment, select } = await openForfaits();
+  select("Offre choisie : Confort");
+  assert.equal(comment.hidden, true);
+  select("Forfait B\t19 €");
+  assert.equal(comment.hidden, false);
+});
+
+test("dans un groupe, la Page d’un autre participant que le bot du fil ne donne pas de bouton (le moteur répondrait 409)", async () => {
+  const h = harness(forfaits);
+  h.panels.state.conversations = [{ id: "fil", kind: "group", bot_id: "coordinateur" }];
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil", "coordinateur"));
+  byClass(h.main, "page-stage").rect = { left: 400, top: 60, right: 800, bottom: 660, width: 400, height: 600 };
+  byClass(h.main, "page-canvas").rect = { left: 400, top: 120, right: 800, bottom: 660, width: 400, height: 540 };
+  const comment = byClass(h.main, "page-comment");
+  const node = textNode(canvasOf(h.main), "Forfait B");
+  const range = { startContainer: node, endContainer: node, getBoundingClientRect: () => ({ left: 450, top: 200, right: 520, bottom: 220, width: 70, height: 20 }) };
+  h.selection.change(1, "Forfait B", range);
+  assert.equal(comment.hidden, true);
+  h.panels.state.conversations = [{ id: "fil", kind: "group", bot_id: "grokbot" }];
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil", "grokbot"));
+  h.selection.change(1, "Forfait B", range);
+  assert.equal(comment.hidden, false);
 });

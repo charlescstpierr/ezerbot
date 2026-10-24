@@ -139,15 +139,27 @@
     return conversations.some((conversation) => conversation.id === currentConversationId && conversation.kind === "task");
   }
 
+  // Une Page d'un autre bot que celui du fil (groupe) est refusée par le moteur (409) : on ne propose pas de citer.
+  function foreignPage() {
+    const conversations = lastState && Array.isArray(lastState.conversations) ? lastState.conversations : [];
+    const thread = conversations.find((conversation) => conversation.id === currentConversationId);
+    return Boolean(thread && thread.bot_id && detail && detail.bot_id && thread.bot_id !== detail.bot_id);
+  }
+
+  // Le moteur vérifie le passage dans le texte affiché de la Page à l'état initial, en ignorant les blancs.
+  const blanks = (text) => String(text).replace(/\p{White_Space}+/gu, "");
+
   // Le passage est le texte sélectionné, rogné comme le moteur le rogne ; la sélection doit tenir toute dans le canevas.
   function selectedPassage() {
     const selection = document.getSelection();
-    if (inTask() || !detail || detail.id !== selectedId || shell.stage.hidden || !selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
+    if (inTask() || !detail || foreignPage() || detail.id !== selectedId || shell.stage.hidden || !selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
     const range = selection.getRangeAt(0);
     if (!shell.canvas.contains(range.startContainer) || !shell.canvas.contains(range.endContainer)) return null;
     // Même rognage que `str::trim` de Rust (propriété Unicode White_Space), pas `String.trim`.
     const passage = selection.toString().replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
     if (!passage || [...passage].length > passageLimit) return null;
+    // Un texte changé par l'état interactif de la Page (« Offre choisie : Confort ») n'est pas dans l'aperçu que le moteur contrôle.
+    if (!blanks(detail.preview || "").includes(blanks(passage))) return null;
     const target = range.getBoundingClientRect();
     const view = shell.canvas.getBoundingClientRect();
     if (target.bottom < view.top || target.top > view.bottom) return null;
@@ -450,7 +462,7 @@
     knownPages = pages;
     const chosen = choose(pages, conversationId);
     selectedId = chosen ? chosen.id : null;
-    if (quote && (!chosen || chosen.id !== quote.page_id || inTask())) clearQuote();
+    if (quote && (!chosen || chosen.id !== quote.page_id || inTask() || foreignPage())) clearQuote();
     paintList(pages);
     if (!chosen) {
       hideStage();

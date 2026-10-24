@@ -616,7 +616,7 @@ test("l’envoi d’un passage cité transmet page_anchor ; après la croix, le 
   // Ce faux serveur partage son état avec le client : on retire l'envoi optimiste resté « queued ».
   conversation.messages = conversation.messages.filter((message) => message.state !== "queued");
   const detail = {
-    id: "page_forfaits", title: "Trois forfaits", status: "ready", diagnostic: null, source_version: "c".repeat(64),
+    id: "page_forfaits", bot_id: "grokbot", title: "Trois forfaits", status: "ready", diagnostic: null, source_version: "c".repeat(64), preview: "ConfortREFUSÉ",
     document: { states: [], view: { type: "element", tag: "table", children: [
       { type: "element", tag: "tr", children: [{ type: "element", tag: "td", children: [{ type: "text", text: "Confort" }] }] },
     ] } },

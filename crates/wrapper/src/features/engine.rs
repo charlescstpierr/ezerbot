@@ -1718,6 +1718,7 @@ impl RunServices for Services<'_> {
     fn is_journaled_external_tool(&self, call: &grokbot_engine::contracts::ToolCall) -> bool {
         super::local::is_tool(&call.name)
             || super::screen::is_tool(&call.name)
+            || super::page_snapshot::is_tool(&call.name)
             || super::generated::is_external(&call.name)
             || super::images::is_external(&call.name)
             || super::recall::is_tool(&call.name)
@@ -1771,6 +1772,8 @@ impl RunServices for Services<'_> {
         let ctx = self.ctx(self.connection, run);
         let outcome = if super::screen::is_tool(&call.name) {
             super::screen::execute(&ctx, call, self.cancel.clone())
+        } else if super::page_snapshot::is_tool(&call.name) {
+            super::page_snapshot::execute(&ctx, call)
         } else if super::generated::is_external(&call.name) {
             super::generated::execute(&ctx, call, self.cancel.clone())
         } else if super::images::is_external(&call.name) {

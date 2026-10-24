@@ -1085,6 +1085,129 @@ fn responses_round_trip_recalls_an_old_fact_from_five_hundred_before_answering()
         .any(|m| m["body"].as_str().unwrap_or_default().contains("4317")));
 }
 
+fn remember(f: &Fixture, text: &str, learned_at: i64) -> String {
+    facts::remember(
+        &f.db(),
+        &facts::Fact {
+            fact_id: String::new(),
+            bot_id: "grokbot".into(),
+            scope: Scope::Private,
+            text: text.into(),
+            provenance: facts::Provenance {
+                conversation_id: None,
+                entry_id: None,
+                source: Source::UserStated,
+            },
+            learned_at,
+            status: FactStatus::Active,
+            sensitive: false,
+        },
+    )
+    .unwrap()
+    .fact_id
+}
+/// Le modèle factice appelle `recall_memory`, puis répond.
+fn script_recall(f: &Fixture, query: &str) {
+    let mut seen = f.server.seen.lock().unwrap();
+    seen.responses.push_back(ScriptedResponse::events(&[
+        json!({"type":"response.output_item.done","item":{"id":"fc-recall","type":"function_call","status":"completed","call_id":"recall","name":"recall_memory","arguments":json!({"query":query,"limit":5}).to_string()}}),
+        json!({"type":"response.completed"})]));
+    seen.responses.push_back(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":"Voilà."}),
+        json!({"type":"response.completed"}),
+    ]));
+}
+fn recalled(f: &mut Fixture, c: &str, id: &str) -> Value {
+    f.messages(c)
+        .into_iter()
+        .find(|m| m["id"] == format!("reply-{id}"))
+        .unwrap()["payload"]["recalled_fact_ids"]
+        .clone()
+}
+
+#[test]
+fn reply_after_recall_memory_carries_the_ids_of_the_recalled_facts_only() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    let port = remember(&f, "Le projet Boréal utilise le port 4317.", 1);
+    remember(&f, "Le thé vert est préféré.", 2);
+    script_recall(&f, "port Boreal");
+    f.send(&c, "ask", "Quel port utilise le projet Boréal ?");
+    assert_eq!(recalled(&mut f, &c, "ask"), json!([port]));
+}
+
+#[test]
+fn facts_only_injected_in_the_bootstrap_are_not_counted_as_recalled() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    remember(&f, "Le projet Boréal utilise le port 4317.", 1);
+    f.send(&c, "plain", "Bonjour");
+    assert!(f
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .bodies
+        .iter()
+        .any(|b| b.to_string().contains("port 4317")));
+    assert_eq!(recalled(&mut f, &c, "plain"), json!([]));
+}
+
+#[test]
+fn reply_without_any_memory_has_an_empty_list_even_after_a_recall() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    script_recall(&f, "port Boreal");
+    f.send(&c, "empty", "Quel port ?");
+    assert_eq!(recalled(&mut f, &c, "empty"), json!([]));
+}
+
+#[test]
+fn a_recalled_fact_forgotten_afterwards_is_no_longer_listed() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    let port = remember(&f, "Le projet Boréal utilise le port 4317.", 1);
+    let tea = remember(&f, "Le projet Boréal sert du thé vert.", 2);
+    script_recall(&f, "Boreal");
+    f.send(&c, "ask", "Parle-moi de Boréal");
+    assert_eq!(recalled(&mut f, &c, "ask"), json!([tea, port]));
+    f.post(
+        "/api/memory/forget",
+        json!({"bot_id":"grokbot","fact_id":port}),
+    );
+    assert_eq!(recalled(&mut f, &c, "ask"), json!([tea]));
+}
+
+#[test]
+fn a_recalled_topic_fact_is_listed_then_dropped_when_charles_forgets_it() {
+    let mut f = Fixture::new();
+    let topic = f.post("/api/topics", json!({"name":"Déménagement"}))["topic"]["id"].clone();
+    let c = f.conv("grokbot");
+    f.post(
+        "/api/topics/assign",
+        json!({"conversation_id":c,"topic_id":topic}),
+    );
+    let offer = match f
+        .app
+        .invoke_tool_in(
+            "grokbot",
+            Some(&c),
+            "propose_topic_memory",
+            json!({"text":"Le camion est réservé pour le 1er juillet"}),
+        )
+        .unwrap()
+    {
+        grokbot_engine::contracts::ToolOutcome::Done { output } => output["offer_id"].clone(),
+        _ => panic!("proposition refusée"),
+    };
+    let fact = f.post("/api/topics/memory/accept", json!({"offer_id":offer}))["fact"]["id"].clone();
+    script_recall(&f, "camion");
+    f.send(&c, "truck", "Quand est le camion ?");
+    assert_eq!(recalled(&mut f, &c, "truck"), json!([fact]));
+    f.post("/api/topics/memory/forget", json!({"fact_id":fact}));
+    assert_eq!(recalled(&mut f, &c, "truck"), json!([]));
+}
+
 #[test]
 fn plain_everyone_produces_a_receipt_and_consent_card_without_weakening_email_guard() {
     let mut f = Fixture::new();

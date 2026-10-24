@@ -666,9 +666,6 @@ PY
 if [[ "$release_size" -eq 1 ]]; then
   run_captured 'cargo build --release --locked -p grokbot-wrapper --message-format=json' measure_release_size \
     cargo build --release --locked -p grokbot-wrapper --message-format=json
-  if [[ "$captured_status" -ne 0 ]]; then
-    exit 1
-  fi
 fi
 
 emit "critères: ${criteria_source}"

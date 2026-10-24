@@ -669,11 +669,14 @@ PY
   unset CARGO_STUB_FAIL
 done
 
-# 26. L'échec du build optionnel est un échec de build, pas un seuil de taille.
+# 26. L'échec du build optionnel est consigné sans changer le verdict ni
+# sauter les critères.
 export RELEASE_STUB_FAIL=1
 run_script --release-size 248 "$REPO/criteres.md"
-expect_status 1 "échec du build release demandé"
+expect_status 0 "échec du build release non bloquant"
 require_grep '- binaire release : — — origin/main : —' "pas de taille périmée après échec de build"
+require_grep '- `cargo build --release --locked -p grokbot-wrapper --message-format=json` — exit 1 —' "échec du build release consigné"
+require_grep '- `sleep 1` — exit 0 —' "critères exécutés après échec du build release"
 unset RELEASE_STUB_FAIL
 
 # 27. Un artefact absent ne mesure pas un ancien binaire et ne modifie pas le

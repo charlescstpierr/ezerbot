@@ -379,6 +379,14 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     "Ajoutez du texte (16 Ko au plus) ou un fichier.",
                 ));
             }
+            if previous.is_some() {
+                super::pages::anchors::check_resend(
+                    &app.connection,
+                    &input.conversation_id,
+                    &input.message_id,
+                    input.page_anchor.as_ref(),
+                )?;
+            }
             let prepared = if previous.is_some() {
                 Some(
                     app.session
@@ -404,7 +412,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     skill_id,
                 )?;
             }
-            if let Some(anchor) = &input.page_anchor {
+            if let Some(anchor) = input.page_anchor.as_ref().filter(|_| previous.is_none()) {
                 super::pages::anchors::record(
                     &tx,
                     &input.conversation_id,

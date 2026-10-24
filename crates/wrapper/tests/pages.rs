@@ -568,10 +568,43 @@ fn retrying_an_accepted_anchored_message_survives_the_edit_that_removed_its_pass
     f.send_in(&chat, "retouche", Some(anchor.clone())).unwrap();
     f.finish("retouche");
 
-    f.send_in(&chat, "retouche", Some(anchor)).unwrap();
+    let settled = f.page()["anchors"].clone();
+    let padded = Fixture::anchor(&page, "  Confort ");
+    f.send_in(&chat, "retouche", Some(padded)).unwrap();
     let anchors = f.page()["anchors"].clone();
     assert_eq!(anchors.as_array().unwrap().len(), 1);
     assert_eq!(anchors[0]["state"], "done");
+    assert_eq!(anchors, settled);
+}
+
+#[test]
+fn a_resend_cannot_add_remove_or_change_the_anchor_of_the_first_send() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.answer(None);
+    f.answer(None);
+    let chat = f.chat.clone();
+    f.send_in(&chat, "sans-ancre", None).unwrap();
+    f.finish("sans-ancre");
+    f.send_in(&chat, "ancre", Some(Fixture::anchor(&page, "Confort")))
+        .unwrap();
+    f.finish("ancre");
+    let kept = f.page()["anchors"].clone();
+    assert_eq!(kept.as_array().unwrap().len(), 1);
+
+    let elsewhere = json!({"page_id": format!("page_{}", "0".repeat(64)), "source_version": page["source_version"], "passage": "Confort"});
+    let cases = [
+        ("sans-ancre", Some(Fixture::anchor(&page, "Confort"))),
+        ("ancre", None),
+        ("ancre", Some(Fixture::anchor(&page, "Trois forfaits"))),
+        ("ancre", Some(elsewhere)),
+    ];
+    for (id, anchor) in cases {
+        let error = f.send_in(&chat, id, anchor).unwrap_err();
+        assert_eq!(error.status, 409, "{id} : {error}");
+        assert!(error.to_string().contains("autre ancre"), "{error}");
+        assert_eq!(f.page()["anchors"], kept, "{id}");
+    }
 }
 
 #[test]

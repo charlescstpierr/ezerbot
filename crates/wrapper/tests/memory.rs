@@ -83,6 +83,181 @@ fn memory_text(app: &App, conversation: &str) -> String {
         .join("\n")
 }
 
+fn topic_fact(app: &mut App, bot: &str, text: &str) -> Value {
+    let topic = post(app, "/api/topics", json!({"name": "Projet 🦀"}))["topic"]["id"].clone();
+    let conv = conversation(app, bot);
+    post(
+        app,
+        "/api/topics/assign",
+        json!({"conversation_id": conv, "topic_id": topic}),
+    );
+    let offer = done(
+        app.invoke_tool_in(
+            bot,
+            Some(conv.as_str()),
+            "propose_topic_memory",
+            json!({"text": text}),
+        )
+        .unwrap(),
+    );
+    post(
+        app,
+        "/api/topics/memory/accept",
+        json!({"offer_id": offer["offer_id"]}),
+    )["fact"]
+        .clone()
+}
+
+#[test]
+fn workspace_memory_lists_all_bots_scopes_and_metadata() {
+    use grokbot_memory::facts::{Fact, Provenance, Scope};
+    let db = Database::new();
+    let mut app = db.open();
+    add_bot(&mut app);
+    let conv = conversation(&mut app, "other");
+    let conn = Connection::open(db.path()).unwrap();
+    let mut expected = Vec::new();
+    for (i, source) in [
+        Source::UserStated,
+        Source::ModelInferred,
+        Source::Automatic,
+        Source::Imported,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        expected.push(
+            facts::remember(
+                &conn,
+                &Fact {
+                    fact_id: String::new(),
+                    bot_id: if i == 0 { "grokbot" } else { "other" }.into(),
+                    scope: if i == 3 { Scope::Team } else { Scope::Private },
+                    text: format!("Souvenir {i} 🦀"),
+                    provenance: Provenance {
+                        conversation_id: Some(conv.clone()),
+                        entry_id: None,
+                        source,
+                    },
+                    learned_at: 100 + i as i64,
+                    status: FactStatus::Active,
+                    sensitive: i == 0,
+                },
+            )
+            .unwrap(),
+        );
+    }
+    let topic = topic_fact(&mut app, "other", "Souvenir du sujet");
+    let response = app.api("GET", "/api/memory/all", b"").unwrap();
+    let all = response["facts"].as_array().unwrap();
+    assert_eq!(all.len(), 5);
+    for fact in expected {
+        let value = all
+            .iter()
+            .find(|value| value["fact_id"] == fact.fact_id)
+            .unwrap();
+        for (key, expected) in serde_json::to_value(&fact).unwrap().as_object().unwrap() {
+            assert_eq!(&value[key], expected, "{key}");
+        }
+        assert_eq!(value["bot_deleted"], false);
+        assert!(value["topic_id"].is_null());
+        assert!(value["topic_name"].is_null());
+    }
+    let value = all
+        .iter()
+        .find(|value| value["fact_id"] == topic["id"])
+        .unwrap();
+    assert_eq!(
+        value,
+        &json!({
+            "fact_id": topic["id"], "bot_id": "other", "bot_deleted": false,
+            "scope": "topic", "topic_id": topic["topic_id"], "topic_name": "Projet 🦀",
+            "text": topic["text"], "learned_at": topic["created_at"],
+            "provenance": {"conversation_id": topic["conversation_id"], "entry_id": null, "source": "user_stated"},
+            "status": {"status": "active"}, "sensitive": false
+        })
+    );
+    // A workspace dump never broadens bot/model-context access.
+    assert_eq!(list(&mut app, "grokbot").len(), 2);
+    assert!(!memory_text(&app, &conv).contains("Souvenir 0"));
+}
+
+#[test]
+fn workspace_memory_excludes_forgotten_and_superseded_text() {
+    let db = Database::new();
+    let mut app = db.open();
+    let old = remember(&app, "grokbot", "Ancien secret", false);
+    let current = post(
+        &mut app,
+        "/api/memory/correct",
+        json!({"bot_id": "grokbot", "fact_id": old["fact_id"], "text": "Secret corrigé"}),
+    )["fact"]
+        .clone();
+    let erased = remember(&app, "grokbot", "Secret oublié", true);
+    post(
+        &mut app,
+        "/api/memory/forget",
+        json!({"bot_id": "grokbot", "fact_id": erased["fact_id"]}),
+    );
+    let topic = topic_fact(&mut app, "grokbot", "Secret du sujet oublié");
+    post(
+        &mut app,
+        "/api/topics/memory/forget",
+        json!({"fact_id": topic["id"]}),
+    );
+    let response = app.api("GET", "/api/memory/all", b"").unwrap();
+    assert_eq!(response["facts"].as_array().unwrap().len(), 1);
+    assert_eq!(response["facts"][0]["fact_id"], current["fact_id"]);
+    for absent in [
+        old["fact_id"].as_str().unwrap(),
+        erased["fact_id"].as_str().unwrap(),
+        topic["id"].as_str().unwrap(),
+        "Ancien secret",
+        "Secret oublié",
+        "Secret du sujet oublié",
+    ] {
+        assert!(!response.to_string().contains(absent), "{absent}");
+    }
+}
+
+#[test]
+fn workspace_memory_marks_deleted_owners_including_topic_facts() {
+    let db = Database::new();
+    let mut app = db.open();
+    add_bot(&mut app);
+    remember(&app, "other", "Fait conservé", false);
+    topic_fact(&mut app, "other", "Fait de sujet conservé");
+    post(&mut app, "/api/bots/delete", json!({"id": "other"}));
+    let response = app.api("GET", "/api/memory/all", b"").unwrap();
+    let all = response["facts"].as_array().unwrap();
+    assert_eq!(all.len(), 2);
+    for fact in all {
+        assert_eq!(fact["bot_id"], "other");
+        assert_eq!(fact["bot_deleted"], true);
+        assert!(!fact["text"].as_str().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn workspace_memory_is_read_only_and_empty_workspace_is_valid() {
+    let db = Database::new();
+    let mut app = db.open();
+    assert_eq!(
+        app.api("GET", "/api/memory/all", b"").unwrap(),
+        json!({"facts": []})
+    );
+    assert_eq!(
+        app.api("POST", "/api/memory/all", b"{}")
+            .unwrap_err()
+            .status,
+        404
+    );
+    assert_eq!(
+        app.api("GET", "/api/memory/all?_=123", b"").unwrap(),
+        json!({"facts": []})
+    );
+}
+
 #[test]
 fn forgotten_fact_absent_from_context_preview() {
     let db = Database::new();

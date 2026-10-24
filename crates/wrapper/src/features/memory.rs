@@ -6,7 +6,10 @@
 //! separately in `memory_auto`.
 //!
 //! GET /api/memory?bot_id=<id> (default: grokbot), or POST /api/memory
-//! {bot_id}, lists active owned/private and workspace/team facts. POST children
+//! {bot_id}, lists active owned/private and workspace/team facts.
+//! GET /api/memory/all is an owner-facing, read-only workspace catalogue, including
+//! topic facts and deleted owners; it never changes bot recall or model context.
+//! POST children
 //! /forget, /correct and /promote require bot_id and fact_id/text or fact_ids.
 //! Promotion accepts ONE batch of <=100; earlier successful requests survive a
 //! later failure (RC03). Forgetting atomically wipes the correction lineage,
@@ -80,6 +83,9 @@ pub fn routes(
     body: &[u8],
 ) -> Option<Result<ApiResponse, ApiError>> {
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    if method == "GET" && route == "/api/memory/all" {
+        return Some(workspace_listing(&app.connection).map(ApiResponse::Json));
+    }
     if !matches!(
         (method, route),
         ("GET" | "POST", "/api/memory")
@@ -164,6 +170,53 @@ pub fn routes(
         };
         Ok(ApiResponse::Json(result))
     })())
+}
+
+/// One SQLite snapshot of every active fact, independent of the selected bot/fil.
+fn workspace_listing(conn: &Connection) -> Result<Value, ApiError> {
+    let mut statement = conn.prepare(
+        "WITH active AS (
+            SELECT fact_id, bot_id, scope, text, provenance, learned_at, sensitive,
+                   NULL AS topic_id, NULL AS topic_name
+            FROM memory_facts WHERE status = 'active'
+            UNION ALL
+            SELECT f.id, f.bot_id, 'topic', f.text,
+                   json_object('conversation_id', f.conversation_id, 'entry_id', NULL, 'source', 'user_stated'),
+                   f.created_at, 0, f.topic_id, t.name
+            FROM wrapper_topic_facts f
+            LEFT JOIN wrapper_topics t ON t.account_id = f.account_id AND t.id = f.topic_id
+            WHERE f.account_id = ?1
+         )
+         SELECT a.*, (a.bot_id IS NOT NULL AND COALESCE(b.deleted, 1)) AS bot_deleted
+         FROM active a
+         LEFT JOIN wrapper_bots b ON b.account_id = ?1 AND b.id = a.bot_id
+         ORDER BY a.learned_at DESC, a.fact_id ASC",
+    )?;
+    let rows = statement.query_map([ACCOUNT], |row| {
+        let raw: String = row.get("provenance")?;
+        let provenance: Provenance = serde_json::from_str(&raw).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        Ok(json!({
+            "fact_id": row.get::<_, String>("fact_id")?,
+            "bot_id": row.get::<_, Option<String>>("bot_id")?,
+            "bot_deleted": row.get::<_, bool>("bot_deleted")?,
+            "scope": row.get::<_, String>("scope")?,
+            "text": row.get::<_, String>("text")?,
+            "provenance": provenance,
+            "learned_at": row.get::<_, i64>("learned_at")?,
+            "status": {"status": "active"},
+            "sensitive": row.get::<_, bool>("sensitive")?,
+            "topic_id": row.get::<_, Option<String>>("topic_id")?,
+            "topic_name": row.get::<_, Option<String>>("topic_name")?,
+        }))
+    })?;
+    let facts = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(json!({"facts": facts}))
 }
 
 fn listing(conn: &Connection, bot: &str) -> Result<Value, ApiError> {

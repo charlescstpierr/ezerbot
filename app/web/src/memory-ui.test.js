@@ -50,7 +50,6 @@ async function fixture() {
     window: { GrokbotPanels: panels }, setTimeout, clearTimeout, HTMLInputElement: Element, String,
     document: { createElement: (tag) => new Element(tag), createTextNode: (text) => { const el = new Element("#text"); el.textContent = text; return el; } },
   });
-  // Comme dans le bundle des panneaux, memory-filter.js (la normalisation partagée) passe avant memory.js.
   for (const file of ["memory-filter.js", "memory.js"]) runInContext(readFileSync(new URL(`../../ui/panels/${file}`, import.meta.url), "utf8"), context);
   registration.onState(state);
   const cleanup = registration.botSection(state.bots[0], root);

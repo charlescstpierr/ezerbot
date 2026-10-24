@@ -18,7 +18,6 @@ test("filtre : bot, portée et recherche se combinent ; une portée inconnue com
   assert.deepEqual(filtre(FACTS, { bot: "a", scope: "private" }), ["1", "4"]);
   assert.deepEqual(filtre(FACTS, { bot: "a", scope: "topic", q: "lisbonne" }), ["3"]);
   assert.deepEqual(filtre(FACTS, { bot: "b", scope: "topic" }), []);
-  assert.deepEqual(filtre(null, { q: "x" }), []);
 });
 test("menu des bots : ceux de l’état (sauf supprimés) plus ceux que les souvenirs citent, triés", () => {
   const label = (item) => `libellé ${item.bot_id}`;

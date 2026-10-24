@@ -48,10 +48,12 @@
   // `options.matches` : ids des souvenirs trouvés (Set) ; ils ressortent avec leur texte, le reste s'estompe. Absent : rien ne change.
   function view(facts, options) {
     const graph = buildGraph(facts, options), matches = options?.matches || null;
-    // Le texte d'un résultat déborde de son point et garde sa taille à l'écran : la place qu'on lui laisse se compte en pixels (s = pixels par unité).
-    const room = (s) => {
+    // Le texte d'un résultat déborde de son point et garde sa taille à l'écran : la place qu'on lui laisse se compte en pixels (s = pixels par unité),
+    // suit sa longueur et reste plafonnée à 35 % du cadre de chaque côté, pour que le calcul soit borné sur un cadre étroit.
+    const room = (s, rect) => {
       let { x, y, w, h } = graph.bounds, x1 = x + w, y1 = y + h;
-      for (const n of graph.nodes) if (matches?.has(n.id)) { x = Math.min(x, n.x - 150 / s); y = Math.min(y, n.y - 40 / s); x1 = Math.max(x1, n.x + 150 / s); y1 = Math.max(y1, n.y + 50 / s); }
+      const pad = (px, side) => Math.min(px, (rect?.[side] || Infinity) * 0.35) / s;
+      for (const n of graph.nodes) if (matches?.has(n.id)) { const wide = pad(10 * [...excerpt(n.label)].length + 12, "width"); x = Math.min(x, n.x - wide); y = Math.min(y, n.y - pad(40, "height")); x1 = Math.max(x1, n.x + wide); y1 = Math.max(y1, n.y + pad(50, "height")); }
       return { x, y, w: x1 - x, h: y1 - y };
     };
     let box = room(1);
@@ -114,7 +116,7 @@
     let { zoom, ox, oy } = kept, scale = 1, drag = null;
     const apply = () => {
       const rect = svg.getBoundingClientRect?.();
-      if (matches && rect?.width) for (let i = 0; i < 4; i++) box = room(Math.min(rect.width / box.w, rect.height / box.h)); // quelques passes : la place dépend de l'échelle
+      if (matches && rect?.width) { box = room(1, rect); for (let i = 0; i < 6; i++) box = room(Math.min(rect.width / box.w, rect.height / box.h), rect); } // à neuf à chaque fois, en quelques passes : la place dépend de l'échelle
       const w = box.w / zoom, h = box.h / zoom;
       scale = rect?.width ? Math.min(rect.width / w, rect.height / h) : 1;
       svg.setAttribute("viewBox", [box.x + box.w / 2 + ox - w / 2, box.y + box.h / 2 + oy - h / 2, w, h].map(round).join(" "));

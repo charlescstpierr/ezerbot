@@ -25,7 +25,7 @@ THEMES = ("dark", "light")
 CANVAS = {"dark": "#0e0f12", "light": "#ffffff"}
 # EZERBOT_VERIFY_BASELINE=1 rejoue la sphère approbation-rappel sur un produit sans le rappel : mêmes gestes, aucune attente des éléments nouveaux, seules les captures « avant » comptent.
 BASELINE = os.environ.get("EZERBOT_VERIFY_BASELINE") == "1"
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive", "approbation-rappel", "sujets", "mode-yolo", "sources-citees")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "iphone-jumelage", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive", "approbation-rappel", "sujets", "mode-yolo", "sources-citees")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -645,6 +645,17 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
         )
     if sphere == "mode-yolo":
         return prepare_mode_yolo(evidence)
+    if sphere == "iphone-jumelage":
+        # L'accès iPhone s'active sur la base jetable ; le faux Tailscale du run donne l'adresse du QR.
+        eval_js(evidence, close_overlays_js())
+        return eval_js(
+            evidence,
+            """async () => {
+              const status = await window.GrokbotPanels.api("/api/iphone/enabled", {enabled: true});
+              await window.GrokbotPanels.refresh();
+              return {enabled: status.enabled === true};
+            }""",
+        )
     if sphere == "taches-de-fond":
         # Le shell est accordé au bot, et aucune tâche d'un passage précédent ne tourne encore.
         eval_js(evidence, close_overlays_js())
@@ -1540,6 +1551,74 @@ def prepare_mode_yolo(evidence: Path) -> dict:
     return {"ok": True, "mode": None, "conversations": ids}
 
 
+def iphone_pairing_step(evidence: Path, index: int) -> None:
+    if index == 0:
+        # Repartir sans code : couper puis rétablir l'accès efface le QR d'un passage précédent.
+        eval_js(evidence, close_overlays_js())
+        eval_js(evidence, """() => { document.getElementById("settings-button").click(); return document.getElementById("settings-dialog").open; }""")
+        for checked in (False, True):
+            eval_js(
+                evidence,
+                f"""() => {{
+                  const toggle = document.querySelector('#settings-iphone input[role="switch"]');
+                  if (!toggle) throw new Error("bascule iPhone absente");
+                  if (toggle.checked !== {json.dumps(checked)}) toggle.click();
+                  return true;
+                }}""",
+            )
+            wait_js(
+                evidence,
+                f"""() => {{
+                  const toggle = document.querySelector('#settings-iphone input[role="switch"]');
+                  return toggle && toggle.checked === {json.dumps(checked)} && !toggle.disabled ? {{ok: true}} : null;
+                }}""",
+                "bascule iPhone sans effet",
+            )
+        eval_js(
+            evidence,
+            """() => {
+              [...document.querySelectorAll("#settings-iphone button")].find((node) => node.textContent === "Vérifier Tailscale").click();
+              return true;
+            }""",
+        )
+        wait_js(
+            evidence,
+            """() => {
+              const section = document.getElementById("settings-iphone");
+              const create = [...section.querySelectorAll("button")].find((node) => node.textContent === "Créer un QR de jumelage");
+              if (!create || section.querySelector(".iphone-pairing-card") || !section.querySelector(".iphone-address")) return null;
+              create.scrollIntoView({block: "center"});
+              return {ok: true};
+            }""",
+            "section iPhone sans bouton QR",
+        )
+        return
+    eval_js(
+        evidence,
+        """() => {
+          [...document.querySelectorAll("#settings-iphone button")].find((node) => node.textContent === "Créer un QR de jumelage").click();
+          return true;
+        }""",
+    )
+    # Le QR et le code sont des secrets, même jetables : masqués avant la capture et le texte visible.
+    wait_js(
+        evidence,
+        """() => {
+          const card = document.querySelector("#settings-iphone .iphone-pairing-card");
+          const image = card?.querySelector("img.iphone-qr");
+          const code = card?.querySelector(".iphone-code");
+          if (!image?.complete || !image.naturalWidth || !code) return null;
+          const secret = code.textContent.replace(/\s/g, "");
+          image.src = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#8b8f98"/><text x="5" y="5.6" font-size="1.4" text-anchor="middle" fill="#fff" font-family="sans-serif">QR masqué</text></svg>');
+          code.textContent = "•••• •••• ••";
+          card.scrollIntoView({block: "center"});
+          const leaked = document.body.innerText.replace(/\s/g, "").includes(secret);
+          return leaked ? null : {ok: true, masked: true};
+        }""",
+        "QR non affiché ou non masqué",
+    )
+
+
 def yolo_step(evidence: Path, index: int) -> None:
     mode = yolo_mode(evidence)
     eval_js(evidence, close_overlays_js())
@@ -2139,6 +2218,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"avant-{theme}-{size}.png", f"vitesse-{theme}-{size}.png", f"saut-{theme}-{size}.png", f"sans-temps-{theme}-{size}.png"]
     if sphere == "iphone-reponse":
         return [f"avant-{theme}-{size}.png", f"toucher-{theme}-{size}.png", f"feuille-{theme}-{size}.png", f"envoyee-{theme}-{size}.png"]
+    if sphere == "iphone-jumelage":
+        return [f"avant-{theme}-{size}.png", f"qr-{theme}-{size}.png"]
     if sphere == "reponse-fil":
         return [f"avant-{theme}-{size}.png", f"menu-{theme}-{size}.png", f"sous-fil-{theme}-{size}.png", f"reponse-{theme}-{size}.png", f"principal-{theme}-{size}.png"]
     if sphere == "sujets":
@@ -2207,6 +2288,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             )
         if sphere == "iphone-reponse":
             iphone_reply_step(evidence, index)
+        if sphere == "iphone-jumelage":
+            iphone_pairing_step(evidence, index)
         if sphere == "mode-yolo":
             yolo_step(evidence, index)
         if sphere == "approbation-non-bloquante":

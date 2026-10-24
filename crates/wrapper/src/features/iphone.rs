@@ -1,6 +1,7 @@
 //! Private iPhone host. REA interbot-mobile-protocol I1/I2/I7 establishes named
 //! device credentials/presence, NOT a recovered pairing protocol. Local choice:
 //! 2-minute single-use code, Mac confirmation, 256-bit HttpOnly device cookie.
+//! The code is also shown as a QR linking to the Tailscale address.
 use super::Context;
 use crate::{ApiError, ApiResponse, App};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
@@ -438,7 +439,13 @@ pub fn routes(
                     "UPDATE iphone_settings SET code_hash=?1,expires=?2 WHERE id=1",
                     params![hash(&code), expires],
                 )?;
-                json!({"code":code,"expires":expires})
+                let mut value = json!({"code":code,"expires":expires});
+                // Sans adresse Tailscale valide, pas de QR : le code se tape sur l'iPhone.
+                if let Some(address) = tailscale_status()["url"].as_str() {
+                    value["qr"] = json!(qr_image(&pairing_link(address, &code))?);
+                    value["address"] = json!(address);
+                }
+                value
             }
             ("POST", "/api/iphone/confirm") => {
                 #[derive(Deserialize)]
@@ -506,6 +513,33 @@ pub fn routes(
         };
         Ok(ApiResponse::Json(value))
     })())
+}
+/// Lien du QR. Le code voyage dans le fragment, qu'aucune requête HTTP ne
+/// transmet : ni Tailscale ni ce Mac ne le voient passer dans une adresse.
+fn pairing_link(address: &str, code: &str) -> String {
+    format!("{address}/#jumelage={code}")
+}
+fn qr_image(text: &str) -> Result<String, ApiError> {
+    use qrcodegen::{QrCode, QrCodeEcc};
+    use std::fmt::Write;
+    let qr = QrCode::encode_text(text, QrCodeEcc::Medium)
+        .map_err(|_| bad(500, "Le QR de jumelage est indisponible."))?;
+    // Marge de 4 modules exigée par la norme, sur fond blanc dans les deux thèmes.
+    let (size, border) = (qr.size(), 4);
+    let mut path = String::new();
+    for y in 0..size {
+        for x in 0..size {
+            if qr.get_module(x, y) {
+                let _ = write!(path, "M{},{}h1v1h-1z", x + border, y + border);
+            }
+        }
+    }
+    let side = size + 2 * border;
+    let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {side} {side}\" shape-rendering=\"crispEdges\"><rect width=\"{side}\" height=\"{side}\" fill=\"#fff\"/><path d=\"{path}\" fill=\"#000\"/></svg>");
+    Ok(format!(
+        "data:image/svg+xml;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(svg)
+    ))
 }
 pub(crate) fn tailscale(args: &[String]) -> Result<std::process::Output, ApiError> {
     // Debug NEVER invokes a real CLI, including status. No installation, login,

@@ -865,15 +865,15 @@ pub fn redact_payloads(conn: &Connection, bot_id: &str, text: &str) -> Result<us
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
         let mut run: Run = serde_json::from_str(&row.get::<_, String>(1)?)?;
-        if let Some(TaskStatus::Done { summary, .. }) = &mut run.task_status {
-            let sanitized = redact_string(summary, text);
-            if sanitized != *summary {
-                *summary = sanitized;
-                conn.execute(
-                    "UPDATE engine_runs SET record=?2 WHERE run_id=?1",
-                    params![id, serde_json::to_string(&run)?],
-                )?;
-            }
+        if run
+            .task_status
+            .as_mut()
+            .is_some_and(|status| status.map_text(|value| redact_string(value, text)))
+        {
+            conn.execute(
+                "UPDATE engine_runs SET record=?2 WHERE run_id=?1",
+                params![id, serde_json::to_string(&run)?],
+            )?;
         }
     }
     Ok(changed)
@@ -882,7 +882,7 @@ pub fn redact_payloads(conn: &Connection, bot_id: &str, text: &str) -> Result<us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contracts::{with_tx, Error, RunBudgets, RunKind};
+    use crate::contracts::{with_tx, CaptureLabel, CaptureRef, Error, RunBudgets, RunKind};
     use crate::model;
 
     fn sample() -> Run {
@@ -1549,7 +1549,11 @@ mod tests {
             save(conn, &completed)?;
             completed.task_status = Some(TaskStatus::Done {
                 summary: text.into(),
-                captures: vec![],
+                captures: vec![CaptureRef {
+                    id: "shot-1".into(),
+                    label: CaptureLabel::Apres,
+                    caption: format!("vu : {text}"),
+                }],
             });
             completed.status = RunStatus::Finished;
             completed.turn_end = Some(TurnEnd::Finished);
@@ -1567,7 +1571,11 @@ mod tests {
                 required(conn, "run")?.task_status,
                 Some(TaskStatus::Done {
                     summary: "[redacted]".into(),
-                    captures: vec![],
+                    captures: vec![CaptureRef {
+                        id: "shot-1".into(),
+                        label: CaptureLabel::Apres,
+                        caption: "vu : [redacted]".into(),
+                    }],
                 })
             );
             assert_eq!(

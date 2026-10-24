@@ -585,7 +585,7 @@ pub fn thumbnail_url(conversation: &str, id: &str) -> String {
 /// Whether a capture of this thread (a screen action, or a page photo that
 /// shares the table) has this id. The id comes from the model: look it up.
 /// Screen captures are the only ids that start with `screen:`.
-pub fn produced_in(
+fn produced_in(
     conn: &rusqlite::Connection,
     conversation: &str,
     id: &str,
@@ -595,6 +595,16 @@ pub fn produced_in(
         params![id, conversation],
         |r| r.get(0),
     )
+}
+/// Whether an image of this thread has this id: a capture (screen or page photo)
+/// or an attached image. Taken from stored state, never from what a model says.
+pub fn exists_in_thread(
+    conn: &rusqlite::Connection,
+    conversation: &str,
+    id: &str,
+) -> rusqlite::Result<bool> {
+    Ok(produced_in(conn, conversation, id)?
+        || super::attachments::linked_in(conn, conversation, id)?)
 }
 fn shot(app: &App, path: &str) -> Result<ApiResponse, ApiError> {
     use base64::Engine;

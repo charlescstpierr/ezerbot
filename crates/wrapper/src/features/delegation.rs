@@ -27,6 +27,7 @@ use grokbot_engine::{
 use grokbot_forms::{
     approvals::args_digest,
     redact::{redact, redact_value},
+    vault::Vault,
 };
 use grokbot_memory::facts;
 use grokbot_skills::library;
@@ -1209,23 +1210,37 @@ fn model_status(status: &DelegationStatus, limit: usize) -> Value {
     }
     value
 }
-/// The card gets each reference with the thumbnail route of the task thread.
-fn card_status(edge: &Delegation) -> Value {
-    let mut value = json!(bounded_status(&edge.status, RESULT_CHARACTERS));
-    if let (DelegationStatus::Done { captures, .. }, Some(conversation)) =
+/// The card gets each reference that still exists in the task thread, with its
+/// thumbnail route. Added after the vault masking: ids and routes are generated
+/// by the host, never a secret, and masking them would break the thumbnails.
+fn attach_references(conn: &Connection, vault: &Vault, edge: &Delegation, edge_json: &mut Value) {
+    let (DelegationStatus::Done { captures, .. }, Some(conversation)) =
         (&edge.status, &edge.conversation_id)
-    {
-        if !captures.is_empty() {
-            value["captures"] = captures
-                .iter()
-                .map(|c| {
-                    json!({"id":c.id,"label":c.label,"caption":c.caption,
-                    "url":capture_url(conversation,&c.id)})
-                })
-                .collect();
-        }
+    else {
+        return;
+    };
+    let live: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id=?1 AND id=?2 AND deleted=0)",
+            params![ACCOUNT, conversation],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    let shown: Vec<Value> = captures
+        .iter()
+        .filter(|c| {
+            live && super::screen::exists_in_thread(conn, conversation, &c.id).unwrap_or(false)
+        })
+        .filter_map(|c| {
+            Some(
+                json!({"id":c.id,"label":c.label,"caption":redact(vault,&c.caption).ok()?,
+                "url":capture_url(conversation,&c.id)}),
+            )
+        })
+        .collect();
+    if !shown.is_empty() {
+        edge_json["status"]["captures"] = shown.into();
     }
-    value
 }
 /// A screen capture has its conversation-filtered thumbnail route; an attached
 /// image is served by its own id.
@@ -1239,8 +1254,13 @@ fn capture_url(conversation: &str, id: &str) -> String {
 fn public_edge(conn: &Connection, edge: &Delegation) -> Result<Value> {
     edge_value(conn, edge, model_status(&edge.status, RESULT_CHARACTERS))
 }
+/// The card's view, references left to `attach_references` once masking is done.
 fn card_edge(conn: &Connection, edge: &Delegation) -> Result<Value> {
-    edge_value(conn, edge, card_status(edge))
+    let mut status = json!(bounded_status(&edge.status, RESULT_CHARACTERS));
+    if let Some(fields) = status.as_object_mut() {
+        fields.remove("captures");
+    }
+    edge_value(conn, edge, status)
 }
 fn edge_value(conn: &Connection, edge: &Delegation, status: Value) -> Result<Value> {
     let parent = store::required(conn, &edge.parent_run_id)?;
@@ -1980,12 +2000,16 @@ fn context_checked(ctx: &Context<'_>, request: &ContextRequest) -> Result<Vec<Co
 }
 
 pub fn state(ctx: &Context<'_>) -> Value {
+    let Ok(vault) = super::forms::vault(ctx) else {
+        return json!({"error":"Delegation state is unavailable"});
+    };
     let mut counts = serde_json::Map::new();
     let delegations: Vec<_> = state_edges(ctx.connection)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|edge| {
-            let value = card_edge(ctx.connection, &edge).ok()?;
+            let mut value = redact_value(&vault, &card_edge(ctx.connection, &edge).ok()?).ok()?;
+            attach_references(ctx.connection, &vault, &edge, &mut value);
             if matches!(
                 edge.status,
                 DelegationStatus::Queued | DelegationStatus::Running
@@ -1997,11 +2021,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
             Some(value)
         })
         .collect();
-    let value = json!({"delegations":delegations,"active_by_conversation":counts});
-    super::forms::vault(ctx)
-        .ok()
-        .and_then(|vault| redact_value(&vault, &value).ok())
-        .unwrap_or_else(|| json!({"error":"Delegation state is unavailable"}))
+    json!({"delegations":delegations,"active_by_conversation":counts})
 }
 pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
     if kind == "delegation_followup" {
@@ -2080,8 +2100,9 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         return None;
     }
     let edge = graph::get(ctx.connection, id).ok()??;
-    let payload = card_edge(ctx.connection, &edge).ok()?;
-    let payload = redact_value(&super::forms::vault(ctx).ok()?, &payload).ok()?;
+    let vault = super::forms::vault(ctx).ok()?;
+    let mut payload = redact_value(&vault, &card_edge(ctx.connection, &edge).ok()?).ok()?;
+    attach_references(ctx.connection, &vault, &edge, &mut payload);
     if ctx.conversation_id != payload["parent_conversation_id"].as_str() {
         return None;
     }

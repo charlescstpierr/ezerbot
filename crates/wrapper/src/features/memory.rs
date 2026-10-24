@@ -1094,7 +1094,7 @@ pub(super) fn redact_traces(
 // Keep this privacy exception local to the manifest until that helper becomes
 // content-aware: forgetting "name", "id" or a letter must not corrupt replay.
 fn redact_run(conn: &Connection, run_id: &str, texts: &BTreeSet<String>) -> Result<(), ApiError> {
-    use grokbot_engine::{contracts::TaskStatus, store};
+    use grokbot_engine::store;
     let mut events = store::events(conn, run_id, 0)?;
     let mut index = 0;
     while index < events.len() {
@@ -1184,18 +1184,18 @@ fn redact_run(conn: &Connection, run_id: &str, texts: &BTreeSet<String>) -> Resu
     // Le journal du Mode YOLO recopie la commande ou l'objectif : il s'oublie avec le reste.
     super::yolo::redact_log(conn, run_id, &|text| redact_string(text, texts))?;
     let mut run = store::required(conn, run_id)?;
-    if let Some(TaskStatus::Done { summary, .. }) = &mut run.task_status {
-        let redacted = redact_string(summary, texts);
-        if redacted != *summary {
-            *summary = redacted;
-            conn.execute(
-                "UPDATE engine_runs SET record=?2 WHERE run_id=?1",
-                params![
-                    run_id,
-                    serde_json::to_string(&run).map_err(grokbot_engine::contracts::Error::from)?
-                ],
-            )?;
-        }
+    if run
+        .task_status
+        .as_mut()
+        .is_some_and(|status| status.map_text(|value| redact_string(value, texts)))
+    {
+        conn.execute(
+            "UPDATE engine_runs SET record=?2 WHERE run_id=?1",
+            params![
+                run_id,
+                serde_json::to_string(&run).map_err(grokbot_engine::contracts::Error::from)?
+            ],
+        )?;
     }
     Ok(())
 }

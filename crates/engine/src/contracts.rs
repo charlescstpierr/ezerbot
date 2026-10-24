@@ -93,6 +93,23 @@ pub enum TaskStatus {
     },
 }
 
+impl TaskStatus {
+    /// Rewrites the free text of a finished task (summary and capture captions);
+    /// capture ids and labels stay. True when something changed.
+    pub fn map_text(&mut self, rewrite: impl Fn(&str) -> String) -> bool {
+        let Self::Done { summary, captures } = self else {
+            return false;
+        };
+        let mut changed = false;
+        for text in std::iter::once(summary).chain(captures.iter_mut().map(|c| &mut c.caption)) {
+            let rewritten = rewrite(text);
+            changed |= rewritten != *text;
+            *text = rewritten;
+        }
+        changed
+    }
+}
+
 pub const MAX_CAPTURES: usize = 4;
 pub const MAX_CAPTION_CHARACTERS: usize = 200;
 
@@ -100,7 +117,7 @@ pub const MAX_CAPTION_CHARACTERS: usize = 200;
 pub enum CaptureLabel {
     #[serde(rename = "avant")]
     Avant,
-    #[serde(rename = "après", alias = "apres")]
+    #[serde(rename = "après")]
     Apres,
 }
 impl CaptureLabel {

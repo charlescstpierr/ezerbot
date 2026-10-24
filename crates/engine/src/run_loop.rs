@@ -2135,7 +2135,7 @@ mod tests {
             "complete_task",
             json!({"summary":"fait","captures":[
                 capture("shot-a", "avant", "  Page vide  "),
-                capture("shot-b", "apres", "Page remplie"),
+                capture("shot-b", "après", "Page remplie"),
             ]}),
         )])]);
         let mut services = Services {
@@ -2192,6 +2192,10 @@ mod tests {
             (
                 "étiquette inconnue",
                 json!([capture("shot-0", "pendant", "x")]),
+            ),
+            (
+                "étiquette sans accent",
+                json!([capture("shot-0", "apres", "x")]),
             ),
             ("légende vide", json!([capture("shot-0", "avant", "  ")])),
             (

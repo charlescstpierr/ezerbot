@@ -3945,6 +3945,40 @@ mod captures {
         }
         drop(seen);
         assert_eq!(f.run(&c, "captures").run_id, parent.run_id);
+        // check_delegations is read by the parent bot too: no reference, no image bytes.
+        f.events(vec![
+            call("fil", "check_delegations", json!({"portee":"fil"})),
+            completed(),
+        ]);
+        f.events(vec![
+            json!({"type":"response.output_text.delta","delta":"Voilà."}),
+            completed(),
+        ]);
+        f.send(&c, "recheck", "Où en est ma tâche ?");
+        f.wait_parent(&c, "recheck", RunStatus::Finished);
+        let text = f
+            .server
+            .seen
+            .lock()
+            .unwrap()
+            .bodies
+            .last()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("portee"));
+        for hidden in [
+            "screen:run:before",
+            after.as_str(),
+            "Page vide",
+            "Page remplie",
+            "base64",
+            "iVBOR",
+        ] {
+            assert!(
+                !text.contains(hidden),
+                "check_delegations donne « {hidden} »"
+            );
+        }
     }
 
     #[test]
@@ -4040,30 +4074,38 @@ mod captures {
     }
 
     #[test]
-    fn deleting_the_thread_discards_its_screen_captures() {
+    fn deleting_the_thread_removes_every_reference_from_the_card() {
         let mut f = Fixture::new(true);
         let c = f.conversation();
         let (_, edge) = f.begin(&c, "efface", args("child"));
         let thread = edge.conversation_id.clone().unwrap();
         shot(&f, &thread, "screen:run:own");
+        let attachment = attached(&mut f, &thread);
         complete(
             &f,
             "fini",
-            json!([capture("screen:run:own", "avant", "Page")]),
+            json!([
+                capture("screen:run:own", "avant", "Page"),
+                capture(&attachment, "après", "Page remplie"),
+            ]),
         );
         f.tick();
         wait("child done", || {
             matches!(status(&f, &edge), DelegationStatus::Done { .. })
         });
-        let url = card(&mut f, &edge)["status"]["captures"][0]["url"]
-            .as_str()
+        let urls: Vec<String> = card(&mut f, &edge)["status"]["captures"]
+            .as_array()
             .unwrap()
-            .to_owned();
-        assert!(image(&mut f, &url).starts_with(b"\x89PNG"));
+            .iter()
+            .map(|c| c["url"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(urls.len(), 2);
+        assert!(image(&mut f, &urls[0]).starts_with(b"\x89PNG"));
         f.post("/api/conversations/delete", json!({"id":thread}));
         f.tick();
+        // The screen pixels are purged with the thread and the card shows no reference at all.
         assert_eq!(
-            f.app.api_response("GET", &url, &[]).unwrap_err().status,
+            f.app.api_response("GET", &urls[0], &[]).unwrap_err().status,
             404
         );
         let left: i64 = f
@@ -4075,5 +4117,43 @@ mod captures {
             )
             .unwrap();
         assert_eq!(left, 0);
+        assert!(card(&mut f, &edge)["status"].get("captures").is_none());
+        assert_eq!(card(&mut f, &edge)["status"]["result"], "fini");
+    }
+
+    #[test]
+    fn masking_a_secret_hides_its_text_but_never_breaks_a_reference() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "masque", args("child"));
+        let thread = edge.conversation_id.clone().unwrap();
+        shot(&f, &thread, "screen:run:before");
+        complete(
+            &f,
+            "fini",
+            json!([capture(
+                "screen:run:before",
+                "avant",
+                "Page avec CLE-SECRETE-9"
+            )]),
+        );
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        // One secret appears in the caption; another one overlaps the generated id and route.
+        let vault = Vault::open(&f.path.with_extension("secrets.json")).unwrap();
+        vault.set("legende", "test", "CLE-SECRETE-9").unwrap();
+        vault.set("recoupe", "test", "screen:run:be").unwrap();
+        let shown = card(&mut f, &edge);
+        let reference = &shown["status"]["captures"][0];
+        assert_eq!(reference["id"], "screen:run:before");
+        assert!(!reference["caption"]
+            .as_str()
+            .unwrap()
+            .contains("CLE-SECRETE-9"));
+        let url = reference["url"].as_str().unwrap().to_owned();
+        assert!(url.contains("screen%3Arun%3Abefore"), "{url}");
+        assert!(image(&mut f, &url).starts_with(b"\x89PNG"));
     }
 }

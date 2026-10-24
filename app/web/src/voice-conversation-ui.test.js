@@ -24,10 +24,11 @@ function fixture() {
   const bridge=async body => {
     calls.push(body);
     if(body.command === "options")return {voices};
-    if(body.command === "start")source={status:scenario || "listening",token:body.token,transcript:"",utterance_id:0,barged:0,...startExtras};
+    if(body.command === "start")source={status:scenario || "listening",token:body.token,transcript:"",utterance_id:0,barged:0,muted:false,...startExtras};
+    if(body.command === "mute" || body.command === "unmute") { source.muted=body.command === "mute"; if(source.muted)source.transcript=""; }
     if(body.command === "speak")source.speaking=true;
     if(body.command === "interrupt") { source.speaking=false;source.transcript=""; }
-    if(body.command === "cancel")source.status="idle";
+    if(body.command === "cancel") { source.status="idle";source.muted=false; }
     if(body.command === "pause")source.paused=true;
     if(body.command === "resume")source.paused=false;
     return {...source};
@@ -90,6 +91,45 @@ test("voice controls share one toolbar group; listening has no false interrupt a
   assert.ok(transcript.textContent.endsWith("Voici les derniers mots."));
   assert.equal(transcript.scrollTop,transcript.scrollHeight);
   await button.onclick();assert.equal(f.panel.wantsPolling(),false);
+});
+
+const muteButton=f=>cls(f.root,"icon-button voice-mute-toggle"), stateOf=f=>cls(f.root,"voice-session-state").textContent;
+const shortcut=(f,extra={})=>{const event={key:"M",metaKey:true,shiftKey:true,prevented:false,preventDefault(){this.prevented=true;},stopImmediatePropagation(){},...extra};f.keydown(event);return new Promise(r=>setImmediate(()=>r(event)));};
+test("the mute button sends mute, says the bot cannot hear, and empties the live transcript; a second click listens again",async()=>{
+  const f=fixture();await cls(f.root,"voice-session-toggle").onclick();const mute=muteButton(f);
+  assert.equal(mute.attributes["aria-label"],"Couper le micro");assert.equal(mute.attributes["aria-pressed"],"false");
+  f.source.transcript="Bonjour";await f.tick();assert.equal(cls(f.root,"voice-live-transcript").textContent,"Bonjour");
+  await mute.onclick();
+  assert.equal(f.calls.at(-1).command,"mute");assert.equal(f.calls.at(-1).token,"token");
+  assert.equal(stateOf(f),"Micro coupé · le bot ne vous entend pas");
+  assert.equal([mute.attributes["aria-pressed"],mute.attributes["aria-label"]].join(),"true,Réactiver le micro");
+  assert.equal(cls(f.root,"voice-live-transcript").hidden,true);assert.doesNotMatch(cls(f.root,"voice-live-transcript").textContent,/Bonjour/);
+  await f.tick();assert.equal(stateOf(f),"Micro coupé · le bot ne vous entend pas","the screen follows the bridge status, tick after tick");
+  await mute.onclick();
+  assert.equal(f.calls.at(-1).command,"unmute");assert.match(stateOf(f),/^À l’écoute/);
+  assert.equal(mute.attributes["aria-pressed"],"false");assert.equal(cls(f.root,"voice-live-transcript").hidden,false);
+});
+test("the screen follows the bridge, not the click: a bridge that stays unmuted keeps the button released",async()=>{
+  const f=fixture();await cls(f.root,"voice-session-toggle").onclick();
+  Object.defineProperty(f.source,"muted",{get:()=>false,set(){}});
+  await muteButton(f).onclick();
+  assert.equal(muteButton(f).attributes["aria-pressed"],"false");assert.match(stateOf(f),/^À l’écoute/);
+});
+test("⌘⇧M toggles the microphone during a session and does nothing without one",async()=>{
+  const f=fixture();let event=await shortcut(f);
+  assert.equal(event.prevented,false);assert.equal(f.calls.filter(c=>c.command==="mute").length,0,"no session, no command");
+  await cls(f.root,"voice-session-toggle").onclick();
+  event=await shortcut(f);assert.equal(event.prevented,true);assert.equal(f.source.muted,true);assert.equal(muteButton(f).attributes["aria-pressed"],"true");
+  await shortcut(f);assert.equal(f.source.muted,false);assert.equal(muteButton(f).attributes["aria-pressed"],"false");
+  for(const extra of [{shiftKey:false},{metaKey:false},{altKey:true},{ctrlKey:true},{key:"N"}])await shortcut(f,extra);
+  assert.equal(f.calls.filter(c=>c.command==="mute"||c.command==="unmute").length,2,"only ⌘⇧M");
+});
+test("leaving the voice mode and starting it again listens: the mute never sticks",async()=>{
+  const f=fixture();const toggle=cls(f.root,"voice-session-toggle");await toggle.onclick();await muteButton(f).onclick();assert.equal(f.source.muted,true);
+  await toggle.onclick();assert.equal(f.source.status,"idle");
+  await toggle.onclick();
+  assert.equal(f.source.muted,false);assert.equal(muteButton(f).attributes["aria-pressed"],"false");assert.match(stateOf(f),/^À l’écoute/);
+  await f.tick();assert.match(stateOf(f),/^À l’écoute/);
 });
 
 test("welcome voice creates a thread only after a successful utterance, never for permission refusal",async()=>{

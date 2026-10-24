@@ -35,9 +35,10 @@ function fixture({ available = true, remote = false } = {}) {
   let context = { connected: true, bot: { id: "ezerbot", name: "Ezerbot" }, conversation: { id: "chat", messages: [] }, state };
   const bridge = async body => {
     calls.push({ debug: body.command, ...body });
-    if (body.command === "start") source = { status: startStatus, lines: [], transcript: "", speaking: false, token: body.token };
+    if (body.command === "start") source = { status: startStatus, lines: [], transcript: "", speaking: false, muted: false, token: body.token };
+    if (body.command === "mute" || body.command === "unmute") { source.muted = body.command === "mute"; if (source.muted) source.transcript = ""; }
     if (body.command === "interrupt") source.speaking = false;
-    if (body.command === "cancel") source.status = "idle";
+    if (body.command === "cancel") { source.status = "idle"; source.muted = false; }
     return { ...source };
   };
   const panels = {
@@ -263,4 +264,50 @@ test("a call left open by a reload is ended once, so the next call can start", a
   await new Promise(r => setImmediate(r));
   assert.deepEqual(f.calls.filter(c => c.path === "/api/voice/call/end").map(c => c.id), ["call_old"]);
   assert.ok(f.calls.some(c => c.refresh), "le fil est relu pour montrer le transcript écrit");
+});
+
+const muteButton = f => cls(f.root, "voice-mute-toggle"), stateOf = f => cls(f.root, "voice-call-state").textContent;
+const shortcut = (f, extra = {}) => {
+  const event = { key: "M", metaKey: true, shiftKey: true, prevented: false, preventDefault() { this.prevented = true; }, stopImmediatePropagation() {}, ...extra };
+  f.keydown(event);
+  return new Promise(r => setImmediate(() => r(event)));
+};
+
+test("the mute button sends mute, says the bot cannot hear and empties the live line; a second click listens again", async () => {
+  const f = fixture();
+  await f.toggle().onclick();
+  const mute = muteButton(f);
+  assert.equal(mute.attributes["aria-label"], "Couper le micro");
+  cls(f.root, "voice-call-transcript-toggle").onclick();
+  f.source.transcript = "Bonjour"; await f.tick();
+  assert.match(textOf(cls(f.root, "voice-call-transcript")), /Bonjour/);
+  await mute.onclick();
+  assert.equal(f.calls.at(-1).debug, "mute"); assert.equal(f.calls.at(-1).token, "call_one");
+  assert.equal(stateOf(f), "Micro coupé · le bot ne vous entend pas");
+  assert.equal([mute.attributes["aria-pressed"], mute.attributes["aria-label"]].join(), "true,Réactiver le micro");
+  assert.doesNotMatch(textOf(cls(f.root, "voice-call-transcript")), /Bonjour/);
+  await f.tick(); assert.equal(stateOf(f), "Micro coupé · le bot ne vous entend pas", "l’écran suit l’état du pont à chaque sondage");
+  await mute.onclick();
+  assert.equal(f.calls.at(-1).debug, "unmute"); assert.match(stateOf(f), /^Appel en cours/);
+  assert.equal(mute.attributes["aria-pressed"], "false");
+});
+
+test("⌘⇧M toggles the microphone during a call and does nothing without one", async () => {
+  const f = fixture();
+  let event = await shortcut(f);
+  assert.equal(event.prevented, false); assert.equal(f.calls.filter(c => c.debug === "mute").length, 0);
+  await f.toggle().onclick();
+  event = await shortcut(f); assert.equal(event.prevented, true); assert.equal(f.source.muted, true);
+  await shortcut(f); assert.equal(f.source.muted, false);
+  for (const extra of [{ shiftKey: false }, { metaKey: false }, { altKey: true }, { ctrlKey: true }, { key: "N" }]) await shortcut(f, extra);
+  assert.equal(f.calls.filter(c => c.debug === "mute" || c.debug === "unmute").length, 2, "seulement ⌘⇧M");
+});
+
+test("quitting the call and calling again listens: the mute never sticks", async () => {
+  const f = fixture();
+  await f.toggle().onclick(); await muteButton(f).onclick(); assert.equal(f.source.muted, true);
+  await all(f.root).find(x => x.textContent === "Quitter").onclick();
+  await f.toggle().onclick();
+  assert.equal(f.source.muted, false); assert.equal(muteButton(f).attributes["aria-pressed"], "false"); assert.match(stateOf(f), /^Appel en cours/);
+  await f.tick(); assert.match(stateOf(f), /^Appel en cours/);
 });

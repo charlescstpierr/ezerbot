@@ -237,7 +237,7 @@ def capture_turn(payload: dict, instructions: str, items: list) -> bytes | None:
         if last is None:
             return _call("verify-cap-before", "generate_image", {"description": "la page avant le changement", "aspect_ratio": "16:9"})
         if last == "verify-cap-before":
-            return _call("verify-cap-after", "generate_image", {"description": "la page après le changement", "aspect_ratio": "16:9"})
+            return _call("verify-cap-after", "generate_image", {"description": "la page après le changement", "aspect_ratio": "9:16"})
         if last == "verify-cap-after":
             return _call("verify-cap-bad", "complete_task", {"summary": "Page modifiée.", "captures": [{"id": "image-inventee", "label": "avant", "caption": "Capture inventée"}]})
         if last == "verify-cap-bad":

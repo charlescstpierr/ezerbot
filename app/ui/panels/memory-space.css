@@ -11,12 +11,11 @@
 .memory-space-tab { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 7px; font-size: 11.5px; font-weight: 500; color: var(--muted); }
 .memory-space-tab[aria-pressed="true"] { background: var(--pane); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
 .memory-space-tab:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.memory-space-soon { font-size: 11.5px; color: var(--subtle); }
 .memory-space-help { margin: 14px 0 18px; font-size: 12px; line-height: 1.6; color: var(--muted); }
 .memory-space-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .memory-space-item { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--pane); }
 .memory-space-text { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text); overflow-wrap: anywhere; white-space: pre-line; }
 .memory-space-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 .memory-space-chip { max-width: 100%; padding: 2px 8px; border-radius: 999px; background: var(--soft); color: var(--text); font-size: 11.5px; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.memory-space-date { font-size: 11.5px; color: var(--muted); }
+.memory-space-soon, .memory-space-date { font-size: 11.5px; color: var(--muted); }
 .memory-space-empty { margin: 0; padding: 18px; font-size: 12px; line-height: 1.6; color: var(--muted); border: 1px dashed var(--line); border-radius: 9px; }

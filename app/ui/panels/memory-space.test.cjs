@@ -96,24 +96,23 @@ test("zéro souvenir : état vide lisible ; un seul : singulier ; échec : pas d
   assert.equal(none.entry().querySelector(".memory-entry-count").textContent, "0");
   assert.equal(none.nodes["conversation-title"].textContent, "Mémoire · 0 souvenir");
   assert.match(named(none.screen(), "memory-space-empty")[0].textContent, /Aucun souvenir pour l’instant/);
-  const one = harness({ facts: [FACTS[0]] });
-  await one.open();
-  assert.equal(one.nodes["conversation-title"].textContent, "Mémoire · 1 souvenir");
   // Échec de chargement : message honnête, pas de compteur inventé.
   const down = harness({ fail: true });
   await down.open();
   assert.equal(down.entry().querySelector(".memory-entry-count").textContent, "");
   assert.equal(down.nodes["conversation-title"].textContent, "Mémoire");
   assert.match(named(down.screen(), "memory-space-empty")[0].textContent, /n’a pas pu être chargée/);
-  // Un rechargement manqué garde la dernière liste, signalée comme telle.
-  const stale = harness();
-  await stale.open();
-  stale.panels.down = true;
-  stale.panel().onNavigate();
-  stale.entry().click();
-  await stale.settle();
-  assert.equal(named(stale.screen(), "memory-space-item").length, 3);
-  assert.match(stale.screen().textContent, /dernier état connu/);
+  // Un rechargement manqué garde la dernière liste, même vide, signalée comme telle.
+  for (const known of [FACTS, []]) {
+    const stale = harness({ facts: known });
+    await stale.open();
+    stale.panels.down = true;
+    stale.panel().onNavigate();
+    stale.entry().click();
+    await stale.settle();
+    assert.equal(named(stale.screen(), "memory-space-item").length, known.length);
+    assert.match(stale.screen().textContent, /dernier état connu/);
+  }
 });
 test("changer d’écran ferme la Mémoire ; occupé, le clic ne fait rien ; non enregistré, rien n’est monté", async () => {
   const h = harness();

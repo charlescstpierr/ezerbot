@@ -15,14 +15,8 @@
   const factDate = (value) => new Date(Number(value) < 1e12 ? value * 1000 : value).toLocaleDateString("fr-CA", { day: "numeric", month: "short", year: "numeric" });
   let latest = null; // { state } du dernier onState
   let facts = null; // null tant que la liste n’est pas arrivée
-  let failed = false;
-  let open = false;
-  let view = "list";
-  let generation = 0;
-  let mark = null;
-  let painted = null;
-  let entry = null;
-  let screen = null;
+  let failed = false, open = false, view = "list", generation = 0;
+  let mark = null, painted = null, entry = null, screen = null;
   async function load() {
     const token = ++generation;
     try {
@@ -70,7 +64,6 @@
     sidebar.insertBefore(wrapper, sidebar.querySelector(".sidebar-bots"));
     screen = node("section", "memory-space");
     screen.hidden = true;
-    screen.setAttribute("aria-label", "Mémoire");
     const switcher = node("div", "memory-space-switch");
     switcher.setAttribute("role", "group");
     switcher.setAttribute("aria-label", "Affichage de la mémoire");
@@ -90,7 +83,8 @@
     const empty = (text) => [node("p", "memory-space-empty", text)];
     if (view === "graph") return empty("Le graphe de la mémoire arrive bientôt. La Liste montre déjà tous les souvenirs.");
     if (!facts) return empty(failed ? "La mémoire n’a pas pu être chargée." : "Chargement…");
-    if (!facts.length) return empty("Aucun souvenir pour l’instant. Vos bots retiendront ici ce qui compte pour vous.");
+    const note = failed ? [node("p", "memory-space-help", "La mémoire n’a pas pu être actualisée : voici le dernier état connu.")] : [];
+    if (!facts.length) return [...note, ...empty("Aucun souvenir pour l’instant. Vos bots retiendront ici ce qui compte pour vous.")];
     const list = node("ul", "memory-space-list");
     list.setAttribute("aria-label", "Souvenirs");
     for (const fact of facts) {
@@ -101,7 +95,7 @@
       item.append(node("p", "memory-space-text", String(fact.text ?? "")), meta);
       list.append(item);
     }
-    return failed ? [node("p", "memory-space-help", "La mémoire n’a pas pu être actualisée : voici le dernier état connu."), list] : [list];
+    return [...note, list];
   }
   function paint() {
     if (!entry) return;

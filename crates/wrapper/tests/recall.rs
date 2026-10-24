@@ -331,8 +331,8 @@ fn the_catalogue_offers_meetings_and_never_shows_the_key_again() {
     assert_eq!(item["status"], "disconnected");
     assert_eq!(item["has_key"], false);
     let state = f.state();
-    assert_eq!(state["mcp"]["catalogue"].as_array().unwrap().len(), 9);
-    // Les huit autres entrées restent telles quelles.
+    assert_eq!(state["mcp"]["catalogue"].as_array().unwrap().len(), 10);
+    // Les neuf autres entrées restent telles quelles.
     for id in [
         "gmail",
         "calendar",
@@ -342,6 +342,7 @@ fn the_catalogue_offers_meetings_and_never_shows_the_key_again() {
         "github",
         "linear",
         "microsoft365",
+        "jira",
     ] {
         assert!(state["mcp"]["catalogue"]
             .as_array()

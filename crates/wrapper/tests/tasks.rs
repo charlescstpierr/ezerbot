@@ -980,3 +980,26 @@ fn a_question_in_a_task_thread_follows_the_visibility_of_its_delegation_origin()
         assert!(f.questions().is_empty(), "{target}");
     }
 }
+
+#[test]
+fn a_refused_blank_call_neither_creates_nor_replaces_a_question() {
+    let mut f = Fixture::new();
+    f.turn("turn", 1000);
+    // Every character the tool treats as blank, since the query has its own list of them.
+    for blank in (0..=0x10FFFF)
+        .filter_map(char::from_u32)
+        .filter(|c| c.is_whitespace())
+    {
+        let outcome = f.call(
+            "turn",
+            "attendre_reponse",
+            json!({"question": format!(" {blank}{blank}")}),
+        );
+        assert!(matches!(outcome, ToolOutcome::Failed { .. }), "{blank:?}");
+        assert!(f.questions().is_empty(), "{blank:?}");
+    }
+    f.ask("turn", "Quelle option ?");
+    let outcome = f.call("turn", "attendre_reponse", json!({"question": "\n\u{a0}"}));
+    assert!(matches!(outcome, ToolOutcome::Failed { .. }));
+    assert_eq!(f.questions()[0]["question"], "Quelle option ?");
+}

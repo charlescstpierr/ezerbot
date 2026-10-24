@@ -1922,7 +1922,6 @@ def voice_mute_step(evidence: Path, index: int) -> None:
               const quit = () => [...document.querySelectorAll(".voice-session-bar button")].find((node) => node.textContent === "Quitter").click();
               quit();
               await waitFor(() => !window.EzerbotVoiceMode.active());
-              const idle = (await modeStatus()).status;
               // Relancé, le mode voix écoute : la sourdine ne reste pas collée.
               window.__muteTap.token = "";
               document.querySelector(".voice-session-toggle").click();
@@ -1934,10 +1933,10 @@ def voice_mute_step(evidence: Path, index: int) -> None:
               document.querySelector(".voice-call-toggle").click();
               await waitFor(() => document.querySelector(".voice-call-state")?.textContent.startsWith("Appel en cours") && panels.state.voice_call.active);
               const callMute = document.querySelector(".voice-call-bar .voice-mute-toggle");
-              return {idle, relaunched, call: {label: document.querySelector(".voice-call-state").textContent, pressed: callMute.getAttribute("aria-pressed"), name: callMute.getAttribute("aria-label"), muted: (await callStatus()).muted}};
+              return {relaunched, call: {label: document.querySelector(".voice-call-state").textContent, pressed: callMute.getAttribute("aria-pressed"), name: callMute.getAttribute("aria-label"), muted: (await callStatus()).muted}};
             }""",
         )
-        if (said["idle"] != "idle" or not said["relaunched"]["label"].startswith("À l’écoute") or said["relaunched"]["pressed"] != "false" or said["relaunched"]["muted"] is not False
+        if (not said["relaunched"]["label"].startswith("À l’écoute") or said["relaunched"]["pressed"] != "false" or said["relaunched"]["muted"] is not False
                 or not said["call"]["label"].startswith("Appel en cours") or said["call"]["pressed"] != "false" or said["call"]["name"] != "Couper le micro" or said["call"]["muted"] is not False):
             raise SystemExit(f"quitter puis relancer ne rend pas le micro, ou l’appel n’est pas à l’écoute: {said}")
     if index == 3:

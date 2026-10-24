@@ -17,8 +17,8 @@
   let facts = null; // null tant que la liste n’est pas arrivée
   let failed = false, open = false, view = "list", generation = 0;
   let mark = null, painted = null, entry = null, screen = null, detail = null, found = null; // found : ids trouvés (Set), null sans filtre
-  // Ouvert depuis « N souvenirs utilisés » sous une réponse : `recalled` attend la liste relue, `used` décrit ce qu'elle a rendu
-  // ({ origin, total, missing, ids }) ; `ids` (Set) ne restreint la Liste que pour plusieurs souvenirs.
+  // Ouvert depuis « N souvenirs utilisés » sous une réponse : `recalled` attend la liste relue, `used` garde la demande
+  // ({ origin, ask, all }) ; ce qui existe encore s'en déduit à chaque affichage (`scopeOf`), car un souvenir peut être oublié écran ouvert.
   let recalled = null, used = null, usedBar = null;
   const filter = window.EzerbotMemoryFilter?.create(() => paint());
   let loading = Promise.resolve();
@@ -46,13 +46,19 @@
     if (!recalled || !open) return;
     const { ids, origin } = recalled;
     recalled = null;
-    const live = new Set((facts || []).map((fact) => String(fact.fact_id)));
-    const present = ids.filter((id) => live.has(id));
-    used = { origin, total: ids.length, missing: ids.length - present.length, ids: ids.length > 1 && present.length ? new Set(present) : null };
+    used = { origin, ask: ids, all: false };
     view = "list";
     paint();
-    if (present.length) detail?.open(present[0]);
+    const first = scopeOf(used).present[0];
+    if (first) detail?.open(first);
     else detail?.close();
+  }
+  // Ce que la demande vaut d'après la liste lue : les souvenirs qui existent encore (`present`, dans l'ordre du rappel), ceux qui manquent,
+  // et `ids` (Set) quand la Liste ne doit montrer qu'eux : plusieurs souvenirs demandés, au moins un présent, « Tout afficher » pas encore pressé.
+  function scopeOf({ ask, all, origin }) {
+    const live = new Set((facts || []).map((fact) => String(fact.fact_id)));
+    const present = ask.filter((id) => live.has(id));
+    return { origin, total: ask.length, present, missing: ask.length - present.length, ids: !all && ask.length > 1 && present.length ? new Set(present) : null };
   }
   function openWith(ids, origin = null) {
     if (panels.busy) return { ok: false, message: "Une action est en cours : réessayez dans un instant." };
@@ -123,13 +129,13 @@
   }
   // Le bandeau de « N souvenirs utilisés » : ce que la réponse a rappelé, ce qui n'existe plus, et le chemin du retour à la réponse.
   let usedKey = "";
-  function paintUsed() {
-    usedBar.hidden = !used;
-    const key = used ? JSON.stringify([used.total, used.missing, Boolean(used.ids), Boolean(used.origin?.conversationId)]) : "";
+  function paintUsed(scope) {
+    usedBar.hidden = !scope;
+    const key = scope ? JSON.stringify([scope.total, scope.missing, Boolean(scope.ids), Boolean(scope.origin?.conversationId)]) : "";
     if (key === usedKey) return;
     usedKey = key;
-    if (!used) { usedBar.replaceChildren(); return; }
-    const { total, missing, origin } = used, plural = (n) => (n < 2 ? "" : "s");
+    if (!scope) { usedBar.replaceChildren(); return; }
+    const { total, missing, origin } = scope, plural = (n) => (n < 2 ? "" : "s");
     const text = node("p", "", total === missing
       ? `${total < 2 ? "Ce souvenir n’existe plus : il a été oublié ou remplacé" : "Ces souvenirs n’existent plus : ils ont été oubliés ou remplacés"} depuis cette réponse.`
       : `${noun(total)} utilisé${plural(total)} dans cette réponse.${missing ? ` ${missing} n’${missing < 2 ? "existe" : "existent"} plus (oublié${plural(missing)} ou remplacé${plural(missing)} depuis).` : ""}`);
@@ -140,8 +146,8 @@
       el.addEventListener("click", action);
       return el;
     };
-    if (used.ids) {
-      actions.append(button("Tout afficher", () => { used = { ...used, ids: null }; paint(); screen.querySelector(`.is-${view}`).focus?.(); }));
+    if (scope.ids) {
+      actions.append(button("Tout afficher", () => { used = { ...used, all: true }; paint(); screen.querySelector(`.is-${view}`).focus?.(); }));
     }
     if (origin?.conversationId) {
       actions.append(button("Retour à la réponse", () => {
@@ -196,11 +202,12 @@
     label.disabled = true;
     document.title = "Mémoire · Ezerbot";
     for (const tab of screen.querySelectorAll(".memory-space-tab")) tab.setAttribute("aria-pressed", String(tab.dataset.view === view));
-    paintUsed();
+    const scope = used && scopeOf(used);
+    paintUsed(scope);
     // Plusieurs souvenirs utilisés : la Liste ne montre qu'eux, le temps de « Tout afficher ».
-    const shown = used?.ids ? (facts || []).filter((fact) => used.ids.has(String(fact.fact_id))) : facts;
+    const shown = scope?.ids ? (facts || []).filter((fact) => scope.ids.has(String(fact.fact_id))) : facts;
     found = filter ? filter.sync(shown, latest?.state?.bots || [], botLabel) : null;
-    const signature = JSON.stringify([view, failed, facts, (latest?.state?.bots || []).map((bot) => [bot.id, bot.name]), filter?.state, used?.ids ? [...used.ids] : null]);
+    const signature = JSON.stringify([view, failed, facts, (latest?.state?.bots || []).map((bot) => [bot.id, bot.name]), filter?.state, scope?.ids ? [...scope.ids] : null]);
     if (signature === painted) return;
     painted = signature;
     screen.querySelector(".memory-space-body").replaceChildren(...body(shown));

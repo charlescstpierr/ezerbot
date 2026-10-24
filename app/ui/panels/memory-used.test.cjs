@@ -54,6 +54,7 @@ async function harness({ opened = ["c1"], mounted = true } = {}) {
   await settle();
   const space = window.EzerbotMemorySpace;
   const h = {
+    reload: async () => { registered[0].onState({ bots: [{ id: "grokbot", name: "Ezerbot" }, { id: "chef", name: "Chef" }], memory_auto: { revision: Math.random() } }, {}); await settle(); },
     space, panels, net, calls, settle, main, nodes, navigate: () => registered[0].onNavigate(), entry: () => sidebar.querySelector(".memory-entry"),
     screen: () => main.querySelector(".memory-space"),
     async openWith(ids, origin = ORIGIN) { const result = space.openWith(ids, origin); await settle(); return result; },
@@ -142,6 +143,22 @@ test("un souvenir ouvert avant est remplacé par celui de la réponse, et le tex
   assert.deepEqual(h.selected(), ["f3"]);
   await h.openWith(["gone"]);
   assert.equal(h.shown(), false, "le détail d'avant ne reste pas sous un message qui dit autre chose");
+});
+
+test("un souvenir oublié pendant que l'écran est ouvert : le bandeau suit, la Liste n'est jamais vide", async () => {
+  const h = await harness();
+  await h.openWith(["f1", "f2"]);
+  assert.deepEqual(h.items(), ["f1", "f2"]);
+  h.net.facts = h.net.facts.filter((item) => item.fact_id !== "f1");
+  await h.reload();
+  assert.deepEqual(h.items(), ["f2"]);
+  assert.equal(h.bar().querySelector("p").textContent, "2 souvenirs utilisés dans cette réponse. 1 n’existe plus (oublié ou remplacé depuis).");
+  h.net.facts = h.net.facts.filter((item) => item.fact_id !== "f2");
+  await h.reload();
+  assert.deepEqual(h.items(), ["f3"], "plus aucun souvenir de la réponse : la mémoire entière, pas une liste vide");
+  assert.equal(h.shown(), false, "pas de panneau sur un souvenir disparu");
+  assert.match(h.bar().querySelector("p").textContent, /^Ces souvenirs n’existent plus/);
+  assert.deepEqual(h.buttons(), ["Retour à la réponse"]);
 });
 
 test("« Retour à la réponse » rouvre la conversation sur la réponse ; sinon l'écran le dit", async () => {

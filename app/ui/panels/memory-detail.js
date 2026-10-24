@@ -23,6 +23,7 @@
     const root = node("aside", "memory-detail");
     root.hidden = true;
     root.setAttribute("aria-label", "Détail du souvenir");
+    const stamp = (fact) => JSON.stringify([fact, label.bot(fact), label.scope(fact)]); // un bot renommé change aussi ce que le panneau affiche
     const current = () => (facts() || []).find((item) => item.fact_id === id) || null;
     const find = (key) => root.parentElement?.querySelector(`[data-id="${key}"], [data-fact-id="${key}"]`);
     const mark = () => {
@@ -37,7 +38,8 @@
     function render(want = "") {
       const fact = current();
       if (!fact) return;
-      shown = JSON.stringify(fact);
+      shown = stamp(fact);
+      if (!want && mode === "edit" && root.contains(document.activeElement)) want = "body"; // la saisie garde le focus quand la liste change autour d'elle
       const editing = mode === "edit", confirming = mode === "confirm", conversation = fact.provenance?.conversation_id;
       const origin = conversation ? button("Ouvrir la conversation", "memory-detail-link", () => { if (!panels.openConversation?.(conversation)) { problem = "Cette conversation n’existe plus, ou une autre action est en cours."; render("origin"); } }, false) : "Hors conversation";
       const rows = [["Bot", label.bot(fact)], ["Origine", origin], ["Appris le", label.date(fact.learned_at)], ["Provenance", SOURCES[fact.provenance?.source] || "Inconnue"], ["Portée", label.scope(fact)]];
@@ -120,7 +122,7 @@
       const fact = current();
       if (!fact && busy) return; // l'action en cours décide, une fois sa réponse reçue
       if (!fact) close(!document.activeElement || document.activeElement === document.body || root.contains(document.activeElement));
-      else if (JSON.stringify(fact) !== shown) render();
+      else if (stamp(fact) !== shown) render();
       else mark(); // la vue a pu être reconstruite (Graphe ↔ Liste)
     }
     document.addEventListener("keydown", (event) => {

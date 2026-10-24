@@ -34,7 +34,7 @@ async function harness({ refuse = null, opened = ["c1"] } = {}) {
   const nodes = { sidebar, "conversation-title": new Element("h1"), "workspace-label": new Element("button") };
   const document = { createElement: (tag) => new Element(tag), createElementNS: (_, tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (s) => (s === ".main-panel" ? main : s === "dialog[open]" ? null : dock), addEventListener: (_, action) => keys.push(action), get activeElement() { return Element.active; }, body: new Element("body") };
   let facts = FACTS.map((item) => ({ ...item })), n = 0;
-  const calls = { api: [], opened: [] }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); } };
+  const calls = { api: [], opened: [] }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); }, touch: (id) => { facts = facts.map((item) => (item.fact_id === id ? { ...item, needs_review: true } : item)); } };
   const panels = {
     register: (panel) => registered.push(panel), leaveConversation() {},
     openConversation: (id) => { calls.opened.push(id); return opened.includes(id); },
@@ -56,7 +56,7 @@ async function harness({ refuse = null, opened = ["c1"] } = {}) {
   sidebar.querySelector(".memory-entry").click();
   await settle();
   const h = {
-    calls, settle, main, net, reload: () => registered[0].onState({ bots: [{ id: "grokbot", name: "Ezerbot" }], memory_auto: { revision: Math.random() } }, {}), svg: () => main.querySelector(".memory-graph-canvas"),
+    calls, settle, main, net, reload: (name = "Ezerbot") => registered[0].onState({ bots: [{ id: "grokbot", name }], memory_auto: { revision: Math.random() } }, {}), svg: () => main.querySelector(".memory-graph-canvas"),
     tab: (view) => main.querySelector(`.is-${view}`).click(),
     point: (id) => main.querySelector(`.memory-graph-point[data-id="${id}"]`),
     item: (id) => main.querySelector(`.memory-space-item[data-fact-id="${id}"]`),
@@ -191,6 +191,22 @@ test("une relecture manquée ne masque pas une correction réussie ; une action 
   assert.deepEqual([race.text("text"), race.cells()[0]], ["A", "Ezerbot"]);
   race.item("f2").click();
   assert.equal(race.text("text"), "L’équipe déjeune à midi", "une fois la réponse reçue, un autre souvenir s'ouvre");
+});
+
+test("quand la liste change autour du panneau : un bot renommé s'y lit, la saisie en cours garde le focus", async () => {
+  const h = await harness();
+  h.item("f1").click();
+  h.button("Modifier").click();
+  const field = () => h.panel().querySelector(".memory-detail-field");
+  field().value = "Brouillon";
+  field().fire("input");
+  h.reload("Zéphyr");
+  await h.settle();
+  assert.equal(h.cells()[0], "Zéphyr");
+  h.net.touch("f1");
+  h.reload("Zéphyr");
+  await h.settle();
+  assert.deepEqual([field().value, Element.active === field()], ["Brouillon", true]);
 });
 
 test("Oublier demande confirmation ; annuler ne change rien ; confirmer retire le souvenir du graphe, de la Liste et du panneau", async () => {

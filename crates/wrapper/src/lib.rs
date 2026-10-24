@@ -865,6 +865,7 @@ impl App {
         )?;
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(3))?;
+        connection.set_prepared_statement_cache_capacity(64);
         let journal_mode: String =
             connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         if !journal_mode.eq_ignore_ascii_case("wal") {

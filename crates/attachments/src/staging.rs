@@ -332,7 +332,7 @@ pub fn for_message(
     conversation_id: &str,
     message_id: &str,
 ) -> Result<Vec<Attachment>> {
-    let mut query = conn.prepare(
+    let mut query = conn.prepare_cached(
         "SELECT a.id, a.sha256, a.image_type, a.byte_length, a.staged_at
          FROM attachments_message_links l JOIN attachments_staged a ON a.id = l.attachment_id
          WHERE l.conversation_id = ?1 AND l.message_id = ?2 ORDER BY l.ordinal",

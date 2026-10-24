@@ -129,18 +129,17 @@ pub fn save_token_usage(
 /// Unknown for legacy/simulated runs or providers which omit usage (not a fabricated zero).
 pub fn token_usage(conn: &Connection, run_id: &str) -> Result<Option<TokenUsage>> {
     Ok(conn
-        .query_row(
+        .prepare_cached(
             "SELECT SUM(input_tokens),SUM(output_tokens),SUM(cached_input_tokens)
         FROM engine_response_usage WHERE run_id=?1 HAVING COUNT(*)>0",
-            [run_id],
-            |row| {
-                Ok(TokenUsage {
-                    input_tokens: row.get(0)?,
-                    output_tokens: row.get(1)?,
-                    cached_input_tokens: row.get(2)?,
-                })
-            },
-        )
+        )?
+        .query_row([run_id], |row| {
+            Ok(TokenUsage {
+                input_tokens: row.get(0)?,
+                output_tokens: row.get(1)?,
+                cached_input_tokens: row.get(2)?,
+            })
+        })
         .optional()?)
 }
 
@@ -164,11 +163,8 @@ pub(crate) fn trigger_key(trigger: &Trigger) -> (&str, &str, u32) {
 
 pub fn get(conn: &Connection, run_id: &str) -> Result<Option<Run>> {
     let record: Option<String> = conn
-        .query_row(
-            "SELECT record FROM engine_runs WHERE run_id = ?1",
-            [run_id],
-            |row| row.get(0),
-        )
+        .prepare_cached("SELECT record FROM engine_runs WHERE run_id = ?1")?
+        .query_row([run_id], |row| row.get(0))
         .optional()?;
     record
         .map(|record| Ok(serde_json::from_str(&record)?))
@@ -200,12 +196,11 @@ pub(crate) fn latest_attempt(
     reference: &str,
 ) -> Result<Option<Run>> {
     let record: Option<String> = conn
-        .query_row(
+        .prepare_cached(
             "SELECT record FROM engine_runs WHERE trigger_kind=?1 AND trigger_ref=?2
          ORDER BY attempt DESC LIMIT 1",
-            params![kind, reference],
-            |row| row.get(0),
-        )
+        )?
+        .query_row(params![kind, reference], |row| row.get(0))
         .optional()?;
     record
         .map(|record| Ok(serde_json::from_str(&record)?))
@@ -360,7 +355,7 @@ pub fn events(conn: &Connection, run_id: &str, after_seq: u64) -> Result<Vec<Run
     if after_seq > i64::MAX as u64 {
         return Ok(Vec::new());
     }
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT seq,kind,payload FROM engine_run_events WHERE run_id=?1 AND seq>?2 ORDER BY seq",
     )?;
     let rows = statement.query_map(params![run_id, after_seq], |row| {

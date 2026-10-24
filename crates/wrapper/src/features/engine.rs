@@ -2844,11 +2844,9 @@ fn run_reply(
     let parts = projected_parts(conn, run)?;
     let body: String = parts.iter().map(|part| part.body.as_str()).collect();
     let citations = super::sources::citations(conn, &run.run_id, &body)?;
-    let mut metadata: (Option<String>, Option<String>, Option<String>) = conn.query_row(
-        "SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1",
-        [&run.run_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+    let mut metadata: (Option<String>, Option<String>, Option<String>) = conn
+        .prepare_cached("SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1")?
+        .query_row([&run.run_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     if context_budget_failed(conn, run)? {
         metadata.0 = Some(CONTEXT_TOO_LARGE.into());
         metadata.1 = Some("context_budget".into());

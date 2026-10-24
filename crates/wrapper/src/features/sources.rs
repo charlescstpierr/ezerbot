@@ -201,7 +201,7 @@ pub fn register(conn: &Connection, run_id: &str, draft: &Draft) -> rusqlite::Res
 
 /// The registry of a run, in numbering order.
 pub fn registry(conn: &Connection, run_id: &str) -> rusqlite::Result<Vec<Value>> {
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT n,kind,title,account,author,date,locator,range,excerpt
          FROM wrapper_run_sources WHERE run_id=?1 ORDER BY n",
     )?;

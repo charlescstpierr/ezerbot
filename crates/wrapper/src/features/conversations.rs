@@ -424,7 +424,7 @@ impl App {
             if hidden.contains(id) {
                 continue;
             }
-            let metadata: Option<(i64, u64)> = self.connection.query_row("SELECT ordinal, created_at FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND kind = 'submission'", params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let metadata: Option<(i64, u64)> = self.connection.prepare_cached("SELECT ordinal, created_at FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND kind = 'submission'")?.query_row( params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
             let (ordinal, created_at) =
                 metadata.unwrap_or((i64::MAX, *created.get(id).unwrap_or(&0)));
             let conversation = conversations
@@ -496,7 +496,7 @@ impl App {
         )?;
         for row in rows {
             let (ordinal, conversation_id, kind, id, created_at) = row?;
-            let meeting_reply: bool = kind == "group_reply" && self.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_group_turns t JOIN wrapper_meetings m ON m.conversation_id=t.conversation_id AND m.message_id=t.root_id WHERE t.id=?1 AND t.parent_id IS NULL)",[&id],|r|r.get(0))?;
+            let meeting_reply: bool = kind == "group_reply" && self.connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM wrapper_group_turns t JOIN wrapper_meetings m ON m.conversation_id=t.conversation_id AND m.message_id=t.root_id WHERE t.id=?1 AND t.parent_id IS NULL)")?.query_row([&id],|r|r.get(0))?;
             if hidden.contains(&conversation_id)
                 || meeting_reply
                 || (kind == "group_notice"

@@ -9,7 +9,7 @@ Depuis la racine, sans compte, réseau (même loopback), serveur HTTP ni lanceme
 ```sh
 cargo test -p grokbot-wrapper --locked --lib features::memory_auto::evaluation -- --nocapture
 cargo test -p grokbot-wrapper --locked --test memory_auto
-cargo clippy -p grokbot-wrapper --locked --lib --test memory_auto -- -D warnings
+cargo clippy -p grokbot-wrapper --locked --lib --tests -- -D warnings
 ```
 
 Sur le Mac partagé, préfixer chaque commande Cargo par le script de limitation des builds. Les tests créent uniquement des bases/coffres neufs en dossier temporaire, nettoyés après usage. Ils n’appellent ni `tick` ni une API d’envoi : le fournisseur factice est une fonction retournant le texte enregistré, directement à la frontière de `extract`. En production, cette même frontière appelle toujours `Provider::extract_memory` ; le prompt, les constantes, la sélection du modèle et les garde-fous ne changent pas.

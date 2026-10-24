@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -52,11 +53,16 @@ pub struct SessionStore {
     database_path: PathBuf,
 }
 
+/// Clé durable d'une soumission du compte de la base : `(conversation, message)`.
+type SubmissionKey = (ConversationId, MessageId);
+
 /// Journal chargé avec la révision et l'origine de cette image.
 /// Les opérations du journal sont accessibles via `Deref` et `DerefMut`.
 pub struct StoredJournal {
     journal: Journal,
     revision: i64,
+    /// Lignes du compte telles qu'elles sont sur disque à `revision`.
+    saved: BTreeMap<SubmissionKey, CommittedSubmission>,
     account_id: AccountId,
     database_path: PathBuf,
 }
@@ -124,6 +130,14 @@ impl SessionStore {
     /// Remplace seulement le journal du compte par l'image courante.
     /// Une écriture concurrente impose de recharger le journal avant de réessayer.
     /// Le jeton de cette image avance seulement si le commit réussit.
+    ///
+    /// Seules les lignes qui diffèrent de `journal.saved` sont écrites : les
+    /// lignes du compte ne sont écrites que par cette méthode, et la révision
+    /// vérifiée dans la transaction prouve qu'aucun autre écrivain n'a validé
+    /// depuis le chargement ou la dernière sauvegarde de cette image. Le disque
+    /// égale donc `saved`, et supprimer les clés disparues puis insérer ou
+    /// mettre à jour les lignes nouvelles ou modifiées donne le même état
+    /// qu'un remplacement complet. La révision avance même sans ligne modifiée.
     pub fn save_journal(&mut self, journal: &mut StoredJournal) -> Result<(), StoreError> {
         self.check_origin(&journal.account_id, &journal.database_path)?;
         let items = journal.export_committed();
@@ -133,6 +147,15 @@ impl SessionStore {
         for item in &items {
             validate_submission(item)?;
         }
+        let image: BTreeMap<SubmissionKey, CommittedSubmission> = items
+            .into_iter()
+            .map(|item| {
+                (
+                    (item.conversation_id.clone(), item.message_id.clone()),
+                    item,
+                )
+            })
+            .collect();
         let expected = journal.revision;
         let tx = self
             .connection
@@ -144,25 +167,41 @@ impl SessionStore {
         let next = actual
             .checked_add(1)
             .ok_or_else(|| StoreError::Invalid("révision du journal épuisée".into()))?;
-        tx.execute(
-            "DELETE FROM submissions WHERE account_id = ?1",
-            params![self.account_id.as_str()],
-        )?;
-        for item in items {
-            let state_json = serde_json::to_string(&submission_to_dto(&item.state))?;
-            tx.execute(
+        {
+            let mut delete = tx.prepare_cached(
+                "DELETE FROM submissions
+                 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+            )?;
+            for key in journal.saved.keys().filter(|key| !image.contains_key(*key)) {
+                delete.execute(params![
+                    self.account_id.as_str(),
+                    key.0.as_str(),
+                    key.1.as_str(),
+                ])?;
+            }
+            let mut upsert = tx.prepare_cached(
                 "INSERT INTO submissions (
                     account_id, generation, conversation_id, message_id, body, state_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(account_id, conversation_id, message_id) DO UPDATE SET
+                    generation = excluded.generation,
+                    body = excluded.body,
+                    state_json = excluded.state_json",
+            )?;
+            for (key, item) in &image {
+                if journal.saved.get(key) == Some(item) {
+                    continue;
+                }
+                let state_json = serde_json::to_string(&submission_to_dto(&item.state))?;
+                upsert.execute(params![
                     item.account_id.as_str(),
                     item.generation.0,
                     item.conversation_id.as_str(),
                     item.message_id.as_str(),
                     item.body,
                     state_json,
-                ],
-            )?;
+                ])?;
+            }
         }
         tx.execute(
             "INSERT INTO journal_revisions (account_id, revision) VALUES (?1, ?2)
@@ -171,22 +210,33 @@ impl SessionStore {
         )?;
         tx.commit()?;
         journal.revision = next;
+        journal.saved = image;
         Ok(())
     }
 
     /// Recharge le journal validé du compte et sa révision dans la même lecture.
     /// Une base vide donne un journal vide.
     pub fn load_journal(&self) -> Result<StoredJournal, StoreError> {
-        let (journal, revision) = self.read_journal()?;
+        let (items, revision) = self.read_journal()?;
+        let saved = items
+            .iter()
+            .map(|item| {
+                (
+                    (item.conversation_id.clone(), item.message_id.clone()),
+                    item.clone(),
+                )
+            })
+            .collect();
         Ok(StoredJournal {
-            journal,
+            journal: Journal::from_committed(items),
             revision,
+            saved,
             account_id: self.account_id.clone(),
             database_path: self.database_path.clone(),
         })
     }
 
-    fn read_journal(&self) -> Result<(Journal, i64), StoreError> {
+    fn read_journal(&self) -> Result<(Vec<CommittedSubmission>, i64), StoreError> {
         let tx = self.connection.unchecked_transaction()?;
         let revision = journal_revision(&tx, &self.account_id)?;
         let mut statement = tx.prepare(
@@ -201,7 +251,7 @@ impl SessionStore {
         }
         drop(statement);
         tx.commit()?;
-        Ok((Journal::from_committed(items), revision))
+        Ok((items, revision))
     }
 
     /// Remplace l'image de cette conversation si sa révision n'a pas changé.
@@ -332,7 +382,7 @@ impl SessionStore {
 
     /// Soumissions validées, pour l'affichage. Ne rafraîchit pas la révision d'écriture.
     pub fn list_submissions(&self) -> Result<Vec<CommittedSubmission>, StoreError> {
-        Ok(self.read_journal()?.0.export_committed())
+        Ok(self.read_journal()?.0)
     }
 
     /// Soumissions validées d'une seule conversation, dans l'ordre des messages.
@@ -872,6 +922,99 @@ mod tests {
             .execute("DROP TRIGGER reject_message", [])
             .unwrap();
         store.save_journal(&mut journal).unwrap();
+        assert_eq!(store.list_submissions().unwrap().len(), 2);
+    }
+
+    fn actor_for(account: &AccountId) -> AuthenticatedActor {
+        AuthenticatedActor {
+            account_id: account.clone(),
+            generation: AccountGeneration(1),
+            team_id: None,
+        }
+    }
+
+    fn prepare_in(journal: &mut StoredJournal, account: &AccountId, message: &str, body: &str) {
+        journal
+            .prepare(PreparedMessage {
+                actor: actor_for(account),
+                conversation_id: must_id(ConversationId::new("conversation")),
+                message_id: must_id(MessageId::new(message)),
+                body: body.into(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn un_message_retire_disparait_du_disque_apres_la_sauvegarde() {
+        let db = TestDatabase::new("discard-on-disk");
+        let account = must_id(AccountId::new("alice"));
+        let mut store = open_store(&db.0, &account).unwrap();
+        let mut image = store.load_journal().unwrap();
+        prepare_in(&mut image, &account, "one", "premier");
+        prepare_in(&mut image, &account, "two", "second");
+        store.save_journal(&mut image).unwrap();
+        assert_eq!(store.list_submissions().unwrap().len(), 2);
+
+        image
+            .discard_undelivered(
+                &actor_for(&account),
+                &must_id(ConversationId::new("conversation")),
+                &must_id(MessageId::new("one")),
+            )
+            .unwrap();
+        store.save_journal(&mut image).unwrap();
+
+        let bodies: Vec<_> = store
+            .list_submissions()
+            .unwrap()
+            .into_iter()
+            .map(|item| item.body)
+            .collect();
+        assert_eq!(bodies, ["second"]);
+    }
+
+    #[test]
+    fn recharger_apres_plusieurs_sauvegardes_rend_exactement_l_image_en_memoire() {
+        let db = TestDatabase::new("save-round-trip");
+        let account = must_id(AccountId::new("alice"));
+        let conversation = must_id(ConversationId::new("conversation"));
+        let mut store = open_store(&db.0, &account).unwrap();
+        let mut image = store.load_journal().unwrap();
+        let assert_round_trip = |store: &SessionStore, image: &StoredJournal| {
+            assert_eq!(
+                store.load_journal().unwrap().export_committed(),
+                image.export_committed()
+            );
+        };
+
+        store.save_journal(&mut image).unwrap();
+        assert_round_trip(&store, &image);
+        prepare_in(&mut image, &account, "a", "alpha");
+        prepare_in(&mut image, &account, "b", "beta");
+        store.save_journal(&mut image).unwrap();
+        assert_round_trip(&store, &image);
+        image
+            .dispatch(
+                &actor_for(&account),
+                &conversation,
+                &must_id(MessageId::new("a")),
+                must_id(AttemptId::new("send-1")),
+            )
+            .unwrap();
+        prepare_in(&mut image, &account, "c", "gamma");
+        store.save_journal(&mut image).unwrap();
+        assert_round_trip(&store, &image);
+        image
+            .discard_undelivered(
+                &actor_for(&account),
+                &conversation,
+                &must_id(MessageId::new("b")),
+            )
+            .unwrap();
+        store.save_journal(&mut image).unwrap();
+        assert_round_trip(&store, &image);
+        store.save_journal(&mut image).unwrap();
+        assert_round_trip(&store, &image);
         assert_eq!(store.list_submissions().unwrap().len(), 2);
     }
 

@@ -1,11 +1,10 @@
 // Run with: node --test app/ui/panels/group-swatch-layout.test.cjs
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
 const { mkdtempSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
-const { chromeBinary } = require("../chrome-binary.cjs");
+const { dumpQaResult } = require("../chrome-binary.cjs");
 
 const UI = join(__dirname, "..");
 const COLORS = [
@@ -71,40 +70,7 @@ function measure() {
   const directory = mkdtempSync(join(tmpdir(), "group-swatches-"));
   const file = join(directory, "swatches.html");
   writeFileSync(file, page());
-  const chrome = spawn(chromeBinary(), [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--force-device-scale-factor=1",
-    `--user-data-dir=${join(directory, "profile")}`,
-    "--virtual-time-budget=2000",
-    "--window-size=1140,780",
-    "--dump-dom",
-    `file://${file}`,
-  ], { stdio: ["ignore", "pipe", "ignore"] });
-  let dom = "";
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      chrome.kill("SIGKILL");
-      reject(new Error("chrome did not report swatch layout"));
-    }, 20000);
-    chrome.stdout.on("data", (chunk) => {
-      dom += chunk;
-      const match = dom.match(/<pre id="qa-result">([\s\S]*?)<\/pre>/);
-      if (!match) return;
-      clearTimeout(timer);
-      chrome.kill("SIGKILL");
-      resolve(JSON.parse(match[1].replaceAll("&quot;", "\"").replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">")));
-    });
-    chrome.on("error", (error) => { clearTimeout(timer); reject(error); });
-    chrome.on("exit", () => {
-      if (!dom.includes("qa-result")) {
-        clearTimeout(timer);
-        reject(new Error("chrome exited without a swatch layout report"));
-      }
-    });
-  });
+  return dumpQaResult({ file, directory, width: 1140, height: 780, label: "swatch layout" });
 }
 
 test("à 1140 px, chaque nom de pastille du groupe s’affiche en entier", async () => {

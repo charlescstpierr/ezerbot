@@ -1,12 +1,11 @@
 // Run with: node --test app/ui/text-input-contrast.test.cjs
 // Optional: CHROME_BIN=/path/to/chrome node --test app/ui/text-input-contrast.test.cjs
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
 const { mkdtempSync, readdirSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
-const { chromeBinary } = require("./chrome-binary.cjs");
+const { dumpQaResult } = require("./chrome-binary.cjs");
 
 const UI = __dirname;
 const AA = 4.5;
@@ -119,43 +118,7 @@ function measure() {
   const file = join(directory, "form.html");
   const html = page().replaceAll(`file://${UI}/panels.bundle.css`, `file://${directory}/panels.bundle.css`);
   writeFileSync(file, html);
-  const chrome = spawn(chromeBinary(), [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--force-device-scale-factor=1",
-    `--user-data-dir=${join(directory, "profile")}`,
-    "--virtual-time-budget=2000",
-    "--window-size=900,800",
-    "--dump-dom",
-    `file://${file}`,
-  ], { stdio: ["ignore", "pipe", "pipe"] });
-  let dom = "";
-  let err = "";
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      chrome.kill("SIGKILL");
-      reject(new Error(`chrome did not report contrast\n${err.slice(-500)}`));
-    }, 20000);
-    chrome.stdout.on("data", (chunk) => {
-      dom += chunk;
-      const match = dom.match(/<pre id="qa-result">([\s\S]*?)<\/pre>/);
-      if (!match) return;
-      clearTimeout(timer);
-      chrome.kill("SIGKILL");
-      const json = match[1].replaceAll("&quot;", "\"").replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">");
-      resolve(JSON.parse(json));
-    });
-    chrome.stderr.on("data", (chunk) => { err += chunk; });
-    chrome.on("error", (error) => { clearTimeout(timer); reject(error); });
-    chrome.on("exit", () => {
-      if (!dom.includes("qa-result")) {
-        clearTimeout(timer);
-        reject(new Error(`chrome exited without a contrast report\n${err.slice(-500)}`));
-      }
-    });
-  });
+  return dumpQaResult({ file, directory, width: 900, height: 800, label: "contrast" });
 }
 
 test("typed text in the bot form stays WCAG AA on both themes", async () => {

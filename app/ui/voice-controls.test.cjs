@@ -1,12 +1,11 @@
 // Run with: node --test app/ui/voice-controls.test.cjs
 // Optional: CHROME_BIN=/path/to/chrome node --test app/ui/voice-controls.test.cjs
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
 const { mkdtempSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
-const { chromeBinary } = require("./chrome-binary.cjs");
+const { dumpQaResult } = require("./chrome-binary.cjs");
 
 const UI = __dirname;
 const WIDTHS = [500, 820, 901, 1140];
@@ -74,40 +73,7 @@ function measure(width, height) {
   const directory = mkdtempSync(join(tmpdir(), "voice-controls-"));
   const file = join(directory, "voice.html");
   writeFileSync(file, page());
-  const chrome = spawn(chromeBinary(), [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--force-device-scale-factor=1",
-    `--user-data-dir=${join(directory, "profile")}`,
-    "--virtual-time-budget=2000",
-    `--window-size=${width},${height}`,
-    "--dump-dom",
-    `file://${file}`,
-  ], { stdio: ["ignore", "pipe", "ignore"] });
-  let dom = "";
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      chrome.kill("SIGKILL");
-      reject(new Error(`chrome did not report layout at ${width}×${height}`));
-    }, 20000);
-    chrome.stdout.on("data", (chunk) => {
-      dom += chunk;
-      const match = dom.match(/<pre id="qa-result">([\s\S]*?)<\/pre>/);
-      if (!match) return;
-      clearTimeout(timer);
-      chrome.kill("SIGKILL");
-      resolve(JSON.parse(match[1].replaceAll("&quot;", "\"").replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">")));
-    });
-    chrome.on("error", (error) => { clearTimeout(timer); reject(error); });
-    chrome.on("exit", () => {
-      if (!dom.includes("qa-result")) {
-        clearTimeout(timer);
-        reject(new Error(`chrome exited without a layout report at ${width}×${height}`));
-      }
-    });
-  });
+  return dumpQaResult({ file, directory, width, height, label: `layout at ${width}×${height}` });
 }
 
 test("Mode voix, Mémo vocal and Dictée have no border at rest in both themes", async () => {

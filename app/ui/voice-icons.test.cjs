@@ -1,11 +1,10 @@
 // Run with: node --test app/ui/voice-icons.test.cjs
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
 const { mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
-const { chromeBinary } = require("./chrome-binary.cjs");
+const { dumpQaResult } = require("./chrome-binary.cjs");
 
 const UI = __dirname;
 function commands(path) {
@@ -87,43 +86,7 @@ function measure(modeSvg, memoSvgText) {
   const directory = mkdtempSync(join(tmpdir(), "voice-icons-"));
   const file = join(directory, "icons.html");
   writeFileSync(file, page(modeSvg, memoSvgText));
-  const chrome = spawn(chromeBinary(), [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--force-device-scale-factor=1",
-    `--user-data-dir=${join(directory, "profile")}`,
-    "--virtual-time-budget=2000",
-    "--window-size=200,200",
-    "--dump-dom",
-    `file://${file}`,
-  ], { stdio: ["ignore", "pipe", "pipe"] });
-  let dom = "";
-  let err = "";
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      chrome.kill("SIGKILL");
-      reject(new Error(`chrome did not compare icons\n${err.slice(-400)}`));
-    }, 20000);
-    chrome.stdout.on("data", (chunk) => {
-      dom += chunk;
-      const match = dom.match(/<pre id="qa-result">([\s\S]*?)<\/pre>/);
-      if (!match || match[1].trim() === "") return;
-      clearTimeout(timer);
-      chrome.kill("SIGKILL");
-      const json = match[1].replaceAll("&quot;", "\"").replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">");
-      resolve(JSON.parse(json));
-    });
-    chrome.stderr.on("data", (chunk) => { err += chunk; });
-    chrome.on("error", (error) => { clearTimeout(timer); reject(error); });
-    chrome.on("exit", () => {
-      if (!dom.includes("qa-result")) {
-        clearTimeout(timer);
-        reject(new Error(`chrome exited without an icon report\n${err.slice(-400)}`));
-      }
-    });
-  });
+  return dumpQaResult({ file, directory, width: 200, height: 200, label: "an icon comparison" });
 }
 
 test("voice mode and voice memo icons differ and keep accessible names", async () => {
@@ -241,36 +204,7 @@ function measureGlyphs(icons) {
   const directory = mkdtempSync(join(tmpdir(), "voice-glyphs-"));
   const file = join(directory, "glyphs.html");
   writeFileSync(file, glyphPage(icons));
-  const chrome = spawn(chromeBinary(), [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--force-device-scale-factor=1",
-    `--user-data-dir=${join(directory, "profile")}`,
-    "--virtual-time-budget=2000",
-    "--window-size=200,200",
-    "--dump-dom",
-    `file://${file}`,
-  ], { stdio: ["ignore", "pipe", "pipe"] });
-  let dom = "";
-  let err = "";
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      chrome.kill("SIGKILL");
-      reject(new Error(`chrome did not measure glyphs\n${err.slice(-400)}`));
-    }, 20000);
-    chrome.stdout.on("data", (chunk) => {
-      dom += chunk;
-      const match = dom.match(/<pre id="qa-result">([\s\S]*?)<\/pre>/);
-      if (!match || match[1].trim() === "") return;
-      clearTimeout(timer);
-      chrome.kill("SIGKILL");
-      resolve(JSON.parse(match[1].replaceAll("&quot;", "\"").replaceAll("&amp;", "&")));
-    });
-    chrome.stderr.on("data", (chunk) => { err += chunk; });
-    chrome.on("error", (error) => { clearTimeout(timer); reject(error); });
-  });
+  return dumpQaResult({ file, directory, width: 200, height: 200, label: "glyph measures" });
 }
 
 test("voice memo glyph is centered and as large as the neighbouring icons", async () => {

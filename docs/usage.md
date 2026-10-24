@@ -81,7 +81,7 @@ Le rejeu réel et les essais d'ordre du préfixe restent un travail séparé.
 
 ## Évaluation sur faux serveur (opt-in)
 
-Le [lanceur d’évaluation — étape A](evaluation.md) rejoue un scénario de messages dans un espace neuf marqué, impose `EZERBOT_EVAL_MAX_CALLS` et écrit uniquement des chiffres dans `target/eval/`. Il ne se connecte à aucun compte réel.
+Le [lanceur d’évaluation — étape A](evaluation.md) rejoue un scénario de messages dans un espace neuf marqué, impose un plafond d’appels et écrit uniquement des chiffres dans `target/eval/`. Il ne se connecte à aucun compte réel.
 
 ## Test de dictée Mac
 

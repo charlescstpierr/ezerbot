@@ -1,20 +1,15 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 import test, { after } from "node:test";
 import vm from "node:vm";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createServer } from "vite";
+import { createTestServer } from "./vite-test-server.js";
 import react from "@vitejs/plugin-react";
 
 // Réunions : l'entrée du catalogue (clé, lien, état, Quitter) et la carte de
 // consentement. Les assertions portent sur les phrases, boutons et corps envoyés.
-const vite = await createServer({
-  root: fileURLToPath(new URL("..", import.meta.url)), configFile: false,
-  plugins: [react()], server: { middlewareMode: true }, logLevel: "error",
-  optimizeDeps: { noDiscovery: true },
-});
+const vite = await createTestServer({ plugins: [react()] });
 after(() => vite.close());
 const { Card } = await vite.ssrLoadModule("/src/cards/approval.jsx");
 

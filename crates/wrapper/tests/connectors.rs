@@ -1460,11 +1460,9 @@ impl Drop for Deadline {
     }
 }
 /// What the browser does when the authorization ends: one GET on the loopback listener of the
-/// sign-in. The listener is tiny_http, which hands a request to whoever calls `recv` and to
-/// nobody once the sign-in has left it, so a request that reached it as the sign-in ended is
-/// never answered. No such call may wait for ever: the test that made it would keep
-/// `OAUTH_TEST_LOCK` and stop the whole binary.
-fn browser_get(url: &str, within: Duration) -> Result<u16, String> {
+/// sign-in. No such call may wait for ever: the test that made it would keep `OAUTH_TEST_LOCK`
+/// and stop the whole binary. A call still without an answer at `within` is `unanswered`.
+fn browser_get(url: &str, within: Duration) -> Result<u16, BrowserError> {
     match ureq::AgentBuilder::new()
         .timeout(within)
         .build()
@@ -1473,7 +1471,28 @@ fn browser_get(url: &str, within: Duration) -> Result<u16, String> {
     {
         Ok(response) => Ok(response.status()),
         Err(ureq::Error::Status(code, _)) => Ok(code),
-        Err(error) => Err(error.to_string()),
+        Err(ureq::Error::Transport(transport)) => Err(BrowserError {
+            unanswered: std::error::Error::source(&transport)
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .is_some_and(|error| {
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    )
+                }),
+            message: transport.to_string(),
+        }),
+    }
+}
+/// A browser call that failed: refused or closed in time, or left without an answer.
+#[derive(Debug)]
+struct BrowserError {
+    unanswered: bool,
+    message: String,
+}
+impl std::fmt::Display for BrowserError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
     }
 }
 /// A return that completes or refuses a sign-in does real work (token, tools): it gets time.
@@ -4428,8 +4447,69 @@ fn gmail_refusal_or_cancellation_leaves_no_token_behind() {
     late.query_pairs_mut()
         .append_pair("state", &query["state"])
         .append_pair("code", "late-code");
-    // Whatever the listener answers, or nothing: only that this return completes nothing counts.
-    let _ = browser_get(late.as_str(), Duration::from_secs(10));
+    // The listener has left, or leaves now: it refuses, answers or closes this return, and never
+    // leaves the browser waiting.
+    if let Err(error) = browser_get(late.as_str(), Duration::from_secs(10)) {
+        assert!(!error.unanswered, "the late return got no answer: {error}");
+    }
+    assert_eq!(f.oauth.count("/gmail/token"), 0);
+    assert_eq!(f.item("gmail")["status"], "disconnected");
+    f.assert_no_gmail_token_kept();
+}
+
+#[test]
+fn a_return_sent_on_a_connection_opened_before_a_disconnect_is_answered_or_closed() {
+    use std::io::{Read, Write};
+    let mut f = Fixture::new();
+    f.gmail_start();
+    let url = f.item("gmail")["authorization_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let query: std::collections::HashMap<_, _> = url::Url::parse(&url)
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect();
+    let redirect = url::Url::parse(&query["redirect_uri"]).unwrap();
+    let port = redirect.port().unwrap();
+    // A browser opens its connection to the listener first and sends the return later.
+    let mut early = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    early
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let removed = f.post("/api/connectors/disconnect", json!({"id":"gmail"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&removed, json!("allow_once"));
+    wait("the sign-in left its listener", || {
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_err()
+    });
+    let request = format!(
+        "GET {}?state={}&code=late-code HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n",
+        redirect.path(),
+        query["state"]
+    );
+    // A reset connection is closed too: the browser is not left waiting.
+    if early.write_all(request.as_bytes()).is_ok() {
+        let mut answer = Vec::new();
+        if let Err(error) = early.read_to_end(&mut answer) {
+            assert!(
+                !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+                "the return got neither an answer nor a closed connection within 5 s: {error}"
+            );
+        }
+        assert!(
+            answer.is_empty() || answer.starts_with(b"HTTP/1.1 409 "),
+            "{}",
+            String::from_utf8_lossy(&answer)
+        );
+    }
     assert_eq!(f.oauth.count("/gmail/token"), 0);
     assert_eq!(f.item("gmail")["status"], "disconnected");
     f.assert_no_gmail_token_kept();
@@ -10457,8 +10537,8 @@ fn jira_draft_is_refused_after_a_new_sign_in_even_to_an_account_of_the_same_name
 
 #[test]
 fn a_return_nobody_answers_ends_in_an_error_instead_of_waiting_for_ever() {
-    // The request reaches the listener and nobody ever responds to it: what a sign-in that
-    // left its tiny_http listener just before leaves behind.
+    // The request reaches a listener and nobody ever responds to it: the call ends at its limit
+    // as `unanswered`, which a test of a late return counts as a failure.
     let listener = Server::http("127.0.0.1:0").unwrap();
     let url = format!(
         "http://{}/oauth/gmail/callback?state=s&code=late-code",
@@ -10475,7 +10555,10 @@ fn a_return_nobody_answers_ends_in_an_error_instead_of_waiting_for_ever() {
     let outcome = outcome
         .recv_timeout(Duration::from_secs(10))
         .expect("the browser's call is bounded: it still waits for an answer");
-    assert!(outcome.is_err(), "{outcome:?}");
+    assert!(
+        outcome.as_ref().is_err_and(|error| error.unanswered),
+        "{outcome:?}"
+    );
     drop(unanswered);
 }
 

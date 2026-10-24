@@ -799,6 +799,18 @@ fn write_credentials(path: &Path, credentials: &Credentials) -> std::io::Result<
     fs::rename(temporary, path)
 }
 
+/// La réponse de l'écouteur à un retour qui arrive quand la connexion n'est plus attendue.
+fn ended_reply() -> loopback::Reply {
+    loopback::Reply::new(
+        409,
+        page(
+            "Connexion non terminée",
+            "Cette demande de connexion n’est plus en cours. Revenez dans Ezerbot pour recommencer.",
+        ),
+    )
+    .header("Content-Type", "text/html; charset=utf-8")
+}
+
 fn page(title: &str, detail: &str) -> String {
     let escape = |s: &str| {
         s.replace('&', "&amp;")
@@ -1115,7 +1127,9 @@ impl Session {
             .find_map(|attempt| {
                 if attempt > 0 { thread::sleep(Duration::from_millis(50)); }
                 ports.clone().find_map(|port| {
-                    tiny_http::Server::http(("127.0.0.1", port)).ok().map(|server| (server, port))
+                    loopback::Listener::bind(("127.0.0.1", port), ended_reply())
+                        .ok()
+                        .map(|server| (server, port))
                 })
             })
             .ok_or_else(|| {
@@ -1197,7 +1211,12 @@ impl Session {
         Ok(url)
     }
 
-    fn await_callback(&self, server: tiny_http::Server, attempt: Attempt, cancel: Arc<AtomicBool>) {
+    fn await_callback(
+        &self,
+        server: loopback::Listener,
+        attempt: Attempt,
+        cancel: Arc<AtomicBool>,
+    ) {
         let mut server = Some(server);
         let deadline = Instant::now() + SIGN_IN_WINDOW;
         let outcome = loop {
@@ -1207,7 +1226,7 @@ impl Session {
             if Instant::now() >= deadline {
                 break Err("La connexion a expiré. Recommencez.".to_owned());
             }
-            let Ok(Some(request)) = server
+            let Some(request) = server
                 .as_ref()
                 .expect("serveur actif")
                 .recv_timeout(Duration::from_millis(250))
@@ -1216,13 +1235,13 @@ impl Session {
             };
             let url = request.url().to_owned();
             if url.split('?').next() != Some(CALLBACK_PATH) {
-                let _ = request.respond(tiny_http::Response::empty(404));
+                request.respond(&loopback::Reply::new(404, ""));
                 continue;
             }
             let query = parse_query(&url);
             // Un retour dont l'état ne correspond pas n'appartient pas à cette tentative.
             if query.get("state") != Some(&attempt.state) {
-                let _ = request.respond(tiny_http::Response::empty(400));
+                request.respond(&loopback::Reply::new(400, ""));
                 continue;
             }
             // Libérer le port avant l’échange réseau, qui peut être lent ou annulé.
@@ -1246,9 +1265,9 @@ impl Session {
                 ),
                 Err(message) => page("Connexion non terminée", message),
             };
-            let header = tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8")
-                .expect("en-tête constant");
-            let _ = request.respond(tiny_http::Response::from_string(html).with_header(header));
+            request.respond(
+                &loopback::Reply::new(200, html).header("Content-Type", "text/html; charset=utf-8"),
+            );
             break outcome;
         };
         let mut signin = lock(&self.inner.signin);
@@ -2117,10 +2136,398 @@ impl<R: BufRead> BufRead for Cancellable<'_, R> {
     }
 }
 
+/// Écouteur de retour OAuth sur une adresse de bouclage : connexion ChatGPT et connecteurs.
+///
+/// Pas tiny_http 0.12 : un fil de sa piscine lit chaque connexion acceptée et dépose ses
+/// requêtes dans une file partagée, et détruire son `Server` ne fait qu'arrêter l'acceptation.
+/// Une requête arrivée après le départ de l'attente reste dans cette file, que plus personne ne
+/// lit, et ce fil garde la connexion ouverte jusqu'à ce qu'elle soit servie : le navigateur
+/// attend sans fin. Ici, une connexion acceptée appartient à son fil de lecture, borné, puis à
+/// sa `Request` ; une requête que l'attente ne prend plus reçoit `gone`, puis la fermeture.
+pub(crate) mod loopback {
+    use std::io::{self, Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    /// Un retour n'a qu'une ligne de requête (`code`, `state`) et quelques en-têtes.
+    const HEAD_LIMIT: usize = 16 * 1024;
+    /// Temps laissé à une connexion acceptée pour envoyer ses en-têtes ; elle est fermée ensuite.
+    const HEAD_WINDOW: Duration = Duration::from_secs(10);
+    const WRITE_WINDOW: Duration = Duration::from_secs(5);
+    /// Rythme auquel `recv_timeout` accepte les connexions en attente.
+    const ACCEPT_EVERY: Duration = Duration::from_millis(20);
+
+    /// Une réponse entière, toujours suivie de la fermeture de la connexion.
+    pub(crate) struct Reply {
+        status: u16,
+        headers: Vec<(&'static str, String)>,
+        body: String,
+    }
+    impl Reply {
+        pub(crate) fn new(status: u16, body: impl Into<String>) -> Self {
+            Self {
+                status,
+                headers: Vec::new(),
+                body: body.into(),
+            }
+        }
+        pub(crate) fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+            self.headers.push((name, value.into()));
+            self
+        }
+        fn send(&self, mut stream: TcpStream) {
+            let reason = match self.status {
+                200 => "OK",
+                400 => "Bad Request",
+                404 => "Not Found",
+                409 => "Conflict",
+                431 => "Request Header Fields Too Large",
+                _ => "",
+            };
+            let mut message = format!(
+                "HTTP/1.1 {} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                self.status,
+                self.body.len()
+            );
+            for (name, value) in &self.headers {
+                message.push_str(&format!("{name}: {value}\r\n"));
+            }
+            message.push_str("\r\n");
+            message.push_str(&self.body);
+            let _ = stream.set_write_timeout(Some(WRITE_WINDOW));
+            let _ = stream
+                .write_all(message.as_bytes())
+                .and_then(|()| stream.flush());
+            let _ = stream.shutdown(Shutdown::Write);
+        }
+    }
+
+    /// Une requête reçue en entier. Servie par `respond`, ou par `gone` à sa destruction.
+    pub(crate) struct Request {
+        stream: Option<TcpStream>,
+        method: String,
+        url: String,
+        host: Option<String>,
+        gone: Arc<Reply>,
+    }
+    impl Request {
+        pub(crate) fn method(&self) -> &str {
+            &self.method
+        }
+        pub(crate) fn url(&self) -> &str {
+            &self.url
+        }
+        pub(crate) fn host(&self) -> Option<&str> {
+            self.host.as_deref()
+        }
+        pub(crate) fn respond(mut self, reply: &Reply) {
+            if let Some(stream) = self.stream.take() {
+                reply.send(stream);
+            }
+        }
+    }
+    impl Drop for Request {
+        fn drop(&mut self) {
+            if let Some(stream) = self.stream.take() {
+                self.gone.send(stream);
+            }
+        }
+    }
+
+    /// Le port est libéré quand l'écouteur est détruit ; les requêtes restées dans sa file et
+    /// celles qui arrivent ensuite sur une connexion déjà acceptée reçoivent `gone`.
+    pub(crate) struct Listener {
+        socket: TcpListener,
+        port: u16,
+        sender: Sender<Request>,
+        requests: Receiver<Request>,
+        gone: Arc<Reply>,
+    }
+    impl Listener {
+        pub(crate) fn bind(address: impl ToSocketAddrs, gone: Reply) -> io::Result<Self> {
+            let socket = TcpListener::bind(address)?;
+            socket.set_nonblocking(true)?;
+            let port = socket.local_addr()?.port();
+            let (sender, requests) = mpsc::channel();
+            Ok(Self {
+                socket,
+                port,
+                sender,
+                requests,
+                gone: Arc::new(gone),
+            })
+        }
+        pub(crate) fn port(&self) -> u16 {
+            self.port
+        }
+        /// La première requête entière reçue avant `timeout`.
+        pub(crate) fn recv_timeout(&self, timeout: Duration) -> Option<Request> {
+            let deadline = Instant::now() + timeout;
+            loop {
+                self.accept_waiting();
+                let left = deadline.saturating_duration_since(Instant::now());
+                match self.requests.recv_timeout(left.min(ACCEPT_EVERY)) {
+                    Ok(request) => return Some(request),
+                    Err(RecvTimeoutError::Timeout) if !left.is_zero() => {}
+                    Err(_) => return None,
+                }
+            }
+        }
+        fn accept_waiting(&self) {
+            loop {
+                match self.socket.accept() {
+                    Ok((stream, _)) => {
+                        let sender = self.sender.clone();
+                        let gone = self.gone.clone();
+                        // Un fil qui ne démarre pas emporte et ferme sa connexion.
+                        let _ = thread::Builder::new()
+                            .name("retour-oauth".into())
+                            .spawn(move || read_head(stream, &sender, gone));
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
+                        ) => {}
+                    Err(_) => return,
+                }
+            }
+        }
+    }
+
+    /// Lit les en-têtes d'une connexion acceptée en `HEAD_WINDOW` au plus et confie la requête à
+    /// l'écouteur ; s'il est parti, elle reçoit `gone`.
+    fn read_head(mut stream: TcpStream, sender: &Sender<Request>, gone: Arc<Reply>) {
+        // Sur macOS, la connexion acceptée hérite du mode non bloquant de l'écouteur.
+        if stream.set_nonblocking(false).is_err() {
+            return;
+        }
+        let started = Instant::now();
+        let mut head = Vec::new();
+        let mut chunk = [0; 2048];
+        let end = loop {
+            if let Some(end) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                break end;
+            }
+            if head.len() > HEAD_LIMIT {
+                return Reply::new(431, "").send(stream);
+            }
+            let left = HEAD_WINDOW.saturating_sub(started.elapsed());
+            if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+                return;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(read) => head.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        };
+        let Some((method, url, host)) = parse_head(&head[..end]) else {
+            return Reply::new(400, "").send(stream);
+        };
+        let request = Request {
+            stream: Some(stream),
+            method,
+            url,
+            host,
+            gone,
+        };
+        // Refusée, la requête revient ici et sa destruction répond `gone`.
+        let _ = sender.send(request);
+    }
+
+    fn parse_head(head: &[u8]) -> Option<(String, String, Option<String>)> {
+        let head = std::str::from_utf8(head).ok()?;
+        let mut lines = head.split("\r\n");
+        let mut line = lines.next()?.split(' ');
+        let (method, url, version) = (line.next()?, line.next()?, line.next()?);
+        if line.next().is_some()
+            || method.is_empty()
+            || url.is_empty()
+            || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+        {
+            return None;
+        }
+        let mut host = None;
+        for header in lines {
+            let (name, value) = header.split_once(':')?;
+            if host.is_none() && name.eq_ignore_ascii_case("Host") {
+                host = Some(value.trim().to_owned());
+            }
+        }
+        Some((method.to_owned(), url.to_owned(), host))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn gone() -> Reply {
+            Reply::new(409, "partie").header("Content-Type", "text/plain")
+        }
+        fn read_answer(stream: &mut TcpStream) -> io::Result<String> {
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut answer = String::new();
+            stream.read_to_string(&mut answer)?;
+            Ok(answer)
+        }
+        const RETURN: &[u8] =
+            b"GET /auth/callback?code=c&state=s HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n";
+
+        #[test]
+        fn a_request_is_served_once_and_the_connection_closes() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let mut browser = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+            browser.write_all(RETURN).unwrap();
+            let request = listener.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(request.method(), "GET");
+            assert_eq!(request.url(), "/auth/callback?code=c&state=s");
+            assert_eq!(request.host(), Some("127.0.0.1"));
+            request.respond(&Reply::new(200, "ok").header("Cache-Control", "no-store"));
+            assert_eq!(
+                read_answer(&mut browser).unwrap(),
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nCache-Control: no-store\r\n\r\nok"
+            );
+        }
+
+        #[test]
+        fn a_request_sent_after_the_listener_left_on_a_connection_it_accepted_gets_gone() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let port = listener.port();
+            let mut early = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            // The connection is accepted while the sign-in waits, then the sign-in leaves.
+            assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+            drop(listener);
+            // Its port is free at once.
+            drop(TcpListener::bind(("127.0.0.1", port)).unwrap());
+            early.write_all(RETURN).unwrap();
+            let answer = read_answer(&mut early).unwrap();
+            assert!(answer.starts_with("HTTP/1.1 409 Conflict\r\n"), "{answer}");
+            assert!(answer.ends_with("\r\n\r\npartie"), "{answer}");
+        }
+
+        #[test]
+        fn a_request_nobody_took_from_the_queue_gets_gone_when_the_listener_leaves() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let mut browser = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+            assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+            browser.write_all(RETURN).unwrap();
+            // Read by its connection's thread, the request waits in the queue.
+            std::thread::sleep(Duration::from_millis(300));
+            drop(listener);
+            let answer = read_answer(&mut browser).unwrap();
+            assert!(answer.starts_with("HTTP/1.1 409 Conflict\r\n"), "{answer}");
+        }
+
+        #[test]
+        fn a_malformed_or_oversized_return_is_refused() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let mut malformed = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+            malformed.write_all(b"GET\r\n\r\n").unwrap();
+            assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+            let answer = read_answer(&mut malformed).unwrap();
+            assert!(
+                answer.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+                "{answer}"
+            );
+            let mut oversized = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+            let _ = oversized.write_all(&vec![b'a'; HEAD_LIMIT + 4096]);
+            assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+            let answer = read_answer(&mut oversized).unwrap_or_default();
+            assert!(
+                answer.is_empty() || answer.starts_with("HTTP/1.1 431 "),
+                "{answer}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn a_return_sent_after_a_cancelled_sign_in_on_a_connection_it_accepted_is_answered() {
+        use std::io::Read;
+        use std::net::TcpStream;
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "ezerbot-signin-{}-{}",
+            std::process::id(),
+            random_token(8)
+        )));
+        fs::create_dir_all(&scratch.0).unwrap();
+        // Nothing is exchanged: the sign-in is cancelled before its return.
+        let base = "http://127.0.0.1:9";
+        let endpoints = Endpoints {
+            authorize: format!("{base}/authorize"),
+            token: format!("{base}/token"),
+            revoke: format!("{base}/revoke"),
+            jwks: format!("{base}/jwks"),
+            issuer: base.to_owned(),
+            api: format!("{base}/v1"),
+        };
+        let provider =
+            Provider::with_endpoints(&scratch.0.join("ezerbot.sqlite"), endpoints, false);
+        let query = parse_query(&provider.start_signin().unwrap());
+        let port: u16 = query["redirect_uri"]
+            .trim_end_matches(CALLBACK_PATH)
+            .rsplit_once(':')
+            .unwrap()
+            .1
+            .parse()
+            .unwrap();
+        // The browser opens its connection first and sends the return after the cancellation.
+        let mut early = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        early
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        thread::sleep(Duration::from_millis(300));
+        provider.cancel_signin();
+        let started = Instant::now();
+        while TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the sign-in kept its port"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        let request = format!(
+            "GET {CALLBACK_PATH}?code=late&state={} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n",
+            query["state"]
+        );
+        // A reset connection is closed too: the browser is not left waiting.
+        if early.write_all(request.as_bytes()).is_ok() {
+            let mut answer = Vec::new();
+            if let Err(error) = early.read_to_end(&mut answer) {
+                assert!(
+                    !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ),
+                    "the return got neither an answer nor a closed connection within 5 s: {error}"
+                );
+            }
+            let answer = String::from_utf8_lossy(&answer);
+            assert!(
+                answer.is_empty()
+                    || answer.starts_with("HTTP/1.1 409 Conflict\r\n")
+                        && answer.contains("n’est plus en cours"),
+                "{answer}"
+            );
+        }
+        assert_eq!(provider.status()["signin"], "idle");
+    }
 
     #[test]
     fn pkce_challenge_matches_rfc_7636_example() {

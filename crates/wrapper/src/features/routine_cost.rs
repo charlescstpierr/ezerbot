@@ -311,4 +311,121 @@ mod tests {
             assert!(scans.is_empty(), "{scans:?} in {details:?}");
         }
     }
+
+    const NOW: i64 = 2_000_000_000_000;
+    const LIMIT_PASSAGES: i32 = 20_000;
+    const LIMIT_TOKENS: i32 = 1_000;
+
+    /// Five recent passages, each with a subtask, and `old` finished and `old` missed ones long ago.
+    fn history(old: i64) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        grokbot_engine::store::migrate(&conn).unwrap();
+        grokbot_delegation::graph::migrate(&conn).unwrap();
+        grokbot_scheduler::migrate(&conn).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        grokbot_scheduler::routine::create(
+            &conn,
+            &Routine {
+                routine_id: "r1".into(),
+                bot_id: "b".into(),
+                conversation_id: "c1".into(),
+                name: "R".into(),
+                body: grokbot_scheduler::routine::RoutineBody::InlinePrompt { prompt: "p".into() },
+                trigger: grokbot_scheduler::cron::Schedule::Every {
+                    interval_ms: 60_000,
+                    phase_ms: None,
+                },
+                time_zone: "UTC".into(),
+                enabled: true,
+                origin: grokbot_scheduler::routine::Origin::User,
+                untrusted: false,
+                schedule_version: 0,
+                modified_at: 0,
+                last_served_at: None,
+            },
+        )
+        .unwrap();
+        let counted = "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<?1-1)";
+        for (prefix, at, count) in [("old", 1_000_000_i64, old), ("new", NOW - 3_600_000, 5)] {
+            conn.execute(
+                &format!("{counted} INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record)
+                 SELECT ?2||i,'b','c1','occurrence',?2||i,0,'finished',json_object('started_at',?3+i*1000) FROM n"),
+                rusqlite::params![count, prefix, at],
+            ).unwrap();
+            conn.execute(
+                &format!("{counted} INSERT INTO engine_response_usage(run_id,response,input_tokens,output_tokens,cached_input_tokens)
+                 SELECT ?2||i,1,10,5,0 FROM n"),
+                rusqlite::params![count, prefix],
+            ).unwrap();
+            conn.execute(
+                &format!("{counted} INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,run_id,slot_key)
+                 SELECT ?2||i,'r1',1,?3+i*1000,'done',?2||i,?2||i FROM n"),
+                rusqlite::params![count, prefix, at],
+            ).unwrap();
+        }
+        conn.execute(
+            &format!("{counted} INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,slot_key)
+             SELECT 'missed'||i,'r1',1,500+i*1000,'missed','missed'||i FROM n"),
+            [old],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record)
+             SELECT 'child'||i,'b','c2','delegation','child'||i,0,'finished',json_object('started_at',?1) FROM (SELECT 0 i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4)",
+            [NOW - 3_600_000],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO engine_response_usage SELECT run_id,1,10,5,0 FROM engine_runs WHERE run_id LIKE 'child%'",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO delegation_graph(id,parent_run_id,root_run_id,parent_bot,child_bot,depth,child_run_id,conversation_id,selected_context,status)
+             SELECT 'edge'||i,'new'||i,'new'||i,'b','b',1,'child'||i,NULL,'{}','{}' FROM (SELECT 0 i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4)",
+            [],
+        ).unwrap();
+        conn
+    }
+
+    /// SQLite virtual-machine steps a query takes, rows drained.
+    fn vm_steps(conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> i32 {
+        let mut statement = conn.prepare(sql).unwrap();
+        let rows = statement.query_map(params, |_| Ok(())).unwrap().count();
+        assert!(rows > 0);
+        statement.get_status(rusqlite::StatementStatus::VmStep)
+    }
+
+    /// A routine's cost is read on every GET: ten times the old history must not cost ten times
+    /// the work. The passages query takes ~10 000 steps and the window sum ~140, whatever the history.
+    #[test]
+    fn old_history_ten_times_larger_costs_about_the_same() {
+        let measure = |old: i64| {
+            let conn = history(old);
+            let week_start = NOW - WEEK_MS;
+            (
+                vm_steps(
+                    &conn,
+                    PASSAGES,
+                    &[
+                        &"r1",
+                        &week_start,
+                        &AVERAGED_PASSAGES,
+                        &RECENT_FINISHED,
+                        &"c1",
+                    ],
+                ),
+                vm_steps(&conn, LOCAL_TOKENS, &[&week_start]),
+            )
+        };
+        let (passages, tokens) = measure(500);
+        let (passages_10x, tokens_10x) = measure(5000);
+        eprintln!("VMSTEPS passages {passages} -> {passages_10x}, tokens {tokens} -> {tokens_10x}");
+        assert!(
+            passages_10x <= passages + passages / 10,
+            "{passages} -> {passages_10x}"
+        );
+        assert!(
+            tokens_10x <= tokens + tokens / 10,
+            "{tokens} -> {tokens_10x}"
+        );
+        assert!(passages_10x < LIMIT_PASSAGES && tokens_10x < LIMIT_TOKENS);
+    }
 }

@@ -4,7 +4,12 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const window = {};
-vm.runInContext(fs.readFileSync(`${__dirname}/memory-graph.js`, "utf8"), vm.createContext({ window, Math, Set, Map, Object, Array, String, Number }));
+class Fake { // juste de quoi dessiner : le rendu complet est exercé par memory-space.test.cjs
+  constructor() { this.classList = { toggle() {} }; }
+  append() {} setAttribute() {} addEventListener() {} getBoundingClientRect() { return { width: 0 }; }
+}
+const document = { createElement: () => new Fake(), createElementNS: () => new Fake() };
+vm.runInContext(fs.readFileSync(`${__dirname}/memory-graph.js`, "utf8"), vm.createContext({ window, document, Math, Set, Map, Object, Array, String, Number }));
 const build = (...args) => JSON.parse(JSON.stringify(window.GrokbotMemoryGraph.buildGraph(...args))); // sort du contexte vm
 const buildGraph = build;
 const fact = (id, scope, topic) => ({ fact_id: id, bot_id: "b", scope, text: `souvenir ${id}`, topic_id: topic ? `t-${topic}` : null, topic_name: topic || null });
@@ -42,4 +47,10 @@ test("jetons : les trois portées existent en clair et en sombre, aucune couleur
   for (const scope of ["private", "team", "topic"]) assert.match(css, new RegExp(`\\.memory-graph-node\\.is-${scope}[^{]*\\{ --tone: var\\(--scope-${scope}\\); \\}`));
   assert.doesNotMatch(css, /#[0-9a-fA-F]{3,8}\b|rgb\(|hsl\(/);
   for (const [, size] of css.matchAll(/font-size:\s*(?:calc\()?(\d+(?:\.\d+)?)px/g)) assert.ok(Number(size) >= 11.5, `${size}px`);
+});
+test("remplacer le graphe déconnecte l’observateur de redimensionnement précédent", () => {
+  const live = new Set();
+  window.ResizeObserver = class { constructor() { live.add(this); } observe() {} disconnect() { live.delete(this); } };
+  for (let i = 0; i < 5; i += 1) window.GrokbotMemoryGraph.view(FACTS, {});
+  assert.equal(live.size, 1, "un seul observateur reste actif");
 });

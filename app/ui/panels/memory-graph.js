@@ -37,6 +37,7 @@
     graph.bounds = { x, y, w: Math.max(...xs) + 70 - x, h: Math.max(...ys) + 70 - y };
     return graph;
   }
+  let observer = null;
   function view(facts, options) {
     const graph = buildGraph(facts, options), box = graph.bounds;
     const make = (tag, attrs = {}, text) => {
@@ -110,7 +111,10 @@
     root.append(svg, tools, legend);
     apply();
     window.requestAnimationFrame?.(apply);
-    if (window.ResizeObserver) new window.ResizeObserver(apply).observe(svg);
+    // Un seul observateur à la fois : celui du graphe remplacé est déconnecté, il ne retient pas un SVG détaché.
+    observer?.disconnect();
+    observer = window.ResizeObserver ? new window.ResizeObserver(apply) : null;
+    observer?.observe(svg);
     return root;
   }
   window.GrokbotMemoryGraph = { buildGraph, view };

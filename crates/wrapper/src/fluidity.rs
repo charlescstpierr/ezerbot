@@ -18,7 +18,7 @@ struct Watched {
 #[derive(Default)]
 pub(crate) struct StreamWatch {
     live: BTreeMap<String, Watched>,
-    // Every reply id already served, so a reply that starts and settles
+    // Every conversation/reply key already served, so a reply that starts and settles
     // between two reads is told apart from history. `None` before the first read.
     known: Option<BTreeSet<String>>,
 }
@@ -28,16 +28,19 @@ impl StreamWatch {
     /// logs its largest gap between two distinct visible texts.
     pub(crate) fn observe(&mut self, directory: &Path, state: &Value, now: Instant) {
         let mut seen = BTreeMap::new();
-        for message in state["conversations"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .flat_map(|conversation| conversation["messages"].as_array().into_iter().flatten())
-            .filter(|message| message["role"] == "assistant")
-        {
-            if let Some(id) = message["id"].as_str() {
-                let text = message["body"].as_str().map_or(0, str::len);
-                seen.insert(id.to_owned(), (text, message["state"] == "streaming"));
+        for conversation in state["conversations"].as_array().into_iter().flatten() {
+            // Reply ids repeat across conversations; tool cards are not replies.
+            let replies = conversation["messages"].as_array().into_iter().flatten();
+            for message in replies.filter(|m| m["role"] == "assistant" && m["kind"] == "message") {
+                if let (Some(conversation), Some(id)) =
+                    (conversation["id"].as_str(), message["id"].as_str())
+                {
+                    let text = message["body"].as_str().map_or(0, str::len);
+                    seen.insert(
+                        format!("{conversation}/{id}"),
+                        (text, message["state"] == "streaming"),
+                    );
+                }
             }
         }
         // The first read is history; afterwards, a new reply already settled
@@ -123,50 +126,88 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn state(replies: &[(&str, &str, &str)]) -> Value {
-        let messages: Vec<Value> = replies
-            .iter()
-            .map(|(id, body, state)| json!({"id": id, "role": "assistant", "body": body, "state": state}))
-            .collect();
-        json!({"conversations": [{"messages": messages}]})
+    /// `(conversation, id, kind, body, state)` per assistant entry.
+    fn state(entries: &[(&str, &str, &str, &str, &str)]) -> Value {
+        let mut conversations: Vec<Value> = Vec::new();
+        for (conversation, id, kind, body, state) in entries {
+            let message =
+                json!({"id": id, "role": "assistant", "kind": kind, "body": body, "state": state});
+            match conversations.iter_mut().find(|c| c["id"] == *conversation) {
+                Some(c) => c["messages"].as_array_mut().unwrap().push(message),
+                None => conversations.push(json!({"id": conversation, "messages": [message]})),
+            }
+        }
+        json!({ "conversations": conversations })
+    }
+
+    fn logged(reads: &[Value]) -> Vec<String> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "ezerbot-fluidity-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let mut watch = StreamWatch::default();
+        let now = Instant::now();
+        for (n, read) in reads.iter().enumerate() {
+            watch.observe(
+                &directory,
+                read,
+                now + Duration::from_millis(200 * n as u64),
+            );
+        }
+        let log = std::fs::read_to_string(directory.join("logs/engine.log")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(!log.contains("Tout d'un coup") && !log.contains("En cours"));
+        log.lines().map(str::to_owned).collect()
     }
 
     #[test]
     fn a_reply_settled_between_two_reads_is_one_block_and_history_is_silent() {
-        let directory =
-            std::env::temp_dir().join(format!("ezerbot-fluidity-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        let mut watch = StreamWatch::default();
-        let now = Instant::now();
-        watch.observe(
-            &directory,
-            &state(&[("ancienne", "Déjà là", "echoed")]),
-            now,
-        );
-        watch.observe(
-            &directory,
-            &state(&[
-                ("ancienne", "Déjà là", "echoed"),
-                ("rapide", "Tout d'un coup", "echoed"),
-            ]),
-            now + Duration::from_millis(200),
-        );
-        watch.observe(
-            &directory,
-            &state(&[
-                ("ancienne", "Déjà là", "echoed"),
-                ("rapide", "Tout d'un coup", "echoed"),
-            ]),
-            now + Duration::from_millis(400),
-        );
-        let log = std::fs::read_to_string(directory.join("logs/engine.log")).unwrap();
-        std::fs::remove_dir_all(&directory).unwrap();
-        let lines: Vec<_> = log.lines().collect();
-        assert_eq!(lines.len(), 1, "{log}");
+        let old = ("c", "ancienne", "message", "Déjà là", "echoed");
+        let fast = ("c", "rapide", "message", "Tout d'un coup", "echoed");
+        let lines = logged(&[state(&[old]), state(&[old, fast]), state(&[old, fast])]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].ends_with(&format!(
             "affichage réponse={} mises_a_jour=1 ecart_max_ms=0",
-            digest("rapide")
+            digest("c/rapide")
         )));
-        assert!(!log.contains("Tout d'un coup"));
+    }
+
+    #[test]
+    fn the_same_reply_id_in_two_conversations_and_tool_cards_are_measured_apart() {
+        let lines = logged(&[
+            state(&[]),
+            state(&[
+                ("a", "reply-m", "message", "Tout d'un coup", "echoed"),
+                ("b", "reply-m", "message", "En cours", "streaming"),
+                ("b", "outil", "tool", "", "echoed"),
+            ]),
+            state(&[
+                ("a", "reply-m", "message", "Tout d'un coup", "echoed"),
+                (
+                    "b",
+                    "reply-m",
+                    "message",
+                    "En cours, puis plus",
+                    "streaming",
+                ),
+                ("b", "outil", "tool", "", "echoed"),
+            ]),
+            state(&[
+                ("a", "reply-m", "message", "Tout d'un coup", "echoed"),
+                ("b", "reply-m", "message", "En cours, puis plus", "echoed"),
+                ("b", "outil", "tool", "", "echoed"),
+            ]),
+        ]);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].ends_with(&format!(
+            "affichage réponse={} mises_a_jour=1 ecart_max_ms=0",
+            digest("a/reply-m")
+        )));
+        assert!(lines[1].ends_with(&format!(
+            "affichage réponse={} mises_a_jour=2 ecart_max_ms=200",
+            digest("b/reply-m")
+        )));
     }
 }

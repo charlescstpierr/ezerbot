@@ -1279,13 +1279,32 @@ impl App {
 
     /// JSON-only compatibility entry point; binary consumers use `api_response`.
     pub fn api(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiError> {
+        let started = std::time::Instant::now();
         match self.api_response(method, path, body)? {
-            ApiResponse::Json(value) => Ok(value),
+            ApiResponse::Json(value) => {
+                // In process, nothing is encoded: the HTTP host times its own encoding.
+                if (method, path) == ("GET", "/api/state") {
+                    self.log_state_served(started.elapsed());
+                }
+                Ok(value)
+            }
             ApiResponse::Bytes { .. } => Err(ApiError::new(
                 406,
                 "Cette route renvoie des octets, pas du JSON.",
             )),
         }
+    }
+
+    /// Display fluidity (#255): one served `/api/state`, with the journal size it replayed.
+    pub fn log_state_served(&self, elapsed: Duration) {
+        let events: u64 = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM engine_run_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0);
+        let directory = self.db_path.parent().unwrap_or(Path::new("."));
+        fluidity::state_served(directory, elapsed, events);
     }
 
     fn require_conversation(&self, id: &str) -> Result<(), ApiError> {

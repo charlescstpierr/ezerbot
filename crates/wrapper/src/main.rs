@@ -576,6 +576,10 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             continue;
         }
         let is_api = request.url().starts_with("/api/");
+        // Timed through JSON encoding, which grows with the history (#255).
+        let state_started = (request.method() == &tiny_http::Method::Get
+            && request.url().split('?').next() == Some("/api/state"))
+        .then(std::time::Instant::now);
         let mut cookie = None;
         let (mut status, mut body, content_type) = match payload(
             &mut request,
@@ -602,6 +606,9 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
                     }
                 }
                 let (body, content_type) = response.into_parts();
+                if let Some(started) = state_started {
+                    app.log_state_served(started.elapsed());
+                }
                 if header_safe(&content_type) {
                     (200, body, content_type)
                 } else {

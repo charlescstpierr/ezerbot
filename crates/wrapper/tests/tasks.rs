@@ -406,6 +406,105 @@ fn deleted_bots_conversations_and_delegation_destinations_leave_no_orphans() {
 }
 
 #[test]
+fn a_routed_delegation_request_disappears_with_its_custom_bot_parent_conversation() {
+    let mut f = Fixture::new();
+    f.post(
+        "/api/bots",
+        json!({"id":"custom","name":"Perso","color":"cyan"}),
+    );
+    let origin = f.post("/api/conversations", json!({"bot_id":"custom"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let child = format!("task:edge:{origin}");
+    f.conn.execute("INSERT INTO wrapper_conversations(account_id,id,title,bot_id,kind,parent_id,created_at,updated_at) SELECT account_id,?1,'Sous-tâche','grokbot','task',?2,0,0 FROM wrapper_conversations WHERE id=?2", params![child, origin]).unwrap();
+    for (id, bot, conversation, trigger) in [
+        (
+            "parent",
+            "custom",
+            &origin,
+            Trigger::UserMessage {
+                message_id: "message-parent".into(),
+                attempt: 0,
+            },
+        ),
+        (
+            "child",
+            "grokbot",
+            &child,
+            Trigger::Delegation {
+                delegation_id: "edge".into(),
+            },
+        ),
+    ] {
+        let task = id == "child";
+        with_tx(&f.conn, |c| {
+            model::start(
+                c,
+                &Run {
+                    run_id: id.into(),
+                    bot_id: bot.into(),
+                    conversation_id: conversation.clone(),
+                    trigger,
+                    kind: if task { RunKind::Task } else { RunKind::Chat },
+                    status: RunStatus::Queued,
+                    task_status: task.then_some(TaskStatus::Working),
+                    turn_end: None,
+                    budgets: RunBudgets::default(),
+                    started_at: 1000,
+                },
+            )?;
+            model::set_running_at(c, id, 1000)
+        })
+        .unwrap();
+    }
+    f.status("child", RunStatus::AwaitingApproval);
+    f.conn.execute("INSERT INTO delegation_graph(id,parent_run_id,root_run_id,parent_bot,child_bot,depth,child_run_id,conversation_id,selected_context,status) VALUES ('edge','parent','parent','custom','grokbot',1,'child',?1,'{\"texts\":[],\"entry_ids\":[],\"fact_ids\":[],\"skill_ids\":[]}','{\"status\":\"running\"}')", [&child]).unwrap();
+    f.request_on("child", "approval", json!({"kind":"approval"}));
+    let items = f.items();
+    let decisions: Vec<_> = items.iter().filter(|i| i["group"] == "decision").collect();
+    assert_eq!(decisions.len(), 1, "{items:?}");
+    assert_eq!(decisions[0]["kind"], "delegation");
+    assert_eq!(decisions[0]["conversation_id"], f.conversation);
+    assert_eq!(decisions[0]["request"]["card_id"], "approval");
+    assert!(items.iter().all(|i| i["id"] != "delegation:edge"));
+
+    f.post("/api/conversations/delete", json!({"id":origin}));
+    let live: i64 = f
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM wrapper_conversations WHERE id IN (?1,?2) AND deleted=0",
+            params![child, f.conversation],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(live, 2);
+    let pending: String = f
+        .conn
+        .query_row(
+            "SELECT status FROM forms_requests WHERE id='approval'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, "pending");
+    let revision = f.app.api("GET", "/api/ping", b"").unwrap();
+    let items = f.items();
+    assert!(items.is_empty(), "{items:?}");
+    assert_eq!(f.items(), items);
+    assert_eq!(f.app.api("GET", "/api/ping", b"").unwrap(), revision);
+    let pending: String = f
+        .conn
+        .query_row(
+            "SELECT status FROM forms_requests WHERE id='approval'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, "pending");
+}
+
+#[test]
 fn runs_waiting_on_a_previous_boot_secret_are_stopped_after_restart_not_running_or_hidden() {
     let mut f = Fixture::new();
     f.children();

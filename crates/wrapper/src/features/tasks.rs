@@ -23,6 +23,10 @@ WITH live_runs AS (
  THEN 'running' ELSE 'stopped' END AS wait_status FROM engine_runs r
  JOIN wrapper_conversations c ON c.account_id=?1 AND c.id=r.conversation_id AND c.deleted=0
  JOIN wrapper_bots b ON b.account_id=?1 AND b.id=r.bot_id AND b.deleted=0
+), live_edges AS (
+ SELECT d.*,p.conversation_id AS origin_conversation_id,p.started_at AS origin_started_at
+ FROM delegation_graph d JOIN live_runs p ON p.run_id=d.parent_run_id
+ WHERE d.conversation_id IS NULL OR EXISTS (SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=d.conversation_id AND c.deleted=0)
 ), pending AS (
  SELECT q.id,q.run_id,q.entry_id,r.bot_id,c.id AS conversation_id,
  CASE r.trigger_kind WHEN 'delegation' THEN 'delegation' WHEN 'occurrence' THEN 'routine' ELSE 'task' END AS kind,
@@ -33,6 +37,7 @@ WITH live_runs AS (
  JOIN wrapper_conversations c ON c.account_id=?1 AND c.id=json_extract(q.route_json,'$.target_conversation_id') AND c.deleted=0
  JOIN wrapper_bots b ON b.account_id=?1 AND b.id=c.bot_id AND b.deleted=0
  WHERE q.status='pending' AND q.replaced=0
+ AND (r.trigger_kind<>'delegation' OR EXISTS (SELECT 1 FROM live_edges e WHERE e.child_run_id=q.run_id))
  AND (json_extract(q.kind_json,'$.expires_at') IS NULL OR json_extract(q.kind_json,'$.expires_at')>?2)
  AND (json_extract(q.kind_json,'$.kind')<>'secret' OR q.boot_id=(SELECT boot_id FROM wrapper_forms_boot WHERE singleton=1))
 ), sources(id,kind,bot_id,conversation_id,title,status,started_at,request_id,request_kind,card_id) AS (
@@ -54,18 +59,16 @@ WITH live_runs AS (
  WHERE r.trigger_kind='user_message'
  AND NOT EXISTS (SELECT 1 FROM pending p WHERE p.run_id=r.run_id)
  UNION ALL
- SELECT 'delegation:'||d.id,'delegation',d.child_bot,p.conversation_id,'Sous-tâche',
+ SELECT 'delegation:'||d.id,'delegation',d.child_bot,d.origin_conversation_id,'Sous-tâche',
  CASE json_extract(d.status,'$.status') WHEN 'done' THEN 'finished' WHEN 'failed' THEN 'failed'
  WHEN 'refused' THEN 'failed' WHEN 'cancelled' THEN 'stopped'
  ELSE CASE r.status WHEN 'interrupted' THEN 'stopped' WHEN 'cancelled' THEN 'stopped' WHEN 'failed' THEN 'failed'
  WHEN 'awaiting_approval' THEN r.wait_status WHEN 'awaiting_human_input' THEN r.wait_status
  WHEN 'finished' THEN CASE json_extract(r.record,'$.task_status.status') WHEN 'done' THEN 'finished' ELSE 'failed' END
  ELSE 'running' END END,
- COALESCE(r.started_at,p.started_at),NULL,NULL,NULL
- FROM delegation_graph d JOIN live_runs p ON p.run_id=d.parent_run_id
- LEFT JOIN live_runs r ON r.run_id=d.child_run_id
+ COALESCE(r.started_at,d.origin_started_at),NULL,NULL,NULL
+ FROM live_edges d LEFT JOIN live_runs r ON r.run_id=d.child_run_id
  WHERE (d.child_run_id IS NULL OR r.run_id IS NOT NULL)
- AND (d.conversation_id IS NULL OR EXISTS (SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=d.conversation_id AND c.deleted=0))
  AND NOT EXISTS (SELECT 1 FROM pending q WHERE q.run_id=d.child_run_id)
  UNION ALL
  SELECT 'routine:'||o.occurrence_id,'routine',s.bot_id,s.conversation_id,'Routine',

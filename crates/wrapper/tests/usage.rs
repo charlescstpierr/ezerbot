@@ -180,6 +180,7 @@ fn seed_run(
         status: RunStatus::Finished,
         task_status: matches!(kind, "routine" | "delegation").then(|| TaskStatus::Done {
             summary: "Fini".into(),
+            captures: vec![],
         }),
         turn_end: Some(TurnEnd::Finished),
         budgets: RunBudgets::default(),

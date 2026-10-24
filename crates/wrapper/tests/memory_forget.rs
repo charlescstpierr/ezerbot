@@ -561,7 +561,8 @@ fn task_content_is_redacted_without_changing_task_protocol() {
     assert_eq!(
         run.task_status,
         Some(grokbot_engine::contracts::TaskStatus::Done {
-            summary: "[redacted]".into()
+            summary: "[redacted]".into(),
+            captures: vec![],
         })
     );
     assert!(!contains(&f.state(), secret));

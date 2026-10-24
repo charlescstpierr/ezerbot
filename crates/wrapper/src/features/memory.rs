@@ -1115,7 +1115,7 @@ fn redact_run(conn: &Connection, run_id: &str, texts: &BTreeSet<String>) -> Resu
     // Le journal du Mode YOLO recopie la commande ou l'objectif : il s'oublie avec le reste.
     super::yolo::redact_log(conn, run_id, &|text| redact_string(text, texts))?;
     let mut run = store::required(conn, run_id)?;
-    if let Some(TaskStatus::Done { summary }) = &mut run.task_status {
+    if let Some(TaskStatus::Done { summary, .. }) = &mut run.task_status {
         let redacted = redact_string(summary, texts);
         if redacted != *summary {
             *summary = redacted;

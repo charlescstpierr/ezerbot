@@ -1166,8 +1166,9 @@ fn bounded(text: &str, limit: usize) -> String {
 }
 fn bounded_status(status: &DelegationStatus, limit: usize) -> DelegationStatus {
     match status {
-        DelegationStatus::Done { result } => DelegationStatus::Done {
+        DelegationStatus::Done { result, captures } => DelegationStatus::Done {
             result: bounded(result, limit),
+            captures: captures.clone(),
         },
         DelegationStatus::Failed { reason } => DelegationStatus::Failed {
             reason: bounded(reason, limit),
@@ -1178,7 +1179,62 @@ fn bounded_status(status: &DelegationStatus, limit: usize) -> DelegationStatus {
         other => other.clone(),
     }
 }
+/// The parent bot reads how many captures were joined and their labels, never
+/// their ids or captions: the references are for the card.
+fn model_status(status: &DelegationStatus, limit: usize) -> Value {
+    let mut value = json!(bounded_status(status, limit));
+    if let (DelegationStatus::Done { captures, .. }, Some(fields)) = (status, value.as_object_mut())
+    {
+        fields.remove("captures");
+        if !captures.is_empty() {
+            let labels: Vec<_> = captures.iter().map(|c| c.label.as_str()).collect();
+            let plural = if labels.len() > 1 { "s" } else { "" };
+            fields.insert(
+                "captures".into(),
+                json!(format!(
+                    "{} capture{plural} jointe{plural} ({})",
+                    labels.len(),
+                    labels.join(", ")
+                )),
+            );
+        }
+    }
+    value
+}
+/// The card gets each reference with the thumbnail route of the task thread.
+fn card_status(edge: &Delegation) -> Value {
+    let mut value = json!(bounded_status(&edge.status, RESULT_CHARACTERS));
+    if let (DelegationStatus::Done { captures, .. }, Some(conversation)) =
+        (&edge.status, &edge.conversation_id)
+    {
+        if !captures.is_empty() {
+            value["captures"] = captures
+                .iter()
+                .map(|c| {
+                    json!({"id":c.id,"label":c.label,"caption":c.caption,
+                    "url":capture_url(conversation,&c.id)})
+                })
+                .collect();
+        }
+    }
+    value
+}
+/// A screen capture has its conversation-filtered thumbnail route; an attached
+/// image is served by its own id.
+fn capture_url(conversation: &str, id: &str) -> String {
+    if id.starts_with("screen:") {
+        super::screen::thumbnail_url(conversation, id)
+    } else {
+        format!("/api/attachments/{id}")
+    }
+}
 fn public_edge(conn: &Connection, edge: &Delegation) -> Result<Value> {
+    edge_value(conn, edge, model_status(&edge.status, RESULT_CHARACTERS))
+}
+fn card_edge(conn: &Connection, edge: &Delegation) -> Result<Value> {
+    edge_value(conn, edge, card_status(edge))
+}
+fn edge_value(conn: &Connection, edge: &Delegation, status: Value) -> Result<Value> {
     let parent = store::required(conn, &edge.parent_run_id)?;
     let objective: String = conn.query_row(
         "SELECT objective FROM wrapper_delegation_calls WHERE id=?1",
@@ -1189,7 +1245,7 @@ fn public_edge(conn: &Connection, edge: &Delegation) -> Result<Value> {
         json!({"id":edge.id,"objective":bounded(&objective,240),"parent_run_id":edge.parent_run_id,"root_run_id":edge.root_run_id,
         "parent_bot":edge.parent_bot,"child_bot":edge.child_bot,"depth":edge.depth,
         "child_run_id":edge.child_run_id,"conversation_id":edge.conversation_id,
-        "parent_conversation_id":parent.conversation_id,"status":bounded_status(&edge.status,RESULT_CHARACTERS)}),
+        "parent_conversation_id":parent.conversation_id,"status":status}),
     )
 }
 fn wake(ctx: &Context<'_>, edge: &Delegation) -> Result<()> {
@@ -1249,7 +1305,7 @@ fn cancel_runs(ctx: &Context<'_>, cancelled: Vec<Delegation>) -> Result<()> {
 }
 fn react(ctx: &Context<'_>, run: &Run) -> Result<()> {
     let done = match &run.task_status {
-        Some(TaskStatus::Done { summary }) => Some(summary),
+        Some(TaskStatus::Done { summary, captures }) => Some((summary, captures)),
         _ => None,
     };
     if run.status.is_terminal() || done.is_some() {
@@ -1266,13 +1322,18 @@ fn react(ctx: &Context<'_>, run: &Run) -> Result<()> {
     }
     let status = if run.status == RunStatus::Cancelled {
         DelegationStatus::Cancelled
-    } else if let Some(summary) = done {
+    } else if let Some((summary, captures)) = done {
         let vault = super::forms::vault(ctx).map_err(|_| invalid("vault unavailable"))?;
+        let mut captures = captures.clone();
+        for capture in &mut captures {
+            capture.caption = grokbot_forms::redact::redact(&vault, &capture.caption)?;
+        }
         DelegationStatus::Done {
             result: bounded(
                 &grokbot_forms::redact::redact(&vault, summary)?,
                 RESULT_CHARACTERS,
             ),
+            captures,
         }
     } else if run.status.is_terminal() {
         let mut reason = "La sous-tâche s’est arrêtée sans terminer son travail.".to_owned();
@@ -1616,7 +1677,7 @@ fn result_context(conn: &Connection, request: &ContextRequest) -> Result<Option<
             .iter()
             .map(|d| {
                 json!({"id":d.id,"child_bot":d.child_bot,
-            "outcome":bounded_status(&d.status,allowance)})
+            "outcome":model_status(&d.status,allowance)})
             })
             .collect();
         let refused: Vec<_> = refusals
@@ -1788,7 +1849,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|edge| {
-            let value = public_edge(ctx.connection, &edge).ok()?;
+            let value = card_edge(ctx.connection, &edge).ok()?;
             if matches!(
                 edge.status,
                 DelegationStatus::Queued | DelegationStatus::Running
@@ -1883,7 +1944,7 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         return None;
     }
     let edge = graph::get(ctx.connection, id).ok()??;
-    let payload = public_edge(ctx.connection, &edge).ok()?;
+    let payload = card_edge(ctx.connection, &edge).ok()?;
     let payload = redact_value(&super::forms::vault(ctx).ok()?, &payload).ok()?;
     if ctx.conversation_id != payload["parent_conversation_id"].as_str() {
         return None;

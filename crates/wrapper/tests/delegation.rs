@@ -564,6 +564,7 @@ fn completed_before_batch_suspension_wake_is_delivered_with_the_group() {
     let mut child = model::set_running_at(&tx, edge.child_run_id.as_ref().unwrap(), 100).unwrap();
     child.task_status = Some(TaskStatus::Done {
         summary: "early summary".into(),
+        captures: vec![],
     });
     store::save(&tx, &child).unwrap();
     let event = store::append_event(
@@ -611,6 +612,7 @@ fn completed_before_batch_suspension_wake_is_delivered_with_the_group() {
     let mut child = model::set_running_at(&tx, later.child_run_id.as_ref().unwrap(), 100).unwrap();
     child.task_status = Some(TaskStatus::Done {
         summary: "later summary".into(),
+        captures: vec![],
     });
     store::save(&tx, &child).unwrap();
     let event = store::append_event(
@@ -649,6 +651,7 @@ fn routines_and_all_delegated_result_tails_survive_assembly() {
             &id,
             &DelegationStatus::Done {
                 result: format!("CHILD_{n}_BEGIN{}CHILD_{n}_END", "x".repeat(7_000)),
+                captures: vec![],
             },
         )
         .unwrap();
@@ -1063,6 +1066,7 @@ fn newest_long_results_and_all_wakees_fit_the_rendered_context_budget() {
             &id,
             &DelegationStatus::Done {
                 result: format!("SUMMARY_{n}_BEGIN{}", "\n\"\\".repeat(10_000)),
+                captures: vec![],
             },
         )
         .unwrap();
@@ -1311,6 +1315,7 @@ fn state_history_is_bounded_and_idle_tick_takes_no_writer_lock() {
             &id,
             &DelegationStatus::Done {
                 result: "historical".into(),
+                captures: vec![],
             },
         )
         .unwrap();
@@ -1331,6 +1336,7 @@ fn state_history_is_bounded_and_idle_tick_takes_no_writer_lock() {
         &active,
         &DelegationStatus::Done {
             result: "done".into(),
+            captures: vec![],
         },
     )
     .unwrap();
@@ -1632,6 +1638,7 @@ fn queued_child_starts_when_slot_frees() {
     let mut child = model::set_running_at(&tx, first.child_run_id.as_ref().unwrap(), 100).unwrap();
     child.task_status = Some(TaskStatus::Done {
         summary: "first complete".into(),
+        captures: vec![],
     });
     store::save(&tx, &child).unwrap();
     let event = store::append_event(
@@ -1842,7 +1849,7 @@ fn hook_storage_failure_is_reconciled_on_tick() {
     db.execute_batch("DROP TRIGGER reject_child_wake").unwrap();
     f.tick();
     assert!(
-        matches!(graph::get(&db, &edge.id).unwrap().unwrap().status, DelegationStatus::Done { result } if result=="Recovered summary")
+        matches!(graph::get(&db, &edge.id).unwrap().unwrap().status, DelegationStatus::Done { result, .. } if result=="Recovered summary")
     );
     assert_eq!(
         store::pending_wakes(&db)
@@ -2017,6 +2024,7 @@ fn delegation_call_retries_keep_binding_and_terminal_result() {
         &id,
         &DelegationStatus::Done {
             result: "stable result".into(),
+            captures: vec![],
         },
     )
     .unwrap();
@@ -2457,7 +2465,7 @@ fn followup_during_final_text_gets_another_model_call() {
     gate.store(true, Ordering::SeqCst);
     wait(
         "follow-up after text",
-        || matches!(graph::get(&f.db(),&edge.id).unwrap().unwrap().status,DelegationStatus::Done{ref result} if result == "Nouvelle réponse"),
+        || matches!(graph::get(&f.db(),&edge.id).unwrap().unwrap().status,DelegationStatus::Done{ref result, ..} if result == "Nouvelle réponse"),
     );
     let body = f
         .server
@@ -3102,7 +3110,7 @@ fn running_followup_beats_stale_completion_and_reaches_same_child_run() {
     gate.store(true, Ordering::SeqCst);
     wait(
         "updated task completion",
-        || matches!(graph::get(&f.db(),&edge.id).unwrap().unwrap().status,DelegationStatus::Done{ref result} if result.contains("française")),
+        || matches!(graph::get(&f.db(),&edge.id).unwrap().unwrap().status,DelegationStatus::Done{ref result, ..} if result.contains("française")),
     );
     assert!(f
         .server

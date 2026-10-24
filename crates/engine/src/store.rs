@@ -865,7 +865,7 @@ pub fn redact_payloads(conn: &Connection, bot_id: &str, text: &str) -> Result<us
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
         let mut run: Run = serde_json::from_str(&row.get::<_, String>(1)?)?;
-        if let Some(TaskStatus::Done { summary }) = &mut run.task_status {
+        if let Some(TaskStatus::Done { summary, .. }) = &mut run.task_status {
             let sanitized = redact_string(summary, text);
             if sanitized != *summary {
                 *summary = sanitized;
@@ -1549,6 +1549,7 @@ mod tests {
             save(conn, &completed)?;
             completed.task_status = Some(TaskStatus::Done {
                 summary: text.into(),
+                captures: vec![],
             });
             completed.status = RunStatus::Finished;
             completed.turn_end = Some(TurnEnd::Finished);
@@ -1565,7 +1566,8 @@ mod tests {
             assert_eq!(
                 required(conn, "run")?.task_status,
                 Some(TaskStatus::Done {
-                    summary: "[redacted]".into()
+                    summary: "[redacted]".into(),
+                    captures: vec![],
                 })
             );
             assert_eq!(

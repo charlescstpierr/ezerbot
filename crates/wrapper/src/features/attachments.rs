@@ -249,6 +249,16 @@ pub fn routes(
     }
 }
 
+/// Whether this image is attached to a message of the thread. The id comes
+/// from the model: look it up, never trust it.
+pub(super) fn linked_in(conn: &Connection, conversation: &str, id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM attachments_message_links WHERE conversation_id=?1 AND attachment_id=?2)",
+        params![conversation, id],
+        |r| r.get(0),
+    )
+}
+
 pub(super) fn dto(attachment: &staging::Attachment) -> Value {
     json!({
         "id": attachment.id, "sha256": attachment.sha256,

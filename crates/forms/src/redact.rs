@@ -17,8 +17,25 @@ use std::collections::BTreeSet;
 pub const MASK: &str = "[...]";
 
 pub fn redact(vault: &Vault, text: &str) -> Result<String> {
-    let values = known_patterns(vault)?;
-    Ok(mask(text, &values))
+    Patterns::of(vault)?.text(text)
+}
+
+/// The secrets known at one instant, read from the vault once. Redacting many
+/// fragments of one rendering (a state read lists hundreds of replies) with the
+/// same snapshot costs one vault read instead of one per fragment; the snapshot
+/// is as fail-closed as `redact`, since taking it fails when the vault does.
+pub struct Patterns(Vec<String>);
+
+impl Patterns {
+    pub fn of(vault: &Vault) -> Result<Self> {
+        known_patterns(vault).map(Self)
+    }
+    pub fn text(&self, text: &str) -> Result<String> {
+        Ok(mask(text, &self.0))
+    }
+    pub fn value(&self, value: &Value) -> Result<Value> {
+        mask_value(value, &self.0)
+    }
 }
 /// Redact a cumulative live snapshot and withhold enough trailing characters
 /// to cover a secret split across reads, including its JSON-escaped form.
@@ -70,8 +87,7 @@ impl SnapshotRedactor {
 pub fn redact_value(vault: &Vault, value: &Value) -> Result<Value> {
     // One fresh snapshot per output; never continue with an empty set on an
     // unavailable/corrupt vault, even if this particular output looks harmless.
-    let values = known_patterns(vault)?;
-    mask_value(value, &values)
+    Patterns::of(vault)?.value(value)
 }
 
 fn known_patterns(vault: &Vault) -> Result<Vec<String>> {
@@ -314,5 +330,33 @@ mod tests {
         assert!(redact_value(&test.vault, &json!({})).is_err());
         std::fs::remove_file(test.vault.path()).unwrap();
         assert!(redact(&test.vault, "").is_err());
+    }
+
+    #[test]
+    fn a_snapshot_masks_like_redact_and_fails_closed_when_taken_without_vault() {
+        let test = TestVault::new();
+        test.vault.set("TOKEN", "", "private-value").unwrap();
+        let snapshot = Patterns::of(&test.vault).unwrap();
+        let value = json!({"a": ["x private-value y"], "b": "private-value"});
+        assert_eq!(
+            snapshot.text("a private-value b").unwrap(),
+            redact(&test.vault, "a private-value b").unwrap()
+        );
+        assert_eq!(
+            snapshot.value(&value).unwrap(),
+            redact_value(&test.vault, &value).unwrap()
+        );
+        // The snapshot is a point in time; a new one sees what was added since.
+        test.vault.set("OTHER", "", "another-value").unwrap();
+        assert_eq!(snapshot.text("another-value").unwrap(), "another-value");
+        assert_eq!(
+            Patterns::of(&test.vault)
+                .unwrap()
+                .text("another-value")
+                .unwrap(),
+            MASK
+        );
+        std::fs::write(test.vault.path(), b"broken").unwrap();
+        assert!(Patterns::of(&test.vault).is_err());
     }
 }

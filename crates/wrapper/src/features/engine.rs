@@ -2775,8 +2775,14 @@ fn projected_parts(
     conn: &Connection,
     run: &Run,
 ) -> grokbot_engine::contracts::Result<Vec<ReplyPart>> {
+    projected_parts_with(conn, run, &redaction_patterns(conn)?)
+}
+fn projected_parts_with(
+    conn: &Connection,
+    run: &Run,
+    secrets: &redact::Patterns,
+) -> grokbot_engine::contracts::Result<Vec<ReplyPart>> {
     let events = store::events(conn, &run.run_id, 0)?;
-    let vault = event_vault(conn)?;
     let completed: HashSet<_> = events
         .iter()
         .filter(|e| matches!(e.kind, RunEventKind::ToolCall | RunEventKind::TurnEnded))
@@ -2805,7 +2811,7 @@ fn projected_parts(
                 ));
         if anchor && !text.is_empty() {
             parts.push(ReplyPart {
-                body: redact::redact(&vault, &std::mem::take(&mut text))?,
+                body: secrets.text(&std::mem::take(&mut text))?,
                 before: Some(format!("{}:{}", run.run_id, event.seq)),
             });
         }
@@ -2823,14 +2829,14 @@ fn projected_parts(
     }
     if !text.is_empty() {
         parts.push(ReplyPart {
-            body: redact::redact(&vault, &text)?,
+            body: secrets.text(&text)?,
             before: None,
         });
     }
     // A secret added after these events may straddle two rendered fragments.
     // Preserve the old whole-reply redaction guarantee, even in that rare case.
     let joined: String = parts.iter().map(|part| part.body.as_str()).collect();
-    let safe = redact::redact(&vault, &joined)?;
+    let safe = secrets.text(&joined)?;
     if safe != joined {
         return Ok(vec![ReplyPart {
             body: safe,
@@ -2845,14 +2851,28 @@ fn run_reply(
     id: String,
     proposals: Vec<Proposal>,
 ) -> Result<Message, ApiError> {
-    let parts = projected_parts(conn, run)?;
+    run_reply_with(conn, run, id, proposals, &redaction_patterns(conn)?)
+}
+/// The secrets to hide in a rendering. Read once per state read, not once per reply (#377).
+pub(crate) fn redaction_patterns(
+    conn: &Connection,
+) -> grokbot_engine::contracts::Result<redact::Patterns> {
+    redact::Patterns::of(&event_vault(conn)?)
+}
+fn run_reply_with(
+    conn: &Connection,
+    run: &Run,
+    id: String,
+    proposals: Vec<Proposal>,
+    secrets: &redact::Patterns,
+) -> Result<Message, ApiError> {
+    let parts = projected_parts_with(conn, run, secrets)?;
     let body: String = parts.iter().map(|part| part.body.as_str()).collect();
-    let citations = super::sources::citations(conn, &run.run_id, &body)?;
-    let mut metadata: (Option<String>, Option<String>, Option<String>) = conn.query_row(
-        "SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1",
-        [&run.run_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+    let sources = super::sources::registry(conn, &run.run_id)?;
+    let citations = super::sources::citations_in(&sources, &body);
+    let mut metadata: (Option<String>, Option<String>, Option<String>) = conn
+        .prepare_cached("SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1")?
+        .query_row([&run.run_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     if context_budget_failed(conn, run)? {
         metadata.0 = Some(CONTEXT_TOO_LARGE.into());
         metadata.1 = Some("context_budget".into());
@@ -2877,7 +2897,7 @@ fn run_reply(
         proposals,
         kind: "message".into(),
         payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":store::token_usage(conn, &run.run_id)?,
-            "sources":redact::redact_value(&event_vault(conn)?, &json!(super::sources::registry(conn, &run.run_id)?))?,"citations":citations,
+            "sources":secrets.value(&json!(sources))?,"citations":citations,
             "recalled_fact_ids":super::memory::recalled_ids(conn, &run.run_id)?}),
         attachments: vec![],
     })
@@ -2892,17 +2912,33 @@ pub fn reply(
     message: &str,
     proposals: Vec<Proposal>,
 ) -> Result<Option<Message>, ApiError> {
+    reply_with(ctx, conversation, message, proposals, &mut None)
+}
+/// `reply` for a caller that renders many replies: `secrets` stays empty until a reply needs
+/// it, then keeps the one vault read for the next ones.
+pub(crate) fn reply_with(
+    ctx: &super::Context<'_>,
+    conversation: &str,
+    message: &str,
+    proposals: Vec<Proposal>,
+    secrets: &mut Option<redact::Patterns>,
+) -> Result<Option<Message>, ApiError> {
     let Some(run) =
         store::latest_run_for_trigger(ctx.connection, &user_trigger(conversation, message, 0))?
             .filter(|r| r.conversation_id == conversation)
     else {
         return Ok(None);
     };
-    Ok(Some(run_reply(
+    if secrets.is_none() {
+        *secrets = Some(redaction_patterns(ctx.connection)?);
+    }
+    let secrets = secrets.as_ref().expect("filled above");
+    Ok(Some(run_reply_with(
         ctx.connection,
         &run,
         format!("reply-{message}"),
         proposals,
+        secrets,
     )?))
 }
 pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> {

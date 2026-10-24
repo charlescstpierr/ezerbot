@@ -399,12 +399,14 @@ impl App {
         }
         let mut ordered: BTreeMap<String, Vec<(i64, Vec<Message>)>> = BTreeMap::new();
         let mut proposals = self.proposals_by_message()?;
+        // The vault is read once for all the replies of this state, not once per reply.
+        let mut secrets = None;
         for record in self.reader.list_submissions()? {
             let id = record.conversation_id.as_str();
             if hidden.contains(id) {
                 continue;
             }
-            let metadata: Option<(i64, u64)> = self.connection.query_row("SELECT ordinal, created_at FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND kind = 'submission'", params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let metadata: Option<(i64, u64)> = self.connection.prepare_cached("SELECT ordinal, created_at FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND kind = 'submission'")?.query_row(params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
             let (ordinal, created_at) =
                 metadata.unwrap_or((i64::MAX, *created.get(id).unwrap_or(&0)));
             let conversation = conversations
@@ -444,13 +446,14 @@ impl App {
                 record.state,
                 SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. }
             ) {
-                if let Some(reply) = super::engine::reply(
+                if let Some(reply) = super::engine::reply_with(
                     &ctx,
                     id,
                     record.message_id.as_str(),
                     proposals
                         .remove(&(id.to_owned(), record.message_id.as_str().to_owned()))
                         .unwrap_or_default(),
+                    &mut secrets,
                 )? {
                     pair.push(reply);
                 }

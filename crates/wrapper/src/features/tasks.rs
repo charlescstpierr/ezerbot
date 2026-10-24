@@ -68,7 +68,7 @@ WITH live_runs AS (
  ELSE 'running' END END,
  COALESCE(r.started_at,d.origin_started_at),NULL,NULL,NULL
  FROM live_edges d LEFT JOIN live_runs r ON r.run_id=d.child_run_id
- WHERE (d.child_run_id IS NULL OR r.run_id IS NOT NULL)
+ WHERE (r.run_id IS NOT NULL OR NOT EXISTS (SELECT 1 FROM engine_runs child WHERE child.run_id=d.child_run_id))
  AND NOT EXISTS (SELECT 1 FROM pending q WHERE q.run_id=d.child_run_id)
  UNION ALL
  SELECT 'routine:'||o.occurrence_id,'routine',s.bot_id,s.conversation_id,'Routine',

@@ -1665,6 +1665,57 @@ fn queued_child_starts_when_slot_frees() {
 }
 
 #[test]
+fn task_snapshot_keeps_queued_and_cancelled_children_without_a_run() {
+    let mut f = Fixture::new(false);
+    let root = f.root("queued-snapshot-root");
+    let ids: Vec<_> = (0..4)
+        .map(|n| suspended(f.tool(&root, &format!("snapshot-{n}"), "delegate", args("child"))))
+        .collect();
+    let queued = graph::get(&f.db(), &ids[3]).unwrap().unwrap();
+    assert_eq!(queued.status, DelegationStatus::Queued);
+    let run_id = queued.child_run_id.as_ref().unwrap();
+    assert!(store::get(&f.db(), run_id).unwrap().is_none());
+    let item_id = format!("delegation:{}", queued.id);
+    let snapshot = f.app.api("GET", "/api/taches", b"").unwrap();
+    let rows: Vec<_> = snapshot["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["id"] == item_id)
+        .collect();
+    assert_eq!(rows.len(), 1, "{snapshot}");
+    assert_eq!(rows[0]["group"], "running");
+    assert_eq!(rows[0]["status"], "running");
+    assert_eq!(rows[0]["conversation_id"], root.conversation_id);
+
+    f.post(
+        "/api/delegation/cancel",
+        json!({
+            "parent_conversation_id":root.conversation_id,"task_id":queued.id
+        }),
+    );
+    assert_eq!(
+        graph::get(&f.db(), &ids[3]).unwrap().unwrap().status,
+        DelegationStatus::Cancelled
+    );
+    assert!(store::get(&f.db(), run_id).unwrap().is_none());
+    let revision = f.app.api("GET", "/api/ping", b"").unwrap();
+    let snapshot = f.app.api("GET", "/api/taches", b"").unwrap();
+    let rows: Vec<_> = snapshot["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["id"] == item_id)
+        .collect();
+    assert_eq!(rows.len(), 1, "{snapshot}");
+    assert_eq!(rows[0]["group"], "recent");
+    assert_eq!(rows[0]["status"], "stopped");
+    assert_eq!(f.app.api("GET", "/api/taches", b"").unwrap(), snapshot);
+    assert_eq!(f.app.api("GET", "/api/ping", b"").unwrap(), revision);
+    assert!(store::get(&f.db(), run_id).unwrap().is_none());
+}
+
+#[test]
 fn crash_before_child_launch_reconciles_without_duplicate_runs() {
     let mut f = Fixture::new(false);
     let root = f.root("recovery-root");

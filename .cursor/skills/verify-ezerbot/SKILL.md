@@ -43,7 +43,7 @@ Puis, avec `HOME` et `CFFIXED_USER_HOME` pointés sur un répertoire neuf (`mkte
 target/debug/grokbot-wrapper --port 0 --db <throwaway>/workspace.sqlite
 ```
 
-L’instance est prête quand sa première ligne stdout est `{"url":"http://127.0.0.1:<port>"}` et que `GET /` contient `<title>Ezerbot</title>`. Le badge `ChatGPT` apparaît ensuite : le jeton fictif est lu, le catalogue vient du faux OpenAI. Tant que le badge reste `Local`, l’instance n’est pas utilisable pour les sphères qui dépendent du compte.
+L’instance est prête quand sa première ligne stdout est `{"url":"http://127.0.0.1:<port>"}` et que `GET /` contient `<title>Ezerbot</title>`. La pilule Modèle `#composer-tools [data-picker="model"]` apparaît ensuite : le jeton fictif est lu, le catalogue vient du faux OpenAI. Tant qu’elle est absente, l’instance n’est pas utilisable pour les sphères qui dépendent du compte.
 
 Le lanceur refuse de démarrer si `HOME` résout vers le vrai dossier personnel (le défaut Mac, le home du compte Unix, ou `HOME` au moment de l’appel) ou si un chemin touche `~/Library/Application Support/Grokbot`. `Grokbot Local` sous le répertoire jetable n’est pas ce dossier. Les preuves sont hors du dépôt et hors de ce `HOME`.
 
@@ -108,13 +108,13 @@ Parcours complet d’une sphère, ou `all` :
 bash .cursor/skills/verify-ezerbot/scripts/drive.sh --evidence <preuves> --sphere accueil
 ```
 
-Chaque sphère est capturée en sombre et en clair, à `1140x780` et à `820x560`. Le thème est choisi par le bouton des Paramètres, puis rouvert pour lire `aria-pressed`. La couleur vient de `--canvas` (`#14161a` sombre, `#ffffff` clair).
+Chaque sphère est capturée en sombre et en clair, à `1140x780` et à `820x560`. Le thème est choisi par le bouton des Paramètres, puis rouvert pour lire `aria-pressed`. La couleur vient de `--canvas` (`#0e0f12` sombre, `#ffffff` clair).
 
 ## Evidence
 
 Les preuves vont dans le dossier donné par l’appelant. Défaut : sous le data root Mac, sinon un dossier temporaire hors dépôt. Elles ne sont jamais commitées.
 
-Pour chaque capture : le PNG, le texte visible (`.txt`) et l’action qui a mené à cet écran. Une sphère n’est pas prouvée par le dernier écran seulement : le doctor, le badge `ChatGPT` et l’état DOM attendu comptent. Le faux OpenAI est la frontière déjà prévue par les builds de développement (`GROKBOT_FAKE_OPENAI`) ; il ne contacte pas OpenAI. Le vérifier en observant que le processus n’a pas d’autre socket que `127.0.0.1`.
+Pour chaque capture : le PNG, le texte visible (`.txt`) et l’action qui a mené à cet écran. Une sphère n’est pas prouvée par le dernier écran seulement : le doctor, la pilule Modèle et l’état DOM attendu comptent. Le faux OpenAI est la frontière déjà prévue par les builds de développement (`GROKBOT_FAKE_OPENAI`) ; il ne contacte pas OpenAI. Le vérifier en observant que le processus n’a pas d’autre socket que `127.0.0.1`.
 
 `reunions-routines` produit deux PNG par thème et par taille : `reunions-…png` (rétention) et `routines-…png` (dialogue Routines).
 

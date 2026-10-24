@@ -21,7 +21,7 @@ Le Mode YOLO (tous les droits) est activé par défaut : le terminal et les fich
 Preconditions:
 
 - `doctor: ok` sur cette instance.
-- Badge `#mode-badge-text` égal à `ChatGPT`.
+- La pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - Le faux OpenAI répond à « Liste mon dossier Documents » par un appel `run_shell` (`ls -1`) et à « Écris mes notes du jour » par un appel `write_file` dans le dossier `Documents` du run, à côté du HOME. Il ne répond ainsi que si le lancement a reçu `--sphere mode-yolo`.
 
 - **Lancer.** Run `bash .cursor/skills/verify-ezerbot/scripts/launch.sh --evidence <preuves> --sphere mode-yolo`. Le dossier `Documents` du run reçoit quelques fichiers d'exemple et l'écriture s'y fait : tout ce que contient le HOME jeté est la base d'Ezerbot, que le Mode YOLO refuse aux outils.

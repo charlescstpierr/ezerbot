@@ -20,7 +20,7 @@ Une demande d’approbation qui attend ne doit pas être oubliée. Après le dé
 Preconditions:
 
 - `doctor: ok`.
-- Badge `ChatGPT`.
+- La pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - La préparation de la sphère permet le shell du bot, règle `/api/approvals/waiting` sur `{task:true, chat:true, validity:"24h", reminder:"1h"}` et fait expirer les cartes laissées par la combinaison précédente.
 
 - **Demander.** Nouvelle conversation (`#new-chat`), texte « Envoie le résumé ». Une carte `[data-card-kind="approval"][data-request-status="pending"]` attend.

@@ -374,7 +374,7 @@ def command_open(cdp: Cdp, url: str) -> None:
       href: location.href,
       ready: !!document.getElementById("home-link"),
       editor: !!document.querySelector(".gb-editor"),
-      badge: document.getElementById("mode-badge-text")?.textContent || "",
+      model: !!document.querySelector('#composer-tools [data-picker="model"]'),
       pending: performance.getEntriesByType("resource").filter((entry) => entry.responseEnd === 0).map((entry) => entry.name).slice(0, 8)
     })"""
     deadline = time.time() + 25
@@ -387,7 +387,7 @@ def command_open(cdp: Cdp, url: str) -> None:
         )
         last = result.get("result", {}).get("value")
         href = str(last.get("href", "")) if isinstance(last, dict) else ""
-        if href.startswith(url) and isinstance(last, dict) and last.get("editor") and last.get("badge") == "ChatGPT":
+        if href.startswith(url) and isinstance(last, dict) and last.get("editor") and last.get("model"):
             return
         time.sleep(0.15)
     raise SystemExit(f"la page n'a pas fini de charger: {last}")

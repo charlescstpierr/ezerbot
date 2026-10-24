@@ -13,7 +13,7 @@
 .tpl-error, .tpl-status.error { color: var(--danger-text); }
 .tpl-status { margin: 0; flex: 1; min-width: 0; color: var(--muted); font-size: 12px; }
 
-.tpl-search:focus-within { border-color: color-mix(in srgb, var(--accent-ink) 60%, var(--line)); }
+.tpl-search:focus-within { border-color: var(--focus); }
 .tpl-search { display: flex; align-items: center; gap: 9px; height: 40px; padding: 0 13px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 20px; background: var(--canvas); color: var(--muted); }
 .tpl-search input { flex: 1; min-width: 0; border: 0; background: none; color: var(--text); font-size: 13px; }
 .tpl-search input::-webkit-search-cancel-button { opacity: .5; }
@@ -33,8 +33,8 @@
 .tpl-card-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .tpl-card-copy strong { font-size: 13.5px; font-weight: 600; }
 .tpl-card-copy small { color: var(--muted); font-size: 11.5px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.tpl-card-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; color: var(--subtle); font-size: 10.5px; }
-.tpl-badge { padding: 3px 8px; border-radius: 10px; background: var(--accent-soft); color: var(--accent-ink); font-size: 10px; font-weight: 600; white-space: nowrap; }
+.tpl-card-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; color: var(--subtle); font-size: 11.5px; }
+.tpl-badge { padding: 3px 8px; border-radius: 10px; background: var(--soft); color: var(--text); font-size: 11.5px; font-weight: 600; white-space: nowrap; }
 .tpl-badge.muted { background: var(--soft); color: var(--muted); }
 
 .tpl-mascot { display: grid; place-items: center; width: 50px; height: 50px; flex: 0 0 auto; border-radius: 14px; overflow: hidden; background: color-mix(in srgb, var(--bot-color) 24%, var(--soft)); --mascot-eye: var(--bot-color); }
@@ -47,7 +47,7 @@
 [data-theme="light"] [data-bot-color="blanc"] .tpl-mascot, [data-theme="light"] .tpl-mascot[data-bot-color="blanc"] { --bot-color: #8f949e; --mascot-eye: #ffffff; }
 
 .tpl-monograms { display: flex; }
-.tpl-monogram { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: var(--connector-color); color: #ffffff; font-size: 10px; font-weight: 700; box-shadow: 0 0 0 2px var(--canvas); }
+.tpl-monogram { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: var(--connector-color); color: #ffffff; font-size: 11.5px; font-weight: 700; box-shadow: 0 0 0 2px var(--canvas); }
 .tpl-monograms .tpl-monogram + .tpl-monogram { margin-left: -4px; }
 .tpl-card:hover .tpl-monogram { box-shadow: 0 0 0 2px var(--soft); }
 
@@ -98,14 +98,14 @@
 .tpl-settings-actions .secondary-button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 11px; }
 .tpl-settings-actions .icon { width: 14px; height: 14px; }
 
-.tpl-start { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; padding: 13px 14px; border-radius: 10px; border: 1px dashed color-mix(in srgb, var(--accent-ink) 45%, var(--line)); background: var(--accent-soft); }
+.tpl-start { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; padding: 13px 14px; border-radius: 10px; border: 1px dashed var(--line); background: var(--soft); }
 .tpl-start strong, .tpl-share-box strong { display: block; font-size: 12.5px; }
 .tpl-start small, .tpl-share-box small { display: block; margin-top: 3px; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
 .tpl-start .secondary-button { flex: 0 0 auto; background: var(--pane); color: var(--text); }
 .tpl-share { display: flex; flex-direction: column; }
 .tpl-try { display: flex; flex-wrap: wrap; gap: 6px; }
 .tpl-try-chip { padding: 7px 11px; border-radius: 14px; background: var(--soft); font-size: 11.5px; text-align: left; }
-.tpl-try-chip:hover { background: var(--accent-soft); }
+.tpl-try-chip:hover { background: var(--soft); }
 .tpl-pills.compact .tpl-pill { font-size: 11.5px; }
 .tpl-share-box { margin-top: 18px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); }
 .tpl-check { display: flex; align-items: center; gap: 8px; margin: 11px 0; font-size: 11.5px; color: var(--muted); }

@@ -18,7 +18,7 @@ Chaque bot a une voix, une vitesse (de 0,5 à 2) et une langue de voix (ou Auto)
 
 Preconditions:
 
-- `doctor: ok` sur le build de développement (`state.voice.debug_fake` vrai), badge `ChatGPT`.
+- `doctor: ok` sur le build de développement (`state.voice.debug_fake` vrai), la pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - Un second bot : le parcours crée « Chef » (`bot-chef`) par `/api/bots`, sans effet s’il existe déjà.
 
 - **Créer le bot.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => window.GrokbotPanels.api("/api/bots", {id: "bot-chef", name: "Chef", color: "orange", instructions: "Réponds en recettes."})'`.

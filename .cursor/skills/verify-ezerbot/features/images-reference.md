@@ -17,7 +17,7 @@ Quand Charles joint une photo et demande « Le même style, en 16:9 », le bot a
 Preconditions:
 
 - `doctor: ok` sur cette instance.
-- Badge `#mode-badge-text` égal à `ChatGPT`.
+- La pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - Le faux OpenAI répond à une demande contenant « le même style » par `list_delegation_context`, puis par `generate_image` avec l’identifiant de la photo et `16:9`, et rend un PNG 288×192 pour la taille `1536x1024`.
 
 - **Lancer.** Run `bash .cursor/skills/verify-ezerbot/scripts/launch.sh --evidence <preuves> --sphere images-reference`. Sans cette sphère, le wrapper répond « OK » à tout et l’image n’est jamais demandée.

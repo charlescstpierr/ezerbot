@@ -1,11 +1,11 @@
 .skills-section { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
 .skills-section h3 { margin: 0 0 10px; font-size: 14px; }
-.skills-section h3:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 4px; }
-.skills-note { color: var(--muted); font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.skills-section h3:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+.skills-note { color: var(--muted); font-size: 11.5px; line-height: 1.65; overflow-wrap: anywhere; }
 .skills-scenario { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
 .skills-scenario-score { margin: 0 0 6px; font-size: 12px; font-weight: 650; }
 .skills-scenario-points { margin: 0; padding-left: 18px; }
-.skills-scenario-points li { font-size: 11px; line-height: 1.6; color: var(--muted); }
+.skills-scenario-points li { font-size: 11.5px; line-height: 1.6; color: var(--muted); }
 .skills-scenario-points li[data-done="true"] { color: var(--text); }
 .skills-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
 .skills-file-input { display: none; }
@@ -14,11 +14,11 @@
 .skills-row > div { flex: 1; min-width: 0; }
 .skills-row strong, .skills-row small { display: block; overflow-wrap: anywhere; }
 .skills-row strong { font-size: 12px; }
-.skills-row small { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.5; white-space: pre-wrap; }
+.skills-row small { margin-top: 4px; color: var(--muted); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; }
 .skills-row button { flex-shrink: 0; }
 .skills-row > .skills-row-actions { flex: 0 0 148px; display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
 .skills-section button:disabled, .skills-dialog button:disabled { opacity: .5; cursor: wait; }
-.skills-report, .skills-history { margin: 16px 0; font-size: 11px; }
+.skills-report, .skills-history { margin: 16px 0; font-size: 11.5px; }
 .skills-report summary, .skills-history summary { cursor: pointer; color: var(--text); line-height: 1.7; }
 .skills-report-rows { max-height: 260px; overflow: auto; margin-top: 12px; padding-left: 22px; }
 .skills-report-rows li { padding: 6px 0; overflow-wrap: anywhere; }
@@ -34,7 +34,7 @@
 .skills-fields textarea:last-of-type { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .skills-error { color: var(--danger-text); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .skills-error:empty { display: none; }
-.skills-version-preview { max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--canvas); border: 1px solid var(--line); padding: 12px; font-size: 11px; line-height: 1.6; }
+.skills-version-preview { max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--canvas); border: 1px solid var(--line); padding: 12px; font-size: 11.5px; line-height: 1.6; }
 .skills-history select { margin-top: 12px; }
 .skills-companion-files { margin-top: 20px; min-width: 0; }
 .skills-companion-files h3 { margin: 0 0 8px; font-size: 14px; }

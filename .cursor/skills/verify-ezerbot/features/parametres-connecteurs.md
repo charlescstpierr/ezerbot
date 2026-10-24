@@ -30,7 +30,7 @@ Les Paramètres regroupent le compte, l’apparence et les sections ajoutées pa
 Preconditions:
 
 - `doctor: ok`.
-- Badge `ChatGPT`.
+- La pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - Base neuve : aucun serveur MCP enregistré.
 
 - **Ouvrir Paramètres.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => { document.getElementById("settings-button").click(); return document.getElementById("settings-dialog").open; }'`. `result:` vaut `true`. Le titre `#settings-title` est `Paramètres`.

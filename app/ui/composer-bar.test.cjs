@@ -63,7 +63,6 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
       <div class="topbar-actions">
         <button class="tool-pill notifications-button" type="button">Notifications</button>
         <button class="tool-pill" type="button">Créer un groupe</button>
-        <span class="mode-badge"><span class="status-dot"></span><span>Local</span></span>
         <button class="icon-button" type="button" disabled aria-label="Actions de la conversation"><svg class="icon"><use href="#i-more"/></svg></button>
       </div>` : `<div class="topbar-title">${workspace ? `<button class="workspace-label" type="button" disabled>${workspace}</button><span class="breadcrumb-separator" aria-hidden="true">/</span>` : ""}<h1 id="conversation-title">${title}</h1></div>
       <div class="topbar-actions">

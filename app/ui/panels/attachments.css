@@ -16,17 +16,17 @@
 .attachment-preview { width: 48px; height: 48px; flex: 0 0 auto; border-radius: 5px; object-fit: cover; }
 .attachment-copy { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
 .attachment-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
-.attachment-status { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-.attachment-metadata { color: var(--muted); font-size: 11px; }
+.attachment-status { color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
+.attachment-metadata { color: var(--muted); font-size: 11.5px; }
 .attachment-document-icon { display: grid; place-items: center; width: 48px; height: 48px; flex: 0 0 auto; color: var(--muted); }
 .attachment-document-icon svg { width: 22px; height: 26px; }
 .attachment-chip[data-status="ready"] .attachment-status { color: var(--ok); }
 .attachment-chip[data-status="ready"][data-warning="true"] .attachment-status { color: var(--warning-text); }
 .attachment-chip[data-status="failed"] .attachment-status { color: var(--danger-text); }
-.attachment-retry { align-self: flex-start; padding: 2px 0; border: 0; color: var(--accent-ink); font-size: 11px; text-decoration: underline; }
+.attachment-retry { align-self: flex-start; padding: 2px 0; border: 0; color: var(--text); font-size: 11.5px; text-decoration: underline; }
 .attachment-retry:disabled { color: var(--muted); text-decoration: none; opacity: .5; cursor: not-allowed; }
-.attachment-pause { margin: 4px 0 6px; color: var(--muted); font-size: 11px; line-height: 1.4; font-variant-numeric: tabular-nums; }
-.attachment-limit { margin: 4px 0 6px; color: var(--danger-text); font-size: 11px; line-height: 1.4; }
+.attachment-pause { margin: 4px 0 6px; color: var(--muted); font-size: 11.5px; line-height: 1.4; font-variant-numeric: tabular-nums; }
+.attachment-limit { margin: 4px 0 6px; color: var(--danger-text); font-size: 11.5px; line-height: 1.4; }
 .attachment-remove { flex: 0 0 auto; align-self: flex-start; width: 28px; height: 28px; border-radius: 5px; color: var(--muted); font-size: 20px; line-height: 1; }
 .attachment-remove:hover { color: var(--text); background: var(--pane); }
 @media (max-width: 600px) { .attachment-chip { width: 100%; } }

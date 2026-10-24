@@ -17,7 +17,7 @@ Quand le bot répond et que la PWA n’est pas ouverte sur la conversation, la n
 
 Preconditions:
 
-- `doctor: ok`, badge `ChatGPT`.
+- `doctor: ok`, la pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 
 - **Réponse du bot.** Le parcours crée une conversation, envoie « Bonjour, qui es-tu ? », attend la réponse du faux bot, puis revient à l’accueil : la notification `reply:<run>` reste non lue.
 - **Toucher et feuille.** `window.EzerbotNotifications.activate(<id>, {push: true})` pose `.reply-offer` ; son bouton ouvre `dialog.reply-sheet`.

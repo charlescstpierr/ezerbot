@@ -443,7 +443,6 @@ pub fn routes(
                 // Sans adresse Tailscale valide, pas de QR : le code se tape sur l'iPhone.
                 if let Some(address) = tailscale_status()["url"].as_str() {
                     value["qr"] = json!(qr_image(&pairing_link(address, &code))?);
-                    value["address"] = json!(address);
                 }
                 value
             }

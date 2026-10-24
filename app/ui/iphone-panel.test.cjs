@@ -33,7 +33,7 @@ function panel(remote = false) {
       requests.push({ url, body: JSON.parse(JSON.stringify(body ?? null)) });
       if (url.endsWith('/status')) return state.iphone;
       if (url.endsWith('/revoke')) state.iphone.devices = state.iphone.devices.filter(d => d.id !== body.id);
-      if (url.endsWith('/code')) return { code: 'BB3977625C', expires: now + 120000, ...(tailnet ? { qr: 'data:image/svg+xml;base64,UVI=', address: 'https://mac.qa.ts.net' } : {}) };
+      if (url.endsWith('/code')) return { code: 'BB3977625C', expires: now + 120000, ...(tailnet ? { qr: 'data:image/svg+xml;base64,UVI=' } : {}) };
       if (url.endsWith('/serve')) return failure ? { error: 'État Tailscale indisponible.' } : { running: true };
       if (url.endsWith('/presence')) return { ok: true, push: subscription };
       if (url.endsWith('/push')) { subscription = body.subscription !== null; return { ok: true }; }

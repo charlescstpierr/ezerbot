@@ -151,7 +151,6 @@ fn qr_link_prefills_a_single_use_code_that_still_needs_the_mac_and_never_reaches
         .into_json()
         .unwrap();
     let code = created["code"].as_str().unwrap().to_owned();
-    assert_eq!(created["address"], "https://mac.qa.ts.net");
     // The camera reads the Tailscale address with the code in the fragment.
     let link = scan(created["qr"].as_str().unwrap());
     assert_eq!(link, format!("https://mac.qa.ts.net/#jumelage={code}"));

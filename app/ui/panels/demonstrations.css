@@ -19,4 +19,4 @@
 .demonstration-overlay small { flex-basis: 100%; text-align: center; color: var(--muted); }
 .demonstration-overlay .secondary-button { min-height: 30px; padding: 4px 12px; }
 @media (max-width: 760px) { .demonstration-dialog { --demonstration-padding: 23px; } }
-@media (max-width: 850px) { .demonstration-overlay { margin: 6px 10px 0; padding: 8px; font-size: 11px; gap: 6px; } }
+@media (max-width: 850px) { .demonstration-overlay { margin: 6px 10px 0; padding: 8px; font-size: 11.5px; gap: 6px; } }

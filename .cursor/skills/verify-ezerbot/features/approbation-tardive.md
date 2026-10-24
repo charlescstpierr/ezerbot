@@ -18,7 +18,7 @@ Une carte d’approbation qui a survécu à la fin du tour du bot (« Continuer 
 Preconditions:
 
 - `doctor: ok`.
-- Badge `ChatGPT`.
+- La pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - La préparation de la sphère repasse en « Demander avant d'agir » (`/api/yolo/mode` sur `ask`, le Mode YOLO actif par défaut lèverait la carte), permet le shell du bot et règle `/api/approvals/waiting` sur `{task:true, chat:true, validity:"24h", reminder:"1h"}`.
 
 - **Demander.** Nouvelle conversation (`#new-chat`), texte « Envoie le résumé ». La page contient « J’attends son accord pour envoyer le résumé. » et une carte `[data-card-kind="approval"][data-request-status="pending"]` avec « Autoriser une fois ». Le texte « Résumé envoyé » est absent.

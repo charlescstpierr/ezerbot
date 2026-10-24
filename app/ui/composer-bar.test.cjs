@@ -42,7 +42,6 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         <button class="tool-pill screen-button screen-button-kept screen-active" type="button" aria-label="Écran du Mac">Écran du Mac</button>
         <button class="tool-pill notifications-button" type="button" aria-label="Notifications"><span class="notifications-icon" aria-hidden="true"><svg class="icon"><use href="#i-plus"/></svg></span><span class="notifications-label">Notifications</span><span class="notification-count" aria-hidden="true" hidden>0</span></button>
         <button class="tool-pill" type="button" data-topbar-intent="create">Créer un groupe</button>
-        <span class="mode-badge"><span class="status-dot"></span><span>ChatGPT</span></span>
         <button class="icon-button" id="conversation-menu-button" type="button" disabled aria-label="Actions de la conversation"><svg class="icon"><use href="#i-more"/></svg></button>
       </div>
       <div class="popover conversation-menu" id="conversation-menu" hidden><button class="screen-menu-item" type="button"><span>Écran du Mac</span></button></div>`;
@@ -52,7 +51,6 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         <button class="tool-pill notifications-button${unread ? " has-unread" : ""}" type="button" aria-label="Notifications"><span class="notifications-icon" aria-hidden="true"><svg class="icon"><use href="#i-plus"/></svg></span><span class="notifications-label">Notifications</span><span class="notification-count" aria-hidden="true"${unread ? "" : " hidden"}>${unread || "0"}</span></button>
         <button class="tool-pill" type="button" data-topbar-intent="create">Créer un groupe</button>
         <button class="tool-pill" type="button" data-topbar-intent="members">Membres</button>
-        <span class="mode-badge"><span class="status-dot"></span><span>ChatGPT</span></span>
         <button class="icon-button" id="conversation-menu-button" type="button" aria-label="Actions de la conversation"><svg class="icon"><use href="#i-more"/></svg></button>
       </div>
       <div class="popover conversation-menu" id="conversation-menu"><button class="screen-menu-item" type="button"${header === "group" ? " hidden" : ""}><span>Écran du Mac</span></button><button type="button">Renommer</button></div>` : "";
@@ -85,7 +83,6 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
       <div class="topbar-actions">
         <button class="tool-pill notifications-button" type="button">Notifications</button>
         <button class="tool-pill" type="button">Créer un groupe</button>
-        <span class="mode-badge"><span class="status-dot"></span><span>Local</span></span>
         <button class="icon-button" type="button" disabled aria-label="Actions de la conversation"><svg class="icon"><use href="#i-more"/></svg></button>
       </div>` : `<div class="topbar-title">${workspace ? `<button class="workspace-label" type="button" disabled>${workspace}</button><span class="breadcrumb-separator" aria-hidden="true">/</span>` : ""}<h1 id="conversation-title">${title}</h1></div>
       <div class="topbar-actions">

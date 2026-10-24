@@ -25,7 +25,7 @@ Un sujet est un dossier nommé qui regroupe plusieurs fils (un bot seul ou un gr
 
 Preconditions:
 
-- `doctor: ok`, badge `ChatGPT`.
+- `doctor: ok`, la pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 
 - **Préparation.** Le parcours crée deux sujets et cinq fils par l'API, vieillit leurs `updated_at` dans la base jetable (2 h, 26 h, 74 h, 5 h, 30 h), puis plie « Impôts » et déplie « Déménagement ».
 - **Barre latérale.** `#sidebar-topics`, `#topic-list .topic-folder`, `.topic-toggle[aria-expanded]`, `.topic-name`, `.topic-thread` et `.topic-thread-time` ; les fils sans sujet restent dans `#conversation-list`.

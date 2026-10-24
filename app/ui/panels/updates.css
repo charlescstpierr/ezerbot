@@ -1,17 +1,17 @@
 .update-corner { display: block; max-width: 100%; margin: 0 2px 8px; }
 .update-corner[hidden] { display: none; }
-.update-corner-action { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 7px 2px 5px; border-radius: 999px; color: var(--sidebar-muted); font-size: 10px; font-weight: 500; line-height: 1.4; }
+.update-corner-action { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 7px 2px 5px; border-radius: 999px; color: var(--sidebar-muted); font-size: 11.5px; font-weight: 500; line-height: 1.4; }
 .update-corner-action[hidden] { display: none; }
 .update-corner-action:hover:not(:disabled) { background: var(--soft); color: var(--sidebar-text); }
 .update-corner-action:disabled { cursor: default; }
-.update-corner-mark { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; }
+.update-corner-mark { width: 6px; height: 6px; border-radius: 50%; background: var(--text); flex: 0 0 auto; }
 .update-corner.is-running .update-corner-mark { background: transparent; border: 1.5px solid color-mix(in srgb, var(--sidebar-muted) 45%, transparent); border-top-color: var(--accent-ink); animation: update-spin .8s linear infinite; }
 @keyframes update-spin { to { transform: rotate(360deg); } }
-.update-corner-error { display: flex; align-items: flex-start; gap: 6px; margin: 0; color: var(--danger-text); font-size: 10px; font-weight: 500; line-height: 1.35; }
+.update-corner-error { display: flex; align-items: flex-start; gap: 6px; margin: 0; color: var(--danger-text); font-size: 11.5px; font-weight: 500; line-height: 1.35; }
 .update-corner-error[hidden] { display: none; }
 .update-corner-error-text { min-width: 0; overflow-wrap: anywhere; }
 .update-corner-dismiss { flex: 0 0 auto; padding: 0 2px; color: var(--danger-text); font-size: 12px; line-height: 1; }
 .updates-section > .updates-version,
-.updates-section > .updates-attempt { color: var(--text); font-size: 11px; line-height: 1.45; margin: 0 0 6px; font-variant-numeric: tabular-nums; }
-.updates-section > .updates-error { color: var(--danger-text); font-size: 11px; line-height: 1.45; margin: 0; overflow-wrap: anywhere; }
+.updates-section > .updates-attempt { color: var(--text); font-size: 11.5px; line-height: 1.45; margin: 0 0 6px; font-variant-numeric: tabular-nums; }
+.updates-section > .updates-error { color: var(--danger-text); font-size: 11.5px; line-height: 1.45; margin: 0; overflow-wrap: anywhere; }
 .updates-section > .updates-error[hidden] { display: none; }

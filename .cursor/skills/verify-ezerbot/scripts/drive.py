@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
-CANVAS = {"dark": "#14161a", "light": "#ffffff"}
+CANVAS = {"dark": "#0e0f12", "light": "#ffffff"}
 # EZERBOT_VERIFY_BASELINE=1 rejoue la sphère approbation-rappel sur un produit sans le rappel : mêmes gestes, aucune attente des éléments nouveaux, seules les captures « avant » comptent.
 BASELINE = os.environ.get("EZERBOT_VERIFY_BASELINE") == "1"
 SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive", "approbation-rappel", "sujets", "mode-yolo", "sources-citees")
@@ -828,8 +828,8 @@ def reminder_step(evidence: Path, index: int) -> None:
         evidence,
         """() => {
           const editor = document.querySelector(".gb-editor");
-          const badge = document.getElementById("mode-badge-text")?.textContent || "";
-          return editor && badge === "ChatGPT" ? {badge} : null;
+          const model = document.querySelector('#composer-tools [data-picker="model"]');
+          return editor && model ? {model: model.title} : null;
         }""",
         "Ezerbot n'est pas revenu après le rechargement",
         timeout=30,
@@ -2321,8 +2321,8 @@ def main() -> None:
             evidence,
             """() => {
               const editor = document.querySelector(".gb-editor");
-              const badge = document.getElementById("mode-badge-text")?.textContent || "";
-              return editor && badge === "ChatGPT" ? {badge} : null;
+              const model = document.querySelector('#composer-tools [data-picker="model"]');
+              return editor && model ? {model: model.title} : null;
             }""",
             "Ezerbot n'est pas connecté au faux OpenAI",
             timeout=25,

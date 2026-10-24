@@ -27,6 +27,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Les tests utilisent uniquement de faux serveurs et des sessions éphémères propres à Ezerbot. Ils couvrent OAuth/renouvellement, absence de fuite d’identifiants, validation des fenêtres, erreurs, déconnexion pendant une lecture, déduplication des tokens, sources et conservation après suppression/redémarrage. Les tests UI couvrent aussi la borne de 80 %, l’actualisation du quota quand la base locale reste inactive, l’intervalle de 60 secondes, le saut pendant un envoi, la mise en file d’**Actualiser** et le rechargement après un changement de compte.
 
+## Évaluation sur faux serveur (opt-in)
+
+Le [lanceur d’évaluation — étape A](evaluation.md) rejoue un scénario de messages dans un espace neuf marqué, impose `EZERBOT_EVAL_MAX_CALLS` et écrit uniquement des chiffres dans `target/eval/`. Il ne se connecte à aucun compte réel.
+
 ## Test de dictée Mac (opt-in)
 
 Le test `french_audio_recognized_on_device_after_english` (crates/wrapper/tests/voice_ui.rs) est ignoré par défaut : il exige un Mac, la permission Speech et les locales en-US/fr-CA installées. Pour le lancer :

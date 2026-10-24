@@ -20,7 +20,7 @@ L’appel vocal est une conversation en direct, à côté du mode voix : un bout
 
 Preconditions:
 
-- `doctor: ok` sur le build de développement (`state.voice_call.debug_fake` vrai), badge `ChatGPT`.
+- `doctor: ok` sur le build de développement (`state.voice_call.debug_fake` vrai), la pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - Une conversation ouverte (le parcours en crée une neuve à chaque passage).
 
 - **Lancer.** Cliquer `.voice-call-toggle` : `.voice-call-bar` apparaît, `.voice-call-state` dit « Appel en cours · parlez, le bot vous écoute ».

@@ -18,7 +18,7 @@ Une commande lancée par le bot en arrière-plan reste une carte du fil : En cou
 
 Preconditions:
 
-- `doctor: ok` sur cette instance, badge `#mode-badge-text` égal à `ChatGPT`.
+- `doctor: ok` sur cette instance, la pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - Le faux OpenAI répond à « Lance le script de saisie » et à « Lance le script du mot de passe » par un appel `run_shell` en arrière-plan (dossier `/tmp`), puis par « La tâche tourne. ».
 
 - **Lancer.** Run `bash .cursor/skills/verify-ezerbot/scripts/launch.sh --evidence <preuves> --sphere taches-de-fond`. Sans `--sphere taches-de-fond`, le wrapper répond « OK » à tout et aucune commande ne part.

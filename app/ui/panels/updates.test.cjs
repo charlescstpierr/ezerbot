@@ -125,7 +125,7 @@ test("une compilation ratée s’affiche en rouge dans le coin et reste dans les
   assert.equal(ui.section.textContent.includes("Rechercher les mises à jour"), false);
   assert.equal(ui.section.textContent.includes("Mettre à jour et redémarrer"), false);
   const css = fs.readFileSync(`${__dirname}/updates.css`, "utf8");
-  assert.match(css, /\.update-corner-error \{[^}]*font-size: 10px/);
+  assert.match(css, /\.update-corner-error \{[^}]*font-size: 11\.5px/);
   assert.match(css, /\.update-corner-error \{[^}]*color: var\(--danger-text\)/);
 
   ui.panels.panel.onState({

@@ -19,7 +19,7 @@ Une Page est un tableau interactif que le bot écrit en `.page.tsx` : Ezerbot la
 Preconditions:
 
 - `doctor: ok` sur cette instance.
-- Badge `#mode-badge-text` égal à `ChatGPT`.
+- La pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - Le faux OpenAI répond à une demande contenant « une page des forfaits » par un appel `write_page`, puis par « Voici la Page. ».
 
 - **Lancer.** Run `bash .cursor/skills/verify-ezerbot/scripts/launch.sh --evidence <preuves> --sphere pages`. Sans `--sphere pages`, le wrapper répond « OK » à tout et aucune Page n’est écrite.

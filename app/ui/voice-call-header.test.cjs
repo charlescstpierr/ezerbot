@@ -60,7 +60,6 @@ function page(withCall) {
         <button class="tool-pill notifications-button" type="button" aria-label="Notifications"><span class="notifications-icon" aria-hidden="true"><svg class="icon"></svg></span><span class="notifications-label">Notifications</span></button>
         <button class="tool-pill" type="button">Créer un groupe</button>
         <button class="tool-pill" type="button">Membres</button>
-        <span class="mode-badge"><span class="status-dot"></span><span>ChatGPT</span></span>
         <button class="icon-button" id="conversation-menu-button" type="button" aria-label="Actions de la conversation" aria-expanded="false">…</button>
       </div>
       <div class="popover conversation-menu" id="conversation-menu" hidden><button id="rename-button">Renommer</button></div>

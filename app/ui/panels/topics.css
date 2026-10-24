@@ -7,7 +7,6 @@
 .sidebar:has(.sidebar-topics:not([hidden])) > .search-field { margin-bottom: 14px; }
 .sidebar:has(.sidebar-topics:not([hidden])) > .brand-row { margin-bottom: 18px; }
 /* Une fenêtre basse garde la place pour les fils : la note « Chez vous » attend une fenêtre plus haute. */
-@media (max-height: 820px) { .sidebar:has(.sidebar-topics:not([hidden])) .local-note { display: none; } }
 .sidebar-topics { margin-bottom: 8px; }
 .topic-list { max-height: min(44dvh, 360px); overflow-y: auto; margin: 0 -3px; padding: 0 3px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .topic-folder { margin-bottom: 2px; }
@@ -19,13 +18,13 @@
 .topic-toggle .icon { width: 13px; height: 13px; }
 .topic-chevron { transition: transform .15s; }
 .topic-toggle[aria-expanded="false"] .topic-chevron { transform: rotate(-90deg); }
-.topic-name { flex: 1; min-width: 0; padding: 6px 4px; text-align: left; font-size: 11px; font-weight: 500; line-height: 1.5; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.topic-count { flex: 0 0 auto; padding-right: 9px; font-size: 10px; color: var(--sidebar-muted); }
+.topic-name { flex: 1; min-width: 0; padding: 6px 4px; text-align: left; font-size: 11.5px; font-weight: 500; line-height: 1.5; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topic-count { flex: 0 0 auto; padding-right: 9px; font-size: 11.5px; color: var(--sidebar-muted); }
 .topic-threads { margin: 0 0 4px 17px; padding-left: 8px; border-left: 1px solid var(--line); }
 .topic-thread { padding: 6px 8px; margin-bottom: 0; }
 .topic-thread .conversation-name { flex: 1; }
-.topic-thread-time { flex: 0 0 auto; font-size: 9.5px; color: var(--sidebar-muted); white-space: nowrap; }
-.topic-threads-empty { margin: 4px 8px 6px; font-size: 10px; color: var(--sidebar-muted); }
+.topic-thread-time { flex: 0 0 auto; font-size: 11.5px; color: var(--sidebar-muted); white-space: nowrap; }
+.topic-threads-empty { margin: 4px 8px 6px; font-size: 11.5px; color: var(--sidebar-muted); }
 .topic-empty { padding-top: 0; max-width: none; }
 
 .main-panel[data-view="topic"] > .chat-scroll,
@@ -49,18 +48,18 @@
 .topic-page-thread { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; min-width: 0; padding: 12px 14px; text-align: left; border: 1px solid var(--line); border-radius: 9px; background: var(--pane); transition: background .15s; }
 .topic-page-thread:hover { background: var(--soft); }
 .topic-page-thread-title { font-size: 12px; font-weight: 500; color: var(--text); overflow-wrap: anywhere; }
-.topic-page-thread-meta { font-size: 10.5px; color: var(--muted); }
+.topic-page-thread-meta { font-size: 11.5px; color: var(--muted); }
 .topic-page-empty { margin: 0; padding: 18px; font-size: 12px; line-height: 1.6; color: var(--muted); border: 1px dashed var(--line); border-radius: 9px; }
 .topic-memory { flex: 0 1 260px; min-width: 220px; align-self: flex-start; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--pane); }
 .topic-memory .topic-section-title { margin-bottom: 8px; }
-.topic-memory-empty { margin: 0; font-size: 11px; line-height: 1.6; color: var(--muted); }
+.topic-memory-empty { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
 .topic-memory-preview { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 8px; }
 .topic-memory-fact { font-size: 11.5px; line-height: 1.55; color: var(--text); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.topic-memory-all { padding: 4px 0; font-size: 11px; font-weight: 500; color: var(--accent-ink); }
+.topic-memory-all { padding: 4px 0; font-size: 11.5px; font-weight: 500; color: var(--text); }
 .topic-memory-all:hover { text-decoration: underline; }
 /* Écran « Mémoire du sujet » : il remplace la liste des fils sur la page du sujet. */
 .topic-memory-screen { flex: 1 1 100%; min-width: 0; max-width: 720px; }
-.topic-memory-back { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; margin: 0 0 14px -4px; padding: 4px 6px; border-radius: 6px; font-size: 11px; color: var(--muted); }
+.topic-memory-back { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; margin: 0 0 14px -4px; padding: 4px 6px; border-radius: 6px; font-size: 11.5px; color: var(--muted); }
 .topic-memory-back:hover { background: var(--soft); color: var(--text); }
 .topic-memory-back span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topic-back-icon { width: 13px; height: 13px; transform: rotate(90deg); flex: 0 0 auto; }
@@ -70,12 +69,12 @@
 .topic-memory-body { flex: 1; min-width: 0; }
 .topic-memory-text { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text); overflow-wrap: anywhere; white-space: pre-line; }
 .topic-memory-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
-.topic-memory-chip { max-width: 100%; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-ink); font-size: 10px; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.topic-memory-date { font-size: 10px; color: var(--muted); }
+.topic-memory-chip { max-width: 100%; padding: 2px 8px; border-radius: 999px; background: var(--soft); color: var(--text); font-size: 11.5px; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topic-memory-date { font-size: 11.5px; color: var(--muted); }
 .topic-memory-forget { flex: 0 0 auto; color: var(--muted); }
 .topic-memory-forget:hover { color: var(--danger-text); }
 .topic-memory-none { padding: 18px; font-size: 12px; line-height: 1.6; color: var(--muted); border: 1px dashed var(--line); border-radius: 9px; }
-.topic-memory-delete { display: block; margin: 28px 0 4px; padding: 4px 0; font-size: 11px; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
+.topic-memory-delete { display: block; margin: 28px 0 4px; padding: 4px 0; font-size: 11.5px; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
 .topic-memory-delete:hover { color: var(--danger-text); }
 .topic-memory-quote { margin: 0 0 14px; padding: 8px 12px; border-left: 2px solid var(--line); font-size: 12px; line-height: 1.6; color: var(--text); overflow-wrap: anywhere; white-space: pre-line; }
 .gb-topic-memory .topic-memory-quote { margin: 8px 0 0; }

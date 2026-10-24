@@ -18,7 +18,7 @@ Le réglage « Continuer sans attendre mes approbations » (Paramètres) décide
 Preconditions:
 
 - `doctor: ok`.
-- Badge `ChatGPT`.
+- La pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - Base neuve : le réglage est à ses valeurs par défaut.
 
 - **Ouvrir Paramètres.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => { document.getElementById("settings-button").click(); return document.getElementById("settings-dialog").open; }'`. `result:` vaut `true`.

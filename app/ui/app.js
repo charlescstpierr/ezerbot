@@ -1176,11 +1176,6 @@
     const selected = (current.models || []).find((item) => item.slug === model);
     const probe = current.connection_test || {};
     const signedIn = Boolean(current.signed_in);
-    $("mode-badge-text").textContent = current.connected
-      ? "ChatGPT"
-      : signedIn
-        ? (probe.state === "running" ? "Vérification" : "Non connecté")
-        : "Local";
     $("plan-banner").hidden = signedIn;
     $("plan-banner").querySelector("span").textContent = "Connectez votre compte ChatGPT. Un seul abonnement, aucune clé API.";
     document.querySelectorAll("[data-provider-signin]").forEach((button) => {
@@ -1200,7 +1195,8 @@
       if (pickerKind === "speed" && !selected?.tiers.length) pickerKind = null;
     } else {
       closePicker();
-      tools.replaceChildren(element("span", "composer-local", signedIn ? (probe.state === "running" ? "Vérification" : "Non connecté") : "Local"));
+      // Sans compte, rien à signaler : l'app tourne en local sans le dire partout.
+      tools.replaceChildren(...(signedIn ? [element("span", "composer-local", probe.state === "running" ? "Vérification" : "Non connecté")] : []));
     }
     renderPicker();
 

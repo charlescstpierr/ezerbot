@@ -6,10 +6,10 @@
 .voice-mode input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
 .voice-mode:hover { background: var(--soft); color: var(--text); }
 .voice-mode:has(input:checked) { background: var(--accent-soft); color: var(--accent-ink); }
-.voice-mode:has(input:focus-visible) { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+.voice-mode:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
 .voice-mic { width: 32px; height: 32px; border-radius: 8px; -webkit-user-select: none; user-select: none; touch-action: none; }
 .voice-mic[aria-pressed=true] { background: var(--accent); color: var(--accent-on); border-radius: 50%; }
-.voice-region { margin: 0 16px 10px; padding: 10px 12px; background: var(--pane); border: 1px solid var(--line); border-radius: 12px; font-size: 11px; }
+.voice-region { margin: 0 16px 10px; padding: 10px 12px; background: var(--pane); border: 1px solid var(--line); border-radius: 12px; font-size: 11.5px; }
 .voice-status-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .voice-status { flex: 1 1 180px; color: var(--muted); line-height: 1.5; }
 .voice-time { font-variant-numeric: tabular-nums; color: var(--muted); }
@@ -20,19 +20,19 @@
 .voice-region[data-tone="warning"] .voice-status { color: var(--warning-text); }
 .voice-memo-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .voice-memo-chip { position: relative; display: flex; flex-direction: column; gap: 5px; padding: 10px 26px 5px 0; max-width: 100%; min-width: 0; }
-.voice-memo-chip strong { font-size: 11px; color: var(--text); }
+.voice-memo-chip strong { font-size: 11.5px; color: var(--text); }
 .voice-memo-chip audio { height: 32px; width: 240px; max-width: 100%; }
 .voice-memo-chip .attachment-remove { position: absolute; right: 0; top: 8px; }
-.voice-region .attachment-retry { font-size: 11px; align-self: center; }
+.voice-region .attachment-retry { font-size: 11.5px; align-self: center; }
 .voice-status-row[hidden] { display: none; }
 .voice-microphone-list { display: flex; flex-direction: column; gap: 2px; margin: 0 0 8px; }
 .voice-microphone-option { display: flex; align-items: center; gap: 9px; padding: 7px 9px; border-radius: 8px; color: var(--text); font-size: 12px; cursor: pointer; }
 .voice-microphone-option:hover { background: var(--soft); }
 .voice-microphone-option[data-selected="true"] { background: var(--accent-soft); color: var(--accent-ink); }
 .voice-microphone-option input { accent-color: var(--accent); margin: 0; flex: 0 0 auto; }
-.voice-microphone-option:has(input:focus-visible) { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+.voice-microphone-option:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
 .voice-microphone-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-.voice-microphone-mark { flex: 0 0 auto; font-size: 11px; font-weight: 550; }
+.voice-microphone-mark { flex: 0 0 auto; font-size: 11.5px; font-weight: 550; }
 @media (max-width: 900px) {
   .voice-region { margin-left: 10px; margin-right: 10px; }
 }

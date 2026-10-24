@@ -17,7 +17,7 @@ La bibliothèque est la liste des fichiers de contexte d’un bot, ouverte depui
 
 Preconditions:
 
-- `doctor: ok`, badge `ChatGPT`.
+- `doctor: ok`, la pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - Aucun fichier déposé. La sphère ne dépose ni ne retire rien.
 
 - **Ouvrir le bot.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => { document.getElementById("settings-button").click(); document.querySelector("[aria-label=\\"Modifier Ezerbot\\"]").click(); return document.getElementById("bot-dialog").open; }'`. Attendre que la section se charge.

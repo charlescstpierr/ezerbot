@@ -1,0 +1,28 @@
+/* Mémoire : panneau de détail d'un souvenir, à droite du graphe ou de la Liste. Jetons Galet et jetons de portée uniquement. */
+.memory-space[data-detail] { display: grid; grid-template-columns: minmax(0, 1fr) 320px; column-gap: 20px; align-content: start; }
+.memory-space[data-detail] > * { grid-column: 1; }
+.memory-space[data-detail] > .memory-detail { grid-column: 2; grid-row: 1 / span 8; position: sticky; top: 0; align-self: start; max-width: none; }
+.memory-detail { display: grid; gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--pane); max-height: calc(100vh - 120px); overflow-y: auto; }
+.memory-detail[hidden], .memory-detail p:empty { display: none; }
+.memory-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.memory-detail-title { margin: 0; font-size: 14px; font-weight: 600; outline: none; }
+.memory-detail-text { margin: 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-line; }
+.memory-detail-field { width: 100%; min-height: 110px; font-family: inherit; resize: vertical; }
+.memory-detail-fields { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; margin: 0; font-size: 12px; line-height: 1.5; }
+.memory-detail-fields dt { color: var(--muted); }
+.memory-detail-fields dd { margin: 0; overflow-wrap: anywhere; }
+.memory-detail-link { padding: 0; font-size: 12px; color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
+.memory-detail-note, .memory-detail-warning, .memory-detail-error { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.memory-detail-warning { padding: 10px 12px; border: 1px solid var(--warning-line); border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); }
+.memory-detail-error { color: var(--danger-text); }
+.memory-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.memory-detail button:disabled { opacity: .5; cursor: default; }
+.memory-detail button:focus-visible, button.memory-space-text:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.memory-graph-point.is-selected circle { stroke: var(--text); stroke-width: 3; }
+.memory-space-item { cursor: pointer; }
+.memory-space-item.is-selected { border-color: var(--text); }
+button.memory-space-text { display: block; width: 100%; padding: 0; border: 0; background: none; color: var(--text); text-align: left; font-family: inherit; cursor: pointer; }
+@media (max-width: 1000px) {
+  .memory-space[data-detail] { grid-template-columns: minmax(0, 1fr); }
+  .memory-space[data-detail] > .memory-detail { grid-column: 1; grid-row: auto; order: -1; position: static; margin-bottom: 16px; max-height: none; }
+}

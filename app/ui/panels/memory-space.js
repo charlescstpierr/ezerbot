@@ -17,6 +17,9 @@
   let facts = null; // null tant que la liste n’est pas arrivée
   let failed = false, open = false, view = "list", generation = 0;
   let mark = null, painted = null, entry = null, screen = null, detail = null, found = null; // found : ids trouvés (Set), null sans filtre
+  // Ouvert depuis « N souvenirs utilisés » sous une réponse : `recalled` attend la liste relue, `used` décrit ce qu'elle a rendu
+  // ({ origin, total, missing, ids }) ; `ids` (Set) ne restreint la Liste que pour plusieurs souvenirs.
+  let recalled = null, used = null, usedBar = null;
   const filter = window.EzerbotMemoryFilter?.create(() => paint());
   let loading = Promise.resolve();
   // `load` rend la main quand la liste est à jour : une lecture dépassée par une plus récente attend celle-ci, sans quoi un appelant (le panneau de détail) croirait la liste relue.
@@ -35,6 +38,30 @@
       failed = true;
     }
     paint();
+    if (failed) recalled = null; // une liste qui n'a pas pu être lue ne dit pas quels souvenirs existent
+    else settle();
+  }
+  // Les souvenirs de la réponse qui existent encore, d'après la liste qui vient d'être relue : le premier s'ouvre, les disparus sont dits.
+  function settle() {
+    if (!recalled || !open) return;
+    const { ids, origin } = recalled;
+    recalled = null;
+    const live = new Set((facts || []).map((fact) => String(fact.fact_id)));
+    const present = ids.filter((id) => live.has(id));
+    used = { origin, total: ids.length, missing: ids.length - present.length, ids: ids.length > 1 && present.length ? new Set(present) : null };
+    view = "list";
+    paint();
+    if (present.length) detail?.open(present[0]);
+    else detail?.close();
+  }
+  function openWith(ids, origin = null) {
+    if (panels.busy) return { ok: false, message: "Une action est en cours : réessayez dans un instant." };
+    if (!Array.isArray(ids) || !ids.length) return { ok: false, message: "Cette réponse n’a pas de souvenir à montrer." };
+    show(); // quitter le fil passe par la navigation, qui ferme cet écran : on retient la demande ensuite
+    recalled = { ids: ids.map(String), origin };
+    used = null;
+    paint();
+    return { ok: true };
   }
   function show() {
     if (panels.busy) return;
@@ -49,6 +76,7 @@
   function close() {
     if (!open) return;
     open = false;
+    recalled = used = null;
     detail?.close();
     paint();
   }
@@ -66,7 +94,7 @@
     entry = node("button", "conversation-item memory-entry");
     entry.type = "button";
     entry.append(node("span", "conversation-name", "Mémoire"), node("span", "memory-entry-count"));
-    entry.addEventListener("click", show);
+    entry.addEventListener("click", () => { recalled = used = null; show(); });
     wrapper.append(entry);
     sidebar.insertBefore(wrapper, sidebar.querySelector(".sidebar-bots"));
     screen = node("section", "memory-space");
@@ -85,24 +113,58 @@
     const add = window.EzerbotMemoryAdd?.create(load);
     // Le panneau de détail (memory-detail.js) s'ouvre à droite de la vue ; il fait relire la liste après chaque action.
     detail = window.EzerbotMemoryDetail?.create({ facts: () => facts, reload: load, label: { bot: botLabel, scope: scopeLabel, date: factDate } });
+    usedBar = node("div", "memory-space-used");
+    usedBar.hidden = true;
     const head = node("div", "memory-space-head");
     head.append(switcher, ...(add ? [add.button] : []));
-    screen.append(head, ...(add ? [add.form] : []), node("p", "memory-space-help", "Tout ce que vos bots ont retenu : souvenirs privés, d’équipe et de sujet."), ...(filter ? [filter.element] : []), node("div", "memory-space-body"), ...(detail ? [detail.element] : []));
+    screen.append(head, ...(add ? [add.form] : []), node("p", "memory-space-help", "Tout ce que vos bots ont retenu : souvenirs privés, d’équipe et de sujet."), usedBar, ...(filter ? [filter.element] : []), node("div", "memory-space-body"), ...(detail ? [detail.element] : []));
     dock.parentElement.insertBefore(screen, dock);
     return true;
   }
-  function body() {
+  // Le bandeau de « N souvenirs utilisés » : ce que la réponse a rappelé, ce qui n'existe plus, et le chemin du retour à la réponse.
+  let usedKey = "";
+  function paintUsed() {
+    usedBar.hidden = !used;
+    const key = used ? JSON.stringify([used.total, used.missing, Boolean(used.ids), Boolean(used.origin?.conversationId)]) : "";
+    if (key === usedKey) return;
+    usedKey = key;
+    if (!used) { usedBar.replaceChildren(); return; }
+    const { total, missing, origin } = used, plural = (n) => (n < 2 ? "" : "s");
+    const text = node("p", "", total === missing
+      ? `${total < 2 ? "Ce souvenir n’existe plus : il a été oublié ou remplacé" : "Ces souvenirs n’existent plus : ils ont été oubliés ou remplacés"} depuis cette réponse.`
+      : `${noun(total)} utilisé${plural(total)} dans cette réponse.${missing ? ` ${missing} n’${missing < 2 ? "existe" : "existent"} plus (oublié${plural(missing)} ou remplacé${plural(missing)} depuis).` : ""}`);
+    text.setAttribute("role", "status");
+    const actions = node("div", "memory-space-used-actions");
+    const button = (label, action) => {
+      const el = Object.assign(node("button", "secondary-button", label), { type: "button" });
+      el.addEventListener("click", action);
+      return el;
+    };
+    if (used.ids) {
+      actions.append(button("Tout afficher", () => { used = { ...used, ids: null }; paint(); screen.querySelector(`.is-${view}`).focus?.(); }));
+    }
+    if (origin?.conversationId) {
+      actions.append(button("Retour à la réponse", () => {
+        if (panels.openConversation?.(origin.conversationId, origin.messageId)) return;
+        const problem = node("p", "memory-space-used-problem", "Cette conversation n’existe plus, ou une autre action est en cours.");
+        problem.setAttribute("role", "alert");
+        usedBar.append(problem);
+      }));
+    }
+    usedBar.replaceChildren(text, ...(actions.children.length ? [actions] : []));
+  }
+  function body(shown) {
     const empty = (text) => [node("p", "memory-space-empty", text)];
     const note = failed ? [node("p", "memory-space-help", "La mémoire n’a pas pu être actualisée : voici le dernier état connu.")] : [];
     // Graphe : sans souvenir (ou pas encore chargé), les messages de la Liste s'appliquent.
-    if (found && !found.size && facts?.length) return [...note, ...empty("Aucun souvenir ne correspond à ces filtres.")];
-    const graph = view === "graph" && facts?.length ? window.GrokbotMemoryGraph?.view(facts, { bots: latest?.state?.bots || [], matches: found, onSelect: (id) => detail?.open(id) }) : null;
+    if (found && !found.size && shown?.length) return [...note, ...empty("Aucun souvenir ne correspond à ces filtres.")];
+    const graph = view === "graph" && facts?.length ? window.GrokbotMemoryGraph?.view(shown, { bots: latest?.state?.bots || [], matches: found, onSelect: (id) => detail?.open(id) }) : null;
     if (graph) return [...note, graph];
     if (!facts) return empty(failed ? "La mémoire n’a pas pu être chargée." : "Chargement…");
     if (!facts.length) return [...note, ...empty("Aucun souvenir pour l’instant. Vos bots retiendront ici ce qui compte pour vous.")];
     const list = node("ul", "memory-space-list");
     list.setAttribute("aria-label", "Souvenirs");
-    for (const fact of facts) {
+    for (const fact of shown) {
       if (found && !found.has(String(fact.fact_id))) continue;
       const item = node("li", "memory-space-item");
       item.dataset.factId = fact.fact_id;
@@ -134,11 +196,14 @@
     label.disabled = true;
     document.title = "Mémoire · Ezerbot";
     for (const tab of screen.querySelectorAll(".memory-space-tab")) tab.setAttribute("aria-pressed", String(tab.dataset.view === view));
-    found = filter ? filter.sync(facts, latest?.state?.bots || [], botLabel) : null;
-    const signature = JSON.stringify([view, failed, facts, (latest?.state?.bots || []).map((bot) => [bot.id, bot.name]), filter?.state]);
+    paintUsed();
+    // Plusieurs souvenirs utilisés : la Liste ne montre qu'eux, le temps de « Tout afficher ».
+    const shown = used?.ids ? (facts || []).filter((fact) => used.ids.has(String(fact.fact_id))) : facts;
+    found = filter ? filter.sync(shown, latest?.state?.bots || [], botLabel) : null;
+    const signature = JSON.stringify([view, failed, facts, (latest?.state?.bots || []).map((bot) => [bot.id, bot.name]), filter?.state, used?.ids ? [...used.ids] : null]);
     if (signature === painted) return;
     painted = signature;
-    screen.querySelector(".memory-space-body").replaceChildren(...body());
+    screen.querySelector(".memory-space-body").replaceChildren(...body(shown));
     detail?.refresh();
   }
   const registered = panels.register({
@@ -158,4 +223,6 @@
   // La page d’un sujet ne passe pas par la navigation : son ouverture ferme l’écran Mémoire.
   byId("topic-list")?.addEventListener("click", (event) => { if (event.target?.closest?.(".topic-name")) close(); });
   setInterval(load, 30000);
+  // Point d'entrée de « N souvenirs utilisés » sous une réponse (app.js) ; absent là où l'écran Mémoire ne se monte pas.
+  window.EzerbotMemorySpace = { openWith };
 })();

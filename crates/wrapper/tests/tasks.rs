@@ -1,7 +1,8 @@
 //! Current-work API against the real local journals; no model, network or UI.
 use grokbot_engine::{
     contracts::{
-        with_tx, RunBudgets, RunKind, SuspendCause, TaskStatus, ToolCall, Trigger, TurnEnd,
+        with_tx, RunBudgets, RunEventKind, RunKind, SuspendCause, TaskStatus, ToolCall,
+        ToolOutcome, Trigger, TurnEnd,
     },
     model::{self, Run, RunStatus},
     store,
@@ -187,6 +188,53 @@ impl Fixture {
                 params![run, call, status],
             )
             .unwrap();
+    }
+    /// A tool call as the engine journals it: the event, then its timeline entry `run:seq`.
+    fn call(&self, run: &str, name: &str, arguments: Value) -> ToolOutcome {
+        let run = store::required(&self.conn, run).unwrap();
+        let call = ToolCall {
+            call_id: "call".into(),
+            name: name.into(),
+            arguments,
+        };
+        let tx = features::write_transaction(&self.conn).unwrap();
+        let payload = serde_json::to_value(&call).unwrap();
+        let event =
+            store::append_event(&tx, &run.run_id, RunEventKind::ToolCall, &payload).unwrap();
+        let entry = format!("{}:{}", run.run_id, event.seq);
+        features::conversations::append_entry(
+            &tx,
+            &run.conversation_id,
+            "engine_tool",
+            &entry,
+            5000,
+        )
+        .unwrap();
+        let ctx = Context {
+            connection: &tx,
+            run_id: Some(&run.run_id),
+            bot_id: Some(&run.bot_id),
+            conversation_id: Some(&run.conversation_id),
+            ..self.app.feature_context()
+        };
+        let outcome = features::call_tool(&ctx, &call).unwrap();
+        tx.commit().unwrap();
+        outcome
+    }
+    fn ask(&self, run: &str, question: &str) {
+        let outcome = self.call(run, "attendre_reponse", json!({"question": question}));
+        assert!(matches!(outcome, ToolOutcome::Done { .. }), "{outcome:?}");
+    }
+    /// Charles writes in `conversation` (a timeline entry of kind `submission`).
+    fn charles_writes(&self, conversation: &str, id: &str) {
+        let tx = features::write_transaction(&self.conn).unwrap();
+        features::conversations::append_entry(&tx, conversation, "submission", id, 6000).unwrap();
+        tx.commit().unwrap();
+    }
+    fn questions(&mut self) -> Vec<Value> {
+        let mut items = self.items();
+        items.retain(|i| i["kind"] == "question");
+        items
     }
     fn request(&self, id: &str, kind: Value) {
         self.request_on("parent", id, kind);
@@ -713,6 +761,10 @@ fn snapshot_cost(n: usize) -> (i32, usize) {
                 )?;
             }
             c.execute("INSERT INTO delegation_graph(id,parent_run_id,root_run_id,parent_bot,child_bot,depth,child_run_id,conversation_id,selected_context,status) VALUES (?1,?2,?2,?3,'grokbot',1,?1,?4,?5,'{\"status\":\"done\"}')", params![child, parent, bot, task, edge])?;
+            let ask = json!({"call_id":"ask","name":"attendre_reponse","arguments":{"question":"Quelle option ?"}});
+            let event = store::append_event(c, &parent, RunEventKind::ToolCall, &ask)?;
+            let entry = format!("{parent}:{}", event.seq);
+            features::conversations::append_entry(c, &f.conversation, "engine_tool", &entry, 1).unwrap();
         }
         c.execute("UPDATE engine_runs SET status='finished'", [])?;
         Ok::<_, grokbot_engine::contracts::Error>(())
@@ -730,9 +782,201 @@ fn snapshot_cost(n: usize) -> (i32, usize) {
 fn the_snapshot_cost_grows_linearly_with_finished_delegations() {
     let (small, rows) = snapshot_cost(250);
     let (large, _) = snapshot_cost(500);
-    assert_eq!(rows, 20);
+    // The 20 most recent ends, and the one open question of the conversation.
+    assert_eq!(rows, 21);
     assert!(
         large <= 3 * small,
         "250 delegations: {small} VM instructions, 500: {large}"
     );
+}
+
+#[test]
+fn the_tool_is_in_the_catalog_and_a_question_appears_in_to_decide() {
+    assert!(features::tools()
+        .iter()
+        .any(|t| t.name == "attendre_reponse"));
+    let mut f = Fixture::new();
+    f.turn("turn", 1000);
+    f.ask("turn", "Je prends quelle option ?");
+    let items = f.items();
+    assert_eq!(items[0]["id"], format!("question:{}", f.conversation));
+    assert_eq!(items[0]["kind"], "question");
+    assert_eq!(items[0]["group"], "decision");
+    assert_eq!(items[0]["status"], "pending");
+    assert_eq!(items[0]["bot_id"], "grokbot");
+    assert_eq!(items[0]["conversation_id"], f.conversation);
+    assert_eq!(items[0]["question"], "Je prends quelle option ?");
+    assert_eq!(items[0]["started_at"], 5000);
+    assert_eq!(items[0]["request"], Value::Null);
+}
+
+#[test]
+fn a_reply_ending_with_a_question_mark_without_the_tool_creates_no_line() {
+    let mut f = Fixture::new();
+    f.turn("turn", 1000);
+    with_tx(&f.conn, |c| {
+        store::append_event(
+            c,
+            "turn",
+            RunEventKind::TextDelta,
+            &json!({"text":"Je prends quelle option ?","response":1}),
+        )
+        .map(|_| ())
+    })
+    .unwrap();
+    f.status("turn", RunStatus::Finished);
+    assert!(f.questions().is_empty());
+}
+
+#[test]
+fn a_message_from_charles_removes_the_question_until_the_bot_asks_again() {
+    let mut f = Fixture::new();
+    f.turn("turn", 1000);
+    f.ask("turn", "Quelle option ?");
+    assert_eq!(f.questions().len(), 1);
+    f.charles_writes(&f.conversation, "answer");
+    assert!(f.questions().is_empty());
+    f.ask("turn", "Et pour la suite ?");
+    assert_eq!(f.questions()[0]["question"], "Et pour la suite ?");
+}
+
+#[test]
+fn a_reset_thread_or_a_deleted_conversation_or_bot_leaves_no_question() {
+    for target in ["reset", "conversation", "bot"] {
+        let mut f = Fixture::new();
+        f.turn("turn", 1000);
+        f.ask("turn", "Quelle option ?");
+        assert_eq!(f.questions().len(), 1);
+        match target {
+            "reset" => {
+                f.post(
+                    "/api/conversations/reset",
+                    json!({"conversation_id":f.conversation}),
+                );
+            }
+            "conversation" => {
+                f.post("/api/conversations/delete", json!({"id":f.conversation}));
+            }
+            _ => {
+                f.conn
+                    .execute("UPDATE wrapper_bots SET deleted=1 WHERE id='grokbot'", [])
+                    .unwrap();
+            }
+        }
+        assert!(f.questions().is_empty(), "{target}");
+    }
+}
+
+#[test]
+fn two_calls_in_one_conversation_give_one_line_with_the_last_question() {
+    let mut f = Fixture::new();
+    f.turn("turn", 1000);
+    f.ask("turn", "Première question ?");
+    f.ask("turn", "Seconde question ?");
+    let questions = f.questions();
+    assert_eq!(questions.len(), 1);
+    assert_eq!(questions[0]["question"], "Seconde question ?");
+}
+
+#[test]
+fn only_the_masked_and_truncated_question_is_returned_never_arguments_or_secrets() {
+    let mut f = Fixture::new();
+    let secret = "SECRET-TOKEN-VALUE-0123456789";
+    forms::vault(&f.app.feature_context())
+        .unwrap()
+        .set("TOKEN", "purpose", secret)
+        .unwrap();
+    f.turn("turn", 1000);
+    // The secret starts before the 140th character and ends after it: cutting first would leave a prefix.
+    let question = format!("{}{secret} et la fin ?", "a".repeat(130));
+    let outcome = f.call(
+        "turn",
+        "attendre_reponse",
+        json!({"question": question, "PRIVATE": "PRIVATE_ARGUMENTS"}),
+    );
+    assert!(matches!(outcome, ToolOutcome::Done { .. }));
+    let questions = f.questions();
+    let shown = questions[0]["question"].as_str().unwrap();
+    assert!(shown.chars().count() <= 140, "{shown}");
+    assert!(!shown.contains("SECRET"), "{shown}");
+    let mut keys: Vec<_> = questions[0].as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "bot_id",
+            "conversation_id",
+            "group",
+            "id",
+            "kind",
+            "question",
+            "request",
+            "started_at",
+            "status",
+            "title"
+        ]
+    );
+    assert!(!json!(f.items()).to_string().contains("PRIVATE"));
+}
+
+#[test]
+fn a_blank_question_or_a_delegated_run_is_refused_and_creates_no_line() {
+    let mut f = Fixture::new();
+    f.turn("parent", 1000);
+    f.delegate("edge", "parent", "grokbot", &f.conversation, 1);
+    for (run, arguments) in [
+        ("parent", json!({"question": "  "})),
+        ("parent", json!({})),
+        ("edge", json!({"question": "Puis-je ?"})),
+    ] {
+        assert!(matches!(
+            f.call(run, "attendre_reponse", arguments),
+            ToolOutcome::Failed { .. }
+        ));
+    }
+    assert!(f.questions().is_empty());
+}
+
+#[test]
+fn a_question_in_a_task_thread_follows_the_visibility_of_its_delegation_origin() {
+    for target in ["conversation", "bot"] {
+        let mut f = Fixture::new();
+        f.post(
+            "/api/bots",
+            json!({"id":"custom","name":"Perso","color":"cyan"}),
+        );
+        let origin = f.post("/api/conversations", json!({"bot_id":"custom"}))["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.run_in(
+            "parent",
+            "custom",
+            &origin,
+            Trigger::UserMessage {
+                message_id: "message-parent".into(),
+                attempt: 0,
+            },
+        );
+        let task = f.delegate("edge", "parent", "custom", &origin, 1);
+        f.run_in(
+            "late",
+            "grokbot",
+            &task,
+            Trigger::UserMessage {
+                message_id: "message-late".into(),
+                attempt: 0,
+            },
+        );
+        f.ask("late", "Je continue ?");
+        assert_eq!(f.questions().len(), 1, "{target}");
+        if target == "conversation" {
+            f.post("/api/conversations/delete", json!({"id":origin}));
+        } else {
+            f.conn
+                .execute("UPDATE wrapper_bots SET deleted=1 WHERE id='custom'", [])
+                .unwrap();
+        }
+        assert!(f.questions().is_empty(), "{target}");
+    }
 }

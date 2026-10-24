@@ -60,6 +60,12 @@ int main(void) {
         assert([result[@"microphone_id"] isEqual:@"fake-usb"] && [result[@"status"] isEqual:@"listening"]);
         [voice command:@{@"command":@"feed",@"token":@"mute",@"text":@"Pour toi",@"final_result":@YES} reply:reply];
         assert([result[@"utterance_id"] unsignedIntegerValue] == 1 && [result[@"final_text"] isEqual:@"Pour toi"]);
+        // Unmute resolves the chosen microphone again: unplugged while muted, the default serves and says so.
+        [voice command:@{@"command":@"mute",@"token":@"mute"} reply:reply];
+        EzerbotMicrophones.fakeUnplugged = @[@"fake-usb"];
+        [voice command:@{@"command":@"unmute",@"token":@"mute"} reply:reply];
+        assert([result[@"microphone_id"] isEqual:@"fake-built-in"] && [result[@"microphone_fallback"] boolValue]);
+        EzerbotMicrophones.fakeUnplugged = @[];
         [voice command:@{@"command":@"mute",@"token":@"mute"} reply:reply];
         [voice command:@{@"command":@"start",@"token":@"again"} reply:reply];
         assert(![result[@"muted"] boolValue] && [voice.fakeSource.status isEqual:@"recording"]);

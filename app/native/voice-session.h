@@ -18,6 +18,7 @@
 @property(nonatomic, strong) id changeObserver;
 @property(nonatomic, strong) NSMutableArray<NSString *> *spoken;
 @property(nonatomic, copy) NSDictionary *microphone;
+@property(nonatomic, copy) NSString *requestedMicrophone;
 #if defined(EZERBOT_RELEASE)
 @property(nonatomic) AudioDeviceID chosenDevice;
 @property(nonatomic, strong) AVAudioEngine *engine;
@@ -208,6 +209,7 @@
     self.playbackFormat = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:rate > 0 ? rate : 48000 channels:1];
     [self.engine connect:self.player to:self.engine.mainMixerNode format:self.playbackFormat];
     __weak EzerbotVoiceSession *weakSelf = self;
+    __weak AVAudioEngine *engine = self.engine;
     if (listening) {
         [self recognize];
         [self.engine.inputNode installTapOnBus:0 bufferSize:1024 format:format block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
@@ -223,7 +225,7 @@
                 owner.loudBuffers = sqrt(energy / buffer.frameLength) > 0.025 ? owner.loudBuffers + 1 : 0;
                 if (owner.loudBuffers == 3) dispatch_async(dispatch_get_main_queue(), ^{
                     EzerbotVoiceSession *current = weakSelf;
-                    if (current && current.generation == generation && current.speaking) [current userSpeech];
+                    if (current && current.generation == generation && current.engine == engine && current.speaking) [current userSpeech];
                 });
             } else { owner.loudBuffers = 0; }
         }];
@@ -267,6 +269,12 @@
     }];
 }
 #endif
+- (void)resolveMicrophone {
+    self.microphone = [EzerbotMicrophones resolve:self.requestedMicrophone];
+#if defined(EZERBOT_RELEASE)
+    self.chosenDevice = [EzerbotMicrophones deviceForResolved:self.microphone];
+#endif
+}
 - (void)command:(NSDictionary *)body reply:(void (^)(NSDictionary *))reply {
     NSString *command = body[@"command"], *token = body[@"token"];
     if (![command isKindOfClass:NSString.class] || ![token isKindOfClass:NSString.class] || token.length > 128) { reply(@{@"status":@"invalid"}); return; }
@@ -288,10 +296,8 @@
     if ([command isEqual:@"start"]) {
         [self cancel]; self.token = token; self.utterance = 0; self.barged = 0;
         NSString *requested = body[@"microphone"];
-        self.microphone = [EzerbotMicrophones resolve:[requested isKindOfClass:NSString.class] && requested.length <= 256 ? requested : @""];
-#if defined(EZERBOT_RELEASE)
-        self.chosenDevice = [EzerbotMicrophones deviceForResolved:self.microphone];
-#endif
+        self.requestedMicrophone = [requested isKindOfClass:NSString.class] && requested.length <= 256 ? requested : @"";
+        [self resolveMicrophone];
         self.spoken = [NSMutableArray array]; self.status = @"authorizing";
 #if defined(EZERBOT_RELEASE)
         NSUInteger generation = self.generation;
@@ -336,7 +342,8 @@
         BOOL mute = [command isEqual:@"mute"];
         if (mute != self.muted) {
             self.muted = mute;
-            if (mute) self.transcript = @"";
+            // The system default may have moved while muted: listen again to the chosen microphone.
+            if (mute) self.transcript = @""; else [self resolveMicrophone];
 #if defined(EZERBOT_RELEASE)
             [self rebuildEngine];
 #else

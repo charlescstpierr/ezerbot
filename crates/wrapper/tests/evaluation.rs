@@ -265,7 +265,26 @@ fn replay_fake_scenario() {
     }
 }
 
-fn test_space(marked: bool) -> PathBuf {
+/// A synthetic space owned by one regression; removed with its sibling fixtures.
+struct TestSpace(PathBuf);
+
+impl std::ops::Deref for TestSpace {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestSpace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+        for sidecar in ["link", "marker", "json"] {
+            let _ = fs::remove_file(self.0.with_extension(sidecar));
+        }
+    }
+}
+
+fn test_space(marked: bool) -> TestSpace {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "ezerbot-eval-test-{}-{}-{}",
@@ -277,7 +296,7 @@ fn test_space(marked: bool) -> PathBuf {
     if marked {
         fs::write(path.join(MARKER), MARKER_CONTENT).unwrap();
     }
-    path
+    TestSpace(path)
 }
 
 fn launch(space: &Path, cap: Option<&str>, source: &Path) -> Output {
@@ -311,6 +330,7 @@ fn report(output: &Output) -> Value {
         .find_map(|line| line.strip_prefix("EVAL_RESULT="))
         .expect("numeric results written");
     let bytes = fs::read(path).unwrap();
+    fs::remove_file(path).unwrap();
     let value: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(value.as_object().unwrap().values().all(Value::is_number));
     for trap in [
@@ -369,7 +389,7 @@ fn symlinked_space_or_marker_is_refused() {
     use std::os::unix::fs::symlink;
     let space = test_space(true);
     let alias = space.with_extension("link");
-    symlink(&space, &alias).unwrap();
+    symlink(&*space, &alias).unwrap();
     let output = launch(&alias, Some("3"), &fixture());
     assert!(!output.status.success());
     assert!(!space.join("run").exists());

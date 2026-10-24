@@ -15,7 +15,7 @@ EZERBOT_EVAL_MAX_CALLS=3 \
 cargo test -p grokbot-wrapper --locked --test evaluation replay_fake_scenario -- --ignored --exact --nocapture
 ```
 
-Sur le Mac partagé, préfixer chaque commande Cargo par `/Users/cstpierrecharles/firstmate/data/build-slot.sh`.
+Sur une machine qui limite les compilations simultanées, lancer la commande via son script de limitation.
 
 Le dossier doit être absolu, neuf et ne contenir que le marqueur ci-dessus (fichier ordinaire, pas un lien). Le lanceur réclame atomiquement un sous-dossier `run`, y crée une base et une session **factice**, et impose un `HOME` jetable dans `run/home`. Il n’ouvre jamais une base existante. Un espace déjà utilisé est refusé : créer un autre dossier pour rejouer. L’espace garde les messages de test dans sa base locale ; ce n’est **pas** un résultat à publier. Ne jamais y placer de données réelles.
 

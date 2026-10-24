@@ -355,6 +355,28 @@ test("réponse perdue après Modifier : un autre souvenir de même bot et de mê
   assert.deepEqual(h.mutations().at(-1), ["/api/memory/forget", { bot_id: "grokbot", fact_id: "n1" }], "Oublier vise le souvenir corrigé, pas le souvenir de sujet");
 });
 
+test("la fin d'une action ne vole pas le focus à quelqu'un qui est passé ailleurs ; un nouveau rendu garde le titre focalisé", async () => {
+  const h = await harness();
+  h.tab("graph");
+  h.point("f1").click();
+  assert.equal(Element.active, h.panel().querySelector(".memory-detail-title"), "à l'ouverture, le focus est sur le titre");
+  h.reload("Café Bot"); // un bot renommé relit le panneau
+  assert.equal(Element.active, h.panel().querySelector(".memory-detail-title"), "le titre rendu de nouveau garde le focus");
+  h.button("Modifier").click();
+  let release;
+  h.net.hold = new Promise((resolve) => { release = resolve; });
+  const field = h.panel().querySelector(".memory-detail-field");
+  field.value = "Café au lait";
+  field.fire("input");
+  h.button("Enregistrer").click();
+  await h.settle();
+  const search = h.filter.field("Rechercher un souvenir");
+  search.focus(); // pendant l'attente, la recherche reçoit le focus
+  release();
+  await h.settle();
+  assert.deepEqual([h.text("text"), Element.active === search], ["Café au lait", true], "la correction aboutit, le focus reste dans la recherche");
+});
+
 test("réponse perdue après Oublier : le moteur a oublié, le panneau relit la liste, se ferme et le graphe et la Liste sont à jour", async () => {
   const forgot = await harness({ lose: "Réseau coupé" });
   forgot.tab("graph");

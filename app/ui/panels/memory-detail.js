@@ -39,7 +39,7 @@
       const fact = current();
       if (!fact) return;
       shown = stamp(fact);
-      const controls = () => [...root.querySelectorAll("button, textarea")], held = controls().indexOf(document.activeElement); // le focus reste sur le même contrôle quand la liste change autour du panneau
+      const controls = () => [...root.querySelectorAll("h2, button, textarea")], held = controls().indexOf(document.activeElement); // le focus reste sur le même contrôle quand la liste change autour du panneau
       const editing = mode === "edit", confirming = mode === "confirm", conversation = fact.provenance?.conversation_id;
       const origin = conversation ? button("Ouvrir la conversation", "memory-detail-link", () => { if (!panels.openConversation?.(conversation)) { problem = "Cette conversation n’existe plus, ou une autre action est en cours."; render("origin"); } }, false) : "Hors conversation";
       const rows = [["Bot", label.bot(fact)], ["Origine", origin], ["Appris le", label.date(fact.learned_at)], ["Provenance", SOURCES[fact.provenance?.source] || "Inconnue"], ["Portée", label.scope(fact)]];
@@ -77,6 +77,8 @@
       ({ title, body, back, edit, ask, origin })[want]?.focus();
       if (!want) controls()[held]?.focus();
     }
+    // Au retour d'une action, le focus ne va au panneau que s'il y était (ou nulle part) : quelqu'un qui a cherché ailleurs entre-temps le garde.
+    const focusing = (want) => (!document.activeElement || document.activeElement === document.body || root.contains(document.activeElement) ? want : "");
     // Le panneau suit le moteur : il ne montre que ce que la dernière lecture contient.
     async function act(path, request, done, forgetting = false) {
       const mine = epoch;
@@ -97,9 +99,9 @@
         refresh();
         if (mine !== epoch) return;
         if (!current()) { close(true); return; } // oublié (ou disparu) pendant l'envoi : le panneau se ferme
-        if (current().fact_id !== request.fact_id) { mode = "view"; note = done; draft = ""; problem = ""; render("edit"); return; } // corrigé : le texte relu s'affiche
+        if (current().fact_id !== request.fact_id) { mode = "view"; note = done; draft = ""; problem = ""; render(focusing("edit")); return; } // corrigé : le texte relu s'affiche
         problem = error?.message || "L’action n’a pas abouti.";
-        render(mode === "edit" ? "body" : "back");
+        render(focusing(mode === "edit" ? "body" : "back"));
         return;
       }
       if (data?.fact?.fact_id) moved.set(request.fact_id, data.fact.fact_id); // corriger remplace le souvenir par un nouveau
@@ -111,7 +113,7 @@
       if (!current()) { close(true); return; } // oublié, et la relecture le confirme
       // Toujours là après la relecture : elle a échoué, et le panneau le dit au lieu de se taire.
       if (current()?.fact_id === request.fact_id) note = `${done.slice(0, -1)}, mais la liste n’a pas pu être relue : actualisez-la.`;
-      render(forgetting ? "title" : "edit");
+      render(focusing(forgetting ? "title" : "edit"));
     }
     function close(restore = false) {
       const was = id;

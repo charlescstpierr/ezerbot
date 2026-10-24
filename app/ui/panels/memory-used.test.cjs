@@ -161,6 +161,23 @@ test("un souvenir oublié pendant que l'écran est ouvert : le bandeau suit, la 
   assert.deepEqual(h.buttons(), ["Retour à la réponse"]);
 });
 
+test("le bandeau reconstruit rend le focus au bouton qui l'avait", async () => {
+  const h = await harness();
+  await h.openWith(["f1", "f2"]);
+  const focused = (label) => h.bar().querySelectorAll("button").find((button) => button.textContent === label);
+  focused("Retour à la réponse").focus();
+  h.net.facts = h.net.facts.filter((item) => item.fact_id !== "f2");
+  await h.reload();
+  assert.match(h.bar().querySelector("p").textContent, /1 n’existe plus/);
+  assert.equal(Element.active, focused("Retour à la réponse"), "le bouton du nouveau bandeau, pas un bouton disparu");
+  assert.equal(h.bar().contains(Element.active), true);
+  focused("Tout afficher").focus();
+  h.net.facts = h.net.facts.filter((item) => item.fact_id !== "f1");
+  await h.reload(); // plus de souvenir de la réponse : « Tout afficher » disparaît, le focus reste dans le bandeau
+  assert.deepEqual(h.buttons(), ["Retour à la réponse"]);
+  assert.equal(h.bar().contains(Element.active), true);
+});
+
 test("« Retour à la réponse » rouvre la conversation sur la réponse ; sinon l'écran le dit", async () => {
   const h = await harness();
   await h.openWith(["f1"]);

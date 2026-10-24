@@ -134,7 +134,14 @@
     const key = scope ? JSON.stringify([scope.total, scope.missing, Boolean(scope.ids), Boolean(scope.origin?.conversationId)]) : "";
     if (key === usedKey) return;
     usedKey = key;
-    if (!scope) { usedBar.replaceChildren(); return; }
+    // Le bandeau est reconstruit quand la liste change : le focus qui y était ne se perd pas avec le bouton remplacé.
+    const held = usedBar.contains(document.activeElement) ? document.activeElement.textContent : null;
+    const keepFocus = () => {
+      if (held === null) return;
+      const buttons = [...usedBar.querySelectorAll("button")];
+      (buttons.find((item) => item.textContent === held) || buttons[0] || screen.querySelector(`.is-${view}`)).focus?.();
+    };
+    if (!scope) { usedBar.replaceChildren(); keepFocus(); return; }
     const { total, missing, origin } = scope, plural = (n) => (n < 2 ? "" : "s");
     const text = node("p", "", total === missing
       ? `${total < 2 ? "Ce souvenir n’existe plus : il a été oublié ou remplacé" : "Ces souvenirs n’existent plus : ils ont été oubliés ou remplacés"} depuis cette réponse.`
@@ -158,6 +165,7 @@
       }));
     }
     usedBar.replaceChildren(text, ...(actions.children.length ? [actions] : []));
+    keepFocus();
   }
   function body(shown) {
     const empty = (text) => [node("p", "memory-space-empty", text)];

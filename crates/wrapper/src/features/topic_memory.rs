@@ -332,6 +332,53 @@ fn accept(conn: &Connection, offer: &str) -> Result<TopicFact, ApiError> {
     Ok(retained)
 }
 
+/// Ajout à la main (`/api/memory/add`) : le texte est déjà vérifié et le sujet existe.
+/// Un souvenir de sujet est toujours « déclaré » ; un doublon renvoie l'existant.
+pub(super) fn add(
+    conn: &Connection,
+    topic: &str,
+    bot: &str,
+    text: &str,
+) -> Result<Value, ApiError> {
+    let wanted = normalize(text);
+    let fact = match facts_of(conn, topic)?
+        .into_iter()
+        .find(|fact| normalize(&fact.text) == wanted)
+    {
+        Some(existing) => existing,
+        None => {
+            let id: String =
+                conn.query_row("SELECT 'tf-' || lower(hex(randomblob(16)))", [], |r| {
+                    r.get(0)
+                })?;
+            let created = TopicFact {
+                id,
+                topic_id: topic.into(),
+                text: text.into(),
+                conversation_id: None,
+                bot_id: Some(bot.into()),
+                created_at: now(),
+            };
+            conn.execute(
+                "INSERT INTO wrapper_topic_facts (account_id, id, topic_id, text, conversation_id, bot_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    ACCOUNT,
+                    created.id,
+                    created.topic_id,
+                    created.text,
+                    created.conversation_id,
+                    created.bot_id,
+                    created.created_at
+                ],
+            )?;
+            created
+        }
+    };
+    let mut value = fact_json(&fact);
+    value["scope"] = json!("topic");
+    Ok(value)
+}
+
 /// « Pas maintenant » : rien n'entre dans la mémoire du sujet, et le texte proposé s'en va.
 fn dismiss(conn: &Connection, offer: &str) -> Result<(), ApiError> {
     let (_, _, _, _, status, _) = offer_row(conn, offer)?;

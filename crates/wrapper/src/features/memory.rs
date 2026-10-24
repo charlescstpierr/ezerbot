@@ -8,6 +8,8 @@
 //! GET /api/memory?bot_id=<id> (default: grokbot), or POST /api/memory
 //! {bot_id}, lists active owned/private and workspace/team facts. POST children
 //! /forget, /correct and /promote require bot_id and fact_id/text or fact_ids.
+//! POST /api/memory/add {bot_id, text, scope: "private"|"topic", topic_id?} est
+//! l'ajout à la main : provenance « déclaré » (`Source::UserStated`), sans modèle.
 //! Promotion accepts ONE batch of <=100; earlier successful requests survive a
 //! later failure (RC03). Forgetting atomically wipes the correction lineage,
 //! redacts run replay/cards and invalidates covering summaries. Regeneration is
@@ -68,6 +70,20 @@ struct Correct {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Add {
+    bot_id: String,
+    text: String,
+    scope: AddScope,
+    topic_id: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AddScope {
+    Private,
+    Topic,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Promote {
     bot_id: String,
     fact_ids: Vec<String>,
@@ -85,7 +101,10 @@ pub fn routes(
         ("GET" | "POST", "/api/memory")
             | (
                 "POST",
-                "/api/memory/forget" | "/api/memory/correct" | "/api/memory/promote"
+                "/api/memory/forget"
+                    | "/api/memory/correct"
+                    | "/api/memory/promote"
+                    | "/api/memory/add"
             )
     ) {
         return None;
@@ -144,6 +163,66 @@ pub fn routes(
                     crate::now() as i64,
                 )
                 .map_err(memory_error)?;
+                tx.commit()?;
+                json!({"fact": fact})
+            }
+            "/api/memory/add" => {
+                let input: Add = parse(body)?;
+                validate_id(&input.bot_id)?;
+                app.require_bot(&input.bot_id)?;
+                // Le texte est vérifié avant toute écriture : refus clair, rien de créé.
+                let text = input.text.trim();
+                if text.is_empty() || text.chars().count() > facts::MAX_FACT_CHARS {
+                    return Err(ApiError::new(
+                        400,
+                        "Le texte d'un souvenir doit contenir entre 1 et 2 000 caractères.",
+                    ));
+                }
+                let tx = super::write_transaction(&app.connection)?;
+                let fact = match input.scope {
+                    AddScope::Topic => {
+                        let topic = input.topic_id.as_deref().ok_or_else(|| {
+                            ApiError::new(400, "Indiquez le sujet de ce souvenir.")
+                        })?;
+                        validate_id(topic)?;
+                        super::topics::require_topic(&tx, topic)?;
+                        super::topic_memory::add(&tx, topic, &input.bot_id, text)?
+                    }
+                    AddScope::Private => {
+                        if input.topic_id.is_some() {
+                            return Err(ApiError::new(
+                                400,
+                                "Un souvenir privé ne prend pas de sujet.",
+                            ));
+                        }
+                        let wanted = normalize(text);
+                        let existing = facts::list_active(&tx, &input.bot_id)?
+                            .into_iter()
+                            .find(|f| f.bot_id == input.bot_id && normalize(&f.text) == wanted);
+                        let fact = match existing {
+                            Some(existing) => existing,
+                            None => facts::remember(
+                                &tx,
+                                &Fact {
+                                    fact_id: String::new(),
+                                    bot_id: input.bot_id.clone(),
+                                    scope: Scope::Private,
+                                    text: text.into(),
+                                    provenance: Provenance {
+                                        conversation_id: None,
+                                        entry_id: None,
+                                        source: Source::UserStated,
+                                    },
+                                    learned_at: crate::now() as i64,
+                                    status: FactStatus::Active,
+                                    sensitive: false,
+                                },
+                            )
+                            .map_err(memory_error)?,
+                        };
+                        json!(fact)
+                    }
+                };
                 tx.commit()?;
                 json!({"fact": fact})
             }

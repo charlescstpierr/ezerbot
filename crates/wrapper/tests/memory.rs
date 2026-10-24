@@ -835,6 +835,89 @@ fn memory_errors_are_french_and_missing_facts_consistently_return_404() {
 }
 
 #[test]
+fn manual_add_is_declared_listed_and_found_by_recall_memory() {
+    let db = Database::new();
+    let mut app = db.open();
+    let added = post(
+        &mut app,
+        "/api/memory/add",
+        json!({"bot_id": "grokbot", "text": "  Le code du portail est 4821  ", "scope": "private"}),
+    );
+    assert_eq!(added["fact"]["text"], "Le code du portail est 4821");
+    assert_eq!(added["fact"]["scope"], "private");
+    assert_eq!(added["fact"]["provenance"]["source"], "user_stated");
+    assert_eq!(added["fact"]["sensitive"], false);
+    let listed = list(&mut app, "grokbot");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["fact_id"], added["fact"]["fact_id"]);
+    // Le même texte ne crée pas de doublon.
+    let again = post(
+        &mut app,
+        "/api/memory/add",
+        json!({"bot_id": "grokbot", "text": "Le code du  portail est 4821", "scope": "private"}),
+    );
+    assert_eq!(again["fact"]["fact_id"], added["fact"]["fact_id"]);
+    assert_eq!(list(&mut app, "grokbot").len(), 1);
+    // Le bot le retrouve lui-même, sans passer par le modèle pour l'ajout.
+    let found = done(
+        app.invoke_tool(
+            "grokbot",
+            "recall_memory",
+            json!({"query": "portail", "limit": 5}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(found["facts"][0]["fact_id"], added["fact"]["fact_id"]);
+    // Il reste privé : un autre bot ne le voit pas.
+    add_bot(&mut app);
+    assert!(list(&mut app, "other").is_empty());
+}
+
+#[test]
+fn manual_add_refuses_empty_or_oversized_text_and_creates_nothing() {
+    let db = Database::new();
+    let mut app = db.open();
+    post(
+        &mut app,
+        "/api/memory/add",
+        json!({"bot_id": "grokbot", "text": "Déjà là", "scope": "private"}),
+    );
+    let before = list(&mut app, "grokbot");
+    let topic = post(&mut app, "/api/topics", json!({"name": "Maison"}))["topic"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for scope in [
+        json!({"scope": "private"}),
+        json!({"scope": "topic", "topic_id": topic}),
+    ] {
+        for text in ["", "   \n\t ", &"x".repeat(facts::MAX_FACT_CHARS + 1)] {
+            let mut body = scope.clone();
+            body["bot_id"] = json!("grokbot");
+            body["text"] = json!(text);
+            let error = app
+                .api("POST", "/api/memory/add", body.to_string().as_bytes())
+                .unwrap_err();
+            assert_eq!(error.status, 400);
+            assert!(error.message.contains("entre 1 et 2 000 caractères"));
+            assert_eq!(list(&mut app, "grokbot"), before);
+            assert!(
+                app.api("GET", "/api/state", b"").unwrap()["topics"]["memory"]
+                    .get(&topic)
+                    .is_none()
+            );
+        }
+    }
+    // Exactement 2 000 caractères passe.
+    post(
+        &mut app,
+        "/api/memory/add",
+        json!({"bot_id": "grokbot", "text": "é".repeat(facts::MAX_FACT_CHARS), "scope": "private"}),
+    );
+    assert_eq!(list(&mut app, "grokbot").len(), 2);
+}
+
+#[test]
 fn remember_deduplicates_whitespace_without_crossing_bots_or_downgrading_sensitivity() {
     let db = Database::new();
     let mut app = db.open();

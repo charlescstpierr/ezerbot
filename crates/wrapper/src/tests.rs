@@ -179,6 +179,114 @@ fn crash_after_link_commit_before_journal_prepare_is_invisible_and_retryable() {
     );
 }
 
+/// Ce que `/api/send` valide en une transaction avant le journal : capture
+/// multibot, ancre éventuelle, entrée du fil, pièces jointes. Puis le crash.
+fn crash_after_commit_before_prepare(app: App, id: &str, message: &str, passage: Option<&str>) {
+    let tx = super::features::write_transaction(&app.connection).unwrap();
+    super::features::multibot::capture(&tx, id, message, &[], "Retouche", false).unwrap();
+    if let Some(passage) = passage {
+        tx.execute(
+            "INSERT INTO wrapper_page_anchors VALUES (?1, ?2, 'page_one', ?3, ?4, 'open', 1)",
+            rusqlite::params![id, message, passage, "0".repeat(64)],
+        )
+        .unwrap();
+    }
+    super::features::conversations::append_entry(&tx, id, "submission", message, 1).unwrap();
+    grokbot_attachments::staging::link_attachments(&tx, id, message, &["image-a".into()]).unwrap();
+    tx.commit().unwrap();
+    drop(app);
+}
+
+fn anchor_rows(app: &App) -> Vec<(String, String)> {
+    let mut statement = app
+        .connection
+        .prepare("SELECT message_id, passage FROM wrapper_page_anchors ORDER BY message_id")
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap();
+    rows.map(Result::unwrap).collect()
+}
+
+fn anchor(passage: &str) -> serde_json::Value {
+    json!({"page_id": "page_one", "source_version": "0".repeat(64), "passage": passage})
+}
+
+fn resend(id: &str, message: &str, anchor: Option<serde_json::Value>) -> serde_json::Value {
+    let mut body = json!({"conversation_id": id, "message_id": message, "body": "Retouche", "attachments": ["image-a"]});
+    if let Some(anchor) = anchor {
+        body["page_anchor"] = anchor;
+    }
+    body
+}
+
+/// Un envoi ancré (« ancre ») et un envoi sans ancre (« sans-ancre ») durables, journal vide.
+fn crashed_before_journal(db: &Database) -> (App, String) {
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    seed_attachments(&app);
+    app.connection
+        .execute(
+            "INSERT INTO bot_pages (id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview, created_at, updated_at)
+             VALUES ('page_one', 'grokbot', ?1, 'Forfaits', 'forfaits.page.tsx', '', 'ready', NULL, NULL, 'Essentiel Confort Famille', 1, 1)",
+            [&id],
+        )
+        .unwrap();
+    crash_after_commit_before_prepare(app, &id, "ancre", Some("Confort"));
+    let app = App::open(&db.0).unwrap();
+    crash_after_commit_before_prepare(app, &id, "sans-ancre", None);
+    let app = App::open(&db.0).unwrap();
+    assert!(app.reader.list_submissions().unwrap().is_empty());
+    (app, id)
+}
+
+#[test]
+fn identical_resend_after_crash_before_journal_prepare_is_idempotent() {
+    let db = Database::new();
+    let (mut app, id) = crashed_before_journal(&db);
+    let durable = anchor_rows(&app);
+    assert_eq!(durable, [("ancre".to_owned(), "Confort".to_owned())]);
+    super::features::test_hooks::with_link(attachment_link_hook, || {
+        for (message, sent) in [("ancre", Some(anchor(" Confort "))), ("sans-ancre", None)] {
+            let result = post(&mut app, "/api/send", resend(&id, message, sent)).unwrap();
+            assert!(result["conversation"]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == message && m["state"] == "echoed"));
+            assert_eq!(anchor_rows(&app), durable);
+            assert_eq!(
+                grokbot_attachments::staging::for_message(&app.connection, &id, message)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    });
+    assert_eq!(app.reader.list_submissions().unwrap().len(), 2);
+}
+
+#[test]
+fn resend_after_crash_before_journal_prepare_cannot_add_remove_or_change_the_anchor() {
+    let db = Database::new();
+    let (mut app, id) = crashed_before_journal(&db);
+    let durable = anchor_rows(&app);
+    super::features::test_hooks::with_link(attachment_link_hook, || {
+        for (message, sent) in [
+            ("sans-ancre", Some(anchor("Confort"))),
+            ("ancre", None),
+            ("ancre", Some(anchor("Famille"))),
+        ] {
+            assert_eq!(
+                post(&mut app, "/api/send", resend(&id, message, sent)),
+                Err(409)
+            );
+            assert!(app.reader.list_submissions().unwrap().is_empty());
+            assert_eq!(anchor_rows(&app), durable);
+        }
+    });
+}
+
 #[test]
 fn timeline_kind_collisions_return_conflict_in_both_directions() {
     let db = Database::new();

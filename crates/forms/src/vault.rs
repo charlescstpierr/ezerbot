@@ -110,7 +110,7 @@ impl Vault {
     /// atomic. Recover a zero-length file left by an interrupted older initializer;
     /// refuse all other corrupt content. Missing data after open fails closed.
     pub fn open(path: &Path) -> Result<Self> {
-        let _guard = access();
+        let guard = access();
         let path = std::env::current_dir()?.join(path);
         if path.file_name().is_none() {
             return Err(invalid("secret vault requires a file path"));
@@ -127,6 +127,11 @@ impl Vault {
             refuse_keychain: false,
         };
         let _file_guard = vault.lock_file(true)?;
+        // The companion lock keeps every other opener of this vault out, so the
+        // thread mutex is released before the scan of the parent directory. That
+        // scan costs time proportional to the directory, and holding the
+        // process-wide mutex through it made every other vault wait for it.
+        drop(guard);
         vault.cleanup_temporaries()?;
         let initialize = match checked_file(&vault.path, false) {
             Ok(file) => file.metadata()?.len() == 0,
@@ -449,6 +454,8 @@ impl Vault {
     }
 
     fn cleanup_temporaries(&self) -> Result<()> {
+        #[cfg(test)]
+        test_support::pause_cleanup(&self.path);
         let parent = self.path.parent().unwrap();
         let mut prefix = self.path.file_name().unwrap().to_os_string();
         prefix.push(".");
@@ -684,6 +691,37 @@ pub(crate) mod test_support {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    type Pause = (
+        PathBuf,
+        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    );
+    static PAUSE: Mutex<Option<Pause>> = Mutex::new(None);
+    /// Makes the cleanup scan of one vault wait until released, so a test can
+    /// observe what other vaults do meanwhile. Returns the signal that the scan
+    /// was entered and the way to release it.
+    pub(super) fn hold_cleanup(
+        path: &Path,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *PAUSE.lock().unwrap() = Some((path.to_owned(), entered_tx, release_rx));
+        (entered, release)
+    }
+    pub(super) fn pause_cleanup(path: &Path) {
+        let pause = {
+            let mut slot = PAUSE.lock().unwrap();
+            if slot.as_ref().is_some_and(|(held, ..)| held == path) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered, release)) = pause {
+            let _ = entered.send(());
+            let _ = release.recv_timeout(std::time::Duration::from_secs(20));
+        }
+    }
     pub(crate) struct TestVault {
         directory: PathBuf,
         pub(crate) vault: Vault,
@@ -1008,6 +1046,45 @@ mod tests {
         assert_eq!(
             crate::redact::redact(&reopened, "test-value").unwrap(),
             "[...]"
+        );
+    }
+
+    #[test]
+    fn a_vault_scanning_its_directory_does_not_hold_up_another_vault() {
+        let directory = std::env::temp_dir().join(format!(
+            "grokbot-vault-scan-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let slow = directory.join("slow.secrets.json");
+        let (entered, release) = test_support::hold_cleanup(&slow);
+        let scanning = std::thread::spawn({
+            let slow = slow.clone();
+            move || Vault::open(&slow).map(|_| ())
+        });
+        entered
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the first vault never reached its directory scan");
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let other = std::thread::spawn(move || {
+            let other = TestVault::new();
+            done_tx
+                .send(other.vault.list().map(|list| list.len()))
+                .unwrap();
+        });
+        let finished = done.recv_timeout(std::time::Duration::from_secs(5));
+        release.send(()).unwrap();
+        scanning.join().unwrap().unwrap();
+        other.join().unwrap();
+        let _ = fs::remove_dir_all(&directory);
+        assert_eq!(
+            finished
+                .expect("another vault waited for a directory scan it does not share")
+                .unwrap(),
+            0
         );
     }
 

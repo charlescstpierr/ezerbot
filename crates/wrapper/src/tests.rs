@@ -2463,3 +2463,46 @@ fn attachment_roots(app: &App) -> std::collections::HashSet<String> {
         .map(|row| row.unwrap())
         .collect()
 }
+
+#[test]
+fn connector_install_text_is_served_once_not_with_every_state() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    let cards = state["mcp"]["catalogue"].as_array().unwrap();
+    assert!(cards.len() >= 10);
+    for card in cards {
+        for key in ["setup", "scopes_label", "license", "source"] {
+            assert!(
+                card.get(key).is_none(),
+                "{} still carries {key}",
+                card["id"]
+            );
+        }
+    }
+    let served = app.api("POST", "/api/connectors/details", b"{}").unwrap();
+    let details = served["details"].as_array().unwrap();
+    // Every card of the state has its install text, none is empty.
+    for card in cards {
+        let id = card["id"].as_str().unwrap();
+        let found = details
+            .iter()
+            .find(|d| d["id"] == id)
+            .unwrap_or_else(|| panic!("no details for {id}"));
+        for key in ["setup", "license", "source"] {
+            assert!(
+                found[key].as_str().is_some_and(|text| !text.is_empty()),
+                "{id} has no {key}"
+            );
+        }
+    }
+    let by = |id: &str| details.iter().find(|d| d["id"] == id).unwrap();
+    assert_eq!(
+        by("slack")["scopes_label"],
+        "Lecture des canaux et publication de messages, choisies pendant le consentement Slack"
+    );
+    assert_eq!(
+        by("linear")["scopes_label"],
+        "read issues:create comments:create"
+    );
+}

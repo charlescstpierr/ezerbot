@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { test, after } from "node:test";
-import { fileURLToPath } from "node:url";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createServer } from "vite";
+import { createTestServer } from "./vite-test-server.js";
 import react from "@vitejs/plugin-react";
 
 const listeners = { addEventListener() {}, removeEventListener() {} };
@@ -40,14 +39,7 @@ function threadSignInOnly() {
   };
 }
 
-const vite = await createServer({
-  root: fileURLToPath(new URL("..", import.meta.url)),
-  configFile: false,
-  plugins: [threadSignInOnly(), react()],
-  server: { middlewareMode: true },
-  logLevel: "error",
-  optimizeDeps: { noDiscovery: true },
-});
+const vite = await createTestServer({ plugins: [threadSignInOnly(), react()] });
 after(() => vite.close());
 const { Thread } = await vite.ssrLoadModule("/src/Thread.jsx");
 

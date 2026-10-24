@@ -33,8 +33,8 @@
       });
     });
     const xs = [graph.center, ...graph.groups, ...graph.nodes].map((item) => item.x), ys = [graph.center, ...graph.groups, ...graph.nodes].map((item) => item.y);
-    const x = Math.min(...xs) - 100, y = Math.min(...ys) - 50;
-    graph.bounds = { x, y, w: Math.max(...xs) + 100 - x, h: Math.max(...ys) + 70 - y };
+    const x = Math.min(...xs) - 70, y = Math.min(...ys) - 50;
+    graph.bounds = { x, y, w: Math.max(...xs) + 70 - x, h: Math.max(...ys) + 70 - y };
     return graph;
   }
   // Le texte d'un souvenir trouvé, raccourci à un mot entier.
@@ -48,7 +48,12 @@
   const kept = { zoom: 1, ox: 0, oy: 0 }; // le cadrage survit au redessin, par exemple à chaque frappe de la recherche
   // `options.matches` : ids des souvenirs trouvés (Set) ; ils ressortent avec leur texte, le reste s'estompe. Absent : rien ne change.
   function view(facts, options) {
-    const graph = buildGraph(facts, options), box = graph.bounds, matches = options?.matches || null;
+    const graph = buildGraph(facts, options), matches = options?.matches || null, box = { ...graph.bounds };
+    for (const n of graph.nodes) { // le texte d'un résultat déborde de son point : le cadre lui garde de la place
+      if (!matches?.has(n.id)) continue;
+      const x0 = Math.min(box.x, n.x - 150), y0 = Math.min(box.y, n.y - 40), x1 = Math.max(box.x + box.w, n.x + 150), y1 = Math.max(box.y + box.h, n.y + 50);
+      Object.assign(box, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+    }
     const make = (tag, attrs = {}, text) => {
       const el = document.createElementNS(SVG, tag);
       for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value);

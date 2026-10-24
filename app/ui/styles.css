@@ -647,6 +647,10 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   }
   .composer-model:has([data-picker="speed"]) .composer-bot { min-width: 0; }
 }
+/* De 761 à 900 le plancher de 120 px remet le titre sous les actions, surtout quand un compteur de non-lus élargit la cloche. Sans plancher, l'espace de travail cède d'abord (flex-shrink sous 1100 px), puis le titre s'ellipse. Le banc de base n'a pas la cloche : son titre garde 120 px. */
+@media (min-width: 761px) and (max-width: 900px) {
+  .topbar:has(.notifications-icon) h1 { min-width: 0; }
+}
 @media (max-width: 370px) {
   .welcome h2 { font-size: 26px; }
   .welcome { width: calc(100% - 30px); }

@@ -25,7 +25,7 @@ function chromeBinary() {
   return found || "google-chrome";
 }
 
-// The header of the app as it stands at 820 px: Notifications, Créer un groupe, Membres,
+// The header of the app as it stands at 820 px: the Notifications bell, Créer un groupe, Membres,
 // the ChatGPT badge and the menu. With the call, the real voice-call.js mounts into it.
 function page(withCall) {
   const script = withCall ? `<script>
@@ -49,6 +49,7 @@ function page(withCall) {
   <meta charset="utf-8">
   <link rel="stylesheet" href="file://${UI}/styles.css">
   <link rel="stylesheet" href="file://${UI}/panels/voice-call.css">
+  <link rel="stylesheet" href="file://${UI}/panels/notifications.css">
 </head>
 <body>
   <aside class="sidebar"></aside>
@@ -56,7 +57,7 @@ function page(withCall) {
     <header class="topbar">
       <div class="topbar-title"><button class="icon-button sidebar-toggle" type="button" aria-label="Ouvrir les conversations"></button><button class="workspace-label" type="button" disabled>Espace personnel</button><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">Nouvelle conversation</h1></div>
       <div class="topbar-actions">
-        <button class="tool-pill notifications-button" type="button">Notifications</button>
+        <button class="tool-pill notifications-button" type="button" aria-label="Notifications"><span class="notifications-icon" aria-hidden="true"><svg class="icon"></svg></span><span class="notifications-label">Notifications</span></button>
         <button class="tool-pill" type="button">Créer un groupe</button>
         <button class="tool-pill" type="button">Membres</button>
         <button class="icon-button" id="conversation-menu-button" type="button" aria-label="Actions de la conversation" aria-expanded="false">…</button>
@@ -76,7 +77,9 @@ const REPORT = `(async () => {
   const header = [...document.querySelectorAll(".topbar-actions > *")].map((node) => ({
     text: node.textContent.trim() || node.getAttribute("aria-label"), width: box(node).width,
   }));
-  const report = { width: innerWidth, titleClient: title.clientWidth, titleScroll: title.scrollWidth, header };
+  const shown = [...document.querySelectorAll(".topbar-actions > *")].filter((node) => box(node).width > 0);
+  const titleClear = box(title).right <= Math.min(...shown.map((node) => box(node).left)) + 0.5;
+  const report = { width: innerWidth, titleClient: title.clientWidth, titleScroll: title.scrollWidth, titleClear, header };
   const toggle = document.querySelector(".topbar-actions .voice-call-toggle");
   if (!toggle) return report;
   report.toggle = { width: box(toggle).width, label: toggle.getAttribute("aria-label") };
@@ -190,9 +193,10 @@ test("at 820 px the call costs the header no width, and stays reachable from the
   const withCall = await measure(820, true);
   const where = JSON.stringify({ without, withCall });
   assert.equal(without.width, 820, where);
-  assert.equal(without.titleScroll <= without.titleClient + 1, true, `le titre tient sans l’appel : ${where}`);
+  // Le titre s'ellipse plutôt que de passer sous les actions : un titre « qui tient » en débordant sous la cloche est recouvert.
+  assert.equal(without.titleClear, true, `le titre reste dégagé sans l’appel : ${where}`);
   assert.equal(withCall.titleClient, without.titleClient, `même largeur de titre avec l’appel : ${where}`);
-  assert.equal(withCall.titleScroll <= withCall.titleClient + 1, true, where);
+  assert.equal(withCall.titleClear, true, where);
   assert.deepEqual(withCall.header.filter((node) => node.width > 0), without.header, `le reste de l’en-tête est identique : ${where}`);
   assert.equal(withCall.toggle.width, 0, where);
   assert.deepEqual([withCall.item.name, withCall.item.pressed, withCall.item.disabled], ["Appel vocal", "false", false], where);

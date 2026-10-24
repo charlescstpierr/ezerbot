@@ -17,8 +17,14 @@
     if (!bridge()) return { status: "unavailable" };
     return await bridge().postMessage({ command, ...fields });
   }
-  const button = node("button", "Notifications", "tool-pill notifications-button");
+  const button = node("button", null, "tool-pill notifications-button");
   button.type = "button";
+  // Sous 1100 px seule la cloche reste dans l'en-tête ; le nom accessible garde le libellé.
+  const bell = node("span", null, "notifications-icon"); bell.setAttribute("aria-hidden", "true");
+  bell.innerHTML = '<svg class="icon"><use href="#i-bell"/></svg>';
+  const caption = node("span", "Notifications", "notifications-label");
+  button.append(bell, caption);
+  button.setAttribute("aria-label", "Notifications");
   button.setAttribute("aria-haspopup", "dialog");
   document.querySelector(".topbar-actions").prepend(button);
   const dialog = node("dialog", null, "dialog notifications-dialog");
@@ -42,7 +48,7 @@
     const unread = data?.unread || 0;
     const badge = node("span", unread > 999 ? "999+" : String(unread), "notification-count");
     badge.hidden = !unread; badge.setAttribute("aria-hidden", "true");
-    button.replaceChildren(node("span", "Notifications"), badge);
+    button.replaceChildren(bell, caption, badge);
     button.classList.toggle("has-unread", unread > 0);
     const paused = data?.settings?.dnd;
     button.title = paused ? "Ne pas déranger : alertes suspendues" : "Consulter les événements non lus";

@@ -1639,6 +1639,7 @@ impl RunServices for Services<'_> {
                 !super::screen::is_tool(&s.name)
                     || super::screen::enabled(self.connection, &run.bot_id)
             })
+            .map(gated)
             .collect()
     }
     fn call_tool(
@@ -3951,5 +3952,31 @@ mod title_tests {
         );
         let long = clean_title(&"mot ".repeat(40)).unwrap();
         assert!(long.chars().count() <= 60 && long.ends_with('…'));
+    }
+}
+
+/// Un outil interdit passe toujours par la porte, même déclaré « sans approbation ».
+fn gated(mut spec: ToolSpec) -> ToolSpec {
+    spec.requires_approval |= grokbot_forms::forbidden::classify(&spec.name).is_some();
+    spec
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    fn spec(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.into(),
+            description: String::new(),
+            schema: json!({}),
+            requires_approval: false,
+        }
+    }
+
+    #[test]
+    fn a_forbidden_tool_declared_without_approval_reaches_the_gate() {
+        assert!(gated(spec("stripe_create_payment")).requires_approval);
+        assert!(!gated(spec("stripe_list_payments")).requires_approval);
     }
 }

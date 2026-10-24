@@ -24,7 +24,7 @@ use grokbot_engine::{
     contracts::{ApprovalCheck, AuthorizedBy, ToolCall},
     model::Run,
 };
-use grokbot_forms::{approvals, policy, redact::redact_value};
+use grokbot_forms::{approvals, forbidden::Forbidden, policy, redact::redact_value};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -207,7 +207,7 @@ pub(super) fn check(
             reason: PROTECTED.into(),
         }));
     }
-    record(ctx, run, call, source)?;
+    record(ctx, run, call, source, detail(ctx, call))?;
     // Un geste d'écran reste lié à la session vivante à l'admission : si elle est
     // révoquée puis remplacée, le geste en attente n'agit pas dans la nouvelle.
     let session = super::screen::is_tool(&call.name)
@@ -313,8 +313,29 @@ pub fn redact_log(
     Ok(())
 }
 
-fn record(ctx: &Context<'_>, run: &Run, call: &ToolCall, source: &str) -> Result<(), ApiError> {
-    let detail = detail(ctx, call);
+/// Le refus d'une action interdite entre au même journal que les actions du mode,
+/// en YOLO comme en « Demander ».
+pub(super) fn record_forbidden(
+    ctx: &Context<'_>,
+    run: &Run,
+    call: &ToolCall,
+    family: Forbidden,
+) -> Result<(), ApiError> {
+    let detail = format!(
+        "Refusé (action interdite : {}) · {}",
+        family.label(),
+        detail(ctx, call)
+    );
+    record(ctx, run, call, "forbidden", detail)
+}
+
+fn record(
+    ctx: &Context<'_>,
+    run: &Run,
+    call: &ToolCall,
+    source: &str,
+    detail: String,
+) -> Result<(), ApiError> {
     ctx.connection.execute(
         "INSERT OR IGNORE INTO wrapper_yolo_log(at,bot_id,conversation_id,run_id,call_id,tool,summary,detail,source)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",

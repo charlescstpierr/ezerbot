@@ -108,6 +108,17 @@ test("le graphe n'est pas laissé affiché : l'écran s'ouvre en Liste", async (
   assert.deepEqual(h.items(), ["f2", "f3"]);
 });
 
+test("rien à ouvrir depuis le Graphe : la Liste s'affiche et le focus est sur son onglet", async () => {
+  const h = await harness();
+  await h.openWith(["f1"]);
+  h.screen().querySelector(".is-graph").click();
+  h.screen().querySelector(".is-graph").focus();
+  await h.openWith(["gone"]);
+  assert.equal(h.screen().querySelector(".is-list").attributes["aria-pressed"], "true");
+  assert.equal(Element.active, h.screen().querySelector(".is-list"));
+  assert.equal(h.shown(), false);
+});
+
 test("un souvenir oublié depuis la réponse : message lisible, aucun panneau vide", async () => {
   const h = await harness();
   await h.settle();

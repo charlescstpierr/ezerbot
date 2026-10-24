@@ -51,7 +51,7 @@
     paint();
     const first = scopeOf(used).present[0];
     if (first) detail?.open(first);
-    else detail?.close();
+    else { detail?.close(); screen.querySelector(".is-list").focus?.(); } // la Liste vient de remplacer le Graphe : le focus suit l'onglet affiché
   }
   // Ce que la demande vaut d'après la liste lue : les souvenirs qui existent encore (`present`, dans l'ordre du rappel), ceux qui manquent,
   // et `ids` (Set) quand la Liste ne doit montrer qu'eux : plusieurs souvenirs demandés, au moins un présent, « Tout afficher » pas encore pressé.

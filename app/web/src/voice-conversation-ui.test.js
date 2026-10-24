@@ -553,3 +553,15 @@ test("an announcement heard to the end is not said again when Charles cuts the b
   f.source.transcript="";f.clock=2000;await f.tick();await f.tick();
   assert.deepEqual(spoken(f).filter(text=>text===phrase),[phrase]);
 });
+
+test("an announcement whose speak is still unanswered when Charles leaves is said at the relaunch",async()=>{
+  const f=fixture();const [edge]=tasksOf(f,task("t1","running"));
+  await cls(f.root,"voice-session-toggle").onclick();await f.tick();
+  edge.status={status:"done",result:"Fait."};f.hold("speak");
+  const pending=f.tick();await new Promise(r=>setImmediate(r));
+  assert.deepEqual(spoken(f),[phrase]);
+  all(f.root).find(e=>e.textContent==="Quitter").onclick();
+  f.release();await pending;
+  await cls(f.root,"voice-session-toggle").onclick();await f.tick();
+  assert.deepEqual(spoken(f),[phrase,phrase]);
+});

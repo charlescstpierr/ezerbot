@@ -34,8 +34,9 @@
   let voicesLoaded = false;
   // A sub-task of this thread that ended (its card in the thread, already polled) is told once per session.
   // `announcing` is its sentence in the bridge (`speech`, and `cut`, the last cut when it was queued): told only
-  // once the bridge read that sentence to the end, told again when a cut drops it. `owed` keeps the ones cut or left
-  // unheard until one is heard, so a new session says them again. Announcements the bar shows queue up, each for its 5 s.
+  // once the bridge read that sentence to the end, told again when a cut drops it. `owed` holds every announcement
+  // sent and not yet heard to the end (cut, failure, a session left): a new session says them again.
+  // Announcements the bar shows queue up, each for its 5 s.
   // Charles is heard when `barged` moves or words come in: the silence starts after that.
   let toldTasks = new Set(), announcements = [], announcing = null, heardAt = -Infinity;
   const owed = new Set();
@@ -93,7 +94,6 @@
     clearTimeout(timer); epoch++;
     if (token) bridge("cancel").catch(() => {});
     token = ""; reader = null; conversationId = null; sending = false; paused = false;
-    if (announcing) owed.add(announcing.id);
     inputHeld = false; followResumedReply = false; muted = muting = false; announcements = []; announcing = null;
     if (clear) { phase = "idle"; detail = ""; liveText = ""; scopeKey = null; }
     render(); panels.composerChanged();
@@ -189,7 +189,7 @@
       if (rev !== epoch) return;
       if (announcing && result.token === token) {
         if (result.speech_cut > announcing.cut && result.speech_cut <= announcing.speech) {
-          owed.add(announcing.id); toldTasks.delete(announcing.id); announcements = announcements.filter(shown => shown !== announcing.shown); announcing = null;
+          toldTasks.delete(announcing.id); announcements = announcements.filter(shown => shown !== announcing.shown); announcing = null;
         } else if (result.speech_heard >= announcing.speech) { owed.delete(announcing.id); announcing = null; }
       }
       noteFallback(result);
@@ -241,9 +241,10 @@
         ? endedTasks().findLast(edge => !toldTasks.has(edge.id)) : null;
       if (ended) {
         const text = announcementText(ended), settings = botVoice();
+        owed.add(ended.id);
         const receipt = await bridge("speak", {text,voice:settings.voice,speed:settings.speed,language:settings.language,barge:lastBarge});
         if (rev !== epoch) return;
-        if (errors[receipt.status]) { owed.add(ended.id); fail(receipt.status); return; }
+        if (errors[receipt.status]) { fail(receipt.status); return; }
         if (receipt.speech_id) {
           const shown = {text, until:Math.max(Date.now(), announcements.at(-1)?.until ?? 0) + ANNOUNCEMENT_MS};
           toldTasks.add(ended.id); announcements.push(shown); announcing = {id:ended.id, speech:receipt.speech_id, cut:receipt.speech_cut, shown};

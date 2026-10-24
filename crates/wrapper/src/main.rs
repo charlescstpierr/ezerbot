@@ -12,17 +12,131 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 
 mod signature;
 
-const INDEX: &str = include_str!("../../../app/ui/index.html");
-const FLOATING: &str = include_str!("../../../app/ui/floating.html");
-const STYLES: &str = include_str!("../../../app/ui/styles.css");
-const SCRIPT: &str = include_str!("../../../app/ui/app.js");
-const MASCOT_SCRIPT: &str = include_str!("../../../app/ui/mascot.js");
-const MASCOT_STYLES: &str = include_str!("../../../app/ui/mascot.css");
-// Built from app/web by `npm run build`.
-const CHAT_SCRIPT: &str = include_str!("../../../app/ui/chat.js");
-const CHAT_STYLES: &str = include_str!("../../../app/ui/chat.css");
-const PANELS_SCRIPT: &str = include_str!(concat!(env!("OUT_DIR"), "/panels.js"));
-const PANELS_STYLES: &str = include_str!(concat!(env!("OUT_DIR"), "/panels.css"));
+const HTML: &str = "text/html; charset=utf-8";
+const JS: &str = "text/javascript; charset=utf-8";
+const CSS: &str = "text/css; charset=utf-8";
+
+/// A served static file. `gzip` is computed by build.rs and kept only when it is
+/// smaller than `identity`.
+struct Asset {
+    path: &'static str,
+    content_type: &'static str,
+    identity: &'static [u8],
+    gzip: Option<&'static [u8]>,
+}
+
+const fn variant(bytes: &'static [u8]) -> Option<&'static [u8]> {
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(bytes)
+    }
+}
+
+macro_rules! asset {
+    ($path:literal, $type:expr, $folder:literal, $key:literal, $name:literal) => {
+        Asset {
+            path: $path,
+            content_type: $type,
+            identity: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../app/",
+                $folder,
+                "/",
+                $name
+            )),
+            gzip: variant(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/gzip/",
+                $key,
+                "/",
+                $name,
+                ".gz"
+            ))),
+        }
+    };
+    ($path:literal, $type:expr, ui $name:literal) => {
+        asset!($path, $type, "ui", "ui", $name)
+    };
+    ($path:literal, $type:expr, public $name:literal) => {
+        asset!($path, $type, "web/public", "public", $name)
+    };
+    ($path:literal, $type:expr, built $name:literal) => {
+        Asset {
+            path: $path,
+            content_type: $type,
+            identity: include_bytes!(concat!(env!("OUT_DIR"), "/", $name)),
+            gzip: variant(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/gzip/",
+                $name,
+                ".gz"
+            ))),
+        }
+    };
+    ($path:literal, $type:expr, png $name:literal) => {
+        Asset {
+            path: $path,
+            content_type: $type,
+            identity: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../app/web/public/",
+                $name
+            )),
+            gzip: None,
+        }
+    };
+}
+
+/// Every file the UI is served from. A new path is added here and only here.
+// chat.js and chat.css are built from app/web by `npm run build`.
+static ASSETS: &[Asset] = &[
+    asset!("/", HTML, ui "index.html"),
+    asset!("/floating", HTML, ui "floating.html"),
+    asset!("/styles.css", CSS, ui "styles.css"),
+    asset!("/app.js", JS, ui "app.js"),
+    asset!("/mascot.js", JS, ui "mascot.js"),
+    asset!("/mascot.css", CSS, ui "mascot.css"),
+    asset!("/chat.js", JS, ui "chat.js"),
+    asset!("/chat.css", CSS, ui "chat.css"),
+    asset!("/panels.js", JS, built "panels.js"),
+    asset!("/panels.css", CSS, built "panels.css"),
+    asset!("/iphone.js", JS, ui "iphone.js"),
+    asset!("/iphone.css", CSS, ui "iphone.css"),
+    asset!("/sw.js", JS, public "sw.js"),
+    asset!("/manifest.webmanifest", "application/manifest+json", public "manifest.webmanifest"),
+    asset!("/icon-192.png", "image/png", png "icon-192.png"),
+    asset!("/icon-512.png", "image/png", png "icon-512.png"),
+];
+
+/// Whether an Accept-Encoding value allows gzip. An explicit gzip entry wins
+/// over `*`; q=0 refuses; an unreadable weight counts as a refusal.
+fn accepts_gzip(accept_encoding: Option<&str>) -> bool {
+    let mut wildcard = None;
+    for item in accept_encoding.unwrap_or("").split(',') {
+        let mut parts = item.split(';');
+        let coding = parts.next().unwrap_or("").trim();
+        let weight = parts
+            .filter_map(|parameter| parameter.split_once('='))
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case("q"))
+            .map_or(1.0, |(_, value)| value.trim().parse::<f32>().unwrap_or(0.0));
+        if coding.eq_ignore_ascii_case("gzip") {
+            return weight > 0.0;
+        }
+        if coding == "*" {
+            wildcard = Some(weight > 0.0);
+        }
+    }
+    wildcard.unwrap_or(false)
+}
+
+/// What an asset reply adds to the shared headers.
+#[derive(Clone, Copy, Default)]
+struct Negotiated {
+    gzip: bool,
+    vary: bool,
+}
+
 const TICK_INTERVAL: Duration = Duration::from_millis(500);
 
 struct Options {
@@ -110,7 +224,7 @@ fn payload(
     port: u16,
     app: &mut App,
     remote: bool,
-) -> Result<ApiResponse, ApiError> {
+) -> Result<(ApiResponse, Negotiated), ApiError> {
     let method = request.method().as_str().to_owned();
     let path = request.url().to_owned();
     let headers: Vec<_> = request
@@ -139,55 +253,26 @@ fn payload(
         } else {
             path.as_str()
         };
-        let asset = match asset_path {
-            "/" => Some((INDEX, "text/html; charset=utf-8")),
-            "/floating" => Some((FLOATING, "text/html; charset=utf-8")),
-            "/styles.css" => Some((STYLES, "text/css; charset=utf-8")),
-            "/app.js" => Some((SCRIPT, "text/javascript; charset=utf-8")),
-            "/mascot.js" => Some((MASCOT_SCRIPT, "text/javascript; charset=utf-8")),
-            "/mascot.css" => Some((MASCOT_STYLES, "text/css; charset=utf-8")),
-            "/chat.js" => Some((CHAT_SCRIPT, "text/javascript; charset=utf-8")),
-            "/chat.css" => Some((CHAT_STYLES, "text/css; charset=utf-8")),
-            "/panels.js" => Some((PANELS_SCRIPT, "text/javascript; charset=utf-8")),
-            "/panels.css" => Some((PANELS_STYLES, "text/css; charset=utf-8")),
-            "/iphone.js" => Some((
-                include_str!("../../../app/ui/iphone.js"),
-                "text/javascript; charset=utf-8",
-            )),
-            "/iphone.css" => Some((
-                include_str!("../../../app/ui/iphone.css"),
-                "text/css; charset=utf-8",
-            )),
-            "/sw.js" => Some((
-                include_str!("../../../app/web/public/sw.js"),
-                "text/javascript; charset=utf-8",
-            )),
-            "/manifest.webmanifest" => Some((
-                include_str!("../../../app/web/public/manifest.webmanifest"),
-                "application/manifest+json",
-            )),
-            _ => None,
-        };
-        let icon = match path.as_str() {
-            "/icon-192.png" => {
-                Some(include_bytes!("../../../app/web/public/icon-192.png").as_slice())
-            }
-            "/icon-512.png" => {
-                Some(include_bytes!("../../../app/web/public/icon-512.png").as_slice())
-            }
-            _ => None,
-        };
-        if let Some(bytes) = icon {
-            return Ok(ApiResponse::Bytes {
-                content_type: "image/png".into(),
-                body: bytes.to_vec(),
-            });
-        }
-        if let Some((content, content_type)) = asset {
-            return Ok(ApiResponse::Bytes {
-                content_type: content_type.into(),
-                body: content.as_bytes().to_vec(),
-            });
+        if let Some(asset) = ASSETS.iter().find(|asset| asset.path == asset_path) {
+            let accept_encoding = headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("accept-encoding"))
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let gzip = asset
+                .gzip
+                .filter(|_| accepts_gzip(Some(accept_encoding.as_str())));
+            return Ok((
+                ApiResponse::Bytes {
+                    content_type: asset.content_type.into(),
+                    body: gzip.unwrap_or(asset.identity).to_vec(),
+                },
+                Negotiated {
+                    gzip: gzip.is_some(),
+                    vary: asset.gzip.is_some(),
+                },
+            ));
         }
     }
     let mut body = Vec::new();
@@ -205,6 +290,7 @@ fn payload(
     } else {
         app.api_response(&method, &path, &body)
     }
+    .map(|response| (response, Negotiated::default()))
 }
 
 /// tiny_http offers no read timeout, so a body reader lives until its sender
@@ -590,13 +676,14 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             app.set_state_client(remote, client.as_deref());
         }
         let mut cookie = None;
+        let mut negotiated = Negotiated::default();
         let (mut status, mut body, content_type) = match payload(
             &mut request,
             port,
             &mut app,
             remote,
         ) {
-            Ok(mut response) => {
+            Ok((mut response, reply)) => {
                 if remote && request.url() == "/api/iphone/exchange" {
                     if let ApiResponse::Json(ref mut value) = response {
                         if let Some(credential) = value
@@ -617,6 +704,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
                 let (body, content_type) = response.into_parts();
                 state_elapsed = state_started.map(|started| started.elapsed());
                 if header_safe(&content_type) {
+                    negotiated = reply;
                     (200, body, content_type)
                 } else {
                     eprintln!("Type de contenu invalide refusé.");
@@ -668,6 +756,16 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         ] {
             response.add_header(Header::from_bytes(name, value).expect("validated response header"));
         }
+        if negotiated.vary {
+            response.add_header(
+                Header::from_bytes("Vary", "Accept-Encoding").expect("validated response header"),
+            );
+        }
+        if negotiated.gzip {
+            response.add_header(
+                Header::from_bytes("Content-Encoding", "gzip").expect("validated response header"),
+            );
+        }
         let result = if remote {
             respond_remote(request, response)
         } else {
@@ -678,6 +776,80 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         }
         if let Some(elapsed) = state_elapsed {
             app.log_state_served(elapsed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::{accepts_gzip, ASSETS};
+    use std::io::Read;
+
+    #[test]
+    fn gzip_is_negotiated_from_accept_encoding() {
+        for (value, expected) in [
+            (None, false),
+            (Some(""), false),
+            (Some("gzip"), true),
+            (Some("GZip"), true),
+            (Some("  gzip  "), true),
+            (Some("gzip, deflate, br"), true),
+            (Some("deflate, gzip;q=0.5"), true),
+            (Some("gzip ; q = 0.001"), true),
+            (Some("gzip;q=1"), true),
+            (Some("gzip;q=0"), false),
+            (Some("gzip;q=0.0"), false),
+            (Some("gzip;Q=0"), false),
+            (Some("gzip;q=oops"), false),
+            (Some("deflate, br"), false),
+            (Some("identity"), false),
+            (Some("*"), true),
+            (Some("*;q=0"), false),
+            (Some("*;q=0.1, deflate"), true),
+            (Some("gzip;q=0, *"), false),
+            (Some("*;q=0, gzip"), true),
+            (Some("gzipped"), false),
+        ] {
+            assert_eq!(accepts_gzip(value), expected, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn served_paths_are_the_explicit_list_and_gzip_variants_decode_to_identity() {
+        let mut paths: Vec<_> = ASSETS.iter().map(|asset| asset.path).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            [
+                "/",
+                "/app.js",
+                "/chat.css",
+                "/chat.js",
+                "/floating",
+                "/icon-192.png",
+                "/icon-512.png",
+                "/iphone.css",
+                "/iphone.js",
+                "/manifest.webmanifest",
+                "/mascot.css",
+                "/mascot.js",
+                "/panels.css",
+                "/panels.js",
+                "/styles.css",
+                "/sw.js",
+            ]
+        );
+        for asset in ASSETS {
+            assert!(!asset.identity.is_empty(), "{}", asset.path);
+            assert!(!asset.path.ends_with(".png") || asset.gzip.is_none());
+            if let Some(gzip) = asset.gzip {
+                assert!(gzip.len() < asset.identity.len(), "{}", asset.path);
+                let mut decoded = Vec::new();
+                flate2::read::GzDecoder::new(gzip)
+                    .read_to_end(&mut decoded)
+                    .unwrap();
+                assert_eq!(decoded, asset.identity, "{}", asset.path);
+            }
         }
     }
 }

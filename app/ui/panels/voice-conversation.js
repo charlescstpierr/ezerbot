@@ -34,8 +34,8 @@
   let voicesLoaded = false;
   // A sub-task of this thread that ended (its card in the thread, already polled) is told once per session.
   // `announcing` is its sentence in the bridge (`speech`, and `cut`, the last cut when it was queued): told only
-  // once the bridge read that sentence to the end, told again when a cut drops it. `owed` keeps the ones a session
-  // ended before hearing, which a new session says again. Announcements the bar shows queue up, each for its 5 s.
+  // once the bridge read that sentence to the end, told again when a cut drops it. `owed` keeps the ones cut or left
+  // unheard until one is heard, so a new session says them again. Announcements the bar shows queue up, each for its 5 s.
   // Charles is heard when `barged` moves or words come in: the silence starts after that.
   let toldTasks = new Set(), announcements = [], announcing = null, heardAt = -Infinity;
   const owed = new Set();
@@ -189,7 +189,7 @@
       if (rev !== epoch) return;
       if (announcing && result.token === token) {
         if (result.speech_cut > announcing.cut && result.speech_cut <= announcing.speech) {
-          toldTasks.delete(announcing.id); announcements = announcements.filter(shown => shown !== announcing.shown); announcing = null;
+          owed.add(announcing.id); toldTasks.delete(announcing.id); announcements = announcements.filter(shown => shown !== announcing.shown); announcing = null;
         } else if (result.speech_heard >= announcing.speech) { owed.delete(announcing.id); announcing = null; }
       }
       noteFallback(result);

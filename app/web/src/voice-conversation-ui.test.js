@@ -53,6 +53,8 @@ function fixture() {
   const heard=(count=queue.length)=>{source.speech_heard=queue.splice(0,count).at(-1) ?? source.speech_heard;source.speaking=queue.length>0;};
   // Charles speaks: the native bridge cuts what is queued at his first word.
   const talk=text=>{source.barged++;source.transcript=text;cut();};
+  // A native failure cancels the session, which cuts what is queued.
+  const failWith=status=>{cut();source.status=status;};
   const panels={
     register(p){ panel=p;p.composer.mount(composer,context);p.onState(context.state,context);},
     composerChanged(){}, notify(text){notices.push(text);}, async refresh(){}, async api(path,body){calls.push({path,...body});if(path==="/api/voice/bot"&&refusal)throw new Error(refusal);if(path==="/api/conversations")return {conversation:{id:"created"}};},
@@ -66,7 +68,7 @@ function fixture() {
     Date:{now:()=>clock},crypto:{randomUUID:()=>"token"},setTimeout(fn,ms){if(ms===100){timer=fn;return 1;}limits.push(fn);return limits.length+1;},clearTimeout(id){if(id>1)limits[id-2]=null;else timer=null;},
   });
   const section=bot=>{const container=new Element("div");const cleanup=panel.botSection(bot,container,context);return {container,cleanup};};
-  return {section,heard,talk,set clock(ms){clock=ms;},set bargeOnSpeak(value){bargeOnSpeak=value;},set refuseSpeak(value){refuseSpeak=value;},hold(...commands){holding.clear();for(const command of commands)holding.add(command);},set script(fn){script=fn;},release(...commands){if(!commands.length)holding.clear();for(const late of held.splice(0))if(!commands.length||commands.includes(late.command))late.resolve();else held.push(late);},set refusal(text){refusal=text;},root,calls,sends,follows,notices,panel,set startExtras(value){startExtras=value;},setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
+  return {section,heard,talk,failWith,set clock(ms){clock=ms;},set bargeOnSpeak(value){bargeOnSpeak=value;},set refuseSpeak(value){refuseSpeak=value;},hold(...commands){holding.clear();for(const command of commands)holding.add(command);},set script(fn){script=fn;},release(...commands){if(!commands.length)holding.clear();for(const late of held.splice(0))if(!commands.length||commands.includes(late.command))late.resolve();else held.push(late);},set refusal(text){refusal=text;},root,calls,sends,follows,notices,panel,set startExtras(value){startExtras=value;},setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
     setContext(c){context=c;panel.onState(c.state,c);},tick:async()=>timer?.(),keydown:e=>keydown(e),expire(){limits.forEach((fn,i)=>{limits[i]=null;fn?.();});}};
 }
 test("end-to-end voice sends only the recognized utterance once, reads streamed sentences, pauses on approval",async()=>{
@@ -533,7 +535,7 @@ test("an announcement lost by a synthesis failure after the bridge took it is sa
   await cls(f.root,"voice-session-toggle").onclick();await f.tick();
   edge.status={status:"done",result:"Fait."};await f.tick();
   assert.deepEqual(spoken(f),[phrase]);
-  f.source.status="tts_unavailable";await f.tick();
+  f.failWith("tts_unavailable");await f.tick();
   assert.equal(f.panel.wantsPolling(),false);
   await cls(f.root,"voice-session-toggle").onclick();await f.tick();
   assert.deepEqual(spoken(f),[phrase,phrase]);

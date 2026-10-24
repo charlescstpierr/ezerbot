@@ -635,6 +635,16 @@ fn un_souvenir_ajoute_a_la_main_au_sujet_est_lu_par_ses_fils_seulement() {
     assert!(f.recall(&inside, "garde-meuble").contains("ferme à 18 h"));
     assert!(f.recall(&inside, "garde-meuble").contains("user_stated"));
     assert!(!f.recall(&outside, "garde-meuble").contains("ferme à 18 h"));
+    let all = f.app.api("GET", "/api/memory/all", b"").unwrap();
+    let in_all = all["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fact| fact["fact_id"] == added["fact"]["id"])
+        .expect("souvenir de sujet absent de /api/memory/all");
+    assert_eq!(in_all["provenance"]["source"], "user_stated");
+    assert_eq!(in_all["scope"], "topic");
+    assert_eq!(in_all["topic_id"], json!(topic));
     // Un souvenir de sujet n'entre pas dans la mémoire privée du bot.
     let private = f.post("/api/memory", json!({"bot_id": "grokbot"}));
     assert!(private["facts"].as_array().unwrap().is_empty());

@@ -177,13 +177,16 @@ pub fn routes(
                 validate_id(&input.bot_id)?;
                 app.require_bot(&input.bot_id)?;
                 // Le texte est vérifié avant toute écriture : refus clair, rien de créé.
-                let text = input.text.trim();
-                if text.is_empty() || text.chars().count() > facts::MAX_FACT_CHARS {
+                // Même plafond que l'outil `remember`, mesuré sur le texte reçu.
+                if input.text.trim().is_empty()
+                    || input.text.chars().count() > facts::MAX_FACT_CHARS
+                {
                     return Err(ApiError::new(
                         400,
                         "Le texte d'un souvenir doit contenir entre 1 et 2 000 caractères.",
                     ));
                 }
+                let text = input.text.trim();
                 let tx = super::write_transaction(&app.connection)?;
                 let fact = match input.scope {
                     AddScope::Topic => {
@@ -201,12 +204,35 @@ pub fn routes(
                                 "Un souvenir privé ne prend pas de sujet.",
                             ));
                         }
+                        let provenance = Provenance {
+                            conversation_id: None,
+                            entry_id: None,
+                            source: Source::UserStated,
+                        };
+                        let now = crate::now() as i64;
+                        // Seul un souvenir privé de ce bot compte comme doublon (jamais
+                        // un fait d'équipe). Un doublon déduit par le modèle est
+                        // confirmé : la correction le remplace, provenance « déclaré ».
                         let wanted = normalize(text);
-                        let existing = facts::list_active(&tx, &input.bot_id)?
-                            .into_iter()
-                            .find(|f| f.bot_id == input.bot_id && normalize(&f.text) == wanted);
+                        let existing =
+                            facts::list_active(&tx, &input.bot_id)?
+                                .into_iter()
+                                .find(|f| {
+                                    f.bot_id == input.bot_id
+                                        && f.scope == Scope::Private
+                                        && normalize(&f.text) == wanted
+                                });
                         let fact = match existing {
-                            Some(existing) => existing,
+                            Some(f) if f.provenance.source == Source::UserStated => f,
+                            Some(f) => facts::correct(
+                                &tx,
+                                &input.bot_id,
+                                &f.fact_id,
+                                text,
+                                &provenance,
+                                now,
+                            )
+                            .map_err(memory_error)?,
                             None => facts::remember(
                                 &tx,
                                 &Fact {
@@ -214,12 +240,8 @@ pub fn routes(
                                     bot_id: input.bot_id.clone(),
                                     scope: Scope::Private,
                                     text: text.into(),
-                                    provenance: Provenance {
-                                        conversation_id: None,
-                                        entry_id: None,
-                                        source: Source::UserStated,
-                                    },
-                                    learned_at: crate::now() as i64,
+                                    provenance,
+                                    learned_at: now,
                                     status: FactStatus::Active,
                                     sensitive: false,
                                 },

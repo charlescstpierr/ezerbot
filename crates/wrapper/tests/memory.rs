@@ -1025,6 +1025,16 @@ fn manual_add_is_declared_listed_and_found_by_recall_memory() {
     let listed = list(&mut app, "grokbot");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0]["fact_id"], added["fact"]["fact_id"]);
+    // Présent aussi dans le catalogue de tout l'espace, provenance « déclaré ».
+    let all = app.api("GET", "/api/memory/all", b"").unwrap();
+    let in_all = all["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["fact_id"] == added["fact"]["fact_id"])
+        .expect("souvenir absent de /api/memory/all");
+    assert_eq!(in_all["provenance"]["source"], "user_stated");
+    assert_eq!(in_all["scope"], "private");
     // Le même texte ne crée pas de doublon.
     let again = post(
         &mut app,
@@ -1049,6 +1059,44 @@ fn manual_add_is_declared_listed_and_found_by_recall_memory() {
 }
 
 #[test]
+fn manual_add_of_an_existing_text_keeps_scope_private_and_declares_it() {
+    let db = Database::new();
+    let mut app = db.open();
+    // Un fait déduit par le modèle, redéclaré à la main : provenance « déclaré ».
+    let inferred = done(
+        app.invoke_tool(
+            "grokbot",
+            "remember",
+            json!({"text": "Aime le thé vert", "sensitive": false, "source": "model_inferred"}),
+        )
+        .unwrap(),
+    )["fact"]
+        .clone();
+    let declared = post(
+        &mut app,
+        "/api/memory/add",
+        json!({"bot_id": "grokbot", "text": "Aime le thé vert", "scope": "private"}),
+    );
+    assert_ne!(declared["fact"]["fact_id"], inferred["fact_id"]);
+    assert_eq!(declared["fact"]["provenance"]["source"], "user_stated");
+    let listed = list(&mut app, "grokbot");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["provenance"]["source"], "user_stated");
+    // Un fait déjà partagé avec l'équipe n'est jamais renvoyé comme souvenir privé.
+    post(
+        &mut app,
+        "/api/memory/promote",
+        json!({"bot_id": "grokbot", "fact_ids": [declared["fact"]["fact_id"]]}),
+    );
+    let again = post(
+        &mut app,
+        "/api/memory/add",
+        json!({"bot_id": "grokbot", "text": "Aime le thé vert", "scope": "private"}),
+    );
+    assert_eq!(again["fact"]["scope"], "private");
+}
+
+#[test]
 fn manual_add_refuses_empty_or_oversized_text_and_creates_nothing() {
     let db = Database::new();
     let mut app = db.open();
@@ -1066,7 +1114,13 @@ fn manual_add_refuses_empty_or_oversized_text_and_creates_nothing() {
         json!({"scope": "private"}),
         json!({"scope": "topic", "topic_id": topic}),
     ] {
-        for text in ["", "   \n\t ", &"x".repeat(facts::MAX_FACT_CHARS + 1)] {
+        let padded = format!("{} ", "x".repeat(facts::MAX_FACT_CHARS));
+        for text in [
+            "",
+            "   \n\t ",
+            &"x".repeat(facts::MAX_FACT_CHARS + 1),
+            &padded,
+        ] {
             let mut body = scope.clone();
             body["bot_id"] = json!("grokbot");
             body["text"] = json!(text);

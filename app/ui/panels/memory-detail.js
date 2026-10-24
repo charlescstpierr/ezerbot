@@ -19,6 +19,7 @@
   // `facts()` donne la liste lue par l'écran, `reload()` la relit (et rend la main une fois l'écran à jour), `label` : { bot, scope, date }.
   function create({ facts, reload, label }) {
     let id = null, mode = "view", busy = false, draft = "", note = "", problem = "", shown = null, epoch = 0;
+    const inflight = new Set(); // souvenirs dont une action attend la réponse du moteur : une relecture ne les ferme pas
     const moved = new Map(); // ancien identifiant → identifiant du souvenir qui le remplace (réponse du moteur à une correction)
     const root = node("aside", "memory-detail");
     root.hidden = true;
@@ -38,6 +39,7 @@
       const fact = current();
       if (!fact) return;
       shown = JSON.stringify(fact);
+      if (!want && mode === "edit" && root.contains(document.activeElement)) want = "body"; // la saisie garde le focus d'un rendu à l'autre
       const editing = mode === "edit", confirming = mode === "confirm", conversation = fact.provenance?.conversation_id;
       const origin = conversation ? button("Ouvrir la conversation", "memory-detail-link", () => { if (!panels.openConversation?.(conversation)) { problem = "Cette conversation n’existe plus, ou une autre action est en cours."; render("origin"); } }, false) : "Hors conversation";
       const rows = [["Bot", label.bot(fact)], ["Origine", origin], ["Appris le", label.date(fact.learned_at)], ["Provenance", SOURCES[fact.provenance?.source] || "Inconnue"], ["Portée", label.scope(fact)]];
@@ -77,6 +79,7 @@
     // Le panneau suit le moteur : il ne montre que ce que la dernière lecture contient.
     async function act(path, request, done, forgetting = false) {
       const mine = epoch;
+      inflight.add(request.fact_id);
       busy = true;
       problem = "";
       render();
@@ -84,6 +87,7 @@
       try {
         data = await panels.api(path, request);
       } catch (error) {
+        inflight.delete(request.fact_id);
         if (mine !== epoch) return;
         busy = false;
         if (!current()) { close(true); return; } // le souvenir a disparu pendant l'envoi : rien à corriger
@@ -94,6 +98,7 @@
       if (data?.fact?.fact_id) moved.set(request.fact_id, data.fact.fact_id); // corriger remplace le souvenir par un nouveau
       if (mine === epoch) { mode = "view"; note = done; draft = ""; }
       await reload();
+      inflight.delete(request.fact_id);
       refresh(); // la liste relue peut être identique à la précédente : l'écran n'appelle alors pas refresh
       if (mine !== epoch) return;
       busy = false;
@@ -118,7 +123,7 @@
       if (id === null) return;
       if (!current() && (facts() || []).some((item) => item.fact_id === moved.get(id))) id = moved.get(id);
       const fact = current();
-      if (!fact && busy) return; // l'action en cours décide, une fois sa réponse reçue
+      if (!fact && inflight.has(id)) return; // l'action en cours décide, une fois sa réponse reçue
       if (!fact) close(!document.activeElement || document.activeElement === document.body || root.contains(document.activeElement));
       else if (JSON.stringify(fact) !== shown) render();
       else mark(); // la vue a pu être reconstruite (Graphe ↔ Liste)

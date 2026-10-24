@@ -19,6 +19,10 @@
   --danger: #d93a26;
   --danger-text: #c42d1a;
   --scrim: #0f101266;
+  /* Portées de la mémoire (graphe) : privé, équipe, sujet. Le citron n'y figure pas. */
+  --scope-private: #6d4ae0;
+  --scope-team: #15803d;
+  --scope-topic: #2563eb;
   --accent-rgb: 230 255 61;
   --accent-on: #0a0b0d;
   --accent-deep: #5b6b00;
@@ -54,6 +58,9 @@
   --ok-text: #35c58a;
   --danger-text: #ff7a68;
   --scrim: #000000a6;
+  --scope-private: #a78bfa;
+  --scope-team: #35c58a;
+  --scope-topic: #6ea8ff;
   --accent-ink: var(--accent);
   --focus: #a9acb3;
 }

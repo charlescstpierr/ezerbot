@@ -1,0 +1,26 @@
+/* Mémoire : vue Graphe. Jetons Galet et jetons de portée (--scope-*) uniquement. */
+.memory-graph { position: relative; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 10px; height: clamp(320px, calc(100vh - 240px), 620px); }
+.memory-graph-canvas { width: 100%; height: 100%; border: 1px solid var(--line); border-radius: 12px; background: var(--pane); cursor: grab; touch-action: none; }
+.memory-graph-tools { position: absolute; top: 10px; right: 10px; display: flex; gap: 4px; }
+.memory-graph-tool { min-width: 30px; height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); color: var(--text); font-size: 12px; }
+.memory-graph-tool:hover { border-color: var(--focus); }
+.memory-graph-tool:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.memory-graph-edge { stroke: var(--muted); stroke-opacity: .45; stroke-width: 1; transition: opacity .15s; }
+.memory-graph-node { --tone: var(--text); outline: none; transition: opacity .15s; }
+.memory-graph-node.is-private, .memory-graph-swatch.is-private { --tone: var(--scope-private); }
+.memory-graph-node.is-team, .memory-graph-swatch.is-team { --tone: var(--scope-team); }
+.memory-graph-node.is-topic, .memory-graph-swatch.is-topic { --tone: var(--scope-topic); }
+.memory-graph-point circle { fill: var(--tone); stroke: var(--pane); stroke-width: 1.5; transform-box: fill-box; transform-origin: center; transition: transform .15s; }
+.memory-graph-group circle { fill: color-mix(in srgb, var(--tone) 16%, var(--pane)); stroke: var(--tone); stroke-width: 1.5; }
+.memory-graph-center circle { fill: var(--text); }
+.memory-graph-node.is-active circle, .memory-graph-node:focus-visible circle { stroke: var(--text); stroke-width: 3; }
+.memory-graph-point.is-active circle { transform: scale(1.6); }
+.memory-graph-node:focus-visible circle { stroke: var(--focus); }
+.is-dim { opacity: .18; }
+.memory-graph-label, .memory-graph-initial { text-anchor: middle; pointer-events: none; }
+.memory-graph-label { fill: var(--text); font-size: calc(12px * var(--k, 1)); }
+.memory-graph-initial { fill: var(--pane); font-size: calc(20px * var(--k, 1)); font-weight: 600; dominant-baseline: central; }
+.memory-graph-legend { grid-row: 2; display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; padding: 0; list-style: none; font-size: 12px; color: var(--muted); }
+.memory-graph-key { display: inline-flex; align-items: center; gap: 6px; }
+.memory-graph-swatch { width: 10px; height: 10px; border-radius: 50%; background: var(--tone); }
+@media (prefers-reduced-motion: reduce) { .memory-graph-edge, .memory-graph-node, .memory-graph-point circle { transition: none; } }

@@ -35,10 +35,16 @@ async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFai
   const nodes = { sidebar, "conversation-title": new Element("h1"), "workspace-label": new Element("button") };
   const document = { createElement: (tag) => new Element(tag), createElementNS: (_, tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (s) => (s === ".main-panel" ? main : s === "dialog[open]" ? null : dock), addEventListener: (_, action) => keys.push(action), get activeElement() { return Element.active; }, body: new Element("body") };
   let facts = FACTS.map((item) => ({ ...item })), n = 0;
-  const calls = { api: [], opened: [], refresh: 0 }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); }, touch: (id) => { facts = facts.map((item) => (item.fact_id === id ? { ...item, needs_review: true } : item)); } };
+  const cache = { seen: null, work: null }, calls = { api: [], opened: [], refresh: 0 }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); }, touch: (id) => { facts = facts.map((item) => (item.fact_id === id ? { ...item, needs_review: true } : item)); } };
   const panels = {
     register: (panel) => registered.push(panel), leaveConversation() {},
-    async refresh() { calls.refresh += 1; if (refreshFails) throw new Error("état indisponible"); }, // l'état partagé de l'application (fils en cache, reçus)
+    // L'état partagé de l'application (fils en cache, reçus) : comme app.js, une lecture déjà en vol est partagée, et elle rend l'état tel qu'il était à son départ.
+    refresh() {
+      calls.refresh += 1;
+      if (refreshFails) return Promise.reject(new Error("état indisponible"));
+      if (!cache.work) cache.work = (async () => { const seen = facts.map((item) => item.fact_id).join(); await new Promise((resolve) => setImmediate(resolve)); cache.seen = seen; })().finally(() => { cache.work = null; });
+      return cache.work;
+    },
     openConversation: (id) => { calls.opened.push(id); return opened.includes(id); },
     async api(path, body) {
       calls.api.push([path, JSON.parse(JSON.stringify(body || {}))]);
@@ -59,7 +65,7 @@ async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFai
   sidebar.querySelector(".memory-entry").click();
   await settle();
   const h = {
-    calls, settle, main, net, reload: (name = "Ezerbot") => registered[0].onState({ bots: [{ id: "grokbot", name }], memory_auto: { revision: Math.random() } }, {}), svg: () => main.querySelector(".memory-graph-canvas"),
+    calls, settle, main, net, cache, panels, reload: (name = "Ezerbot") => registered[0].onState({ bots: [{ id: "grokbot", name }], memory_auto: { revision: Math.random() } }, {}), svg: () => main.querySelector(".memory-graph-canvas"),
     tab: (view) => main.querySelector(`.is-${view}`).click(),
     point: (id) => main.querySelector(`.memory-graph-point[data-id="${id}"]`),
     item: (id) => main.querySelector(`.memory-space-item[data-fact-id="${id}"]`),
@@ -384,11 +390,11 @@ test("après Modifier ou Oublier, l'état partagé de l'application est relu aus
   h.point("f1").click();
   h.button("Modifier").click();
   await h.type("Enregistrer", "Café au lait");
-  assert.equal(h.calls.refresh, 1, "Modifier relit l'état partagé");
+  assert.equal(h.calls.refresh >= 1, true, "Modifier relit l'état partagé");
   h.button("Oublier…").click();
   h.button("Oublier ce souvenir").click();
   await h.settle();
-  assert.deepEqual([h.calls.refresh, h.open()], [2, false], "Oublier aussi");
+  assert.deepEqual([h.calls.refresh >= 2, h.open()], [true, false], "Oublier aussi");
   const broken = await harness({ refreshFails: true });
   broken.tab("graph");
   broken.point("f1").click();
@@ -401,7 +407,15 @@ test("après Modifier ou Oublier, l'état partagé de l'application est relu aus
   lost.button("Oublier…").click();
   lost.button("Oublier ce souvenir").click();
   await lost.settle();
-  assert.equal(lost.calls.refresh, 1, "même une réponse perdue relit l'état partagé");
+  assert.equal(lost.calls.refresh >= 1, true, "même une réponse perdue relit l'état partagé");
+  const racing = await harness();
+  racing.tab("graph");
+  racing.point("f1").click();
+  racing.panels.refresh(); // une lecture d'état part avant l'action et reste en vol
+  racing.button("Oublier…").click();
+  racing.button("Oublier ce souvenir").click();
+  await racing.settle();
+  assert.equal(racing.cache.seen.includes("f1"), false, "l'état partagé relu après l'oubli ne contient plus le souvenir, même si une lecture partie avant était en vol");
 });
 
 test("réponse perdue après Oublier : le moteur a oublié, le panneau relit la liste, se ferme et le graphe et la Liste sont à jour", async () => {

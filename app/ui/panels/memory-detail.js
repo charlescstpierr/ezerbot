@@ -79,7 +79,9 @@
     }
     // Après une action, la liste ET l'état partagé de l'application sont relus : un fil en cache afficherait sinon un reçu de mémoire périmé (un texte oublié, des commandes actives).
     // L'échec de cette relecture ne devient pas celui de l'action : le panneau ne l'affiche pas comme une erreur.
-    const sync = () => Promise.allSettled([reload(), panels.refresh?.()]);
+    // `refresh` partage la lecture déjà en vol : une lecture partie avant l'action rendrait un état périmé. La seconde, lancée une fois la première rendue, part après l'action.
+    const refreshState = async () => { for (let pass = 0; pass < 2; pass += 1) await Promise.resolve(panels.refresh?.()).catch(() => {}); };
+    const sync = () => Promise.all([reload(), refreshState()]);
     // Au retour d'une action, le focus ne va au panneau que s'il y était (ou nulle part) : quelqu'un qui a cherché ailleurs entre-temps le garde.
     const focusing = (want) => (!document.activeElement || document.activeElement === document.body || root.contains(document.activeElement) ? want : "");
     // Le panneau suit le moteur : il ne montre que ce que la dernière lecture contient.

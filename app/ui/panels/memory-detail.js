@@ -19,6 +19,7 @@
   // `facts()` donne la liste lue par l'écran, `reload()` la relit (et rend la main une fois l'écran à jour), `label` : { bot, scope, date }.
   function create({ facts, reload, label }) {
     let id = null, mode = "view", busy = false, draft = "", note = "", problem = "", shown = null, epoch = 0;
+    const moved = new Map(); // ancien identifiant → identifiant du souvenir qui le remplace (réponse du moteur à une correction)
     const root = node("aside", "memory-detail");
     root.hidden = true;
     root.setAttribute("aria-label", "Détail du souvenir");
@@ -89,11 +90,13 @@
         render(mode === "edit" ? "body" : "back");
         return;
       }
-      if (mine === epoch) { if (data?.fact?.fact_id) id = data.fact.fact_id; mode = "view"; note = done; draft = ""; } // corriger remplace le souvenir par un nouveau
+      if (data?.fact?.fact_id) moved.set(request.fact_id, data.fact.fact_id); // corriger remplace le souvenir par un nouveau
+      if (mine === epoch) { mode = "view"; note = done; draft = ""; }
       await reload();
       if (mine !== epoch) return;
       busy = false;
-      if (forgetting) note = "Souvenir oublié, mais la liste n’a pas pu être relue : actualisez-la.";
+      // Toujours là après la relecture : elle a échoué, et le panneau le dit au lieu de se taire.
+      if (current()?.fact_id === request.fact_id) note = `${done.slice(0, -1)}, mais la liste n’a pas pu être relue : actualisez-la.`;
       render(forgetting ? "title" : "edit");
     }
     function close(restore = false) {
@@ -110,6 +113,7 @@
     // Appelé par l'écran quand la liste a changé : un souvenir disparu ferme le panneau ; la saisie en cours n'est jamais écrasée.
     function refresh() {
       if (id === null) return;
+      if (!current() && (facts() || []).some((item) => item.fact_id === moved.get(id))) id = moved.get(id);
       const fact = current();
       if (!fact) close(!document.activeElement || document.activeElement === document.body || root.contains(document.activeElement));
       else if (JSON.stringify(fact) !== shown) render();

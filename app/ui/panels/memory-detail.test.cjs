@@ -34,13 +34,13 @@ async function harness({ refuse = null, opened = ["c1"] } = {}) {
   const nodes = { sidebar, "conversation-title": new Element("h1"), "workspace-label": new Element("button") };
   const document = { createElement: (tag) => new Element(tag), createElementNS: (_, tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (s) => (s === ".main-panel" ? main : s === "dialog[open]" ? null : dock), addEventListener: (_, action) => keys.push(action), get activeElement() { return Element.active; }, body: new Element("body") };
   let facts = FACTS.map((item) => ({ ...item })), n = 0;
-  const calls = { api: [], opened: [] };
+  const calls = { api: [], opened: [] }, net = { down: false };
   const panels = {
     register: (panel) => registered.push(panel), leaveConversation() {},
     openConversation: (id) => { calls.opened.push(id); return opened.includes(id); },
     async api(path, body) {
       calls.api.push([path, JSON.parse(JSON.stringify(body || {}))]);
-      if (path === "/api/memory/all") return { facts: facts.map((item) => ({ ...item })) };
+      if (path === "/api/memory/all") return net.down ? Promise.reject(new Error("hors ligne")) : { facts: facts.map((item) => ({ ...item })) };
       if (refuse) throw new Error(refuse);
       if (path === "/api/memory/correct") { const old = facts.find((item) => item.fact_id === body.fact_id), next = { ...old, fact_id: `n${++n}`, text: body.text }; facts = [next, ...facts.filter((item) => item !== old)]; return { fact: next }; }
       facts = facts.filter((item) => item.fact_id !== body.fact_id);
@@ -56,7 +56,7 @@ async function harness({ refuse = null, opened = ["c1"] } = {}) {
   sidebar.querySelector(".memory-entry").click();
   await settle();
   const h = {
-    calls, settle, main, svg: () => main.querySelector(".memory-graph-canvas"),
+    calls, settle, main, net, svg: () => main.querySelector(".memory-graph-canvas"),
     tab: (view) => main.querySelector(`.is-${view}`).click(),
     point: (id) => main.querySelector(`.memory-graph-point[data-id="${id}"]`),
     item: (id) => main.querySelector(`.memory-space-item[data-fact-id="${id}"]`),
@@ -144,6 +144,30 @@ test("Modifier envoie /api/memory/correct puis relit : le texte affiché change 
   assert.deepEqual(ok.mutations(), [["/api/memory/correct", { bot_id: "grokbot", fact_id: "f1", text: "Aime le thé" }]]);
   assert.equal(ok.calls.api.at(-1)[0], "/api/memory/all", "la liste est relue");
   assert.deepEqual([ok.text("text"), ok.main.querySelectorAll(".memory-space-text").map((t) => t.textContent)[0]], ["Aime le thé", "Aime le thé"]);
+});
+
+test("une relecture manquée ne masque pas une correction réussie ; une action périmée ne fait pas perdre la saisie suivante", async () => {
+  const h = await harness();
+  h.item("f1").click();
+  h.button("Modifier").click();
+  h.net.down = true;
+  await h.type("Enregistrer", "Aime le thé");
+  assert.match(h.panel().textContent, /Souvenir modifié, mais la liste n’a pas pu être relue/);
+  assert.equal(h.open(), true);
+  const race = await harness();
+  race.item("f1").click();
+  race.button("Modifier").click();
+  const field = race.panel().querySelector(".memory-detail-field");
+  field.value = "A";
+  field.fire("input");
+  race.button("Enregistrer").click();
+  race.item("f1").click(); // on rouvre le même souvenir avant la réponse
+  race.button("Modifier").click();
+  const second = race.panel().querySelector(".memory-detail-field");
+  second.value = "B";
+  second.fire("input");
+  await race.settle();
+  assert.deepEqual([race.open(), race.panel().querySelector(".memory-detail-field").value], [true, "B"]);
 });
 
 test("Oublier demande confirmation ; annuler ne change rien ; confirmer retire le souvenir du graphe, de la Liste et du panneau", async () => {

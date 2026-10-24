@@ -2050,7 +2050,6 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
             error: None,
             error_kind: None,
             notice: None,
-            proposals: vec![],
         });
     }
     if kind == "delegation_input" {
@@ -2093,7 +2092,6 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
             error: None,
             error_kind: None,
             notice: None,
-            proposals: vec![],
         });
     }
     if kind != "delegation" {
@@ -2126,6 +2124,5 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         error: None,
         error_kind: None,
         notice: None,
-        proposals: vec![],
     })
 }

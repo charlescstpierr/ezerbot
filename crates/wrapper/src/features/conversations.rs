@@ -33,8 +33,6 @@ pub fn routes(
                     | "/api/bots"
                     | "/api/bots/update"
                     | "/api/bots/delete"
-                    | "/api/proposals/accept"
-                    | "/api/proposals/dismiss"
             )
     ) {
         return None;
@@ -293,16 +291,6 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             super::multibot::delete_bot(app, &input.id)?;
             Ok(json!({"ok": true}))
         }
-        "/api/proposals/accept" => {
-            let input: AcceptProposal = parse(body)?;
-            validate_id(&input.id)?;
-            app.accept_proposal(&input.id, input.overrides)
-        }
-        "/api/proposals/dismiss" => {
-            let input: DismissProposal = parse(body)?;
-            validate_id(&input.id)?;
-            app.dismiss_proposal(&input.id)
-        }
         _ => unreachable!("route filtered above"),
     }
 }
@@ -398,7 +386,6 @@ impl App {
             );
         }
         let mut ordered: BTreeMap<String, Vec<(i64, Vec<Message>)>> = BTreeMap::new();
-        let mut proposals = self.proposals_by_message()?;
         for record in self.reader.list_submissions()? {
             let id = record.conversation_id.as_str();
             if hidden.contains(id) {
@@ -435,7 +422,6 @@ impl App {
                 error: None,
                 error_kind: None,
                 notice: None,
-                proposals: Vec::new(),
                 kind: "message".into(),
                 payload: json!({"mentions":super::multibot::mentions(&self.connection, id, record.message_id.as_str()), "demonstration_id":super::demonstrations::message_source(&ctx, record.message_id.as_str())}),
                 attachments: super::attachments::for_message(&ctx, id, record.message_id.as_str()),
@@ -444,14 +430,7 @@ impl App {
                 record.state,
                 SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. }
             ) {
-                if let Some(reply) = super::engine::reply(
-                    &ctx,
-                    id,
-                    record.message_id.as_str(),
-                    proposals
-                        .remove(&(id.to_owned(), record.message_id.as_str().to_owned()))
-                        .unwrap_or_default(),
-                )? {
+                if let Some(reply) = super::engine::reply(&ctx, id, record.message_id.as_str())? {
                     pair.push(reply);
                 }
             }
@@ -497,7 +476,6 @@ impl App {
                 error: None,
                 error_kind: None,
                 notice: None,
-                proposals: Vec::new(),
                 kind,
                 payload: Value::Null,
                 attachments: Vec::new(),

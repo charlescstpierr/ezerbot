@@ -53,6 +53,17 @@ pub struct Fact {
     pub sensitive: bool,
 }
 
+/// Un souvenir est « à revoir » au-delà de 49 jours (7 semaines) sans reconfirmation.
+pub const REVIEW_AFTER_MS: i64 = 49 * 24 * 60 * 60 * 1000;
+
+/// « À revoir » est dérivé à la lecture, jamais stocké. Les dates sont en millisecondes
+/// UTC : aucun fuseau ni changement d'heure ne décale la borne. Strictement plus de
+/// 49 jours : à 49 jours pile, le souvenir n'est pas encore à revoir.
+pub fn needs_review(learned_at: i64, reconfirmed_at: Option<i64>, now_ms: i64) -> bool {
+    let last_confirmed = learned_at.max(reconfirmed_at.unwrap_or(learned_at));
+    now_ms.saturating_sub(last_confirmed) > REVIEW_AFTER_MS
+}
+
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memory_facts (
@@ -75,7 +86,29 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS memory_facts_team_active
             ON memory_facts(scope, status, learned_at DESC);",
     )?;
+    let has_column: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('memory_facts') WHERE name = 'reconfirmed_at')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_column {
+        conn.execute(
+            "ALTER TABLE memory_facts ADD COLUMN reconfirmed_at INTEGER",
+            [],
+        )?;
+    }
     Ok(())
+}
+
+/// « Encore vrai » : remet le compteur à zéro sans toucher au texte, à l'ID ni à
+/// `learned_at`. Réservé aux faits actifs : un fait oublié ou remplacé ne revit pas
+/// (`Ok(false)`). La date ne recule jamais, donc un rappel est sans effet nuisible.
+pub fn reconfirm(conn: &Connection, fact_id: &str, now_ms: i64) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE memory_facts SET reconfirmed_at = MAX(?2, COALESCE(reconfirmed_at, ?2))
+         WHERE fact_id = ?1 AND status = 'active'",
+        params![fact_id, now_ms],
+    )? > 0)
 }
 
 /// Insert a new active fact without ever overwriting an existing ID. An empty
@@ -617,5 +650,61 @@ pub(crate) mod tests {
         )
         .is_err());
         assert_eq!(get(&conn, &exhausted.fact_id).unwrap(), Some(exhausted));
+    }
+
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+    #[test]
+    fn review_boundary_is_strictly_more_than_49_days() {
+        let age = |days_ms: i64, again: Option<i64>| needs_review(NOW_MS - days_ms, again, NOW_MS);
+        assert!(!age(48 * DAY_MS, None));
+        assert!(!age(49 * DAY_MS, None), "49 j pile : pas encore");
+        assert!(age(49 * DAY_MS + 1, None), "49 j + 1 ms : à revoir");
+        assert!(age(50 * DAY_MS, None));
+        assert!(!age(90 * DAY_MS, Some(NOW_MS - DAY_MS)));
+        assert!(age(90 * DAY_MS, Some(NOW_MS - 60 * DAY_MS)));
+        assert!(!age(-DAY_MS, None), "date future : jamais à revoir");
+    }
+
+    #[test]
+    fn reconfirm_keeps_fact_identical_and_refuses_forgotten_or_superseded() {
+        let conn = database();
+        let old = remember(&conn, &fact(1, "a")).unwrap();
+        let stamp = |conn: &Connection| -> Option<i64> {
+            let sql = "SELECT reconfirmed_at FROM memory_facts WHERE fact_id = ?1";
+            conn.query_row(sql, [&old.fact_id], |r| r.get(0)).unwrap()
+        };
+        for _ in 0..2 {
+            assert!(reconfirm(&conn, &old.fact_id, NOW_MS).unwrap());
+            assert_eq!(get(&conn, &old.fact_id).unwrap().unwrap(), old);
+            assert_eq!(stamp(&conn), Some(NOW_MS));
+        }
+        assert!(reconfirm(&conn, &old.fact_id, NOW_MS - DAY_MS).unwrap());
+        assert_eq!(stamp(&conn), Some(NOW_MS), "la date ne recule pas");
+        let new = correct(
+            &conn,
+            "a",
+            &old.fact_id,
+            "Neuf",
+            &correction_provenance(),
+            NOW_MS,
+        );
+        assert!(!reconfirm(&conn, &old.fact_id, NOW_MS).unwrap(), "remplacé");
+        assert!(reconfirm(&conn, &new.unwrap().fact_id, NOW_MS).unwrap());
+        forget(&conn, "a", &old.fact_id).unwrap();
+        assert!(!reconfirm(&conn, &old.fact_id, NOW_MS).unwrap(), "oublié");
+        assert!(!reconfirm(&conn, "fact_absent", NOW_MS).unwrap());
+        assert_eq!(get(&conn, &old.fact_id).unwrap().unwrap().text, "");
+    }
+
+    #[test]
+    fn migration_adds_the_column_to_an_existing_table_once() {
+        let conn = database();
+        conn.execute("ALTER TABLE memory_facts DROP COLUMN reconfirmed_at", [])
+            .unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        conn.prepare("SELECT reconfirmed_at FROM memory_facts")
+            .unwrap();
     }
 }

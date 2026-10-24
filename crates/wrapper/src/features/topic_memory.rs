@@ -82,7 +82,28 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             PRIMARY KEY (account_id, id)
         );",
     )?;
+    let reconfirmable: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_topic_facts') WHERE name = 'reconfirmed_at')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !reconfirmable {
+        conn.execute(
+            "ALTER TABLE wrapper_topic_facts ADD COLUMN reconfirmed_at INTEGER",
+            [],
+        )?;
+    }
     Ok(())
+}
+
+/// « Encore vrai » sur un souvenir de sujet. Un souvenir oublié est supprimé : il n'y a
+/// plus de ligne à toucher, donc rien ne revit (`false`).
+pub(super) fn reconfirm(conn: &Connection, id: &str, now_ms: i64) -> Result<bool, ApiError> {
+    Ok(conn.execute(
+        "UPDATE wrapper_topic_facts SET reconfirmed_at = MAX(?3, COALESCE(reconfirmed_at, ?3))
+         WHERE account_id = ?1 AND id = ?2",
+        params![ACCOUNT, id, now_ms],
+    )? > 0)
 }
 
 pub fn routes(

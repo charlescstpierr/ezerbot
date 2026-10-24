@@ -174,7 +174,8 @@ fn workspace_memory_lists_all_bots_scopes_and_metadata() {
             "scope": "topic", "topic_id": topic["topic_id"], "topic_name": "Projet 🦀",
             "text": topic["text"], "learned_at": topic["created_at"],
             "provenance": {"conversation_id": topic["conversation_id"], "entry_id": null, "source": "user_stated"},
-            "status": {"status": "active"}, "sensitive": false
+            "status": {"status": "active"}, "sensitive": false,
+            "reconfirmed_at": null, "needs_review": false
         })
     );
     // A workspace dump never broadens bot/model-context access.
@@ -1388,4 +1389,100 @@ fn tool_provenance_uses_real_run_call_entry_and_survives_restart() {
         .unwrap();
     assert_eq!(fact.provenance.conversation_id, Some(conversation));
     assert_eq!(fact.provenance.source, Source::ModelInferred);
+}
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// Vieillit un souvenir dans la base jetable du test (horloge réelle moins `days` jours).
+fn age_fact(db: &Database, table: &str, column: &str, id: &Value, days: i64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let key = if table == "memory_facts" {
+        "fact_id"
+    } else {
+        "id"
+    };
+    Connection::open(db.path())
+        .unwrap()
+        .execute(
+            &format!("UPDATE {table} SET {column} = ?1 WHERE {key} = ?2"),
+            params![now - days * DAY_MS, id.as_str().unwrap()],
+        )
+        .unwrap();
+}
+fn entry(app: &mut App, id: &Value) -> Value {
+    let all = app.api("GET", "/api/memory/all", b"").unwrap();
+    let found = all["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["fact_id"] == *id);
+    found.cloned().unwrap_or(Value::Null)
+}
+fn add_private(app: &mut App, text: &str) -> Value {
+    let body = json!({"bot_id": "grokbot", "text": text, "scope": "private"});
+    post(app, "/api/memory/add", body)["fact"]["fact_id"].clone()
+}
+
+#[test]
+fn old_memories_need_review_and_still_true_resets_them_without_changing_them() {
+    let db = Database::new();
+    let mut app = db.open();
+    let (old, recent) = (
+        add_private(&mut app, "Vieux"),
+        add_private(&mut app, "Récent"),
+    );
+    age_fact(&db, "memory_facts", "learned_at", &old, 50);
+    age_fact(&db, "memory_facts", "learned_at", &recent, 48);
+    assert_eq!(entry(&mut app, &old)["needs_review"], true);
+    assert_eq!(entry(&mut app, &recent)["needs_review"], false);
+    let before = entry(&mut app, &old);
+    for _ in 0..2 {
+        // Deux appels successifs : même état, texte et id inchangés.
+        let answer = post(&mut app, "/api/memory/reconfirm", json!({"fact_id": old}));
+        assert_eq!(answer["fact"]["needs_review"], false);
+        let after = entry(&mut app, &old);
+        for key in [
+            "fact_id",
+            "text",
+            "learned_at",
+            "scope",
+            "provenance",
+            "bot_id",
+        ] {
+            assert_eq!(after[key], before[key], "{key}");
+        }
+        assert_eq!(after["needs_review"], false);
+    }
+    // Dérivé à la lecture : une reconfirmation vieille de 50 jours ne protège plus.
+    age_fact(&db, "memory_facts", "reconfirmed_at", &old, 50);
+    assert_eq!(entry(&mut app, &old)["needs_review"], true);
+}
+
+#[test]
+fn still_true_covers_topic_memories_and_refuses_forgotten_or_unknown_ones() {
+    let db = Database::new();
+    let mut app = db.open();
+    let topic = topic_fact(&mut app, "grokbot", "Budget validé")["id"].clone();
+    age_fact(&db, "wrapper_topic_facts", "created_at", &topic, 60);
+    assert_eq!(entry(&mut app, &topic)["needs_review"], true);
+    post(&mut app, "/api/memory/reconfirm", json!({"fact_id": topic}));
+    assert_eq!(entry(&mut app, &topic)["needs_review"], false);
+    assert_eq!(entry(&mut app, &topic)["text"], "Budget validé");
+    post(
+        &mut app,
+        "/api/topics/memory/forget",
+        json!({"fact_id": topic}),
+    );
+    let private = add_private(&mut app, "À oublier");
+    let forget = json!({"bot_id": "grokbot", "fact_id": private});
+    post(&mut app, "/api/memory/forget", forget);
+    for id in [topic, private, json!("fact_inconnu")] {
+        let body = json!({"fact_id": id}).to_string();
+        let refused = app.api("POST", "/api/memory/reconfirm", body.as_bytes());
+        assert_eq!(refused.unwrap_err().status, 404, "{id}");
+        assert_eq!(entry(&mut app, &id), Value::Null, "rien ne revit : {id}");
+    }
 }

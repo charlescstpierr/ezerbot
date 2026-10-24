@@ -14,6 +14,10 @@
 //! POST /api/memory/add {bot_id, text, scope: "private"|"topic", topic_id?} est
 //! l'ajout à la main : provenance « déclaré » (`Source::UserStated`), sans modèle,
 //! sans déduplication (c'est un geste explicite de l'utilisateur).
+//! POST /api/memory/reconfirm {fact_id} (« Encore vrai ») remet à zéro l'ancienneté d'un
+//! souvenir actif, privé ou de sujet, sans toucher au texte ni à l'ID ; oublié ou
+//! inconnu : 404. `needs_review` (> 49 jours sans reconfirmation) est dérivé dans
+//! GET /api/memory/all, jamais stocké.
 //! Promotion accepts ONE batch of <=100; earlier successful requests survive a
 //! later failure (RC03). Forgetting atomically wipes the correction lineage,
 //! redacts run replay/cards and invalidates covering summaries. Regeneration is
@@ -89,6 +93,11 @@ enum AddScope {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Reconfirm {
+    fact_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Promote {
     bot_id: String,
     fact_ids: Vec<String>,
@@ -102,7 +111,9 @@ pub fn routes(
 ) -> Option<Result<ApiResponse, ApiError>> {
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
     if method == "GET" && route == "/api/memory/all" {
-        return Some(workspace_listing(&app.connection).map(ApiResponse::Json));
+        return Some(
+            workspace_listing(&app.connection, crate::now() as i64).map(ApiResponse::Json),
+        );
     }
     if !matches!(
         (method, route),
@@ -113,6 +124,7 @@ pub fn routes(
                     | "/api/memory/correct"
                     | "/api/memory/promote"
                     | "/api/memory/add"
+                    | "/api/memory/reconfirm"
             )
     ) {
         return None;
@@ -230,6 +242,27 @@ pub fn routes(
                 tx.commit()?;
                 json!({"fact": fact})
             }
+            "/api/memory/reconfirm" => {
+                // « Encore vrai » : catalogue de l'espace, donc le seul fact_id suffit.
+                let input: Reconfirm = parse(body)?;
+                validate_id(&input.fact_id)?;
+                let now = crate::now() as i64;
+                let tx = super::write_transaction(&app.connection)?;
+                if !facts::reconfirm(&tx, &input.fact_id, now).map_err(memory_error)?
+                    && !super::topic_memory::reconfirm(&tx, &input.fact_id, now)?
+                {
+                    return Err(ApiError::new(
+                        404,
+                        "Ce souvenir n'existe plus : rien n'a été reconfirmé.",
+                    ));
+                }
+                tx.commit()?;
+                let fact = workspace_listing(&app.connection, now)?["facts"]
+                    .as_array()
+                    .and_then(|all| all.iter().find(|f| f["fact_id"] == input.fact_id.as_str()))
+                    .cloned();
+                json!({ "fact": fact })
+            }
             "/api/memory/promote" => {
                 let input: Promote = parse(body)?;
                 validate_id(&input.bot_id)?;
@@ -250,16 +283,17 @@ pub fn routes(
 }
 
 /// One SQLite snapshot of every active fact, independent of the selected bot/fil.
-fn workspace_listing(conn: &Connection) -> Result<Value, ApiError> {
+/// `needs_review` est calculé ici à partir de `now_ms` (UTC, millisecondes).
+fn workspace_listing(conn: &Connection, now_ms: i64) -> Result<Value, ApiError> {
     let mut statement = conn.prepare(
         "WITH active AS (
             SELECT fact_id, bot_id, scope, text, provenance, learned_at, sensitive,
-                   NULL AS topic_id, NULL AS topic_name
+                   NULL AS topic_id, NULL AS topic_name, reconfirmed_at
             FROM memory_facts WHERE status = 'active'
             UNION ALL
             SELECT f.id, f.bot_id, 'topic', f.text,
                    json_object('conversation_id', f.conversation_id, 'entry_id', NULL, 'source', 'user_stated'),
-                   f.created_at, 0, f.topic_id, t.name
+                   f.created_at, 0, f.topic_id, t.name, f.reconfirmed_at
             FROM wrapper_topic_facts f
             LEFT JOIN wrapper_topics t ON t.account_id = f.account_id AND t.id = f.topic_id
             WHERE f.account_id = ?1
@@ -278,6 +312,8 @@ fn workspace_listing(conn: &Connection) -> Result<Value, ApiError> {
                 Box::new(error),
             )
         })?;
+        let learned_at: i64 = row.get("learned_at")?;
+        let reconfirmed_at: Option<i64> = row.get("reconfirmed_at")?;
         Ok(json!({
             "fact_id": row.get::<_, String>("fact_id")?,
             "bot_id": row.get::<_, Option<String>>("bot_id")?,
@@ -285,7 +321,9 @@ fn workspace_listing(conn: &Connection) -> Result<Value, ApiError> {
             "scope": row.get::<_, String>("scope")?,
             "text": row.get::<_, String>("text")?,
             "provenance": provenance,
-            "learned_at": row.get::<_, i64>("learned_at")?,
+            "learned_at": learned_at,
+            "reconfirmed_at": reconfirmed_at,
+            "needs_review": facts::needs_review(learned_at, reconfirmed_at, now_ms),
             "status": {"status": "active"},
             "sensitive": row.get::<_, bool>("sensitive")?,
             "topic_id": row.get::<_, Option<String>>("topic_id")?,

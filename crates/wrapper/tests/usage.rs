@@ -708,6 +708,30 @@ fn a_week_without_telemetry_is_unknown_and_a_week_without_passages_is_zero() {
     assert!(c.cost()["tokens_7d"].is_null());
 }
 
+#[test]
+fn the_account_is_noted_on_every_read_even_without_a_weekly_window() {
+    // B was the account noted; the quota says nothing, and nothing is even measured yet.
+    let mut c = Cost::new(json!({}), json!({"kind":"every","interval_ms":1_800_000}));
+    c.conn
+        .execute(
+            "INSERT OR REPLACE INTO wrapper_routine_cost_account(id,identity,since) VALUES (1,'account-b',0)",
+            [],
+        )
+        .unwrap();
+    let before = (now() * 1000) as i64;
+    assert_eq!(c.cost()["state"], "no_measure_yet");
+    let (identity, since): (String, i64) = c
+        .conn
+        .query_row(
+            "SELECT identity, since FROM wrapper_routine_cost_account",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_ne!(identity, "account-b");
+    assert!(since >= before);
+}
+
 fn is_money(key: &str) -> bool {
     ["usd", "dollar", "price", "prix", "eur", "currency"]
         .iter()

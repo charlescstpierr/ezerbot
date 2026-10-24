@@ -91,28 +91,32 @@ struct Measured {
 pub(super) struct Costing<'a> {
     now_ms: i64,
     provider: &'a Provider,
+    /// Since when this app has seen the signed-in Codex account, noted on every read.
+    account_since: i64,
     /// Read once, and only if a routine has a forecast to turn into a share.
     calibration: OnceCell<Calibration>,
 }
 
 impl<'a> Costing<'a> {
-    pub(super) fn new(provider: &'a Provider, now_ms: u64) -> Self {
-        Self {
-            now_ms: i64::try_from(now_ms).unwrap_or(i64::MAX),
+    pub(super) fn new(
+        conn: &Connection,
+        provider: &'a Provider,
+        now_ms: u64,
+    ) -> Result<Self, ApiError> {
+        let now_ms = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        Ok(Self {
+            now_ms,
             provider,
+            account_since: note_account(conn, &provider.demonstration_identity(), now_ms)?,
             calibration: OnceCell::new(),
-        }
+        })
     }
 
     fn calibration(&self, conn: &Connection) -> Result<&Calibration, ApiError> {
         if self.calibration.get().is_none() {
             // The same source as the Usage panel.
-            let calibration = calibrate(
-                conn,
-                &self.provider.codex_usage(false),
-                &self.provider.demonstration_identity(),
-                self.now_ms,
-            )?;
+            let calibration =
+                calibrate(conn, &self.provider.codex_usage(false), self.account_since)?;
             let _ = self.calibration.set(calibration);
         }
         Ok(self.calibration.get().expect("calibration just set"))
@@ -216,6 +220,28 @@ impl<'a> Costing<'a> {
     }
 }
 
+/// Since when the signed-in account has been the one this app sees: a different account than the
+/// one noted (or the first read) dates the sign-in now. Noted on every read, window or not.
+fn note_account(conn: &Connection, identity: &str, now_ms: i64) -> Result<i64, ApiError> {
+    let known: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT identity, since FROM wrapper_routine_cost_account WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match known {
+        Some((known, since)) if known == identity => since,
+        _ => {
+            conn.execute(
+                "INSERT OR REPLACE INTO wrapper_routine_cost_account(id,identity,since) VALUES (1,?1,?2)",
+                rusqlite::params![identity, now_ms],
+            )?;
+            now_ms
+        }
+    })
+}
+
 /// Codex only reports windows as percentages. Dividing the tokens measured locally since the
 /// weekly window began by its `used_percent` gives tokens per percent. An estimate: the window
 /// is shared with other Codex apps and auxiliary calls are not measured here, which makes the
@@ -225,8 +251,7 @@ impl<'a> Costing<'a> {
 fn calibrate(
     conn: &Connection,
     quota: &Value,
-    identity: &str,
-    now_ms: i64,
+    account_since: i64,
 ) -> Result<Calibration, ApiError> {
     let week = ["primary", "secondary"]
         .into_iter()
@@ -239,27 +264,10 @@ fn calibrate(
         return Ok(Calibration::Unknown("quota_unavailable"));
     };
     let began = i64::try_from(reset.saturating_sub(WEEK_S) * 1000).unwrap_or(i64::MAX);
-    let known: Option<(String, i64)> = conn
-        .query_row(
-            "SELECT identity, since FROM wrapper_routine_cost_account WHERE id=1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let since = match known {
-        Some((known, since)) if known == identity => since,
-        _ => {
-            conn.execute(
-                "INSERT OR REPLACE INTO wrapper_routine_cost_account(id,identity,since) VALUES (1,?1,?2)",
-                rusqlite::params![identity, now_ms],
-            )?;
-            now_ms
-        }
-    };
     let local: u64 = conn.query_row(LOCAL_TOKENS, [began], |r| r.get(0))?;
     Ok(if used < MIN_USED_PERCENT || local < MIN_LOCAL_TOKENS {
         Calibration::Unknown("calibration_weak")
-    } else if since > began {
+    } else if account_since > began {
         Calibration::Unknown("account_unconfirmed")
     } else {
         Calibration::TokensPerPercent(local as f64 / used)

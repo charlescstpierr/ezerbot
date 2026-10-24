@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod deep_links;
+mod fluidity;
 mod mcp;
 mod provider;
 mod upstream;
@@ -831,6 +832,7 @@ pub struct App {
     debug_voice_call: features::voice_call::DebugCall,
     // Host-owned: survives a WebView reload, never persisted across app starts.
     deep_link_seen: BTreeMap<String, u64>,
+    stream_watch: fluidity::StreamWatch,
 }
 
 impl App {
@@ -946,6 +948,7 @@ impl App {
             #[cfg(debug_assertions)]
             debug_voice_call: features::voice_call::DebugCall::default(),
             deep_link_seen: BTreeMap::new(),
+            stream_watch: fluidity::StreamWatch::default(),
         })
     }
 

@@ -63,6 +63,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     match path {
         "/api/ping" => Ok(json!({"revision": state_revision(&app.connection, &app.db_path)?})),
         "/api/state" => {
+            let started = std::time::Instant::now();
             // Capture before reading: a concurrent write during serialization
             // must cause another refresh, never be mistaken for observed data.
             let revision = state_revision(&app.connection, &app.db_path)?;
@@ -90,6 +91,16 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     .entry(key.clone())
                     .or_insert_with(|| value.clone());
             }
+            let directory = app.db_path.parent().unwrap_or(std::path::Path::new("."));
+            let events: u64 = app
+                .connection
+                .query_row("SELECT COUNT(*) FROM engine_run_events", [], |row| {
+                    row.get(0)
+                })
+                .unwrap_or(0);
+            crate::fluidity::state_served(directory, started.elapsed(), events);
+            app.stream_watch
+                .observe(directory, &state, std::time::Instant::now());
             Ok(state)
         }
         "/api/preferences" => {

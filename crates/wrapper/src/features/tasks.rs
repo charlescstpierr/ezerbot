@@ -16,8 +16,9 @@ empty_hooks!(
 
 // Only identifiers, fixed labels and allowlisted lifecycle states cross this
 // boundary. Never project objectives, commands, results, form fields or secrets.
-// `live_runs` is the one definition of a visible run: a delegated run is visible
-// only through a chain of visible edges up to a run that was not delegated.
+// `live_runs` is the one definition of a visible run: a run of a delegation (its
+// own, or a later turn in its task conversation, such as a late approval) is
+// visible only through a chain of visible edges up to a run that was not delegated.
 const SNAPSHOT: &str = "
 WITH RECURSIVE open_runs AS (
  SELECT r.*,json_extract(r.record,'$.started_at') AS started_at,
@@ -28,16 +29,19 @@ WITH RECURSIVE open_runs AS (
 ), open_edges AS (
  SELECT d.* FROM delegation_graph d WHERE d.conversation_id IS NULL
  OR EXISTS (SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=d.conversation_id AND c.deleted=0)
+), root_runs AS (
+ SELECT r.* FROM open_runs r WHERE r.trigger_kind<>'delegation'
+ AND NOT EXISTS (SELECT 1 FROM delegation_graph g WHERE g.conversation_id=r.conversation_id)
 ), live_edges AS (
  SELECT d.*,p.conversation_id AS origin_conversation_id,p.started_at AS origin_started_at
- FROM open_edges d JOIN open_runs p ON p.run_id=d.parent_run_id WHERE p.trigger_kind<>'delegation'
+ FROM open_edges d JOIN root_runs p ON p.run_id=d.parent_run_id
  UNION
  SELECT d.*,p.conversation_id,p.started_at
- FROM live_edges e JOIN open_edges d ON d.parent_run_id=e.child_run_id
- JOIN open_runs p ON p.run_id=d.parent_run_id
+ FROM live_edges e JOIN open_runs p ON p.run_id=e.child_run_id OR p.conversation_id=e.conversation_id
+ JOIN open_edges d ON d.parent_run_id=p.run_id
 ), live_runs AS (
- SELECT * FROM open_runs WHERE trigger_kind<>'delegation'
- OR run_id IN (SELECT child_run_id FROM live_edges)
+ SELECT * FROM open_runs r WHERE r.run_id IN (SELECT run_id FROM root_runs)
+ OR EXISTS (SELECT 1 FROM live_edges e WHERE e.child_run_id=r.run_id OR e.conversation_id=r.conversation_id)
 ), pending AS (
  SELECT q.id,q.run_id,q.entry_id,r.bot_id,c.id AS conversation_id,
  CASE r.trigger_kind WHEN 'delegation' THEN 'delegation' WHEN 'occurrence' THEN 'routine' ELSE 'task' END AS kind,

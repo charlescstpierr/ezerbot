@@ -262,6 +262,7 @@ fn deleting_the_origin_of_a_delegation_hides_every_row_its_descendants_left() {
         "finished shell",
         "request",
         "delegation",
+        "late turn shell",
         "grandchild shell",
         "grandchild request",
         "grandchild delegation",
@@ -293,6 +294,18 @@ fn deleting_the_origin_of_a_delegation_hides_every_row_its_descendants_left() {
                 f.status("child", RunStatus::AwaitingApproval);
                 f.request_on("child", "approval", json!({"kind":"approval"}));
             }
+            "late turn shell" => {
+                f.run_in(
+                    "late",
+                    "grokbot",
+                    "task:child",
+                    Trigger::UserMessage {
+                        message_id: "message-late".into(),
+                        attempt: 0,
+                    },
+                );
+                f.background("late", "call", "en cours");
+            }
             "grandchild shell" => f.background("grandchild", "call", "en cours"),
             "grandchild request" => {
                 f.status("grandchild", RunStatus::AwaitingApproval);
@@ -305,6 +318,7 @@ fn deleting_the_origin_of_a_delegation_hides_every_row_its_descendants_left() {
             before.iter().any(|i| match row {
                 "running shell" | "finished shell" => i["id"] == "shell:child/call",
                 "request" | "grandchild request" => i["id"] == "input:approval",
+                "late turn shell" => i["id"] == "shell:late/call",
                 "grandchild shell" => i["id"] == "shell:grandchild/call",
                 "grandchild delegation" => i["id"] == "delegation:grandchild",
                 _ => i["id"] == "delegation:child",

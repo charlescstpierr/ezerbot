@@ -42,6 +42,8 @@ struct SendMessage {
     simulate_loss: bool,
     #[serde(default)]
     apply_skill_id: Option<String>,
+    #[serde(default)]
+    page_anchor: Option<super::pages::anchors::PageAnchor>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -400,6 +402,15 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     &input.conversation_id,
                     &input.message_id,
                     skill_id,
+                )?;
+            }
+            if let Some(anchor) = &input.page_anchor {
+                super::pages::anchors::record(
+                    &tx,
+                    &input.conversation_id,
+                    &input.message_id,
+                    anchor,
+                    now(),
                 )?;
             }
             super::conversations::append_entry(
@@ -3531,6 +3542,7 @@ fn delete_undelivered(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
         "DELETE FROM wrapper_attachment_order WHERE conversation_id = ?1 AND message_id = ?2",
         params![conversation_id, message_id],
     )?;
+    super::pages::anchors::discard_message(&tx, &conversation_id, &message_id)?;
     tx.commit()?;
     app.conversation_response(&conversation_id)
 }

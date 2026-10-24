@@ -30,6 +30,7 @@ pub mod priority {
     pub const MEMORY: u32 = 40;
     pub const LIBRARY: u32 = 45;
     pub const THREAD: u32 = 48;
+    pub const PAGE_ANCHOR: u32 = 49;
     pub const SUMMARY: u32 = 50;
     pub const HISTORY: u32 = 90;
     pub const CURRENT: u32 = 100;

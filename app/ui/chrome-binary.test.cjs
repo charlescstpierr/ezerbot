@@ -138,10 +138,11 @@ test("a browser that wrote an error next to its start-up lines and then stalls i
     })));
 
 // What the first DevTools answer, shortly before the deadline, saw is not what the deadline decides on.
+// (The early look is at the deadline minus probeMs: the stand-in must have announced its port by then.)
 test("a page that left about:blank after the early look, then stalls, fails after its deadline, with no new launch", () =>
   withDevtools((call) => [{ type: "page", url: call === 1 ? "about:blank" : "file:///work/page.html" }], (port) =>
-    withBrowser(`${announce(port)}\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
-      await assert.rejects(dumpQaResult(options), /chrome began loading the page but did not report a test report within its deadline/);
+    withBrowser(`${announce(port)}\n${secondLaunchReports("exec sleep 60")}`, [10000, 30000, 30000], async (options, launches) => {
+      await assert.rejects(dumpQaResult({ ...options, probeMs: 3000 }), /chrome began loading the page but did not report a test report within its deadline/);
       assert.equal(launches(), 1);
     })));
 
@@ -151,3 +152,19 @@ test("a page seen navigating before the deadline, whose browser then stops answe
       await assert.rejects(dumpQaResult(options), /chrome began loading the page but did not report a test report within its deadline/);
       assert.equal(launches(), 1);
     })));
+
+// The last look at the browser can take PROBE_MS: what the launch prints meanwhile still counts. The
+// stand-in DevTools port makes the stand-in browser print (partial page, error) when it is asked the
+// last time, and then keeps silent, so the look times out after the output.
+test("a launch that prints while the last look at its browser is pending fails after its deadline, with no new launch", () => {
+  const go = join(tmpdir(), `chrome-binary-go-${process.pid}-${Date.now()}`);
+  return withDevtools((call) => {
+    if (call === 1) return [{ type: "page", url: "about:blank" }];
+    writeFileSync(go, "");
+    return null;
+  }, (port) =>
+    withBrowser(`${announce(port)}\nwhile [ ! -e "${go}" ]; do sleep 0.05; done\necho '<html><body>'\necho 'boom' >&2\n${secondLaunchReports("exec sleep 60")}`, [8000, 30000, 30000], async (options, launches) => {
+      await assert.rejects(dumpQaResult({ ...options, probeMs: 3000 }), /chrome printed a page without a test report within its deadline/);
+      assert.equal(launches(), 1);
+    })).finally(() => rmSync(go, { force: true }));
+});

@@ -138,10 +138,12 @@ function dumpOnce({ file, profile, width, height, launchMs, probeMs }) {
     timers.push(setTimeout(look, Math.max(launchMs - probeMs, 0)));
     const deadline = setTimeout(async () => {
       const stalled = (replace, why) => settle(resolve, { stalled: true, replace, why, err });
-      if (dom !== "") return stalled(false, "page");
-      if (!onlyStartUpLines(err)) return stalled(false, "stderr");
+      // What the launch printed disqualifies it, now and again after the (slow) last look at the browser.
+      const printed = () => (dom !== "" ? "page" : onlyStartUpLines(err) ? null : "stderr");
+      if (printed()) return stalled(false, printed());
       if (!devtoolsPort(err)) return stalled(err.trim() === "", "stderr"); // silent: never started
       const seen = await look();
+      if (printed()) return stalled(false, printed());
       return stalled(!navigated && (seen === "unanswered" || seen === "no-page"), navigated ? "navigated" : "unproven");
     }, launchMs);
     timers.push(deadline);

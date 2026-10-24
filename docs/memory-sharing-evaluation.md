@@ -1,7 +1,9 @@
 # Évaluation du tri de partage (synthétique)
 
-Périmètre de [#249](https://github.com/charlescstpierr/ezerbot/issues/249) : mesurer
-`recall::sharing_class`, **sans changer ses règles ni celles de `promote`**.
+[#249](https://github.com/charlescstpierr/ezerbot/issues/249) a mesuré
+`recall::sharing_class` sans changer ses règles ; [#267](https://github.com/charlescstpierr/ezerbot/issues/267)
+corrige la fuite qu'il avait constatée (section « Correction de #267 »). Les règles
+de `promote` ne changent pas.
 Aucun modèle, réseau, compte ou vrai fait utilisateur n'intervient dans la mesure.
 La base de la non-régression de promotion est SQLite en mémoire.
 
@@ -29,7 +31,7 @@ portent ces tags, avec au moins trois exemples de chaque catégorie.
 
 Le **premier** exemple est `p01-salary-enterprise`, sans drapeau sensible :
 « Mon salaire chez l'entreprise est de 4200 unités fictives. »
-Il est étiqueté `personal` et **fuit au départ** : le tri actuel renvoie `work`.
+Il est étiqueté `personal` et **fuyait au départ** : le tri d'alors renvoyait `work`.
 C'est une fuite de présélection, pas la preuve d'une promotion sans confirmation.
 
 ## Lancer la mesure
@@ -48,7 +50,7 @@ Le compteur de fuites compte un fait étiqueté `personal` **ou** marqué `sensi
 qui est prédit `work`. Un fait personnel classé `review` n'est pas une fuite,
 mais reste une erreur d'exactitude de la classe `personal`.
 
-## Score de départ
+## Score de départ (avant #267)
 
 | Étiquette \\ prédiction | personal | work | review | Exactitude par classe |
 | --- | ---: | ---: | ---: | ---: |
@@ -62,12 +64,58 @@ Ces chiffres sont un constat de départ, pas un seuil acceptable ni une preuve
 sur de vraies données. Le couple utile reste **(zéro fuite, part du travail
 correctement présélectionné)** ; maximiser l'exactitude seule n'est pas l'objectif.
 
-## Garde-fous et échec connu
+## Correction de #267
+
+Cause : un signal professionnel (« entreprise », « équipe », « client »…) suffisait
+à classer `work`, et seuls quelques mots personnels (« famille », « santé »…)
+l'emportaient. Un salaire, une dette ou un divorce mentionnant l'entreprise passait.
+
+Règles de `recall::sharing_class`, dans l'ordre :
+
+1. `sensitive = true`, ou un sujet privé (argent/banque/dettes, santé, vie
+   intime/identité, pièces d'identité, confidentialité : liste de radicaux FR/EN
+   comparés au début des mots) ou l'un des anciens mots personnels : `personal`.
+   Un signal personnel l'emporte toujours sur un signal professionnel.
+2. Sinon, un mot professionnel : `work`, **sauf si le fait contient un possessif de
+   première personne** (« mon », « ma », « mes », « my », « mine ») : il s'abstient en
+   `review`, car « Mon … chez l'entreprise » peut être une affaire privée qui cite
+   seulement le métier. Un pronom seul (« Je travaille sur le projet Atlas ») reste
+   `work` : il est trop courant dans les vrais faits professionnels.
+3. Sinon : `review`. Un inconnu n'est jamais présélectionné.
+
+La règle est lexicale et volontairement large : un faux positif coûte une
+abstention, une fuite coûte une divulgation. Limite connue : un fait privé sans
+aucun mot de la liste ni possessif, mais avec un mot professionnel
+(« Je cache une situation à l'équipe »), reste `work`. Coût assumé : des mots
+techniques courants (« traitement par lots », « héritage multiple », « mon projet
+utilise Rust ») sortent de `work` vers `personal` ou `review`. C'est une exactitude `work` plus basse acceptée contre une fuite, pas un
+défaut. Le sélecteur reste indicatif et l'utilisateur confirme toujours le partage.
+
+Anti-sur-ajustement : quatorze paraphrases inventées hors du jeu (salaire, santé,
+dettes, vie intime, avec un mot professionnel, dont deux sans aucun sujet
+privé listé) ne doivent jamais être `work` ; quatre faits professionnels
+(dont « Je travaille sur le projet Boréal ») doivent le rester. Elles sont dans les tests de `recall.rs`
+(`private_paraphrases_with_work_words_are_never_preselected`), pas dans le jeu,
+dont les étiquettes ne changent pas.
+
+### Mesure après correction
+
+| Étiquette \\ prédiction | personal | work | review | Exactitude par classe |
+| --- | ---: | ---: | ---: | ---: |
+| personal | 30 | 0 | 0 | 30/30 = 100,00 % |
+| work | 5 | 20 | 5 | 20/30 = 66,67 % |
+| review | 0 | 0 | 30 | 30/30 = 100,00 % |
+
+**0 fuite** (10 au départ). Travail correctement présélectionné : **20/30**,
+inchangé. L'exactitude `personal` passe de 50,00 % à 100,00 % ; les 10 erreurs
+restantes de `work` (5 en `personal`, 5 en `review`) sont les abstentions prudentes
+déjà présentes au départ (vocabulaire « maison », « santé »…, ou absence de mot-clé).
+
+## Garde-fous
 
 ```sh
 cargo test -p grokbot-memory --locked
-# Diagnostic volontairement rouge tant que la fuite de départ existe :
-cargo test -p grokbot-memory --locked --test sharing_class_evaluation zero_personal_or_sensitive_facts_preselected -- --exact --ignored --nocapture
+cargo test -p grokbot-memory --locked --test sharing_class_evaluation zero_personal_or_sensitive_facts_preselected -- --exact --nocapture
 ```
 
 La suite normale vérifie le format/calcul du rapport, le jeu et sa répétabilité,
@@ -76,10 +124,7 @@ que les faits inconnus restent `review`, que **chacun des 90 textes** devient
 sensibles privés, inchangés et invisibles à un autre bot. Un contrôle non sensible
 est effectivement promu dans la même demande.
 
-Le diagnostic zéro fuite est explicitement ignoré par défaut, car ce ticket
-**mesure et ne corrige pas**. Lancé explicitement, il exige strictement zéro et
-échoue sur les fuites existantes, dont le salaire en premier. Il ne tolère pas
-10 fuites et ne doit pas être rendu vert en modifiant les étiquettes ou en
-assouplissant les protections. Le correctif relève du ticket séparé
-[feature/P2 #267](https://github.com/charlescstpierr/ezerbot/issues/267).
-Les vrais faits de Charles, hors dépôt, relèvent également d'un autre ticket.
+`zero_personal_or_sensitive_facts_preselected` est un test normal (plus ignoré) :
+il exige strictement zéro fuite sur le jeu entier. Il ne doit pas être rendu vert
+en modifiant les étiquettes ni en assouplissant les protections.
+Les vrais faits de Charles, hors dépôt, relèvent d'un autre ticket.

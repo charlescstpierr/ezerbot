@@ -213,7 +213,9 @@
     const ids = new Set(items.map(item => item.id));
     for (const [id, previous] of catalogueCards) { if (!ids.has(id)) { previous.node.remove(); catalogueCards.delete(id); } }
     for (const listed of items) {
-      const item = details?.[listed.id] ? {...listed, ...details[listed.id]} : listed;
+      // La carte « Google Calendar et Drive » vient de Gmail : son texte est celui de la connexion sous-jacente.
+      const extra = details?.[listed.connection_id || listed.id];
+      const item = extra ? {...listed, ...extra, id: listed.id} : listed;
       // La carte Recall n'affiche aucun bot : sa clé les ignore, pour ne pas fermer le formulaire de clé en cours de saisie.
       const cardKey = JSON.stringify(item.kind === "recall" ? [item] : [item,bots.map(b => [b.id,b.name])]);
       const previous = catalogueCards.get(item.id);

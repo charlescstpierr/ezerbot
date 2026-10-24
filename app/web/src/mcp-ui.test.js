@@ -789,3 +789,16 @@ test("une lecture refusée laisse la carte utilisable (#374)", async () => {
   assert.doesNotMatch(card.textContent, /undefined/);
   assert.ok(card.all().some(n => n.tag === "form"));
 });
+
+test("la carte Google Calendar et Drive reprend le texte d'installation de Gmail, sous son propre identifiant (#374)", async () => {
+  const gmail = { ...without(service), category: "Courriel et agenda", needs_client: false };
+  const calendar = { ...gmail, id: "calendar", name: "Google Calendar" };
+  const drive = { ...gmail, id: "drive", name: "Google Drive" };
+  const f = await mount([], {}, [gmail, calendar, drive], served);
+  const card = catalogueCard(f.root, "google");
+  assert.ok(card, "la carte fusionnée existe");
+  assert.match(card.textContent, /Texte d'installation lu à part/);
+  assert.match(card.textContent, /MIT · https:\/\/example.test/);
+  assert.equal(catalogueCard(f.root, "calendar"), undefined);
+  assert.match(catalogueCard(f.root, "gmail").textContent, /Texte d'installation lu à part/);
+});

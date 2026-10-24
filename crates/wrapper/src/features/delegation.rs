@@ -24,7 +24,10 @@ use grokbot_engine::{
     model::{self, Run, RunStatus},
     store,
 };
-use grokbot_forms::{approvals::args_digest, redact::redact_value};
+use grokbot_forms::{
+    approvals::args_digest,
+    redact::{redact, redact_value},
+};
 use grokbot_memory::facts;
 use grokbot_skills::library;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -273,8 +276,8 @@ pub fn tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "check_delegations".into(),
-            description: "Read this run's child task statuses and completed summaries.".into(),
-            schema: json!({"type":"object","additionalProperties":false,"properties":{}}),
+            description: "Read this run's child task statuses and completed summaries. With portee \"fil\", list instead every task launched from this conversation in the last 24 hours (sub-tasks and background commands, at most 10, newest first): what it does, which bot, status, start time and, once finished, the first sentence of the result or the exit code.".into(),
+            schema: json!({"type":"object","additionalProperties":false,"properties":{"portee":{"type":"string","enum":["fil"]}}}),
             requires_approval: false,
         },
     ]
@@ -409,6 +412,12 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
             return delegation_catalog(ctx, &parent, &call.arguments);
         }
         if call.name == "check_delegations" {
+            if call.arguments == json!({"portee":"fil"}) {
+                let tasks = thread_tasks(ctx, &parent.conversation_id, &parent.bot_id)?;
+                return Ok(ToolOutcome::Done {
+                    output: json!({"portee":"fil","tasks":tasks.lines}),
+                });
+            }
             if call.arguments != json!({}) {
                 return Err(invalid("check_delegations takes no arguments"));
             }
@@ -1561,6 +1570,125 @@ fn live_selection(
     ))
 }
 
+const THREAD_LINES: usize = 10;
+const THREAD_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// What this bot launched from this conversation since its last reset, within 24 hours,
+/// newest first: the lines the model reads (at most `THREAD_LINES`), and the status of every task.
+/// A command has no start time of its own; it carries the start of the reply that launched it.
+/// A reset is told by message order, like everywhere else: a task is kept when the message that
+/// started its reply (a run with no message counts as before every reset) comes after the marker.
+struct Thread {
+    lines: Vec<Value>,
+    statuses: Vec<&'static str>,
+}
+
+/// A run is anchored to its own message: the one that triggered it, or its own reply entry.
+const AFTER_RESET: &str = "COALESCE((SELECT m.ordinal FROM wrapper_messages m WHERE m.account_id=?5 AND m.conversation_id=r.conversation_id
+            AND m.message_id IN (r.run_id,substr(r.trigger_ref,length(r.conversation_id)+2))),0)>?4";
+
+fn thread_tasks(ctx: &Context<'_>, conversation: &str, bot: &str) -> Result<Thread> {
+    let reset: i64 = ctx.connection.query_row(
+        "SELECT COALESCE(MAX(ordinal),-1) FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind IN ('reset','engine_reset')",
+        params![ACCOUNT, conversation],
+        |r| r.get(0),
+    )?;
+    let since = ctx
+        .now_ms
+        .saturating_sub(THREAD_WINDOW_MS)
+        .min(i64::MAX as u64) as i64;
+    let vault = super::forms::vault(ctx).map_err(|_| invalid("vault unavailable"))?;
+    // `+r.bot_id` keeps the planner on engine_runs_conversation: the bot index would scan every run of the bot.
+    let mut stmt = ctx.connection.prepare(&format!(
+        "SELECT 0,c.objective,d.child_bot,json_extract(d.status,'$.status'),c.created_at,
+            COALESCE(json_extract(d.status,'$.result'),json_extract(d.status,'$.reason')),NULL
+        FROM delegation_graph d JOIN wrapper_delegation_calls c ON c.id=d.id
+        JOIN engine_runs r ON r.run_id=d.parent_run_id
+        WHERE r.conversation_id=?1 AND d.parent_bot=?2 AND c.created_at>=?3 AND {AFTER_RESET}
+        UNION ALL
+        SELECT 1,json_extract(x.outcome,'$.output.command'),r.bot_id,t.status,
+            CAST(json_extract(r.record,'$.started_at') AS INTEGER) AS launched,NULL,t.exit_code
+        FROM wrapper_shell_tasks t JOIN engine_runs r ON r.run_id=t.run_id
+        LEFT JOIN engine_external_tools x ON x.run_id=t.run_id AND x.call_id=t.call_id
+        WHERE r.conversation_id=?1 AND +r.bot_id=?2 AND launched>=?3 AND {AFTER_RESET}
+        ORDER BY 5 DESC,2",
+    ))?;
+    let rows = stmt.query_map(params![conversation, bot, since, reset, ACCOUNT], |r| {
+        Ok((
+            r.get::<_, bool>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, Option<String>>(5)?,
+            r.get::<_, Option<i64>>(6)?,
+        ))
+    })?;
+    let mut thread = Thread {
+        lines: Vec::new(),
+        statuses: Vec::new(),
+    };
+    for row in rows {
+        let (command, summary, bot, status, started_ms, result, exit_code) = row?;
+        let status = match status.as_str() {
+            "queued" => "en file",
+            "running" | "en cours" => "en cours",
+            "done" | "terminé" => "terminée",
+            "failed" | "refused" | "échec" => "échec",
+            _ => "annulée",
+        };
+        thread.statuses.push(status);
+        if thread.lines.len() == THREAD_LINES {
+            continue;
+        }
+        let mask = |text: Option<String>| redact(&vault, &text.unwrap_or_default());
+        let started = jiff::Timestamp::from_millisecond(started_ms).map(|t| t.to_string());
+        let mut line = json!({"kind":if command {"command"} else {"delegation"},
+            "summary":bounded(&mask(summary)?, if command { 120 } else { 240 }),"bot":bot,
+            "status":status,"started_at":started.unwrap_or_default()});
+        if result.is_some() {
+            line["result"] = json!(first_sentence(&mask(result)?));
+        }
+        if let Some(code) = exit_code {
+            line["exit_code"] = json!(code);
+        }
+        thread.lines.push(line);
+    }
+    Ok(thread)
+}
+
+fn first_sentence(text: &str) -> String {
+    let text = text.trim();
+    let mut chars = text.char_indices().peekable();
+    let mut end = text.len();
+    while let Some((i, c)) = chars.next() {
+        let stops =
+            matches!(c, '.' | '!' | '?') && chars.peek().is_none_or(|(_, n)| n.is_whitespace());
+        if c == '\n' || stops {
+            end = i + if c == '\n' { 0 } else { c.len_utf8() };
+            break;
+        }
+    }
+    bounded(&text[..end], 240)
+}
+
+fn thread_summary(statuses: &[&str]) -> Option<String> {
+    let parts: Vec<_> = [
+        ("en file", "en file", "en file"),
+        ("en cours", "en cours", "en cours"),
+        ("terminée", "terminée", "terminées"),
+        ("échec", "en échec", "en échec"),
+        ("annulée", "annulée", "annulées"),
+    ]
+    .into_iter()
+    .filter_map(|(status, one, many)| {
+        let n = statuses.iter().filter(|s| **s == status).count();
+        (n > 0).then(|| format!("{n} {}", if n == 1 { one } else { many }))
+    })
+    .collect();
+    (!parts.is_empty()).then(|| format!("Tâches lancées depuis ce fil : {}.", parts.join(", ")))
+}
+
 fn result_context(conn: &Connection, request: &ContextRequest) -> Result<Option<String>> {
     let events = store::events(conn, &request.run_id, 0)?;
     let mut ids = Vec::new();
@@ -1771,6 +1899,15 @@ fn context_checked(ctx: &Context<'_>, request: &ContextRequest) -> Result<Vec<Co
         blocks.push(ContextBlock {
             source: ContextSource::DelegatedContext,
             priority: 94,
+            budget: CONTEXT_BUDGET * 2,
+            text,
+        });
+    }
+    let tasks = thread_tasks(ctx, &request.conversation_id, &request.bot_id)?;
+    if let Some(text) = thread_summary(&tasks.statuses) {
+        blocks.push(ContextBlock {
+            source: ContextSource::DelegatedContext,
+            priority: 96,
             budget: CONTEXT_BUDGET * 2,
             text,
         });

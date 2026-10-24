@@ -2642,3 +2642,19 @@ fn background_destructive_shell_still_asks_when_a_permanent_shell_rule_exists() 
     f.finish("bg-rm");
     assert!(target.exists());
 }
+
+#[test]
+fn a_finished_background_command_is_listed_with_its_exit_code_in_the_next_reply() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    start_background(&mut f, "code", "echo raté >&2; exit 3");
+    wait_output(&mut f, "code", "code de sortie", |o| o["status"] == "échec");
+    f.send("fil", "check_delegations", json!({"portee":"fil"}));
+    f.reply("vu");
+    f.finish("fil");
+    let task = f.outcome("fil")["output"]["tasks"][0].clone();
+    assert_eq!(task["kind"], "command");
+    assert_eq!(task["summary"], "echo raté >&2; exit 3");
+    assert_eq!(task["status"], "échec");
+    assert_eq!(task["exit_code"], json!(3));
+}

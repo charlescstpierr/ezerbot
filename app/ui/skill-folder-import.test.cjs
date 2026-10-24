@@ -17,7 +17,7 @@ function debuggingPort(directory, chrome) {
   const deadline = Date.now() + 10000;
   return (async () => {
     while (Date.now() < deadline) {
-      if (chrome.exitCode !== null) throw new Error("chrome exited before the debugging port");
+      if (chrome.exitCode !== null || chrome.signalCode !== null) throw new Error("chrome exited before the debugging port");
       try {
         const port = Number(readFileSync(portFile, "utf8").split(/\s/)[0]);
         if (port) return port;
@@ -66,7 +66,9 @@ async function pageTarget(port) {
   throw new Error("chrome did not open a page target");
 }
 
-function readLine(stream) {
+// First line of the child's stdout. Rejects, with the exit status, if the child ends first.
+function readLine(child, details = () => "") {
+  const stream = child.stdout;
   return new Promise((resolve, reject) => {
     let data = "";
     const onData = (chunk) => {
@@ -79,10 +81,27 @@ function readLine(stream) {
     };
     stream.on("data", onData);
     stream.on("error", reject);
+    child.once("close", (code, signal) => {
+      reject(new Error(`process ended (code ${code}, signal ${signal}) before printing a full line${details()}`));
+    });
   });
 }
 
-test("Importer un dossier skips a real symlink whose target is outside the folder", { timeout: 60000 }, async () => {
+// A promise that rejects as soon as `child` fails to start or ends (stdio closed) while the test still
+// needs it. `settle()` marks the end of the test, so stopping the children is not a failure.
+function watchChild(name, child, details = () => "") {
+  let expected = false;
+  const failed = new Promise((_, reject) => {
+    child.once("error", (error) => reject(new Error(`${name} failed: ${error.message}`)));
+    child.once("close", (code, signal) => {
+      if (!expected) reject(new Error(`${name} exited (code ${code}, signal ${signal}) before the test ended${details()}`));
+    });
+  });
+  failed.catch(() => {});
+  return { failed, settle() { expected = true; } };
+}
+
+test("Importer un dossier skips a real symlink whose target is outside the folder", { timeout: 60000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "grokbot-folder-e2e-"));
   const dbDir = join(root, "db");
   const chosen = join(root, "choisi");
@@ -105,25 +124,34 @@ test("Importer un dossier skips a real symlink whose target is outside the folde
   });
   let stderr = "";
   child.stderr.on("data", (chunk) => { if (stderr.length < 4000) stderr += chunk; });
+  const wrapperWatch = watchChild("grokbot-wrapper", child, () => (stderr ? `: ${stderr}` : ""));
   let chrome;
-  const stop = () => {
-    if (child.exitCode === null) child.kill("SIGKILL");
-    if (chrome && chrome.exitCode === null) chrome.kill("SIGKILL");
-  };
-  try {
-    const chromeDir = mkdtempSync(join(tmpdir(), "grokbot-folder-chrome-"));
-    chrome = spawn(chromeBinary(), [
-      "--headless=new",
-      "--no-sandbox",
-      "--disable-gpu",
-      "--disable-dev-shm-usage",
-      "--remote-allow-origins=*",
-      "--remote-debugging-port=0",
-      `--user-data-dir=${join(chromeDir, "profile")}`,
-      "--window-size=1280,900",
-      "about:blank",
-    ], { stdio: ["ignore", "ignore", "pipe"] });
-    const announced = JSON.parse(await readLine(child.stdout));
+  let chromeWatch;
+  // Registered before anything can fail, and run by node:test when the test ends for any
+  // reason, including the test timeout, where the awaited body never reaches a `finally`.
+  t.after(() => {
+    wrapperWatch.settle();
+    chromeWatch?.settle();
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    if (chrome && chrome.exitCode === null && chrome.signalCode === null) chrome.kill("SIGKILL");
+  });
+  // Every wait below ends early, with a clear message, if either process fails or exits.
+  const whileRunning = (work) => Promise.race([work, wrapperWatch.failed, ...(chromeWatch ? [chromeWatch.failed] : [])]);
+  const chromeDir = mkdtempSync(join(tmpdir(), "grokbot-folder-chrome-"));
+  chrome = spawn(chromeBinary(), [
+    "--headless=new",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--remote-allow-origins=*",
+    "--remote-debugging-port=0",
+    `--user-data-dir=${join(chromeDir, "profile")}`,
+    "--window-size=1280,900",
+    "about:blank",
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  chromeWatch = watchChild("chrome", chrome);
+  await whileRunning((async () => {
+    const announced = JSON.parse(await readLine(child, () => (stderr ? `: ${stderr}` : "")));
     const url = announced.url;
     const headers = {
       Origin: url,
@@ -225,7 +253,5 @@ test("Importer un dossier skips a real symlink whose target is outside the folde
     const shot = await cdp.send("Page.captureScreenshot", { format: "png" });
     writeFileSync(join(root, "import-dossier-symlink.png"), Buffer.from(shot.data, "base64"));
     cdp.close();
-  } finally {
-    stop();
-  }
+  })());
 });

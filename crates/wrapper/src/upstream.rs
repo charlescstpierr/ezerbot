@@ -116,7 +116,7 @@ pub(crate) fn request_options(directory: &std::path::Path, body: &Value) {
     );
 }
 
-fn append(path: &std::path::Path, line: &str) {
+pub(crate) fn append(path: &std::path::Path, line: &str) {
     // The native shell already redirects stderr to this file. Use its open
     // handle so its non-append offset cannot later overwrite a direct append.
     #[cfg(unix)]

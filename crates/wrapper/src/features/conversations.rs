@@ -90,6 +90,14 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     .entry(key.clone())
                     .or_insert_with(|| value.clone());
             }
+            let directory = app.db_path.parent().unwrap_or(std::path::Path::new("."));
+            let client = app.state_client;
+            app.stream_watches.entry(client).or_default().observe(
+                directory,
+                client,
+                &state,
+                std::time::Instant::now(),
+            );
             Ok(state)
         }
         "/api/preferences" => {

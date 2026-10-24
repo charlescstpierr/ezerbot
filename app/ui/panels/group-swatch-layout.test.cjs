@@ -1,10 +1,11 @@
 // Run with: node --test app/ui/panels/group-swatch-layout.test.cjs
 const assert = require("node:assert/strict");
-const { spawn, spawnSync } = require("node:child_process");
-const { existsSync, mkdtempSync, writeFileSync } = require("node:fs");
+const { spawn } = require("node:child_process");
+const { mkdtempSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
+const { chromeBinary } = require("../chrome-binary.cjs");
 
 const UI = join(__dirname, "..");
 const COLORS = [
@@ -18,16 +19,6 @@ const COLORS = [
   ["violet", "Violet", "#9B7BFF"],
   ["blanc", "Sans couleur", "#F5F5F5"],
 ];
-
-function chromeOnPath(command) {
-  if (command.includes("/")) return existsSync(command);
-  return spawnSync("which", [command], { stdio: "ignore" }).status === 0;
-}
-
-function chromeBinary() {
-  if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
-  return ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"].find(chromeOnPath) || "google-chrome";
-}
 
 function swatches(id) {
   return COLORS.map(([accent, label, swatch]) => `<button type="button" data-avatar-color="${accent}" aria-label="${label}"><i style="--swatch:${swatch}" aria-hidden="true"></i><span>${label}</span></button>`).join("");

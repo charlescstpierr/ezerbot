@@ -1,30 +1,13 @@
 // Run with: node --test app/ui/voice-icons.test.cjs
 const assert = require("node:assert/strict");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const { mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
+const { chromeBinary } = require("./chrome-binary.cjs");
 
 const UI = __dirname;
-const CHROME_CANDIDATES = [
-  "google-chrome",
-  "google-chrome-stable",
-  "chromium",
-  "chromium-browser",
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-];
-
-function chromeOnPath(command) {
-  if (command.includes("/")) return require("node:fs").existsSync(command);
-  return spawnSync("which", [command], { stdio: "ignore" }).status === 0;
-}
-
-function chromeBinary() {
-  if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
-  return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
-}
-
 function commands(path) {
   return [...path.matchAll(/[a-z]/gi)].map((match) => match[0].toLowerCase());
 }

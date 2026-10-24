@@ -3447,3 +3447,37 @@ fn yolo_launches_a_delegated_task_without_the_background_card() {
     f.child_done(&edge);
     f.resume(&c, "yolo-delegate");
 }
+
+#[test]
+fn check_delegations_without_argument_keeps_its_output() {
+    let mut f = Fixture::new(false);
+    let root = f.root("frozen-root");
+    let id = suspended(f.tool(&root, "frozen", "delegate", args("child")));
+    let db = f.db();
+    let tx = features::write_transaction(&db).unwrap();
+    graph::set_status(
+        &tx,
+        &id,
+        &DelegationStatus::Done {
+            result: "stable result".into(),
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let ToolOutcome::Done { output } = f.tool(&root, "check", "check_delegations", json!({}))
+    else {
+        panic!("check_delegations must succeed");
+    };
+    // Sortie figée sur 9cfe300b, avant l'ajout de la portée « fil ».
+    assert_eq!(
+        output,
+        json!({"delegations":[{
+            "id":id,"objective":"Verify selected material","parent_run_id":"frozen-root",
+            "root_run_id":"frozen-root","parent_bot":"grokbot","child_bot":"child","depth":1,
+            "child_run_id":format!("run-{id}"),
+            "conversation_id":format!("task:{id}:{}",root.conversation_id),
+            "parent_conversation_id":root.conversation_id,
+            "status":{"status":"done","result":"stable result"}
+        }]})
+    );
+}

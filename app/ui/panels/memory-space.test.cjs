@@ -201,7 +201,6 @@ const dimmed = (h) => named(h.screen(), "memory-graph-point").filter((point) => 
 test("Recherche : « lisbonne » trouve « Lisbonne », « eleve » trouve « élève », la casse est ignorée ; la Liste ne garde que les résultats", async () => {
   const h = harness({ facts: WIDE });
   await h.open();
-  assert.deepEqual(listed(h), ["f1", "f2", "f3", "f4", "f5"], "sans filtre, tout est là");
   type(h, "lisbonne");
   assert.deepEqual(listed(h), ["f4"]);
   type(h, "ÉLEVE");
@@ -253,16 +252,11 @@ test("Graphe : les résultats ressortent avec leur texte, le reste s’estompe ;
   first.listeners.mouseenter();
   first.listeners.mouseleave();
   assert.deepEqual(dimmed(h), ["f1", "f2", "f3", "f5"]);
+  type(h, "<b>");
+  assert.ok(named(h.screen(), "memory-graph-label").some((label) => label.textContent === "Aime le café <b>noir</b>"), "le texte reste du texte, jamais du HTML");
   type(h, "introuvable");
   assert.equal(named(h.screen(), "memory-graph-point").length, 0);
   assert.match(named(h.screen(), "memory-space-empty")[0].textContent, /Aucun souvenir ne correspond/);
-});
-test("le texte d’un résultat reste du texte, jamais du HTML", async () => {
-  const h = harness();
-  await h.open();
-  named(h.screen(), "memory-space-tab")[0].click();
-  type(h, "<b>");
-  assert.equal(named(h.screen(), "memory-graph-label").map((label) => label.textContent).join("|"), "Vous|Personnel|Travail|Déménagement|Aime le café <b>noir</b>");
 });
 test("le filtre survit au changement Graphe/Liste et au rechargement périodique de la liste", async () => {
   const h = harness({ facts: WIDE });

@@ -1,7 +1,6 @@
-/* Mémoire : recherche et filtres par bot et par portée.
- * L'état du filtre est `{ q, bot, scope }` ; `filtre` rend les ids des souvenirs qui lui correspondent. La Liste ne garde que ceux-là,
- * le Graphe les met en avant : les deux lisent le même résultat. `normalize` est aussi celle de l'ancien panneau (memory.js).
- * Le bundle des panneaux est trié par nom : ce fichier passe avant memory-graph.js, memory-space.js et memory.js. */
+/* Mémoire : recherche et filtres par bot et par portée. État du filtre `{ q, bot, scope }` ; `filtre` rend les ids correspondants,
+ * que la Liste garde et que le Graphe met en avant. `normalize` est aussi celle de memory.js (ancien panneau). Le bundle des panneaux
+ * est trié par nom : ce fichier passe avant memory-graph.js, memory-space.js et memory.js. */
 (() => {
   "use strict";
   const SCOPES = [["", "Toutes les portées"], ["private", "Privé"], ["team", "Équipe"], ["topic", "Sujet"]];

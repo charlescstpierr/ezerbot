@@ -39,8 +39,7 @@
     painted = null;
     load();
     paint();
-    // Le focus va à l'onglet actif : sur « Liste » alors que « Graphe » est affiché, l'anneau passerait pour un état actif.
-    screen.querySelector(`.is-${view}`).focus?.();
+    screen.querySelector(`.is-${view}`).focus?.(); // l'onglet actif : sur « Liste » alors que « Graphe » est affiché, l'anneau passerait pour un état actif
   }
   function close() {
     if (!open) return;

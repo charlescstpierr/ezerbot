@@ -94,8 +94,12 @@
     nodeLayer.append(center,
       ...graph.groups.map((group) => add(group, "group", group.scope, 20, `${group.label}, ${group.count} souvenir${group.count > 1 ? "s" : ""}`, short(group.label))),
       ...graph.nodes.map((node) => {
-        const hit = Boolean(matches?.has(node.id)), el = add(node, "point", node.scope, 6, `${node.bot}, ${SCOPE_LABELS[node.scope]} : ${node.label.slice(0, 120)}`, hit ? excerpt(node.label) : "");
+        const hit = Boolean(matches?.has(node.id)), el = add(node, "point", node.scope, 6, `${node.bot}, ${SCOPE_LABELS[node.scope]} : ${node.label.slice(0, 120)}`);
         el.classList.toggle("is-match", hit);
+        if (hit) { // le texte se pose vers l'extérieur de son groupe, loin de l'étiquette du groupe
+          const g = at.get(node.group), d = Math.hypot(node.x - g.x, node.y - g.y) || 1, ux = (node.x - g.x) / d, uy = (node.y - g.y) / d, side = Math.abs(ux) > 0.5 ? Math.sign(ux) : 0;
+          el.append(make("text", { class: "memory-graph-label", x: node.x + side * 10, y: node.y, dy: Math.abs(uy) > 0.5 ? (uy > 0 ? "1.6em" : "-0.9em") : "0.35em", style: `text-anchor:${side > 0 ? "start" : side < 0 ? "end" : "middle"}` }, excerpt(node.label)));
+        }
         return el;
       }));
     svg.append(edgeLayer, nodeLayer);

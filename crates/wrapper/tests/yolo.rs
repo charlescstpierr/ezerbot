@@ -20,6 +20,7 @@ use std::{
 };
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
 
+const PAYMENTS: &str = "Je ne peux pas faire ça : les paiements sont interdits aux bots, même avec ton accord. Tu peux le faire toi-même.";
 const PROTECTED: &str =
     "Mode YOLO : les données et les identifiants d’Ezerbot restent hors de portée des outils.";
 
@@ -180,6 +181,53 @@ impl Fixture {
         self.finish(id);
         assert!(self.requests(id).is_empty(), "{id} a demandé une carte");
         self.outcome(id)
+    }
+}
+impl Fixture {
+    /// Un connecteur de caisse fictif, connecté avec la carte que le YOLO laisse en place.
+    /// Chaque appel qui l'atteint est noté dans le fichier rendu.
+    fn payments_connector(&mut self) -> PathBuf {
+        let calls = self.root().join("appels.txt");
+        let fixture = format!(
+            "{}/tests/fixtures/mcp_server.py",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let server = self.post("/api/mcp/add", json!({"name":"Caisse","command":"python3","arguments":[fixture,"payments"],"environment":{"CALL_LOG":calls}}))["id"].as_str().unwrap().to_owned();
+        self.post(
+            "/api/mcp/select",
+            json!({"id":server,"bot_id":"grokbot","enabled":true}),
+        );
+        let run = self.post("/api/mcp/restart", json!({"id":server}))["run_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        wait("carte de connexion", || {
+            !requests::list_for_run(&self.db(), &run).unwrap().is_empty()
+        });
+        let card = requests::list_for_run(&self.db(), &run).unwrap().remove(0);
+        self.post("/api/approvals/resolve", json!({"entry_id":card.entry_id,"conversation_id":card.route.target_conversation_id,"submission_id":"connexion","decision":"allow_once"}));
+        self.app.tick(0);
+        wait("connecteur prêt", || {
+            self.state()["mcp"]["servers"][0]["status"] == "connected"
+        });
+        calls
+    }
+    fn connector_tool(&mut self, name: &str) -> String {
+        self.state()["mcp"]["servers"][0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap()["namespace"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+    fn forbidden_log(&mut self) -> Vec<Value> {
+        let log = self.yolo()["log"].as_array().unwrap().clone();
+        log.into_iter()
+            .filter(|e| e["source"] == "forbidden")
+            .collect()
     }
 }
 impl Drop for Fixture {
@@ -819,4 +867,80 @@ fn settings_cards_and_drafts_keep_their_card_in_yolo() {
     ] {
         assert!(covered(tool), "{tool} doit être couvert");
     }
+}
+
+#[test]
+fn a_payment_tool_is_refused_in_both_modes_with_no_card_and_never_reaches_the_connector() {
+    let mut f = Fixture::new();
+    let calls = f.payments_connector();
+    for (mode, ids) in [
+        ("yolo", ["paie-yolo", "vire-yolo"]),
+        ("ask", ["paie-ask", "vire-ask"]),
+    ] {
+        f.mode(mode);
+        for (id, tool) in ids.into_iter().zip(["create_payment", "transfer_funds"]) {
+            let name = f.connector_tool(tool);
+            f.send(id, &name, json!({}));
+            f.finish(id);
+            assert!(f.requests(id).is_empty(), "{id} a demandé une carte");
+            assert_eq!(f.outcome(id)["reason"], PAYMENTS, "{id}");
+        }
+    }
+    assert!(std::fs::read_to_string(&calls)
+        .unwrap_or_default()
+        .is_empty());
+    let log = f.forbidden_log();
+    assert_eq!(log.len(), 4);
+    assert!(log.iter().all(|e| e["summary"]
+        .as_str()
+        .unwrap()
+        .starts_with("Refusé (action interdite : paiement) · Connecteur Caisse")));
+}
+
+#[test]
+fn reading_payments_and_plain_commands_keep_their_decision_in_both_modes() {
+    let mut f = Fixture::new();
+    let calls = f.payments_connector();
+    let list = f.connector_tool("list_payments");
+    f.mode("yolo");
+    f.runs_without_a_card("lire-yolo", &list, json!({}));
+    f.runs_without_a_card("shell-yolo", "run_shell", f.shell("printf ok"));
+    assert_eq!(
+        std::fs::read_to_string(&calls).unwrap().trim(),
+        "list_payments"
+    );
+    f.mode("ask");
+    f.local("grokbot", true, false);
+    let other = f.post("/api/conversations", json!({"title":"Demander"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.send("lire-ask", &list, json!({}));
+    f.request("lire-ask");
+    f.send_in(&other, "shell-ask", "run_shell", f.shell("printf ok"));
+    f.request("shell-ask");
+    assert!(f.forbidden_log().is_empty());
+}
+
+#[test]
+fn the_forbidden_list_is_code_only_with_no_table_route_or_setting() {
+    let mut f = Fixture::new();
+    let tables: i64 = f
+        .db()
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE lower(name) LIKE '%forbid%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0);
+    for (method, path) in [
+        ("GET", "/api/forbidden"),
+        ("POST", "/api/forbidden"),
+        ("POST", "/api/forbidden/disable"),
+    ] {
+        let error = f.app.api(method, path, b"{}").unwrap_err();
+        assert_eq!(error.status, 404, "{method} {path}");
+    }
+    assert!(!f.state().to_string().contains("forbid"));
 }

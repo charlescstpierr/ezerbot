@@ -2405,3 +2405,46 @@ fn the_follow_up_turn_of_a_late_decision_cannot_be_regenerated() {
     assert_eq!(f.late_runs(), 1);
     assert_eq!(f.protected_effects(), 1);
 }
+
+#[test]
+fn a_forbidden_action_is_denied_whatever_a_card_a_rule_or_yolo_says() {
+    let mut f = Fixture::new();
+    let call = |id: &str, name: &str| ToolCall {
+        call_id: id.into(),
+        name: name.into(),
+        arguments: json!({"amount": 10}),
+    };
+    let check = |f: &Fixture, call: &ToolCall| {
+        with_tx(&f.conn, |conn| -> Result<_, ApiError> {
+            let run = store::required(conn, "run")?;
+            forms::check_tool_approval(&tool_context(&f.app, conn, &run), &run, call)
+        })
+        .unwrap()
+    };
+    let card_accepted = |f: &mut Fixture, call: &ToolCall| {
+        let card = f.approval_call("run", call);
+        f.decide(&card, &format!("oui-{}", call.call_id), json!("allow_once"));
+    };
+    // Control: the same accepted card admits a harmless tool, so the refusals below
+    // come from the forbidden list and not from the setup.
+    let harmless = call("lecture", "stripe_list_payments");
+    card_accepted(&mut f, &harmless);
+    assert!(matches!(
+        check(&f, &harmless),
+        ApprovalCheck::Authorized { .. }
+    ));
+    let payment = call("paiement", "stripe_create_payment");
+    let refused = |decision: ApprovalCheck| matches!(decision, ApprovalCheck::Denied { reason } if reason.starts_with("Je ne peux pas faire ça : les paiements sont interdits aux bots"));
+    card_accepted(&mut f, &payment);
+    assert!(refused(check(&f, &payment)));
+    f.conn
+        .execute(
+            "INSERT INTO forms_approval_rules VALUES ('grokbot','grokbot',?1,'stripe_create_payment','','\"global\"',1)",
+            params![f.conversation],
+        )
+        .unwrap();
+    assert!(refused(check(&f, &call("autre", "stripe_create_payment"))));
+    f.post("/api/yolo/mode", json!({"mode": "yolo"}));
+    assert!(refused(check(&f, &call("encore", "stripe_create_payment"))));
+    assert_eq!(f.count("forms_requests"), 2, "aucune carte pour un refus");
+}

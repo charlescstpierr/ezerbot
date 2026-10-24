@@ -38,7 +38,7 @@
       if (!fact) return;
       shown = JSON.stringify(fact);
       const editing = mode === "edit", confirming = mode === "confirm", conversation = fact.provenance?.conversation_id;
-      const origin = conversation ? button("Ouvrir la conversation", "memory-detail-link", () => { if (!panels.openConversation?.(conversation)) { problem = "Cette conversation n’existe plus, ou une autre action est en cours."; render(); } }, false) : "Hors conversation";
+      const origin = conversation ? button("Ouvrir la conversation", "memory-detail-link", () => { if (!panels.openConversation?.(conversation)) { problem = "Cette conversation n’existe plus, ou une autre action est en cours."; render("origin"); } }, false) : "Hors conversation";
       const rows = [["Bot", label.bot(fact)], ["Origine", origin], ["Appris le", label.date(fact.learned_at)], ["Provenance", SOURCES[fact.provenance?.source] || "Inconnue"], ["Portée", label.scope(fact)]];
       const fields = node("dl", "memory-detail-fields");
       for (const [name, value] of rows) {
@@ -71,7 +71,7 @@
       root.hidden = false;
       root.parentElement.dataset.detail = "open";
       mark();
-      ({ title, body, back, edit, ask })[want]?.focus();
+      ({ title, body, back, edit, ask, origin })[want]?.focus();
     }
     // Le panneau suit le moteur : il ne montre que ce que la dernière lecture contient.
     async function act(path, request, done, forgetting = false) {
@@ -116,7 +116,7 @@
       else mark(); // la vue a pu être reconstruite (Graphe ↔ Liste)
     }
     document.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || id === null || busy || event.defaultPrevented || document.querySelector("dialog[open]")) return;
+      if (event.key !== "Escape" || id === null || event.defaultPrevented || document.querySelector("dialog[open]")) return;
       event.preventDefault();
       close(true);
     });

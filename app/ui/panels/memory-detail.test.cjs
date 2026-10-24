@@ -91,6 +91,7 @@ test("un clic sur un point du graphe ou sur une ligne de la Liste ouvre le panne
   gone.item("f1").click();
   gone.button("Ouvrir la conversation").click();
   assert.match(gone.text("error"), /n’existe plus/);
+  assert.equal(Element.active, gone.button("Ouvrir la conversation"), "le focus reste sur le bouton après l'erreur");
   gone.button("Fermer").click();
   assert.deepEqual([gone.open(), gone.item("f1").contains(Element.active)], [false, true], "le focus revient à la ligne");
   h.tab("list");
@@ -175,6 +176,8 @@ test("un souvenir de sujet s'oublie par /api/topics/memory/forget, sans Modifier
   ok.item("f3").click();
   ok.button("Oublier…").click();
   ok.button("Oublier ce souvenir").click();
+  ok.escape();
+  assert.equal(ok.open(), false, "Échap ferme aussi pendant l'envoi");
   await ok.settle();
   assert.deepEqual([ok.mutations(), ok.open(), ok.items()], [[["/api/topics/memory/forget", { fact_id: "f3" }]], false, 2]);
 });

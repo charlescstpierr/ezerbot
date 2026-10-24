@@ -74,7 +74,11 @@
       tab.addEventListener("click", () => { view = key; paint(); });
       switcher.append(tab);
     }
-    screen.append(switcher, node("p", "memory-space-help", "Tout ce que vos bots ont retenu : souvenirs privés, d’équipe et de sujet."), node("div", "memory-space-body"));
+    // Le bouton « Ajouter un souvenir » (memory-add.js) rejoint les onglets ; son formulaire s’ouvre dessous.
+    const add = window.EzerbotMemoryAdd?.create(load);
+    const head = node("div", "memory-space-head");
+    head.append(switcher, ...(add ? [add.button] : []));
+    screen.append(head, ...(add ? [add.form] : []), node("p", "memory-space-help", "Tout ce que vos bots ont retenu : souvenirs privés, d’équipe et de sujet."), node("div", "memory-space-body"));
     dock.parentElement.insertBefore(screen, dock);
     return true;
   }

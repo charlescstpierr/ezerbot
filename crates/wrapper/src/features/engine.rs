@@ -1656,6 +1656,18 @@ impl RunServices for Services<'_> {
         }
         tools
     }
+    fn is_own_capture(
+        &self,
+        conn: &Connection,
+        run: &Run,
+        capture_id: &str,
+    ) -> grokbot_engine::contracts::Result<bool> {
+        Ok(super::screen::exists_in_thread(
+            conn,
+            &run.conversation_id,
+            capture_id,
+        )?)
+    }
     fn tools_for_run(&self, run: &Run) -> Vec<ToolSpec> {
         self.tools()
             .into_iter()
@@ -1718,6 +1730,7 @@ impl RunServices for Services<'_> {
     fn is_journaled_external_tool(&self, call: &grokbot_engine::contracts::ToolCall) -> bool {
         super::local::is_tool(&call.name)
             || super::screen::is_tool(&call.name)
+            || super::page_snapshot::is_tool(&call.name)
             || super::generated::is_external(&call.name)
             || super::images::is_external(&call.name)
             || super::recall::is_tool(&call.name)
@@ -1771,6 +1784,8 @@ impl RunServices for Services<'_> {
         let ctx = self.ctx(self.connection, run);
         let outcome = if super::screen::is_tool(&call.name) {
             super::screen::execute(&ctx, call, self.cancel.clone())
+        } else if super::page_snapshot::is_tool(&call.name) {
+            super::page_snapshot::execute(&ctx, call)
         } else if super::generated::is_external(&call.name) {
             super::generated::execute(&ctx, call, self.cancel.clone())
         } else if super::images::is_external(&call.name) {

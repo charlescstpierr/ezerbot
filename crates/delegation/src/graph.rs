@@ -10,7 +10,9 @@
 //! Use an IMMEDIATE write transaction for read/modify/write operations, or the
 //! standalone `admission::submit` helper. A child run must not be startable until
 //! its Running reservation and child link have committed together.
-use grokbot_engine::contracts::{ContextBlock, ContextSource, Error, Result, SelectedContext};
+use grokbot_engine::contracts::{
+    CaptureRef, ContextBlock, ContextSource, Error, Result, SelectedContext,
+};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -20,9 +22,17 @@ use std::collections::HashSet;
 pub enum DelegationStatus {
     Queued,
     Running,
-    Done { result: String },
-    Failed { reason: String },
-    Refused { reason: String },
+    Done {
+        result: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        captures: Vec<CaptureRef>,
+    },
+    Failed {
+        reason: String,
+    },
+    Refused {
+        reason: String,
+    },
     Cancelled,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -657,6 +667,7 @@ pub(crate) mod tests {
             "UPDATE delegation_graph SET status = ?1 WHERE id = 'b'",
             [serde_json::to_string(&DelegationStatus::Done {
                 result: "done".into(),
+                captures: vec![],
             })
             .unwrap()],
         )
@@ -680,7 +691,8 @@ pub(crate) mod tests {
             &conn,
             "a",
             &DelegationStatus::Done {
-                result: "late".into()
+                result: "late".into(),
+                captures: vec![],
             }
         )
         .is_err());
@@ -748,6 +760,7 @@ pub(crate) mod tests {
         for status in [
             DelegationStatus::Done {
                 result: "done".into(),
+                captures: vec![],
             },
             DelegationStatus::Failed {
                 reason: "failed".into(),
@@ -801,6 +814,7 @@ pub(crate) mod tests {
             DelegationStatus::Cancelled,
             DelegationStatus::Done {
                 result: "finished".into(),
+                captures: vec![],
             },
             DelegationStatus::Failed {
                 reason: "failed".into(),

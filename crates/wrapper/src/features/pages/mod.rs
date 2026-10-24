@@ -508,7 +508,7 @@ struct PageRecord {
     has_previous: bool,
 }
 
-fn load(conn: &Connection, id: &str) -> Result<Value, ApiError> {
+pub(super) fn load(conn: &Connection, id: &str) -> Result<Value, ApiError> {
     let record = conn
         .query_row(
             "SELECT id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview, previous_source IS NOT NULL
@@ -601,7 +601,7 @@ fn present_document(record: &PageRecord) -> Result<(String, Option<String>, Valu
     }
 }
 
-fn valid_page_id(id: &str) -> bool {
+pub(super) fn valid_page_id(id: &str) -> bool {
     id.strip_prefix("page_").is_some_and(|hex| {
         hex.len() == 64
             && hex

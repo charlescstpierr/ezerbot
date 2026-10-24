@@ -1219,7 +1219,8 @@ fn routine_without_skill_runs_inline_prompt() {
     assert_eq!(
         f.run(&r).task_status,
         Some(TaskStatus::Done {
-            summary: "Report ready".into()
+            summary: "Report ready".into(),
+            captures: vec![],
         })
     );
     let history = f.history(&r);
@@ -2265,7 +2266,8 @@ fn webhook_body_reaches_the_model_as_untrusted_data_and_the_thread_shows_it() {
     assert_eq!(
         f.run(&r).task_status,
         Some(TaskStatus::Done {
-            summary: "Reçu".into()
+            summary: "Reçu".into(),
+            captures: vec![],
         })
     );
     let history = f.history(&r);

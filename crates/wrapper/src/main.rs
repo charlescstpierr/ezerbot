@@ -576,6 +576,19 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             continue;
         }
         let is_api = request.url().starts_with("/api/");
+        // Timed through JSON encoding, which grows with the history (#255).
+        let mut state_elapsed = None;
+        let state_started = (request.method() == &tiny_http::Method::Get
+            && request.url().split('?').next() == Some("/api/state"))
+        .then(std::time::Instant::now);
+        if state_started.is_some() {
+            let client = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("X-Ezerbot-Client"))
+                .map(|header| header.value.as_str().to_owned());
+            app.set_state_client(remote, client.as_deref());
+        }
         let mut cookie = None;
         let (mut status, mut body, content_type) = match payload(
             &mut request,
@@ -602,6 +615,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
                     }
                 }
                 let (body, content_type) = response.into_parts();
+                state_elapsed = state_started.map(|started| started.elapsed());
                 if header_safe(&content_type) {
                     (200, body, content_type)
                 } else {
@@ -661,6 +675,9 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         };
         if let Err(error) = result {
             eprintln!("Réponse HTTP interrompue : {error}");
+        }
+        if let Some(elapsed) = state_elapsed {
+            app.log_state_served(elapsed);
         }
     }
 }

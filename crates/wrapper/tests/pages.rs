@@ -156,14 +156,15 @@ impl Fixture {
         for _ in 0..500 {
             self.app.tick(now());
             if self.run(id).status.is_terminal() && self.provider.status()["titling"] == false {
+                assert_eq!(self.run(id).status, RunStatus::Finished);
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("run inachevée {:?}", self.run(id));
     }
-    fn outcome(&self, id: &str) -> Value {
-        store::events(&self.db(), &self.run("compare").run_id, 0)
+    fn outcome(&self, message: &str, id: &str) -> Value {
+        store::events(&self.db(), &self.run(message).run_id, 0)
             .unwrap()
             .into_iter()
             .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == id)
@@ -227,11 +228,11 @@ fn interactive_table_becomes_a_local_page_and_survives_restart() {
     f.finish("compare");
     assert_eq!(f.run("compare").status, RunStatus::Finished);
 
-    let broken = f.outcome("page-broken");
+    let broken = f.outcome("compare", "page-broken");
     assert_eq!(broken["status"], "failed", "{broken}");
     assert_eq!(broken["reason"], DIAGNOSTIC);
 
-    let fixed = f.outcome("page-fixed");
+    let fixed = f.outcome("compare", "page-fixed");
     assert_eq!(fixed["status"], "done", "{fixed}");
     assert_eq!(std::fs::read_to_string(f.file()).unwrap(), FIXED);
 
@@ -313,4 +314,300 @@ fn interactive_table_becomes_a_local_page_and_survives_restart() {
         "Mes forfaits"
     );
     assert_eq!(std::fs::read_to_string(f.file()).unwrap(), FIXED);
+}
+
+impl Fixture {
+    fn page(&mut self) -> Value {
+        let state = self.app.api("GET", "/api/state", b"").unwrap();
+        let id = state["pages"]["by_bot"]["grokbot"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        self.app
+            .api("GET", &format!("/api/pages/{id}"), b"")
+            .unwrap()["page"]
+            .clone()
+    }
+    fn answer(&self, write: Option<ScriptedResponse>) {
+        let mut seen = self.server.seen.lock().unwrap();
+        seen.responses.extend(write);
+        seen.responses.push_back(ScriptedResponse::events(&[
+            json!({"type":"response.output_text.delta","delta":"C’est modifié."}),
+            json!({"type":"response.completed"}),
+        ]));
+    }
+    fn anchor(page: &Value, passage: &str) -> Value {
+        json!({"page_id": page["id"], "source_version": page["source_version"], "passage": passage})
+    }
+    fn send_in(
+        &mut self,
+        chat: &str,
+        message: &str,
+        anchor: Option<Value>,
+    ) -> Result<Value, grokbot_wrapper::ApiError> {
+        let mut body =
+            json!({"conversation_id":chat,"message_id":message,"body":"Retouche ce passage"});
+        if let Some(anchor) = anchor {
+            body["page_anchor"] = anchor;
+        }
+        self.app
+            .api("POST", "/api/send", body.to_string().as_bytes())
+    }
+    fn has_message(&mut self, chat: &str, message: &str) -> bool {
+        let state = self.app.api("GET", "/api/state", b"").unwrap();
+        state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["id"] == chat)
+            .flat_map(|c| c["messages"].as_array().unwrap())
+            .any(|m| m["id"] == message)
+    }
+    fn instructions_with(&self, needle: &str) -> Vec<String> {
+        self.server
+            .seen
+            .lock()
+            .unwrap()
+            .bodies
+            .iter()
+            .filter_map(|body| body["instructions"].as_str())
+            .filter(|text| text.contains(needle))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+fn after_first_page() -> Fixture {
+    let mut f = Fixture::new();
+    f.ask();
+    f.finish("compare");
+    f
+}
+
+#[test]
+fn anchored_message_is_kept_and_the_bot_reads_the_cited_lines() {
+    let mut f = after_first_page();
+    let page = f.page();
+    assert_eq!(page["anchors"], json!([]));
+    f.answer(None);
+    let chat = f.chat.clone();
+    f.send_in(
+        &chat,
+        "retouche",
+        Some(Fixture::anchor(&page, "Trois forfaits")),
+    )
+    .unwrap();
+    f.finish("retouche");
+
+    assert_eq!(
+        f.page()["anchors"],
+        json!([{
+            "message_id": "retouche",
+            "passage": "Trois forfaits",
+            "state": "open",
+            "source_version": page["source_version"]
+        }])
+    );
+    let line = FIXED.lines().position(|l| l.contains("<h1>")).unwrap() + 1;
+    let source_line = FIXED
+        .lines()
+        .nth(line - 1)
+        .unwrap()
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e");
+    let blocks = f.instructions_with("Passage cité");
+    assert!(!blocks.is_empty());
+    for block in blocks {
+        assert!(
+            block.contains("Passage cité : « Trois forfaits »"),
+            "{block}"
+        );
+        assert!(block.contains(&format!("{line}: {source_line}")), "{block}");
+        assert!(block.contains("Change seulement cet endroit"), "{block}");
+    }
+}
+
+#[test]
+fn a_passage_missing_from_the_source_reaches_the_bot_as_a_quote_only() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.answer(None);
+    let chat = f.chat.clone();
+    f.send_in(
+        &chat,
+        "prix",
+        Some(Fixture::anchor(&page, "Offre choisie : Essentiel")),
+    )
+    .unwrap();
+    f.finish("prix");
+    let blocks = f.instructions_with("Passage cité : « Offre choisie : Essentiel »");
+    assert!(!blocks.is_empty());
+    assert!(blocks
+        .iter()
+        .all(|b| b.contains("citation seule") && !b.contains("Lignes de la source")));
+}
+
+#[test]
+fn anchor_is_settled_after_a_successful_write_in_the_same_answer() {
+    let mut f = after_first_page();
+    let page = f.page();
+    let rewritten = FIXED.replace("19 €", "21 €");
+    f.answer(Some(Fixture::tool("edit-ok", &rewritten)));
+    let chat = f.chat.clone();
+    f.send_in(&chat, "retouche", Some(Fixture::anchor(&page, "Confort")))
+        .unwrap();
+    f.finish("retouche");
+
+    let after = f.page();
+    assert_ne!(after["source_version"], page["source_version"]);
+    assert_eq!(after["anchors"][0]["state"], "done");
+    assert_eq!(
+        after["anchors"][0]["source_version"],
+        after["source_version"]
+    );
+}
+
+#[test]
+fn anchor_stays_open_after_a_compile_failure() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.answer(Some(Fixture::tool("edit-bad", BROKEN)));
+    let chat = f.chat.clone();
+    f.send_in(&chat, "retouche", Some(Fixture::anchor(&page, "Confort")))
+        .unwrap();
+    f.finish("retouche");
+
+    let failed = f.outcome("retouche", "edit-bad");
+    assert_eq!(failed["status"], "failed", "{failed}");
+    assert_eq!(failed["reason"], DIAGNOSTIC);
+    let after = f.page();
+    assert_eq!(after["anchors"][0]["state"], "open");
+    assert_eq!(
+        after["anchors"][0]["source_version"],
+        page["source_version"]
+    );
+}
+
+#[test]
+fn refused_anchors_create_no_message() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.post(
+        "/api/bots",
+        json!({"id": "autre", "name": "Autre", "color": "orange"}),
+    );
+    let other = f.post("/api/conversations", json!({"bot_id": "autre"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let chat = f.chat.clone();
+    let unknown = json!({"page_id": format!("page_{}", "0".repeat(64)), "source_version": page["source_version"], "passage": "Confort"});
+    let cases = [
+        (other, Fixture::anchor(&page, "Confort"), "autre bot"),
+        (
+            chat.clone(),
+            Fixture::anchor(&page, "Absent de la Page"),
+            "n’apparaît pas",
+        ),
+        (
+            chat.clone(),
+            Fixture::anchor(&page, &"a".repeat(501)),
+            "500 caractères",
+        ),
+        (
+            chat.clone(),
+            Fixture::anchor(&page, "   "),
+            "500 caractères",
+        ),
+        (chat.clone(), unknown, "introuvable"),
+    ];
+    for (n, (conversation, anchor, reason)) in cases.into_iter().enumerate() {
+        let id = format!("refuse-{n}");
+        let error = f.send_in(&conversation, &id, Some(anchor)).unwrap_err();
+        assert!(error.to_string().contains(reason), "{reason} : {error}");
+        assert!(!f.has_message(&conversation, &id), "{reason}");
+    }
+    assert_eq!(f.page()["anchors"], json!([]));
+}
+
+#[test]
+fn deleting_the_conversation_deletes_its_anchors() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.answer(None);
+    let chat = f.chat.clone();
+    f.send_in(&chat, "retouche", Some(Fixture::anchor(&page, "Confort")))
+        .unwrap();
+    f.finish("retouche");
+    assert_eq!(f.page()["anchors"].as_array().unwrap().len(), 1);
+
+    f.post("/api/conversations/delete", json!({"id": chat}));
+    assert_eq!(f.page()["anchors"], json!([]));
+}
+
+#[test]
+fn a_message_without_anchor_behaves_as_before() {
+    let mut f = after_first_page();
+    f.answer(None);
+    let chat = f.chat.clone();
+    f.send_in(&chat, "merci", None).unwrap();
+    f.finish("merci");
+    assert!(f.has_message(&chat, "merci"));
+    assert_eq!(f.page()["anchors"], json!([]));
+    assert!(f.instructions_with("Passage cité").is_empty());
+}
+
+#[test]
+fn retrying_an_accepted_anchored_message_survives_the_edit_that_removed_its_passage() {
+    let mut f = after_first_page();
+    let page = f.page();
+    let rewritten = FIXED.replace("Confort", "Premium");
+    f.answer(Some(Fixture::tool("edit-ok", &rewritten)));
+    let chat = f.chat.clone();
+    let anchor = Fixture::anchor(&page, "Confort");
+    f.send_in(&chat, "retouche", Some(anchor.clone())).unwrap();
+    f.finish("retouche");
+
+    f.send_in(&chat, "retouche", Some(anchor)).unwrap();
+    let anchors = f.page()["anchors"].clone();
+    assert_eq!(anchors.as_array().unwrap().len(), 1);
+    assert_eq!(anchors[0]["state"], "done");
+}
+
+#[test]
+fn an_anchor_can_only_address_the_bot_owning_the_page() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.post(
+        "/api/bots",
+        json!({"id": "autre", "name": "Voisin", "color": "orange"}),
+    );
+    let group = f.post(
+        "/api/conversations",
+        json!({"bot_ids": ["grokbot", "autre"], "title": "Groupe"}),
+    )["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let send = |f: &mut Fixture, id: &str, mention: &str, label: &str| {
+        let body = json!({"conversation_id": group, "message_id": id, "body": "Retouche ce passage",
+            "mentions": [{"id": mention, "label": label}], "page_anchor": Fixture::anchor(&page, "Confort")});
+        f.app.api("POST", "/api/send", body.to_string().as_bytes())
+    };
+    for (id, mention, label) in [
+        ("voisin", "autre", "Voisin"),
+        ("tous", "@everyone", "everyone"),
+    ] {
+        let error = send(&mut f, id, mention, label).unwrap_err();
+        assert!(error.to_string().contains("propriétaire"), "{error}");
+        assert!(!f.has_message(&group, id));
+    }
+
+    f.answer(None);
+    send(&mut f, "proprio", "grokbot", "Ezerbot").unwrap();
+    wait("réponse du propriétaire", || {
+        f.app.tick(now());
+        !f.instructions_with("Passage cité").is_empty()
+    });
+    assert!(f.instructions_with("Tu t'appelles Voisin").is_empty());
 }

@@ -10,6 +10,7 @@
 @property(nonatomic) NSUInteger barged;
 @property(nonatomic) BOOL speaking;
 @property(nonatomic) BOOL paused;
+@property(nonatomic) BOOL muted;
 @property(nonatomic) BOOL speechDetected;
 @property(nonatomic) NSUInteger loudBuffers;
 @property(nonatomic) BOOL tapInstalled;
@@ -17,6 +18,7 @@
 @property(nonatomic, strong) id changeObserver;
 @property(nonatomic, strong) NSMutableArray<NSString *> *spoken;
 @property(nonatomic, copy) NSDictionary *microphone;
+@property(nonatomic, copy) NSString *requestedMicrophone;
 #if defined(EZERBOT_RELEASE)
 @property(nonatomic) AudioDeviceID chosenDevice;
 @property(nonatomic, strong) AVAudioEngine *engine;
@@ -42,7 +44,7 @@
 - (NSDictionary *)snapshot {
     return @{ @"token":self.token ?: @"", @"status":self.status ?: @"idle", @"transcript":self.transcript ?: @"",
         @"utterance_id":@(self.utterance), @"final_text":self.finalText ?: @"", @"barged":@(self.barged),
-        @"speaking":@(self.speaking && !self.paused), @"paused":@(self.paused),
+        @"speaking":@(self.speaking && !self.paused), @"paused":@(self.paused), @"muted":@(self.muted),
         @"microphone_id":self.microphone[@"id"] ?: @"", @"microphone_name":self.microphone[@"name"] ?: @"", @"microphone_fallback":self.microphone[@"fallback"] ?: @NO };
 }
 - (void)interrupt {
@@ -55,23 +57,28 @@
     self.speaking = NO; self.paused = NO;
 }
 - (void)cancel {
-    ++self.generation; ++self.recognitionGeneration;
-    [self.silence invalidate]; self.silence = nil;
-    if (self.changeObserver) [NSNotificationCenter.defaultCenter removeObserver:self.changeObserver]; self.changeObserver = nil;
+    ++self.generation;
     [self interrupt];
 #if defined(EZERBOT_RELEASE)
+    [self teardownEngine];
+    self.recognizer = nil; self.synth = nil;
+#else
+    [self.fakeSource cancel]; self.fakeSource = nil;
+#endif
+    self.transcript = nil; self.finalText = nil; self.status = @"idle"; self.muted = NO;
+}
+#if defined(EZERBOT_RELEASE)
+- (void)teardownEngine {
+    ++self.recognitionGeneration;
+    [self.silence invalidate]; self.silence = nil;
+    if (self.changeObserver) [NSNotificationCenter.defaultCenter removeObserver:self.changeObserver]; self.changeObserver = nil;
     [self.engine stop];
     if (self.engine && self.tapInstalled) [self.engine.inputNode removeTapOnBus:0];
     self.tapInstalled = NO; self.engine = nil;
     [self.request endAudio]; self.request = nil;
-    [self.task cancel]; self.task = nil; self.recognizer = nil;
-    self.synth = nil; self.player = nil; self.playbackFormat = nil;
-#else
-    [self.fakeSource cancel]; self.fakeSource = nil;
-#endif
-    self.transcript = nil; self.finalText = nil; self.status = @"idle";
+    [self.task cancel]; self.task = nil;
+    self.player = nil; self.playbackFormat = nil;
 }
-#if defined(EZERBOT_RELEASE)
 - (void)fail:(NSString *)status {
     [self cancel]; self.status = status;
 }
@@ -178,57 +185,96 @@
         [owner.silence invalidate]; owner.silence = nil; [owner recognize];
     });
 }
-- (void)capture:(NSUInteger)generation {
-    if (self.generation != generation) return;
-    if (![AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio]) { [self fail:@"no_microphone"]; return; }
+// A muted engine is output-only: AVAudioEngine opens the input unit (and the
+// microphone) only when inputNode is accessed, so that path never touches it.
+- (BOOL)buildEngine:(BOOL)listening {
+    NSUInteger generation = self.generation;
     self.engine = [[AVAudioEngine alloc] init];
     NSError *error = nil;
-    // The microphone chosen in the settings. Without a choice, the system default serves.
-    if (self.chosenDevice != kAudioObjectUnknown) {
-        AudioDeviceID device = self.chosenDevice; AudioUnit unit = self.engine.inputNode.audioUnit;
-        if (unit) AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, sizeof(device));
+    AVAudioFormat *format = nil;
+    if (listening) {
+        // The microphone chosen in the settings. Without a choice, the system default serves.
+        if (self.chosenDevice != kAudioObjectUnknown) {
+            AudioDeviceID device = self.chosenDevice; AudioUnit unit = self.engine.inputNode.audioUnit;
+            if (unit) AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, sizeof(device));
+        }
+        // No raw microphone fallback while the speaker is active: avoid self-transcription.
+        if (![self.engine.inputNode setVoiceProcessingEnabled:YES error:&error]) { [self fail:@"audio_failed"]; return NO; }
+        format = [self.engine.inputNode outputFormatForBus:0];
+        if (!format.sampleRate || !format.channelCount) { [self fail:@"no_microphone"]; return NO; }
     }
-    // No raw microphone fallback while the speaker is active: avoid self-transcription.
-    if (![self.engine.inputNode setVoiceProcessingEnabled:YES error:&error]) { [self fail:@"audio_failed"]; return; }
-    AVAudioFormat *format = [self.engine.inputNode outputFormatForBus:0];
-    if (!format.sampleRate || !format.channelCount) { [self fail:@"no_microphone"]; return; }
     self.player = [[AVAudioPlayerNode alloc] init];
     [self.engine attachNode:self.player];
     double rate = [self.engine.outputNode outputFormatForBus:0].sampleRate;
     self.playbackFormat = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:rate > 0 ? rate : 48000 channels:1];
     [self.engine connect:self.player to:self.engine.mainMixerNode format:self.playbackFormat];
-    self.speechQueue = [NSMutableArray array];
-    [self recognize];
     __weak EzerbotVoiceSession *weakSelf = self;
-    [self.engine.inputNode installTapOnBus:0 bufferSize:1024 format:format block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
-        (void)when;
-        EzerbotVoiceSession *owner = weakSelf;
-        [owner.request appendAudioPCMBuffer:buffer];
-        // Three echo-cancelled input buffers (~64 ms at 48 kHz) interrupt speech
-        // before the recognizer can produce its first partial transcript.
-        float *samples = buffer.floatChannelData ? buffer.floatChannelData[0] : NULL;
-        if (samples && owner.speaking && !owner.paused && buffer.frameLength) {
-            double energy = 0;
-            for (AVAudioFrameCount i = 0; i < buffer.frameLength; ++i) energy += samples[i] * samples[i];
-            owner.loudBuffers = sqrt(energy / buffer.frameLength) > 0.025 ? owner.loudBuffers + 1 : 0;
-            if (owner.loudBuffers == 3) dispatch_async(dispatch_get_main_queue(), ^{
-                EzerbotVoiceSession *current = weakSelf;
-                if (current && current.generation == generation && current.speaking) [current userSpeech];
-            });
-        } else { owner.loudBuffers = 0; }
-    }];
-    self.tapInstalled = YES;
+    __weak AVAudioEngine *engine = self.engine;
+    if (listening) {
+        [self recognize];
+        [self.engine.inputNode installTapOnBus:0 bufferSize:1024 format:format block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
+            (void)when;
+            EzerbotVoiceSession *owner = weakSelf;
+            [owner.request appendAudioPCMBuffer:buffer];
+            // Three echo-cancelled input buffers (~64 ms at 48 kHz) interrupt speech
+            // before the recognizer can produce its first partial transcript.
+            float *samples = buffer.floatChannelData ? buffer.floatChannelData[0] : NULL;
+            if (samples && owner.speaking && !owner.paused && buffer.frameLength) {
+                double energy = 0;
+                for (AVAudioFrameCount i = 0; i < buffer.frameLength; ++i) energy += samples[i] * samples[i];
+                owner.loudBuffers = sqrt(energy / buffer.frameLength) > 0.025 ? owner.loudBuffers + 1 : 0;
+                if (owner.loudBuffers == 3) dispatch_async(dispatch_get_main_queue(), ^{
+                    EzerbotVoiceSession *current = weakSelf;
+                    if (current && current.generation == generation && current.engine == engine && current.speaking) [current userSpeech];
+                });
+            } else { owner.loudBuffers = 0; }
+        }];
+        self.tapInstalled = YES;
+    }
     [self.engine prepare];
-    if (![self.engine startAndReturnError:&error]) { [self fail:@"audio_failed"]; return; }
-    self.status = @"listening";
-    self.synth = [[AVSpeechSynthesizer alloc] init];
+    if (![self.engine startAndReturnError:&error]) { [self fail:@"audio_failed"]; return NO; }
     // Capture route changes and unplugged microphones fail closed, with a French UI error.
+    // Muted, nothing is captured: closing the microphone can itself change the output
+    // (a Bluetooth headset leaves its call profile), so the output engine is rebuilt.
     self.changeObserver = [NSNotificationCenter.defaultCenter addObserverForName:AVAudioEngineConfigurationChangeNotification object:self.engine queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         EzerbotVoiceSession *owner = weakSelf;
-        if (owner && owner.generation == generation && note.object == owner.engine) [owner fail:@"audio_failed"];
+        if (!owner || owner.generation != generation || note.object != owner.engine) return;
+        if (owner.muted) [owner rebuildEngine]; else [owner fail:@"audio_failed"];
+    }];
+    return YES;
+}
+- (void)capture:(NSUInteger)generation {
+    if (self.generation != generation) return;
+    if (![AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio]) { [self fail:@"no_microphone"]; return; }
+    self.speechQueue = [NSMutableArray array];
+    if (![self buildEngine:!self.muted]) return;
+    self.status = @"listening";
+    if (!self.synth) self.synth = [[AVSpeechSynthesizer alloc] init];
+}
+// The bot keeps talking: its queue stays and the current sentence restarts through the new engine.
+- (void)rebuildEngine {
+    if (!self.engine) return;
+    ++self.speechGeneration;
+    [self.synth stopSpeakingAtBoundary:AVSpeechBoundaryImmediate]; [self.player stop];
+    self.pendingBuffers = 0; self.converter = nil;
+    [self teardownEngine];
+    if (![self buildEngine:!self.muted]) return;
+    if (self.speechQueue.count) [self synthesizeSentence];
+}
+#else
+- (void)startFakeSource {
+    self.fakeSource = [[EzerbotVoice alloc] init];
+    [self.fakeSource command:@{@"command":@"start",@"token":self.token,@"language":@"fr"} reply:^(NSDictionary *result) {
+        self.status = [result[@"status"] isEqual:@"recording"] ? @"listening" : result[@"status"];
     }];
 }
 #endif
+- (void)resolveMicrophone {
+    self.microphone = [EzerbotMicrophones resolve:self.requestedMicrophone];
+#if defined(EZERBOT_RELEASE)
+    self.chosenDevice = [EzerbotMicrophones deviceForResolved:self.microphone];
+#endif
+}
 - (void)command:(NSDictionary *)body reply:(void (^)(NSDictionary *))reply {
     NSString *command = body[@"command"], *token = body[@"token"];
     if (![command isKindOfClass:NSString.class] || ![token isKindOfClass:NSString.class] || token.length > 128) { reply(@{@"status":@"invalid"}); return; }
@@ -250,10 +296,8 @@
     if ([command isEqual:@"start"]) {
         [self cancel]; self.token = token; self.utterance = 0; self.barged = 0;
         NSString *requested = body[@"microphone"];
-        self.microphone = [EzerbotMicrophones resolve:[requested isKindOfClass:NSString.class] && requested.length <= 256 ? requested : @""];
-#if defined(EZERBOT_RELEASE)
-        self.chosenDevice = [EzerbotMicrophones deviceForResolved:self.microphone];
-#endif
+        self.requestedMicrophone = [requested isKindOfClass:NSString.class] && requested.length <= 256 ? requested : @"";
+        [self resolveMicrophone];
         self.spoken = [NSMutableArray array]; self.status = @"authorizing";
 #if defined(EZERBOT_RELEASE)
         NSUInteger generation = self.generation;
@@ -279,10 +323,7 @@
             });
         }];
 #else
-        self.fakeSource = [[EzerbotVoice alloc] init];
-        [self.fakeSource command:@{@"command":@"start",@"token":token,@"language":@"fr"} reply:^(NSDictionary *result) {
-            self.status = [result[@"status"] isEqual:@"recording"] ? @"listening" : result[@"status"];
-        }];
+        [self startFakeSource];
 #endif
     } else if (![token isEqual:self.token]) { reply(@{@"status":@"stale"}); return; }
     else if ([command isEqual:@"cancel"]) [self cancel];
@@ -297,6 +338,18 @@
 #if defined(EZERBOT_RELEASE)
         if (self.pendingBuffers) [self.player play];
 #endif
+    } else if ([command isEqual:@"mute"] || [command isEqual:@"unmute"]) {
+        BOOL mute = [command isEqual:@"mute"];
+        if (mute != self.muted) {
+            self.muted = mute;
+            // The system default may have moved while muted: listen again to the chosen microphone.
+            if (mute) self.transcript = @""; else [self resolveMicrophone];
+#if defined(EZERBOT_RELEASE)
+            [self rebuildEngine];
+#else
+            if (mute) { [self.fakeSource cancel]; self.fakeSource = nil; } else [self startFakeSource];
+#endif
+        }
     } else if ([command isEqual:@"speak"]) {
         NSString *text = body[@"text"], *identifier = body[@"voice"], *language = body[@"language"] ?: @"";
         NSNumber *speed = body[@"speed"], *barge = body[@"barge"];
@@ -328,7 +381,7 @@
     }
     else if ([command isEqual:@"feed"]) {
         NSString *text = body[@"text"];
-        if ([text isKindOfClass:NSString.class]) {
+        if (!self.muted && [text isKindOfClass:NSString.class]) {
             self.transcript = text; ++self.barged; [self interrupt];
             if ([body[@"final_result"] isKindOfClass:NSNumber.class] && [body[@"final_result"] boolValue]) { self.finalText = text; ++self.utterance; }
         }

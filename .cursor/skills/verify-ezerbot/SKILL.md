@@ -108,7 +108,7 @@ Parcours complet d’une sphère, ou `all` :
 bash .cursor/skills/verify-ezerbot/scripts/drive.sh --evidence <preuves> --sphere accueil
 ```
 
-Chaque sphère est capturée en sombre et en clair, à `1140x780` et à `820x560`. Le thème est choisi par le bouton des Paramètres, puis rouvert pour lire `aria-pressed`. La couleur vient de `--canvas` (`#14161a` sombre, `#ffffff` clair).
+Chaque sphère est capturée en sombre et en clair, à `1140x780` et à `820x560`. Le thème est choisi par le bouton des Paramètres, puis rouvert pour lire `aria-pressed`. La couleur vient de `--canvas` (`#0e0f12` sombre, `#ffffff` clair).
 
 ## Evidence
 

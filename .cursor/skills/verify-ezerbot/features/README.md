@@ -24,7 +24,7 @@ This directory is the maintained source for verifying the user-facing behavior o
 
 - Capturer l’action et l’état qui en résulte, pas seulement le dernier écran.
 - Chaque thème (`dark`, `light`) et chaque taille (`1140x780`, `820x560`) produit un PNG et le texte visible à côté.
-- Une préférence de thème n’est prouvée qu’une fois `aria-pressed` relu après fermeture et réouverture des Paramètres, et une fois `--canvas` égal à `#14161a` (sombre) ou `#ffffff` (clair).
+- Une préférence de thème n’est prouvée qu’une fois `aria-pressed` relu après fermeture et réouverture des Paramètres, et une fois `--canvas` égal à `#0e0f12` (sombre) ou `#ffffff` (clair).
 - Noter l’identifiant de sphère et l’entrée utilisée avec chaque artefact.
 - Un chemin inaccessible se rapporte avec la commande tentée et la précondition manquante.
 - Ne pas déclarer une entrée sautée comme vérifiée par un autre chemin.

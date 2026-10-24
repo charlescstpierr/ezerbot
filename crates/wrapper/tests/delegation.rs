@@ -3791,3 +3791,34 @@ fn thread_scope_places_a_task_turn_by_its_reply_entry() {
     let caller = f.run_in("caller", "grokbot", &c, 500);
     assert_eq!(summaries(&f.fil(&caller)), ["echo après"]);
 }
+
+/// What the provider received since `from`, in the instructions of every call.
+fn sent_since(f: &Fixture, from: usize) -> String {
+    let seen = f.server.seen.lock().unwrap();
+    seen.bodies[from..].iter().map(Value::to_string).collect()
+}
+
+#[test]
+fn a_voice_message_asks_for_a_short_answer_and_a_typed_one_does_not() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    for (id, voice) in [("v1", true), ("t1", false), ("v2", true)] {
+        f.events(vec![
+            json!({"type":"response.output_text.delta","delta":"D'accord."}),
+            completed(),
+        ]);
+        let before = f.server.seen.lock().unwrap().bodies.len();
+        f.post(
+            "/api/send",
+            json!({"conversation_id":c,"message_id":id,"body":"Où en est ma tâche ?","voice":voice}),
+        );
+        f.wait_parent(&c, id, RunStatus::Finished);
+        let sent = sent_since(&f, before);
+        assert_eq!(
+            sent.contains("une ou deux phrases"),
+            voice,
+            "{id} : la consigne suit le message, pas l'état précédent"
+        );
+        assert_eq!(sent.contains("au lieu de deviner"), voice, "{id}");
+    }
+}

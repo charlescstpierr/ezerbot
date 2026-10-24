@@ -42,6 +42,9 @@ struct SendMessage {
     simulate_loss: bool,
     #[serde(default)]
     apply_skill_id: Option<String>,
+    /// Sent by the voice mode: the answer is read aloud.
+    #[serde(default)]
+    voice: bool,
     #[serde(default)]
     page_anchor: Option<super::pages::anchors::PageAnchor>,
 }
@@ -419,6 +422,9 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     &input.message_id,
                     skill_id,
                 )?;
+            }
+            if input.voice {
+                super::voice_session::record_turn(&tx, &input.conversation_id, &input.message_id)?;
             }
             if let Some(anchor) = input.page_anchor.as_ref().filter(|_| !resend) {
                 super::pages::anchors::record(

@@ -22,6 +22,14 @@
   let phase = "idle", detail = "", liveText = "", lastUtterance = 0, lastBarge = 0, paused = false, sending = false;
   let inputHeld = false, followResumedReply = false;
   let voicesLoaded = false;
+  // A sub-task of this thread that ended (state.delegation, already polled) is told once per session.
+  let toldTasks = new Set(), announcement = null;
+  const ANNOUNCEMENT_MS = 5000;
+  const endedTasks = () => (ctx?.state?.delegation?.delegations || []).filter(edge =>
+    edge.parent_conversation_id === conversationId && ["done","failed","refused"].includes(edge.status?.status));
+  const taskTitle = edge => { const line = String(edge.objective || "").split("\n")[0].trim(); return line.length > 80 ? `${line.slice(0,79).trimEnd()}…` : line; };
+  const announcementText = edge => `La tâche « ${taskTitle(edge)} » ${edge.status.status === "done" ? "est terminée" : "a échoué"}.`;
+  const announced = () => announcement && Date.now() < announcement.until && ["listening","thinking","speaking"].includes(phase) ? announcement.text : "";
   const botViews = new Set();
   const noVoice = {voice:"",speed:1,language:"",chosen:false};
   // Each bot speaks with its own voice, speed and language, whichever conversation it is in.
@@ -43,7 +51,7 @@
     button.setAttribute("aria-pressed", String(active()));
     button.title = window.EzerbotVoiceCall?.active?.() && !active() ? "Indisponible pendant l’appel vocal" : panels.meetingActive?.() && !active() ? "Indisponible pendant l’enregistrement d’une réunion" : button.disabled ? "Ouvrez une conversation pour utiliser le mode voix" : "Mode voix · parler et écouter les réponses sur ce Mac";
     bar.hidden = phase === "idle";
-    label.textContent = detail || ({authorizing:"Autorisation du microphone…",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:"En attente de vous · répondez dans la carte",sending:"Envoi de la transcription…"}[phase] || "");
+    label.textContent = detail || announced() || ({authorizing:"Autorisation du microphone…",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:"En attente de vous · répondez dans la carte",sending:"Envoi de la transcription…"}[phase] || "");
     bar.dataset.phase = phase;
     bar.dataset.tone = detail ? "danger" : "";
     transcript.textContent = liveText || "Votre transcription apparaîtra ici. L’audio reste sur ce Mac.";
@@ -60,7 +68,7 @@
     clearTimeout(timer); epoch++;
     if (token) bridge("cancel").catch(() => {});
     token = ""; reader = null; conversationId = null; sending = false; paused = false;
-    inputHeld = false; followResumedReply = false;
+    inputHeld = false; followResumedReply = false; announcement = null;
     if (clear) { phase = "idle"; detail = ""; liveText = ""; scopeKey = null; }
     render(); panels.composerChanged();
   }
@@ -98,7 +106,8 @@
     token = crypto.randomUUID(); settingsToken = token; conversationId = ctx.conversation?.id; scopeKey = contextKey(ctx);
     reader = window.GrokbotChat.createVoiceReader(ctx.conversation?.messages || []);
     phase = "authorizing"; detail = ""; liveText = ""; lastUtterance = 0; lastBarge = 0; paused = false;
-    inputHeld = false; followResumedReply = false;
+    inputHeld = false; followResumedReply = false; announcement = null;
+    toldTasks = new Set(endedTasks().map(edge => edge.id));
     const rev = ++epoch;
     render(); panels.composerChanged();
     try {
@@ -176,6 +185,15 @@
         panels.followVoiceReply?.(conversationId);
       }
       const thinking = (ctx.conversation?.messages || []).some(pendingReply);
+      const ended = !needsAction && !result.speaking && !result.transcript && !chunks.length
+        ? endedTasks().findLast(edge => !toldTasks.has(edge.id)) : null;
+      if (ended) {
+        const text = announcementText(ended), settings = botVoice();
+        const receipt = await bridge("speak", {text,voice:settings.voice,speed:settings.speed,language:settings.language,barge:lastBarge});
+        if (rev !== epoch) return;
+        if (errors[receipt.status]) { fail(receipt.status); return; }
+        if (receipt.barged <= lastBarge) { toldTasks.add(ended.id); announcement = {text, until:Date.now() + ANNOUNCEMENT_MS}; }
+      }
       phase = needsAction ? "waiting" : result.speaking || chunks.length ? "speaking" : thinking ? "thinking" : "listening";
       render();
     } catch (error) { if (rev === epoch) fail("failed",error.message); }

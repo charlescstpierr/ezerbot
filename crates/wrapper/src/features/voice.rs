@@ -14,11 +14,11 @@ empty_hooks!(
     tick,
     tools,
     call_tool,
-    context,
     entry,
     on_run_event,
     link_attachments
 );
+pub use super::voice_session::context;
 pub const MAX_SECONDS: u32 = 60;
 /// Dictation is transcribed on the Mac and never kept, so it outlasts the memo.
 pub const DICTATION_SECONDS: u32 = 300;

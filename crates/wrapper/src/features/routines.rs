@@ -14,8 +14,8 @@
 //! schedule is a cron/@every string, or trigger is a typed scheduler Schedule.
 //! /run-now requires nonce. History includes compact missed_ranges, not only runs.
 use super::{
-    mcp, routine_calendar, routine_github, routine_mail, routine_webhooks, write_transaction,
-    Context,
+    mcp, routine_calendar, routine_cost::Costing, routine_github, routine_mail, routine_webhooks,
+    write_transaction, Context,
 };
 use crate::{parse, validate_id, ApiError, ApiResponse, App, ACCOUNT, DEFAULT_BOT};
 use grokbot_engine::{
@@ -777,10 +777,19 @@ pub fn routes(
                 let b: Bot = serde_json::from_value(query(q)?)
                     .map_err(|_| ApiError::new(400, "bot_id required"))?;
                 require_bot(&app.connection, &b.bot_id)?;
+                let costing = Costing::new(
+                    &app.connection,
+                    &app.provider.codex_usage(false),
+                    app.feature_context().now_ms,
+                )?;
                 let values = routine::list(&app.connection, &b.bot_id)?
                     .iter()
-                    .map(|r| routine_value(&app.connection, r))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .map(|r| {
+                        let mut value = routine_value(&app.connection, r)?;
+                        value["cost"] = costing.of(&app.connection, r)?;
+                        Ok(value)
+                    })
+                    .collect::<Result<Vec<_>, ApiError>>()?;
                 return Ok(ApiResponse::Json(json!({"routines":values})));
             }
             let input: History = if method == "GET" {
@@ -1047,6 +1056,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let bots = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let costing = Costing::new(ctx.connection, &ctx.provider.codex_usage(false), ctx.now_ms)?;
         let mut list = Vec::new();
         for bot in bots {
             for r in routine::list(ctx.connection, &bot)? {
@@ -1066,6 +1076,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
                     .as_object_mut()
                     .expect("routine object")
                     .remove("body");
+                metadata["cost"] = costing.of(ctx.connection, &r)?;
                 let running:bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_occurrences WHERE routine_id=?1 AND status IN ('pending','running'))",[&r.routine_id],|row|row.get(0))?;
                 let queue = occurrences::queue(ctx.connection, &r.routine_id)?;
                 list.push(json!({"routine":metadata,"error":error,"confirmation_conversation_id":confirmation,"running":running,"queue":queue}));

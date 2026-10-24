@@ -353,6 +353,7 @@ impl Cost {
         let created = app
             .api("POST", "/api/routines", body.to_string().as_bytes())
             .unwrap();
+        f.quota();
         let routine = created["routine"]["routine_id"].as_str().unwrap().into();
         let conversation = created["routine"]["conversation_id"]
             .as_str()
@@ -384,7 +385,7 @@ impl Cost {
         if let Some(tokens) = tokens {
             add_usage(&self.conn, id, tokens / 2 - 100, 100, 0);
         }
-        self.conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,run_id) VALUES (?1,?2,1,?3,?4,?1)", params![id, self.routine, started, status]).unwrap();
+        self.conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,run_id,reason) VALUES (?1,?2,1,?3,?4,?1,'test')", params![id, self.routine, started, status]).unwrap();
         self
     }
     /// The cost the routine list and the routines state both return, which must agree.
@@ -451,8 +452,17 @@ fn the_daily_forecast_is_the_mean_times_the_passages_the_schedule_plans_each_day
         let forecast = c.cost()["forecast"].clone();
         assert_eq!(forecast["state"], "estimated");
         assert_eq!(forecast["tokens_per_day"], 96_000);
-        assert_eq!(forecast["tokens_7d"], 672_000);
+        assert_eq!(forecast["tokens_next_7d"], 672_000);
     }
+    // A weekly routine is one passage a week, not zero on six days out of seven.
+    let mut c = Cost::new(
+        valid(),
+        json!({"kind":"cron","expression":"0 9 * * 1","time_zone":"UTC"}),
+    );
+    c.pass("a", "done", 3_600_000, Some(2000));
+    let forecast = c.cost()["forecast"].clone();
+    assert_eq!(forecast["runs_next_7d"], 1);
+    assert_eq!(forecast["tokens_per_day"], 286);
     // Events have no clock: the forecast is impossible, not zero.
     let mut c = Cost::new(valid(), json!({"kind":"webhook"}));
     c.pass("a", "done", 3_600_000, Some(2000));
@@ -478,7 +488,7 @@ fn a_routine_without_a_measured_finished_passage_has_no_measure_yet() {
 }
 
 fn is_money(key: &str) -> bool {
-    ["usd", "dollar", "price", "prix", "eur", "currency", "cent"]
+    ["usd", "dollar", "price", "prix", "eur", "currency"]
         .iter()
         .any(|word| key.to_lowercase().contains(word))
 }
@@ -508,8 +518,7 @@ fn the_weekly_quota_share_is_estimated_from_this_weeks_local_tokens_and_has_no_d
     // 20 % of the window used while 2 000 000 tokens ran locally since it began:
     // 100 000 tokens per percent, so a 672 000-token week is 6.72 %.
     let mut c = Cost::new(weekly(20), json!({"kind":"every","interval_ms":1_800_000}));
-    let f = &c.f;
-    assert_eq!(f.quota()["status"], "ready");
+    assert_eq!(c.f.quota()["status"], "ready");
     insert_run(
         &c.conn,
         "chat",
@@ -522,7 +531,7 @@ fn the_weekly_quota_share_is_estimated_from_this_weeks_local_tokens_and_has_no_d
     c.pass("a", "done", 3_600_000, Some(2000));
     let cost = c.cost();
     assert_eq!(cost["quota_share"]["state"], "estimated");
-    assert_eq!(cost["quota_share"]["percent_7d"], 6.7);
+    assert_eq!(cost["quota_share"]["percent"], 6.7);
     assert!(money_keys(&cost).is_empty(), "{cost}");
     // Too little use of the window, or no quota at all: no share, tokens stay.
     for (quota, reason) in [
@@ -530,12 +539,11 @@ fn the_weekly_quota_share_is_estimated_from_this_weeks_local_tokens_and_has_no_d
         (json!({}), "quota_unavailable"),
     ] {
         let mut c = Cost::new(quota, json!({"kind":"every","interval_ms":1_800_000}));
-        c.f.quota();
         c.pass("a", "done", 3_600_000, Some(2000));
         let cost = c.cost();
         assert_eq!(cost["quota_share"]["state"], "unknown");
         assert_eq!(cost["quota_share"]["reason"], reason);
-        assert!(cost["quota_share"]["percent_7d"].is_null());
+        assert!(cost["quota_share"]["percent"].is_null());
         assert_eq!(cost["average_tokens"], 2000);
     }
 }

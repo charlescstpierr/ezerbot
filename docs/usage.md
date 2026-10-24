@@ -5,7 +5,11 @@ Dans **Paramètres → Usage**, Ezerbot distingue deux mesures :
 - **Quota du forfait Codex** : lu chez OpenAI avec la session OAuth créée dans Ezerbot. Les fenêtres fournies par le forfait (par exemple 5 heures et une semaine) affichent le pourcentage restant et la réinitialisation en heure locale. Un avertissement apparaît dès **80 % utilisés**, dans le panneau et au-dessus du chat.
 - **Tokens locaux** : entrée, sortie et total, par bot ou par source (chat, routine, groupe, délégation, entre bots). Les tokens en cache font déjà partie de l’entrée. Un enfant délégué n’est pas recompté dans son parent.
 
-Le quota du forfait est partagé avec les autres applications Codex. Les tokens locaux ne permettent donc pas de le calculer. L’historique local couvre toutes les connexions utilisées dans cet espace, y compris les bots supprimés. Il compte les réponses principales du moteur, pas les appels auxiliaires de titres, mémoire automatique, vision ou résumés. Les exécutions sans télémétrie sont signalées comme non mesurées, jamais estimées.
+Le quota du forfait est partagé avec les autres applications Codex. Les tokens locaux ne permettent donc pas de le calculer exactement : ils servent seulement d'étalon pour l'estimation du coût d'une routine (ci-dessous). L’historique local couvre toutes les connexions utilisées dans cet espace, y compris les bots supprimés. Il compte les réponses principales du moteur, pas les appels auxiliaires de titres, mémoire automatique, vision ou résumés. Les exécutions sans télémétrie sont signalées comme non mesurées, jamais estimées.
+
+## Coût d'une routine
+
+`GET /api/routines` et l'état des routines renvoient `routine.cost`, en tokens et jamais en prix : moyenne des 10 derniers passages terminés et mesurés, total des 7 derniers jours (sous-tâches déléguées comprises, chacune une fois), prévision de l'horaire sur 7 jours (`forecast`, « impossible » pour GitHub, courriel, calendrier ou webhook) et part du quota hebdomadaire (`quota_share`). Cette part est une estimation : tokens mesurés ici depuis le début de la fenêtre de 7 jours ÷ son `used_percent`. Elle n'est donnée que si au moins 5 % du quota sont utilisés et 50 000 tokens mesurés ; sinon `state` vaut `unknown` et seuls les tokens restent. Les autres applications Codex et les appels auxiliaires ne sont pas comptés ici, donc la part est plutôt surestimée.
 
 ## Lecture et confidentialité
 

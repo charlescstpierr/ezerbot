@@ -1,5 +1,8 @@
 //! Provider quota and local, measured engine telemetry are deliberately separate:
-//! token counts cannot be converted to a percentage of a ChatGPT subscription.
+//! token counts do not, on their own, convert to a percentage of a ChatGPT subscription.
+//! The only conversion is `routine_cost`'s estimate, calibrated on the weekly window
+//! (tokens measured here since it began / `used_percent`) and offered only when that
+//! calibration is reliable. Nothing in this module applies it.
 use super::Context;
 use crate::{ApiError, ApiResponse, App, ACCOUNT};
 use rusqlite::Connection;

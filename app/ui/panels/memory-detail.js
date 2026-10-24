@@ -18,7 +18,10 @@
 
   // `facts()` donne la liste lue par l'écran, `reload()` la relit (et rend la main une fois l'écran à jour), `label` : { bot, scope, date }.
   function create({ facts, reload, label }) {
+    // mode : "view" (lecture), "edit" (édition ; intacte tant que le brouillon égale le texte du souvenir, modifiée sinon),
+    // "forget" (confirmation d'oubli) ou "discard" (confirmation d'abandon d'une édition modifiée).
     let id = null, mode = "view", busy = false, draft = "", note = "", problem = "", shown = null, epoch = 0;
+    let after = null, saved = null; // after : ce que la sortie demandée fera si l'on abandonne ; saved : le brouillon d'un écran quitté en pleine modification
     const moved = new Map(); // ancien identifiant → identifiant du souvenir qui le remplace (réponse du moteur à une correction)
     const root = node("aside", "memory-detail");
     root.hidden = true;
@@ -30,6 +33,15 @@
       for (const el of root.parentElement.querySelectorAll(".is-selected")) el.classList.remove("is-selected");
       if (id !== null) find(id)?.classList.add("is-selected");
     };
+    const dirty = () => (mode === "edit" || mode === "discard") && draft !== String(current()?.text ?? "");
+    // Toute sortie de l'édition (Échap, Fermer, un autre souvenir) passe par ici : une saisie modifiée demande d'abord confirmation, sauf pendant l'envoi.
+    function leave(next) {
+      if (mode === "edit" && busy) return;
+      if (dirty()) { after = next; mode = "discard"; problem = ""; render("keep"); return; }
+      drop(next);
+    }
+    function drop(next) { [mode, draft, problem, after] = ["view", "", "", null]; next(); }
+    function resume() { [mode, after] = ["edit", null]; render("body"); } // « Continuer » : le texte et le focus restent dans le champ
     const button = (text, className, action, disabled = busy) => {
       const el = Object.assign(node("button", className, text), { type: "button", disabled });
       el.addEventListener("click", action);
@@ -40,7 +52,7 @@
       if (!fact) return;
       shown = stamp(fact);
       const controls = () => [...root.querySelectorAll("h2, button, textarea")], held = controls().indexOf(document.activeElement); // le focus reste sur le même contrôle quand la liste change autour du panneau
-      const editing = mode === "edit", confirming = mode === "confirm", conversation = fact.provenance?.conversation_id;
+      const discarding = mode === "discard", editing = mode === "edit" || discarding, confirming = mode === "forget", conversation = fact.provenance?.conversation_id;
       const origin = conversation ? button("Ouvrir la conversation", "memory-detail-link", () => { if (!panels.openConversation?.(conversation)) { problem = "Cette conversation n’existe plus, ou une autre action est en cours."; render("origin"); } }, false) : "Hors conversation";
       const rows = [["Bot", label.bot(fact)], ["Origine", origin], ["Appris le", label.date(fact.learned_at)], ["Provenance", SOURCES[fact.provenance?.source] || "Inconnue"], ["Portée", label.scope(fact)]];
       const fields = node("dl", "memory-detail-fields");
@@ -51,30 +63,33 @@
       }
       const title = Object.assign(node("h2", "memory-detail-title", "Souvenir"), { tabIndex: -1 });
       const head = node("div", "memory-detail-head");
-      head.append(title, button("Fermer", "secondary-button", () => close(true), false));
+      head.append(title, button("Fermer", "secondary-button", () => leave(() => close(true)), busy && mode === "edit"));
       const save = button("Enregistrer", "primary-button", () => act("/api/memory/correct", { bot_id: fact.bot_id, fact_id: fact.fact_id, text: draft }, "Souvenir modifié."), busy || !draft.trim());
       let body = node("p", "memory-detail-text", String(fact.text ?? ""));
       if (editing) {
-        body = Object.assign(node("textarea", "text-input memory-detail-field"), { rows: 5, value: draft, disabled: busy });
+        body = Object.assign(node("textarea", "text-input memory-detail-field"), { rows: 5, value: draft, disabled: busy, readOnly: discarding });
         body.setAttribute("aria-label", "Texte du souvenir");
         body.addEventListener("input", () => { draft = body.value; save.disabled = busy || !draft.trim(); });
       }
       const back = button("Annuler", "secondary-button", () => { mode = "view"; problem = ""; render(editing ? "edit" : "ask"); });
       const edit = button("Modifier", "secondary-button", () => { mode = "edit"; draft = String(fact.text ?? ""); problem = ""; render("body"); });
-      const ask = button("Oublier…", "secondary-button", () => { mode = "confirm"; problem = ""; render("back"); });
+      const ask = button("Oublier…", "secondary-button", () => { mode = "forget"; problem = ""; render("back"); });
       const sure = button("Oublier ce souvenir", "danger-button", () => act(...forgetRequest(fact), "Souvenir oublié.", true));
+      const abandon = button("Abandonner", "danger-button", () => drop(after));
+      const keep = button("Continuer", "secondary-button", resume);
       const actions = node("div", "memory-detail-actions");
-      actions.append(...(editing ? [save, back] : confirming ? [sure, back] : fact.scope === "topic" ? [ask] : [edit, ask]));
-      const hint = confirming ? `Oublier ce souvenir ? Son texte sera effacé pour de bon, avec ses versions précédentes ; seule une trace sans contenu (identifiant et dates) reste dans l’historique.${REACH[fact.scope] || ""}`
+      actions.append(...(discarding ? [abandon, keep] : editing ? [save, back] : confirming ? [sure, back] : fact.scope === "topic" ? [ask] : [edit, ask]));
+      const hint = discarding ? "Abandonner la modification ? Le texte saisi n’a pas été enregistré : il sera perdu."
+        : confirming ? `Oublier ce souvenir ? Son texte sera effacé pour de bon, avec ses versions précédentes ; seule une trace sans contenu (identifiant et dates) reste dans l’historique.${REACH[fact.scope] || ""}`
         : !editing && fact.scope === "topic" ? "Un souvenir de sujet ne se modifie pas : oubliez-le, puis ajoutez-en un autre." : "";
       const status = node("p", "memory-detail-note", note), alert = node("p", "memory-detail-error", problem);
       status.setAttribute("role", "status");
       alert.setAttribute("role", "alert");
-      root.replaceChildren(head, body, fields, node("p", confirming ? "memory-detail-warning" : "memory-detail-note", hint), status, alert, actions);
+      root.replaceChildren(head, body, fields, node("p", confirming || discarding ? "memory-detail-warning" : "memory-detail-note", hint), status, alert, actions);
       root.hidden = false;
       root.parentElement.dataset.detail = "open";
       mark();
-      ({ title, body, back, edit, ask, origin })[want]?.focus();
+      ({ title, body, back, edit, ask, origin, keep })[want]?.focus();
       if (!want) controls()[held]?.focus();
     }
     // Après une action, la liste ET l'état partagé de l'application sont relus : un fil en cache afficherait sinon un reçu de mémoire périmé (un texte oublié, des commandes actives).
@@ -123,6 +138,8 @@
     function close(restore = false) {
       const was = id;
       if (was === null) return;
+      if (dirty()) saved = { id: was, draft }; // quitter l'écran ne se refuse pas : le brouillon attend le retour sur ce souvenir
+      [mode, after] = ["view", null];
       [id, shown, root.hidden] = [null, null, true];
       epoch += 1;
       root.replaceChildren();
@@ -144,13 +161,18 @@
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || id === null || event.defaultPrevented || document.querySelector("dialog[open]")) return;
       event.preventDefault();
-      close(true);
+      if (mode === "discard") { resume(); return; } // Échap répond « Continuer »
+      leave(mode === "edit" ? () => render("edit") : () => close(true)); // en édition, Échap ne quitte que l'édition
     });
     function open(factId) {
-      if (busy) return;
-      epoch += 1;
-      [id, mode, draft, note, problem] = [factId, "view", "", "", ""];
-      render("title");
+      if (busy || (factId === id && (mode === "edit" || mode === "discard"))) return; // re-cliquer le souvenir en cours de modification ne l'efface pas
+      leave(() => {
+        const kept = saved?.id === factId ? saved.draft : null;
+        epoch += 1;
+        if (kept !== null) saved = null;
+        [id, mode, draft, note, problem] = [factId, kept === null ? "view" : "edit", kept ?? "", kept === null ? "" : "Brouillon retrouvé : Enregistrer ou Annuler.", ""];
+        render(kept === null ? "title" : "body");
+      });
     }
     // Un clic n'importe où sur la carte ouvre le souvenir ; au clavier, le bouton du texte s'en charge.
     const bind = (el, factId) => el.addEventListener("click", () => open(factId));

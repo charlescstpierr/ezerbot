@@ -265,6 +265,9 @@ fn line(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
     Ok(json!({"recorded":true}))
 }
 
+#[cfg(debug_assertions)]
+use super::voice_session::microphone_of;
+
 /// The loopback voice provider of debug builds. Release builds link none.
 #[cfg(debug_assertions)]
 #[derive(Default)]
@@ -273,11 +276,13 @@ pub(crate) struct DebugCall {
     token: String,
     active: bool,
     paused: bool,
+    muted: bool,
     transcript: String,
     lines: Vec<Value>,
     barged: u64,
     held: u64,
     speaking_until: u64,
+    requested_microphone: String,
     microphone: Value,
     voice: Value,
 }
@@ -332,17 +337,21 @@ impl DebugCall {
             self.token = c.token;
             self.active = true;
             self.paused = false;
+            self.muted = false;
             self.transcript.clear();
             self.lines.clear();
             self.barged = 0;
             self.held = 0;
             self.speaking_until = 0;
-            self.microphone = json!({"microphone_id":source["microphone_id"],"microphone_name":source["microphone_name"],"microphone_fallback":source["microphone_fallback"]});
+            self.requested_microphone = c.microphone;
+            self.microphone = microphone_of(&source);
             self.voice = json!({"voice":c.voice,"speed":c.speed,"language":c.language});
         } else if c.token != self.token || !self.active {
             return Err(ApiError::new(409, "Cet appel vocal n’est plus actif."));
         } else {
             match c.command.as_str() {
+                // Muted, nothing is heard: not even a held sentence is counted.
+                "feed" if self.muted => {}
                 "feed" => {
                     if self.paused {
                         // A card waits for a click: what is said is not sent, and never answers the card.
@@ -369,8 +378,25 @@ impl DebugCall {
                     self.paused = false;
                     self.held = 0;
                 }
+                "mute" | "unmute" if (c.command == "mute") != self.muted => {
+                    self.muted = !self.muted;
+                    let request = if self.muted {
+                        self.transcript.clear();
+                        json!({"command":"cancel","token":self.token})
+                    } else {
+                        json!({"command":"start","token":self.token,"microphone":self.requested_microphone})
+                    };
+                    let source = self
+                        .source
+                        .command(&serde_json::to_vec(&request).unwrap())?;
+                    if !self.muted {
+                        self.microphone = microphone_of(&source);
+                    }
+                }
+                "mute" | "unmute" => {}
                 "cancel" => {
                     self.active = false;
+                    self.muted = false;
                     self.paused = false;
                     self.speaking_until = 0;
                     self.source.command(
@@ -385,7 +411,7 @@ impl DebugCall {
         Ok(
             json!({"status":if self.active {"listening"} else {"idle"},"token":self.token,
             "transcript":self.transcript,"lines":self.lines,"barged":self.barged,"held":self.held,
-            "speaking":self.speaking(),"paused":self.paused,
+            "speaking":self.speaking(),"paused":self.paused,"muted":self.muted,
             "microphone_id":self.microphone["microphone_id"],"microphone_name":self.microphone["microphone_name"],
             "microphone_fallback":self.microphone["microphone_fallback"],"recorded_voice":self.voice,"fake":true}),
         )

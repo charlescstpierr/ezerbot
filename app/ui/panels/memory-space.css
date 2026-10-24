@@ -1,6 +1,5 @@
 /* Mémoire (Espace personnel) : entrée de la barre latérale et écran Liste. Jetons Galet uniquement. */
 .sidebar-memory { margin: -8px 0 14px; }
-.memory-entry { margin-bottom: 0; }
 .memory-entry-count { flex: 0 0 auto; font-size: 11.5px; color: var(--sidebar-muted); }
 .main-panel[data-memory-space] > .chat-scroll,
 .main-panel[data-memory-space] > .thread-banner,
@@ -10,7 +9,6 @@
 .memory-space > * { max-width: 720px; }
 .memory-space-switch { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); }
 .memory-space-tab { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 7px; font-size: 11.5px; font-weight: 500; color: var(--muted); }
-.memory-space-tab:hover { color: var(--text); }
 .memory-space-tab[aria-pressed="true"] { background: var(--pane); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
 .memory-space-tab:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .memory-space-soon { font-size: 11.5px; color: var(--subtle); }

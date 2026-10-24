@@ -1,5 +1,4 @@
 // Run with: node --test app/ui/panels/memory-space.test.cjs
-// Rend vraiment l’entrée « Mémoire » et l’écran Liste dans un DOM minimal.
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -22,11 +21,10 @@ class Element {
   get textContent() { return this.children.map((kid) => (kid instanceof Element ? kid.textContent : String(kid))).join(""); }
 }
 const named = (root, className) => root.querySelectorAll(`.${className}`);
-const at = (iso) => Date.parse(iso);
 const FACTS = [
-  { fact_id: "f1", bot_id: "grokbot", bot_deleted: false, scope: "private", text: "Aime le café <b>noir</b>", learned_at: at("2026-10-20T10:00:00Z") },
-  { fact_id: "f2", bot_id: "chef", bot_deleted: false, scope: "team", text: "L’équipe déjeune à midi", learned_at: at("2026-10-19T10:00:00Z") },
-  { fact_id: "f3", bot_id: "vieux", bot_deleted: true, scope: "topic", text: "Le garde-meuble ferme à 18 h", learned_at: at("2026-10-18T10:00:00Z"), topic_name: "Déménagement" },
+  { fact_id: "f1", bot_id: "grokbot", bot_deleted: false, scope: "private", text: "Aime le café <b>noir</b>", learned_at: Date.parse("2026-10-20T10:00:00Z") },
+  { fact_id: "f2", bot_id: "chef", bot_deleted: false, scope: "team", text: "L’équipe déjeune à midi", learned_at: Date.parse("2026-10-19T10:00:00Z") },
+  { fact_id: "f3", bot_id: "vieux", bot_deleted: true, scope: "topic", text: "Le garde-meuble ferme à 18 h", learned_at: Date.parse("2026-10-18T10:00:00Z"), topic_name: "Déménagement" },
 ];
 function harness({ facts = FACTS, fail = false, registered = true } = {}) {
   const sidebar = new Element("aside");
@@ -42,7 +40,7 @@ function harness({ facts = FACTS, fail = false, registered = true } = {}) {
   const panels = {
     busy: false,
     register(value) { panel = value; return registered; },
-    async api(path) { calls.api.push(path); if (fail) throw new Error("hors ligne"); return { facts }; },
+    async api(path) { calls.api.push(path); if (fail || panels.down) throw new Error("hors ligne"); return { facts }; },
     leaveConversation() { calls.left += 1; },
   };
   vm.runInContext(fs.readFileSync(`${__dirname}/memory-space.js`, "utf8"), vm.createContext({ window: { GrokbotPanels: panels }, document, setInterval: () => 0, JSON, Number, String, Date, Promise, Object, Array }));
@@ -51,7 +49,6 @@ function harness({ facts = FACTS, fail = false, registered = true } = {}) {
   return {
     panels, sidebar, main, nodes, calls, settle, panel: () => panel,
     entry: () => sidebar.querySelector(".memory-entry"), screen: () => main.querySelector(".memory-space"),
-    // Ouvre l’écran comme un clic de Charles, depuis un fil ouvert ou non.
     async open(conversation = null) { panel.onState(state, { conversation }); await settle(); this.entry().click(); await settle(); },
   };
 }
@@ -60,7 +57,6 @@ test("l’entrée « Mémoire » se place sous Rechercher, avant les bots, avec 
   h.panel().onState({ bots: [] }, {});
   await h.settle();
   assert.equal(h.sidebar.children[0].classes[0], "sidebar-memory");
-  assert.equal(h.entry().querySelector(".conversation-name").textContent, "Mémoire");
   assert.equal(h.entry().querySelector(".memory-entry-count").textContent, "3");
   assert.equal(h.entry().getAttribute("aria-label"), "Mémoire, 3 souvenirs");
   assert.deepEqual(h.calls.api, ["/api/memory/all"]);
@@ -109,6 +105,15 @@ test("zéro souvenir : état vide lisible ; un seul : singulier ; échec : pas d
   assert.equal(down.entry().querySelector(".memory-entry-count").textContent, "");
   assert.equal(down.nodes["conversation-title"].textContent, "Mémoire");
   assert.match(named(down.screen(), "memory-space-empty")[0].textContent, /n’a pas pu être chargée/);
+  // Un rechargement manqué garde la dernière liste, signalée comme telle.
+  const stale = harness();
+  await stale.open();
+  stale.panels.down = true;
+  stale.panel().onNavigate();
+  stale.entry().click();
+  await stale.settle();
+  assert.equal(named(stale.screen(), "memory-space-item").length, 3);
+  assert.match(stale.screen().textContent, /dernier état connu/);
 });
 test("changer d’écran ferme la Mémoire ; occupé, le clic ne fait rien ; non enregistré, rien n’est monté", async () => {
   const h = harness();

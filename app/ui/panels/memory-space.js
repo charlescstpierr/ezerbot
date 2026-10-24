@@ -12,7 +12,6 @@
   };
   const byId = (id) => document.getElementById(id);
   const noun = (count) => (count < 2 ? `${count} souvenir` : `${count} souvenirs`);
-  // learned_at est en millisecondes ; d’anciennes secondes restent comprises.
   const factDate = (value) => new Date(Number(value) < 1e12 ? value * 1000 : value).toLocaleDateString("fr-CA", { day: "numeric", month: "short", year: "numeric" });
   let latest = null; // { state } du dernier onState
   let facts = null; // null tant que la liste n’est pas arrivée
@@ -102,7 +101,7 @@
       item.append(node("p", "memory-space-text", String(fact.text ?? "")), meta);
       list.append(item);
     }
-    return [list];
+    return failed ? [node("p", "memory-space-help", "La mémoire n’a pas pu être actualisée : voici le dernier état connu."), list] : [list];
   }
   function paint() {
     if (!entry) return;

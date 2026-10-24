@@ -22,10 +22,21 @@ struct Idle {
     max: Duration,
 }
 
+/// The polling page a `/api/state` read comes from. Each one is measured on its
+/// own: the floating panel's reads must not split a stall of the main window.
+pub(crate) fn client(remote: bool, referer: Option<&str>) -> &'static str {
+    match referer.map(|url| url.split(['?', '#']).next().unwrap_or(url)) {
+        _ if remote => "iphone",
+        Some(page) if page.ends_with("/floating.html") => "flottant",
+        Some(_) => "principal",
+        None => "autre",
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct StreamWatch {
     live: BTreeMap<String, Watched>,
-    // Every conversation/reply key already served, so a reply that starts and settles
+    // Every conversation/reply/run key already served, so a reply that starts and settles
     // between two reads is told apart from history. `None` before the first read.
     known: Option<BTreeSet<String>>,
     // Of the last observed state: whether a reply was in progress, and its message count.
@@ -37,20 +48,22 @@ pub(crate) struct StreamWatch {
 impl StreamWatch {
     /// Record one served state. A reply leaving `streaming` (or disappearing)
     /// logs its largest gap between two distinct visible texts.
-    pub(crate) fn observe(&mut self, directory: &Path, state: &Value, now: Instant) {
+    pub(crate) fn observe(&mut self, directory: &Path, client: &str, state: &Value, now: Instant) {
         let mut seen = BTreeMap::new();
         self.messages = 0;
         for conversation in state["conversations"].as_array().into_iter().flatten() {
             self.messages += conversation["messages"].as_array().map_or(0, Vec::len);
-            // Reply ids repeat across conversations; tool cards are not replies.
+            // Reply ids repeat across conversations and regenerations (a new run
+            // keeps `reply-{message}`); tool cards are not replies.
             let replies = conversation["messages"].as_array().into_iter().flatten();
             for message in replies.filter(|m| m["role"] == "assistant" && m["kind"] == "message") {
                 if let (Some(conversation), Some(id)) =
                     (conversation["id"].as_str(), message["id"].as_str())
                 {
                     let text = message["body"].as_str().map_or(0, str::len);
+                    let run = message["payload"]["run_id"].as_str().unwrap_or_default();
                     seen.insert(
-                        format!("{conversation}/{id}"),
+                        format!("{conversation}/{id}/{run}"),
                         (text, message["state"] == "streaming"),
                     );
                 }
@@ -85,7 +98,7 @@ impl StreamWatch {
             crate::upstream::append(
                 &directory.join("logs/engine.log"),
                 &format!(
-                    "[{}] affichage réponse={} mises_a_jour={} ecart_max_ms={}\n",
+                    "[{}] affichage client={client} réponse={} mises_a_jour={} ecart_max_ms={}\n",
                     timestamp(),
                     digest(&id),
                     watched.updates,
@@ -114,10 +127,16 @@ impl Watched {
 impl StreamWatch {
     /// The duration of the last observed `/api/state`: one line per read while a
     /// reply is in progress, otherwise at most one summary line a minute.
-    pub(crate) fn served(&mut self, directory: &Path, elapsed: Duration, now: Instant) {
+    pub(crate) fn served(
+        &mut self,
+        directory: &Path,
+        client: &str,
+        elapsed: Duration,
+        now: Instant,
+    ) {
         let line = if self.active {
             format!(
-                "api_state duree_ms={} messages={}",
+                "api_state client={client} duree_ms={} messages={}",
                 elapsed.as_millis(),
                 self.messages
             )
@@ -134,7 +153,7 @@ impl StreamWatch {
             }
             let idle = self.idle.take().expect("idle reads");
             format!(
-                "api_state_repos lectures={} duree_max_ms={} messages={}",
+                "api_state_repos client={client} lectures={} duree_max_ms={} messages={}",
                 idle.reads,
                 idle.max.as_millis(),
                 self.messages
@@ -164,12 +183,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// `(conversation, id, kind, body, state)` per assistant entry.
+    /// `(conversation, id, kind, body, state)` per assistant entry, all of run `r1`.
     fn state(entries: &[(&str, &str, &str, &str, &str)]) -> Value {
+        let runs: Vec<_> = entries
+            .iter()
+            .map(|&(c, id, kind, body, state)| (c, id, "r1", kind, body, state))
+            .collect();
+        state_runs(&runs)
+    }
+
+    /// `(conversation, id, run, kind, body, state)` per assistant entry.
+    fn state_runs(entries: &[(&str, &str, &str, &str, &str, &str)]) -> Value {
         let mut conversations: Vec<Value> = Vec::new();
-        for (conversation, id, kind, body, state) in entries {
-            let message =
-                json!({"id": id, "role": "assistant", "kind": kind, "body": body, "state": state});
+        for (conversation, id, run, kind, body, state) in entries {
+            let message = json!({"id": id, "role": "assistant", "kind": kind, "body": body,
+                "state": state, "payload": {"run_id": run}});
             match conversations.iter_mut().find(|c| c["id"] == *conversation) {
                 Some(c) => c["messages"].as_array_mut().unwrap().push(message),
                 None => conversations.push(json!({"id": conversation, "messages": [message]})),
@@ -190,6 +218,7 @@ mod tests {
         for (n, read) in reads.iter().enumerate() {
             watch.observe(
                 &directory,
+                "principal",
                 read,
                 now + Duration::from_millis(200 * n as u64),
             );
@@ -207,8 +236,8 @@ mod tests {
         let lines = logged(&[state(&[old]), state(&[old, fast]), state(&[old, fast])]);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].ends_with(&format!(
-            "affichage réponse={} mises_a_jour=1 ecart_max_ms=0",
-            digest("c/rapide")
+            "affichage client=principal réponse={} mises_a_jour=1 ecart_max_ms=0",
+            digest("c/rapide/r1")
         )));
     }
 
@@ -240,12 +269,12 @@ mod tests {
         ]);
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].ends_with(&format!(
-            "affichage réponse={} mises_a_jour=1 ecart_max_ms=0",
-            digest("a/reply-m")
+            "affichage client=principal réponse={} mises_a_jour=1 ecart_max_ms=0",
+            digest("a/reply-m/r1")
         )));
         assert!(lines[1].ends_with(&format!(
-            "affichage réponse={} mises_a_jour=2 ecart_max_ms=200",
-            digest("b/reply-m")
+            "affichage client=principal réponse={} mises_a_jour=2 ecart_max_ms=200",
+            digest("b/reply-m/r1")
         )));
     }
 
@@ -257,8 +286,13 @@ mod tests {
         let start = Instant::now();
         let read = |watch: &mut StreamWatch, state: &Value, second: u64| {
             let now = start + Duration::from_secs(second);
-            watch.observe(&directory, state, now);
-            watch.served(&directory, Duration::from_millis(second % 7), now);
+            watch.observe(&directory, "principal", state, now);
+            watch.served(
+                &directory,
+                "principal",
+                Duration::from_millis(second % 7),
+                now,
+            );
         };
         let old = ("c", "ancienne", "message", "Déjà là", "echoed");
         for second in 0..90 {
@@ -276,10 +310,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
         let lines: Vec<&str> = log.lines().collect();
         assert_eq!(lines.len(), 5, "{log}");
-        assert!(lines[0].ends_with("api_state_repos lectures=61 duree_max_ms=6 messages=1"));
-        assert!(lines[1].ends_with("api_state duree_ms=6 messages=2"));
-        assert!(lines[2].ends_with("api_state duree_ms=0 messages=2"));
-        assert!(lines[3].contains("affichage réponse=") && !log.contains("Déjà là"));
-        assert!(lines[4].ends_with("api_state duree_ms=1 messages=2"));
+        assert!(lines[0]
+            .ends_with("api_state_repos client=principal lectures=61 duree_max_ms=6 messages=1"));
+        assert!(lines[1].ends_with("api_state client=principal duree_ms=6 messages=2"));
+        assert!(lines[2].ends_with("api_state client=principal duree_ms=0 messages=2"));
+        assert!(
+            lines[3].contains("affichage client=principal réponse=") && !log.contains("Déjà là")
+        );
+        assert!(lines[4].ends_with("api_state client=principal duree_ms=1 messages=2"));
+    }
+
+    #[test]
+    fn a_regeneration_settled_between_two_reads_is_measured_as_a_new_reply() {
+        let first = ("c", "reply-q", "r1", "message", "Tout d'un coup", "echoed");
+        let again = ("c", "reply-q", "r2", "message", "Tout d'un coup", "echoed");
+        let lines = logged(&[state_runs(&[]), state_runs(&[first]), state_runs(&[again])]);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[1].ends_with(&format!(
+            "affichage client=principal réponse={} mises_a_jour=1 ecart_max_ms=0",
+            digest("c/reply-q/r2")
+        )));
+    }
+
+    #[test]
+    fn each_polling_page_keeps_its_own_measurement() {
+        assert_eq!(
+            client(false, Some("http://127.0.0.1:1/floating.html")),
+            "flottant"
+        );
+        assert_eq!(
+            client(false, Some("http://127.0.0.1:1/floating.html?x=1")),
+            "flottant"
+        );
+        assert_eq!(client(false, Some("http://127.0.0.1:1/")), "principal");
+        assert_eq!(
+            client(true, Some("http://127.0.0.1:1/floating.html")),
+            "iphone"
+        );
+        assert_eq!(client(false, None), "autre");
+        // The main window reads at 0 and 1000 ms; the floating panel in between.
+        let directory =
+            std::env::temp_dir().join(format!("ezerbot-fluidity-clients-{}", std::process::id()));
+        let mut main = StreamWatch::default();
+        let mut floating = StreamWatch::default();
+        let now = Instant::now();
+        let reply = |body| state(&[("c", "reply-q", "message", body, "streaming")]);
+        main.observe(&directory, "principal", &state(&[]), now);
+        floating.observe(&directory, "flottant", &state(&[]), now);
+        main.observe(
+            &directory,
+            "principal",
+            &reply("Un"),
+            now + Duration::from_millis(100),
+        );
+        floating.observe(
+            &directory,
+            "flottant",
+            &reply("Un deux"),
+            now + Duration::from_millis(500),
+        );
+        main.observe(
+            &directory,
+            "principal",
+            &reply("Un deux trois"),
+            now + Duration::from_millis(1100),
+        );
+        let done = state(&[("c", "reply-q", "message", "Un deux trois", "echoed")]);
+        main.observe(
+            &directory,
+            "principal",
+            &done,
+            now + Duration::from_millis(1200),
+        );
+        let log = std::fs::read_to_string(directory.join("logs/engine.log")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(log.lines().count(), 1, "{log}");
+        assert!(log.trim_end().ends_with(&format!(
+            "affichage client=principal réponse={} mises_a_jour=2 ecart_max_ms=1000",
+            digest("c/reply-q/r1")
+        )));
     }
 }

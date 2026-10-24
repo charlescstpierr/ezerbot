@@ -832,7 +832,10 @@ pub struct App {
     debug_voice_call: features::voice_call::DebugCall,
     // Host-owned: survives a WebView reload, never persisted across app starts.
     deep_link_seen: BTreeMap<String, u64>,
-    stream_watch: fluidity::StreamWatch,
+    // Display fluidity (#255), per polling page; `state_client` is the page of
+    // the `/api/state` being served, set by the HTTP host.
+    stream_watches: BTreeMap<&'static str, fluidity::StreamWatch>,
+    state_client: &'static str,
 }
 
 impl App {
@@ -948,7 +951,8 @@ impl App {
             #[cfg(debug_assertions)]
             debug_voice_call: features::voice_call::DebugCall::default(),
             deep_link_seen: BTreeMap::new(),
-            stream_watch: fluidity::StreamWatch::default(),
+            stream_watches: BTreeMap::new(),
+            state_client: "principal",
         })
     }
 
@@ -1295,11 +1299,21 @@ impl App {
         }
     }
 
+    /// Display fluidity (#255): the page the next `/api/state` is served to.
+    pub fn set_state_client(&mut self, remote: bool, referer: Option<&str>) {
+        self.state_client = fluidity::client(remote, referer);
+    }
+
     /// Display fluidity (#255): the duration of the last served `/api/state`.
     pub fn log_state_served(&mut self, elapsed: Duration) {
         let directory = self.db_path.parent().unwrap_or(Path::new("."));
-        self.stream_watch
-            .served(directory, elapsed, std::time::Instant::now());
+        let client = self.state_client;
+        self.stream_watches.entry(client).or_default().served(
+            directory,
+            client,
+            elapsed,
+            std::time::Instant::now(),
+        );
     }
 
     fn require_conversation(&self, id: &str) -> Result<(), ApiError> {

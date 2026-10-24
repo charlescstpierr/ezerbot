@@ -489,7 +489,7 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
         .filter(|line| {
             !line.contains("upstream turn=")
                 && !line.contains("] api_state")
-                && !line.contains("] affichage réponse=")
+                && !line.contains("] affichage client=")
         })
         .collect();
     // startup, connection probe, the refused turn, its single refusal, shutdown.

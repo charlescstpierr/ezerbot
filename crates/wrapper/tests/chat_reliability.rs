@@ -1292,7 +1292,7 @@ fn assert_fluid(seen: &[(Instant, String)], max_gap: Option<Duration>) {
 }
 fn fluidity_log(f: &Fixture) -> String {
     let log = std::fs::read_to_string(f.db.parent().unwrap().join("logs/engine.log")).unwrap();
-    assert!(log.contains("api_state duree_ms=") && log.contains("messages="));
+    assert!(log.contains("api_state client=principal duree_ms=") && log.contains("messages="));
     assert!(log.contains("ecart_max_ms="));
     assert!(!log.contains("mot1 ") && !log.contains("Question privée") && !log.contains(&token()));
     log

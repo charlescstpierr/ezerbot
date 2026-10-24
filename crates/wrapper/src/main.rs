@@ -581,6 +581,14 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         let state_started = (request.method() == &tiny_http::Method::Get
             && request.url().split('?').next() == Some("/api/state"))
         .then(std::time::Instant::now);
+        if state_started.is_some() {
+            let referer = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("Referer"))
+                .map(|header| header.value.as_str().to_owned());
+            app.set_state_client(remote, referer.as_deref());
+        }
         let mut cookie = None;
         let (mut status, mut body, content_type) = match payload(
             &mut request,

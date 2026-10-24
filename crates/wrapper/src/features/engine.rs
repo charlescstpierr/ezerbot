@@ -2717,7 +2717,7 @@ impl<'a> RedactedDeltas<'a> {
         Ok(())
     }
 }
-fn event_vault(conn: &Connection) -> grokbot_engine::contracts::Result<Vault> {
+pub(crate) fn event_vault(conn: &Connection) -> grokbot_engine::contracts::Result<Vault> {
     let path = conn
         .path()
         .ok_or_else(|| Error::InvalidInput("file database required".into()))?;
@@ -2776,7 +2776,14 @@ fn projected_parts(
     run: &Run,
 ) -> grokbot_engine::contracts::Result<Vec<ReplyPart>> {
     let events = store::events(conn, &run.run_id, 0)?;
-    let vault = event_vault(conn)?;
+    projected_parts_with(run, &events, &redaction_patterns(conn)?)
+}
+/// `events` are read before `secrets`: a secret stored by one of them is masked.
+fn projected_parts_with(
+    run: &Run,
+    events: &[RunEvent],
+    secrets: &redact::Patterns,
+) -> grokbot_engine::contracts::Result<Vec<ReplyPart>> {
     let completed: HashSet<_> = events
         .iter()
         .filter(|e| matches!(e.kind, RunEventKind::ToolCall | RunEventKind::TurnEnded))
@@ -2793,7 +2800,7 @@ fn projected_parts(
         .map_or(0, |e| e.seq);
     let mut parts = Vec::new();
     let mut text = String::new();
-    for event in &events {
+    for event in events {
         let anchor = event.kind == RunEventKind::ToolCall
             || (run.kind == RunKind::Task
                 && matches!(
@@ -2805,7 +2812,7 @@ fn projected_parts(
                 ));
         if anchor && !text.is_empty() {
             parts.push(ReplyPart {
-                body: redact::redact(&vault, &std::mem::take(&mut text))?,
+                body: secrets.text(&std::mem::take(&mut text))?,
                 before: Some(format!("{}:{}", run.run_id, event.seq)),
             });
         }
@@ -2823,14 +2830,14 @@ fn projected_parts(
     }
     if !text.is_empty() {
         parts.push(ReplyPart {
-            body: redact::redact(&vault, &text)?,
+            body: secrets.text(&text)?,
             before: None,
         });
     }
     // A secret added after these events may straddle two rendered fragments.
     // Preserve the old whole-reply redaction guarantee, even in that rare case.
     let joined: String = parts.iter().map(|part| part.body.as_str()).collect();
-    let safe = redact::redact(&vault, &joined)?;
+    let safe = secrets.text(&joined)?;
     if safe != joined {
         return Ok(vec![ReplyPart {
             body: safe,
@@ -2845,14 +2852,17 @@ fn run_reply(
     id: String,
     proposals: Vec<Proposal>,
 ) -> Result<Message, ApiError> {
-    let parts = projected_parts(conn, run)?;
+    let events = store::events(conn, &run.run_id, 0)?;
+    let sources = super::sources::registry(conn, &run.run_id)?;
+    // One vault read for the whole reply, after what it masks. Under the hold of a state
+    // read, the one read of the whole projection (#377).
+    let secrets = redaction_patterns(conn)?;
+    let parts = projected_parts_with(run, &events, &secrets)?;
     let body: String = parts.iter().map(|part| part.body.as_str()).collect();
-    let citations = super::sources::citations(conn, &run.run_id, &body)?;
-    let mut metadata: (Option<String>, Option<String>, Option<String>) = conn.query_row(
-        "SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1",
-        [&run.run_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+    let citations = super::sources::citations_in(&sources, &body);
+    let mut metadata: (Option<String>, Option<String>, Option<String>) = conn
+        .prepare_cached("SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1")?
+        .query_row([&run.run_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     if context_budget_failed(conn, run)? {
         metadata.0 = Some(CONTEXT_TOO_LARGE.into());
         metadata.1 = Some("context_budget".into());
@@ -2877,10 +2887,18 @@ fn run_reply(
         proposals,
         kind: "message".into(),
         payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":store::token_usage(conn, &run.run_id)?,
-            "sources":redact::redact_value(&event_vault(conn)?, &json!(super::sources::registry(conn, &run.run_id)?))?,"citations":citations,
+            "sources":secrets.value(&json!(sources))?,"citations":citations,
             "recalled_fact_ids":super::memory::recalled_ids(conn, &run.run_id)?}),
         attachments: vec![],
     })
+}
+/// The secrets to hide in a rendering, read once for all its fragments: those of `event_vault`,
+/// which a state read opens once for all its replies (#377).
+fn redaction_patterns(conn: &Connection) -> grokbot_engine::contracts::Result<redact::Patterns> {
+    let path = conn
+        .path()
+        .ok_or_else(|| Error::InvalidInput("file database required".into()))?;
+    redact::app_patterns(&Path::new(path).with_extension("secrets.json"))
 }
 pub(crate) fn group_reply(ctx: &super::Context<'_>, id: &str) -> Result<Message, ApiError> {
     let run = store::required(ctx.connection, id)?;

@@ -188,6 +188,25 @@ impl Vault {
     pub fn path(&self) -> &Path {
         &self.path
     }
+    /// Another handle on the same store, to read it again later (`redact::hold`).
+    pub(crate) fn handle(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            #[cfg(target_os = "macos")]
+            keychain: self.keychain.clone(),
+            signature_notice: self.signature_notice,
+            #[cfg(debug_assertions)]
+            refuse_keychain: self.refuse_keychain,
+        }
+    }
+    /// Whether both handles read the same secrets: same file, same backend.
+    pub(crate) fn same_store(&self, other: &Self) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.keychain.is_some() != other.keychain.is_some() {
+            return false;
+        }
+        self.path == other.path
+    }
     pub fn set(&self, name: &str, purpose: &str, value: &str) -> Result<SecretRef> {
         let name = canonical_secret_name(name)?;
         let purpose = purpose.trim();

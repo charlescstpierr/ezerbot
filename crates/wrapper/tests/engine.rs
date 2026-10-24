@@ -1355,6 +1355,39 @@ fn missing_model_fails_instead_of_streaming_forever() {
 }
 
 #[test]
+fn stopping_a_run_that_already_ended_succeeds_without_rewriting_it() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Terminé"}),
+        complete(),
+    ]);
+    f.send(&c, "finished", "Answer");
+    f.done(&c, "finished");
+    wait("finished owner drained", || {
+        f.provider.status()["titling"] == false
+    });
+    let provider = Provider::with_endpoints(&f.path, f.server.endpoints(), false);
+    f.app = App::open_with(&f.path, provider).unwrap();
+    f.send(&c, "failed", "Answer");
+    f.done(&c, "failed");
+    for (m, status) in [
+        ("failed", RunStatus::Failed),
+        ("finished", RunStatus::Finished),
+    ] {
+        let (run, reply) = (f.run(m), f.reply(&c, m));
+        assert_eq!(run.status, status);
+        f.post("/api/stop", json!({"conversation_id":c,"message_id":m}));
+        assert_eq!(f.run(m), run, "{m} run is rewritten by a late stop");
+        assert_eq!(f.reply(&c, m), reply);
+        assert!(!store::events(&f.db(), &run.run_id, 0)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == RunEventKind::Cancelled));
+    }
+}
+
+#[test]
 fn secret_split_across_deltas_never_reaches_events_projection_or_replay() {
     let mut f = Fixture::new(true);
     let c = f.conversation();

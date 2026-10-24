@@ -83,10 +83,12 @@ Le rejeu réel et les essais d'ordre du préfixe restent un travail séparé.
 
 Le [lanceur d’évaluation — étape A](evaluation.md) rejoue un scénario de messages dans un espace neuf marqué, impose `EZERBOT_EVAL_MAX_CALLS` et écrit uniquement des chiffres dans `target/eval/`. Il ne se connecte à aucun compte réel.
 
-## Test de dictée Mac (opt-in)
+## Test de dictée Mac
 
-Le test `french_audio_recognized_on_device_after_english` (crates/wrapper/tests/voice_ui.rs) est ignoré par défaut : il exige un Mac, la permission Speech et les locales en-US/fr-CA installées. Pour le lancer :
+Le test `french_audio_recognized_on_device_after_english` (crates/wrapper/tests/voice_ui.rs) tourne dans `cargo test` : il exige un Mac, les locales en-US/fr-CA installées et la permission Speech, accordée une fois au binaire de test `~/.local/share/ezerbot/dictation-fixture-test/ezerbot-dictation-fixture-test`. `tools/test-dictation-fixture.sh` l'installe, signé, et ne le recompile que si ses sources changent (une recompilation redemande la permission). Le premier lancement affiche l'invite macOS ; sans réponse en 45 s, ou si l'accès est refusé, le test échoue avec la marche à suivre. Seul ce test :
 
 ```sh
-cargo test -p grokbot-wrapper --test voice_ui -- --ignored
+cargo test --locked -p grokbot-wrapper --test voice_ui french_audio_recognized_on_device_after_english -- --exact
 ```
+
+`tools/test-dictation-fixture.sh --status` affiche l'état de la permission sans la demander.

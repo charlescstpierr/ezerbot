@@ -1242,6 +1242,7 @@ fn watch_words(f: &mut Fixture) -> Vec<(Instant, String)> {
     f.send(Fault::Words);
     let mut seen: Vec<(Instant, String)> = Vec::new();
     let start = Instant::now();
+    let mut next = start;
     loop {
         let reply = f.reply();
         let body = reply["body"].as_str().unwrap_or_default().to_owned();
@@ -1255,7 +1256,8 @@ fn watch_words(f: &mut Fixture) -> Vec<(Instant, String)> {
             start.elapsed() < Duration::from_secs(20),
             "fake chat did not settle"
         );
-        std::thread::sleep(Duration::from_millis(100));
+        next += Duration::from_millis(100);
+        std::thread::sleep(next.saturating_duration_since(Instant::now()));
     }
 }
 fn assert_fluid(seen: &[(Instant, String)], max_gap: Option<Duration>) {

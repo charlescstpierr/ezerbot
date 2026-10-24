@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 
 /// What the shell could see of one streaming reply, across `/api/state` reads.
+#[derive(Default)]
 struct Watched {
     text: usize,
     changed: Option<Instant>,
@@ -46,23 +47,10 @@ impl StreamWatch {
             .get_or_insert_with(|| seen.keys().cloned().collect());
         for (id, &(text, streaming)) in &seen {
             if known.insert(id.clone()) && !streaming {
-                self.live.insert(
-                    id.clone(),
-                    Watched {
-                        text: 0,
-                        changed: None,
-                        updates: 0,
-                        max_gap: Duration::ZERO,
-                    },
-                );
+                self.live.insert(id.clone(), Watched::default());
             }
             if streaming {
-                let watched = self.live.entry(id.clone()).or_insert(Watched {
-                    text: 0,
-                    changed: None,
-                    updates: 0,
-                    max_gap: Duration::ZERO,
-                });
+                let watched = self.live.entry(id.clone()).or_default();
                 watched.saw(text, now);
             }
         }

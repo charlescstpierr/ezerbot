@@ -577,6 +577,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         }
         let is_api = request.url().starts_with("/api/");
         // Timed through JSON encoding, which grows with the history (#255).
+        let mut state_elapsed = None;
         let state_started = (request.method() == &tiny_http::Method::Get
             && request.url().split('?').next() == Some("/api/state"))
         .then(std::time::Instant::now);
@@ -606,9 +607,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
                     }
                 }
                 let (body, content_type) = response.into_parts();
-                if let Some(started) = state_started {
-                    app.log_state_served(started.elapsed());
-                }
+                state_elapsed = state_started.map(|started| started.elapsed());
                 if header_safe(&content_type) {
                     (200, body, content_type)
                 } else {
@@ -668,6 +667,9 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         };
         if let Err(error) = result {
             eprintln!("Réponse HTTP interrompue : {error}");
+        }
+        if let Some(elapsed) = state_elapsed {
+            app.log_state_served(elapsed);
         }
     }
 }

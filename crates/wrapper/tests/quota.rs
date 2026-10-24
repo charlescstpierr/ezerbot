@@ -488,7 +488,7 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
         .lines()
         .filter(|line| {
             !line.contains("upstream turn=")
-                && !line.contains("] api_state ")
+                && !line.contains("] api_state")
                 && !line.contains("] affichage réponse=")
         })
         .collect();

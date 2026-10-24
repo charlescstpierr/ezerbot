@@ -1292,7 +1292,7 @@ fn assert_fluid(seen: &[(Instant, String)], max_gap: Option<Duration>) {
 }
 fn fluidity_log(f: &Fixture) -> String {
     let log = std::fs::read_to_string(f.db.parent().unwrap().join("logs/engine.log")).unwrap();
-    assert!(log.contains("api_state duree_ms=") && log.contains("evenements="));
+    assert!(log.contains("api_state duree_ms=") && log.contains("messages="));
     assert!(log.contains("ecart_max_ms="));
     assert!(!log.contains("mot1 ") && !log.contains("Question privée") && !log.contains(&token()));
     log
@@ -1343,7 +1343,7 @@ fn a_long_history_still_shows_the_reply_growing_without_long_jumps() {
                     .parse::<u64>()
                     .ok()
             };
-            Some((field("duree_ms=")?, field("evenements=")?))
+            Some((field("duree_ms=")?, field("messages=")?))
         })
         .collect();
     let events = served.last().map_or(0, |(_, events)| *events);
@@ -1353,7 +1353,7 @@ fn a_long_history_still_shows_the_reply_growing_without_long_jumps() {
         .map(|(ms, _)| *ms)
         .collect();
     eprintln!(
-        "historique de 200 messages : /api/state pendant la réponse {during:?} ms, {events} événements ; {}",
+        "historique de 200 messages : /api/state pendant la réponse {during:?} ms, {events} messages ; {}",
         log.lines().rev().find(|line| line.contains("ecart_max_ms=")).unwrap_or_default()
     );
     assert_fluid(&seen, Some(Duration::from_millis(300)));

@@ -1295,16 +1295,11 @@ impl App {
         }
     }
 
-    /// Display fluidity (#255): one served `/api/state`, with the journal size it replayed.
-    pub fn log_state_served(&self, elapsed: Duration) {
-        let events: u64 = self
-            .connection
-            .query_row("SELECT COUNT(*) FROM engine_run_events", [], |row| {
-                row.get(0)
-            })
-            .unwrap_or(0);
+    /// Display fluidity (#255): the duration of the last served `/api/state`.
+    pub fn log_state_served(&mut self, elapsed: Duration) {
         let directory = self.db_path.parent().unwrap_or(Path::new("."));
-        fluidity::state_served(directory, elapsed, events);
+        self.stream_watch
+            .served(directory, elapsed, std::time::Instant::now());
     }
 
     fn require_conversation(&self, id: &str) -> Result<(), ApiError> {

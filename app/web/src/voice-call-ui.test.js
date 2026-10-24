@@ -24,6 +24,7 @@ const SECRET = ["ezc", "fake", "never", "visible", "0123456789"].join("_");
 
 function fixture({ available = true, remote = false } = {}) {
   let panel, timer, keydown;
+  const limits = [];
   const calls = [], notices = [], events = [], listeners = {};
   let source = { status: "listening", lines: [], transcript: "", speaking: false };
   let lineGate = null;
@@ -72,7 +73,8 @@ function fixture({ available = true, remote = false } = {}) {
     window,
     document: { createElement: tag => new Element(tag), getElementById: () => send, querySelector: () => actions, addEventListener(name, fn) { if (name === "keydown") keydown = fn; } },
     Event: class { constructor(type) { this.type = type; } },
-    setTimeout(fn) { timer = fn; return 1; }, clearTimeout() { timer = null; },
+    setTimeout(fn, ms) { if (ms === 100) { timer = fn; return 1; } limits.push(fn); return limits.length + 1; },
+    clearTimeout(id) { if (id > 1) limits[id - 2] = null; else timer = null; },
   });
   return {
     root, calls, notices, events, window, get registered() { return Boolean(panel); }, get panel() { return panel; },
@@ -80,6 +82,7 @@ function fixture({ available = true, remote = false } = {}) {
     set mode(v) { mode = v; panel.onState(state, context); }, set dictation(v) { dictation = v; panel.onState(state, context); }, set meeting(v) { meeting = v; panel.onState(state, context); },
     get context() { return context; }, setContext(c) { context = c; panel.onState(state, c); },
     tick: async () => { await timer?.(); }, startTick: () => timer?.(),
+    expire() { limits.forEach((fn, i) => { limits[i] = null; fn?.(); }); },
     hold(...commands) { holding.clear(); for (const command of commands) holding.add(command); },
     release(...commands) { if (!commands.length) holding.clear(); for (const late of held.splice(0)) if (!commands.length || commands.includes(late.command)) late.resolve(); else held.push(late); },
     set script(fn) { script = fn; }, set microphone(id) { microphone = id; }, keydown: e => keydown(e),
@@ -409,4 +412,27 @@ test("a status that carries the microphone fallback announces it, once, for the 
   f.microphone = "usb-B";
   f.hold("unmute"); const unmute = muteButton(f).onclick(); await f.tick(); f.release(); await unmute; await f.tick();
   assert.deepEqual(f.notices, ["repli:usb-A"], "the choice saved meanwhile is not the one that was missing");
+});
+
+test("a command whose answer never comes ends at its limit: the screen follows the bridge again and the gestures come back", async () => {
+  const f = fixture(); await f.toggle().onclick(); await muteButton(f).onclick();
+  f.hold("unmute"); const lost = muteButton(f).onclick(); await settle();
+  assert.equal(f.source.muted, false, "the bridge did unmute; its answer is withheld");
+  for (let i = 0; i < 3; i++) await f.tick();
+  assert.equal(muteButton(f).attributes["aria-pressed"], "true", "inside the limit the command is still waited for");
+  f.expire();
+  for (let i = 0; i < 10; i++) await f.tick();
+  assert.equal(muteButton(f).attributes["aria-pressed"], "false"); assert.match(stateOf(f), /^Appel en cours/);
+  await muteButton(f).onclick(); assert.equal(f.calls.at(-1).debug, "mute"); assert.equal(f.source.muted, true);
+  f.release(); await lost; await settle();
+  assert.equal(muteButton(f).attributes["aria-pressed"], "true", "the abandoned answer says nothing any more");
+});
+
+test("the microphone fallback is announced even when the answer that carries it is an error", async () => {
+  for (const carrier of ["command", "status"]) {
+    const f = fixture(); f.microphone = "usb-A"; await f.toggle().onclick(); await muteButton(f).onclick();
+    f.source.microphone_fallback = true; f.source.status = "mic_denied";
+    if (carrier === "command") await muteButton(f).onclick(); else { f.source.muted = false; await f.tick(); }
+    assert.deepEqual(f.notices, ["repli:usb-A"], carrier);
+  }
 });

@@ -17,6 +17,7 @@ function fixture() {
   let startExtras={}, notices=[], panel, timer, keydown, source={status:"idle",transcript:"",utterance_id:0,barged:0}, scenario="", nextSend, refusal="";
   const calls=[], sends=[], follows=[], held=[], holding=new Set();
   let script;
+  const limits=[];
   let dictationRefreshes=0;
   const root=new Element("div"), send=new Element("button"), settings=new Element("div"), composer=new Element("div"), controls=new Element("div");controls.className="voice-controls";root.append(controls,send,settings,composer);
   const voices=[{id:"v-a",name:"Voix A",language:"fr-CA"},{id:"v-b",name:"Voix B",language:"fr-FR"},{id:"v-en",name:"Voice C",language:"en-US"}];
@@ -51,11 +52,11 @@ function fixture() {
   runInNewContext(readFileSync(new URL("../../ui/panels/voice-conversation.js",import.meta.url),"utf8"),{
     window:{GrokbotPanels:panels,EzerbotMicrophone:{current:()=>context.state.voice.microphone||"",fellBack(id){notices.push("repli:"+id);}},EzerbotDictation:{refresh(){dictationRefreshes++;},cancel(){} },GrokbotChat:{createVoiceReader,voiceNeedsAction},webkit:{messageHandlers:{ezerbotVoiceSession:{postMessage:bridge}}},addEventListener(){}},
     document:{createElement:tag=>new Element(tag),getElementById:()=>send,querySelector:()=>controls,addEventListener(name,fn){if(name==="keydown")keydown=fn;}},
-    crypto:{randomUUID:()=>"token"},setTimeout(fn){timer=fn;return 1;},clearTimeout(){timer=null;},
+    crypto:{randomUUID:()=>"token"},setTimeout(fn,ms){if(ms===100){timer=fn;return 1;}limits.push(fn);return limits.length+1;},clearTimeout(id){if(id>1)limits[id-2]=null;else timer=null;},
   });
   const section=bot=>{const container=new Element("div");const cleanup=panel.botSection(bot,container,context);return {container,cleanup};};
   return {section,hold(...commands){holding.clear();for(const command of commands)holding.add(command);},set script(fn){script=fn;},release(...commands){if(!commands.length)holding.clear();for(const late of held.splice(0))if(!commands.length||commands.includes(late.command))late.resolve();else held.push(late);},set refusal(text){refusal=text;},root,calls,sends,follows,notices,panel,set startExtras(value){startExtras=value;},setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
-    setContext(c){context=c;panel.onState(c.state,c);},tick:async()=>timer?.(),keydown:e=>keydown(e)};
+    setContext(c){context=c;panel.onState(c.state,c);},tick:async()=>timer?.(),keydown:e=>keydown(e),expire(){limits.forEach((fn,i)=>{limits[i]=null;fn?.();});}};
 }
 test("end-to-end voice sends only the recognized utterance once, reads streamed sentences, pauses on approval",async()=>{
   const f=fixture(); await cls(f.root,"voice-session-toggle").onclick();
@@ -343,4 +344,25 @@ test("a status that carries the microphone fallback announces it, once, for the 
   f.context.state.voice.microphone="usb-B";
   f.hold("unmute");const unmute=muteButton(f).onclick();await f.tick();f.release();await unmute;await f.tick();
   assert.deepEqual(f.notices,["repli:usb-A"],"the choice saved meanwhile is not the one that was missing");
+});
+test("a command whose answer never comes ends at its limit: the screen follows the bridge again and the gestures come back",async()=>{
+  const f=fixture();await cls(f.root,"voice-session-toggle").onclick();await muteButton(f).onclick();
+  f.hold("unmute");const lost=muteButton(f).onclick();await settle();
+  assert.equal(f.source.muted,false,"the bridge did unmute; its answer is withheld");
+  for(let i=0;i<3;i++)await f.tick();
+  assert.equal(muteButton(f).attributes["aria-pressed"],"true","inside the limit the command is still waited for");
+  f.expire();
+  for(let i=0;i<10;i++)await f.tick();
+  assert.equal(muteButton(f).attributes["aria-pressed"],"false");assert.match(stateOf(f),/^À l’écoute/);
+  await muteButton(f).onclick();assert.equal(f.calls.at(-1).command,"mute");assert.equal(f.source.muted,true);
+  f.release();await lost;await settle();
+  assert.equal(muteButton(f).attributes["aria-pressed"],"true","the abandoned answer says nothing any more");
+});
+test("the microphone fallback is announced even when the answer that carries it is an error",async()=>{
+  for(const carrier of ["command","status"]){
+    const f=fixture();f.context.state.voice.microphone="usb-A";await cls(f.root,"voice-session-toggle").onclick();await muteButton(f).onclick();
+    f.source.microphone_fallback=true;f.source.status="mic_denied";
+    if(carrier==="command")await muteButton(f).onclick();else{f.source.muted=false;await f.tick();}
+    assert.deepEqual(f.notices,["repli:usb-A"],carrier);
+  }
 });

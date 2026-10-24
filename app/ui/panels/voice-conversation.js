@@ -21,9 +21,11 @@
   let button, bar, label, transcript, heldNotice, stop, mute, leave, systemSettings;
   let phase = "idle", detail = "", liveText = "", lastUtterance = 0, lastBarge = 0, paused = false, sending = false;
   // `muted` is the bridge's, as its latest answer said: the screen never guesses it. One mute/unmute command flies at a time
-  // (`muting`); a status read that started before it ended is older than the command (`reads`) and says nothing about `muted`.
+  // (`muting`, the id of that command); a status read that started before it ended is older than the command (`reads`) and says nothing about `muted`.
+  // A command with no answer after `commandLimit` (50 polls) is over: its answer, if it comes, is dropped and the next status says `muted`.
   // `requested` is the microphone asked at the start, the one a fallback says is gone; `fellBack` says so once per session.
-  let muted = false, muting = false, reads = 0, requested = "", fellBack = false;
+  const commandLimit = 5000;
+  let muted = false, muting = false, commands = 0, reads = 0, requested = "", fellBack = false;
   const noteFallback = answer => {
     if (!answer.microphone_fallback || answer.muted || fellBack) return;
     fellBack = true; window.EzerbotMicrophone?.fellBack(requested);
@@ -103,19 +105,20 @@
   async function toggleMute() {
     if (!active() || phase === "authorizing" || muting) return;
     const rev = epoch;
-    muting = true; reads++;
+    const mine = muting = ++commands, limit = setTimeout(() => { if (muting === mine) { muting = false; reads++; } }, commandLimit);
+    reads++;
     try {
       let answer;
       // A refused command changed nothing: the bridge's status says what it still is.
       try { answer = await bridge(muted ? "unmute" : "mute"); }
       catch (error) { panels.notify(error.message); answer = await bridge("status"); }
-      if (rev !== epoch) return;
+      if (rev !== epoch || muting !== mine) return;
+      noteFallback(answer);
       if (errors[answer.status]) { fail(answer.status); return; }
       muted = Boolean(answer.muted);
       if (muted) liveText = "";
-      noteFallback(answer);
       render();
-    } finally { if (rev === epoch) { muting = false; reads++; } }
+    } finally { clearTimeout(limit); if (rev === epoch && muting === mine) { muting = false; reads++; } }
   }
   const muteToggled = () => toggleMute().catch(error => panels.notify(error.message));
   async function interrupt() {
@@ -166,10 +169,10 @@
     try {
       const seq = ++reads, result = await bridge("status");
       if (rev !== epoch) return;
+      noteFallback(result);
       if (errors[result.status] || result.status === "idle") { fail(result.status); return; }
       if (result.status === "authorizing") { phase = "authorizing"; render(); return; }
       if (result.token !== token) { fail("stale"); return; }
-      noteFallback(result);
       if (!muting && seq === reads) muted = Boolean(result.muted);
       if (muted) liveText = ""; else if (result.transcript) liveText = result.transcript;
       const needsAction = window.GrokbotChat.voiceNeedsAction(ctx.conversation?.messages || []);

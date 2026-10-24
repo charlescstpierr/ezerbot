@@ -26,9 +26,11 @@
   let button, menuItem, bar, label, notice, transcriptToggle, mute, interrupt, leave, transcript;
   let phase = "idle", detail = "", lines = [], partial = "", written = 0, shown = false, paused = false, speaking = false;
   // `muted` is the bridge's, as its latest answer said: the screen never guesses it. One mute/unmute command flies at a time
-  // (`muting`); a status read that started before it ended is older than the command (`reads`) and says nothing about `muted`.
+  // (`muting`, the id of that command); a status read that started before it ended is older than the command (`reads`) and says nothing about `muted`.
+  // A command with no answer after `commandLimit` (50 polls) is over: its answer, if it comes, is dropped and the next status says `muted`.
   // `requested` is the microphone asked at the start, the one a fallback says is gone; `fellBack` says so once per call.
-  let muted = false, muting = false, reads = 0, requested = "", fellBack = false;
+  const commandLimit = 5000;
+  let muted = false, muting = false, commands = 0, reads = 0, requested = "", fellBack = false;
   const noteFallback = answer => {
     if (!answer.microphone_fallback || answer.muted || fellBack) return;
     fellBack = true; window.EzerbotMicrophone?.fellBack?.(requested);
@@ -174,8 +176,8 @@
     try {
       const seq = ++reads, result = await bridge("status");
       if (rev !== epoch) return;
-      if (errors[result.status] || result.status === "idle") { await fail(result.status); return; }
       noteFallback(result);
+      if (errors[result.status] || result.status === "idle") { await fail(result.status); return; }
       if (!muting && seq === reads) muted = Boolean(result.muted);
       lines = result.lines || lines; partial = muted ? "" : result.transcript || ""; speaking = Boolean(result.speaking);
       // A card waiting for a click holds the voice. Speaking is not a decision on it.
@@ -215,19 +217,20 @@
   async function toggleMute() {
     if (!active() || ["authorizing", "ending"].includes(phase) || muting) return;
     const rev = epoch;
-    muting = true; reads++;
+    const mine = muting = ++commands, limit = setTimeout(() => { if (muting === mine) { muting = false; reads++; } }, commandLimit);
+    reads++;
     try {
       let answer;
       // A refused command changed nothing: the bridge's status says what it still is.
       try { answer = await bridge(muted ? "unmute" : "mute"); }
       catch (error) { panels.notify(error.message); answer = await bridge("status"); }
-      if (rev !== epoch) return;
+      if (rev !== epoch || muting !== mine) return;
+      noteFallback(answer);
       if (errors[answer.status]) { await fail(answer.status); return; }
       muted = Boolean(answer.muted);
       if (muted) partial = "";
-      noteFallback(answer);
       render();
-    } finally { if (rev === epoch) { muting = false; reads++; } }
+    } finally { clearTimeout(limit); if (rev === epoch && muting === mine) { muting = false; reads++; } }
   }
   const muteToggled = () => toggleMute().catch(error => panels.notify(error.message));
   panels.register({

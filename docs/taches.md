@@ -19,7 +19,7 @@ Les lignes sont calculées depuis les journaux propriétaires, jamais depuis les
 
 Le moteur n'est jamais écrit par cette lecture : ni table, ni déclencheur sur ses journaux. Les journaux sources ne conservent pas d'heure de fin ; les Terminées récemment sont donc triées par l'heure de début déjà enregistrée (début du tour, du tour source pour une commande de fond, heure prévue pour une routine sans tour).
 
-Un tour, une sous-tâche ou une routine suspendu sur une demande qui n'est plus valable (décidée, expirée, remplacée, ou carte de secret d'un démarrage précédent) ne peut plus avancer : il apparaît Arrêté dans Terminées récemment, jamais En cours ni masqué. Cette règle est calculée à la lecture.
+Un tour, une sous-tâche ou une routine suspendu sur une demande qui n'est plus valable (décidée, expirée, remplacée, ou carte de secret d'un démarrage précédent) ne peut plus avancer : il apparaît Arrêté dans Terminées récemment, jamais En cours ni masqué. Une demande décidée dont le réveil attend encore d'être livré au moteur garde son tour En cours jusqu'à la reprise. Cette règle est calculée à la lecture.
 
 La réponse n'inclut ni arguments ou sorties d'outils, ni objectifs, ni résultats de sous-tâches, ni noms ou valeurs de secrets, ni texte de formulaire. Les demandes ne transportent que leur nature et leurs identifiants pour retrouver la carte dans le fil.
 

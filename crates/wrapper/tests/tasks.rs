@@ -178,6 +178,10 @@ fn approval_is_first_has_its_card_and_disappears_after_a_real_decision() {
         panic!("missing request")
     };
     let request = grokbot_forms::requests::get(&tx, &id).unwrap().unwrap();
+    let mut waiting = run.clone();
+    waiting.status = RunStatus::AwaitingApproval;
+    store::save(&tx, &waiting).unwrap();
+    store::set_awaiting(&tx, "turn", &SuspendCause::HumanInput { id: id.clone() }).unwrap();
     tx.commit().unwrap();
     let items = f.items();
     assert_eq!(items[0]["group"], "decision");
@@ -187,7 +191,15 @@ fn approval_is_first_has_its_card_and_disappears_after_a_real_decision() {
     assert_eq!(items[0]["conversation_id"], f.conversation);
     assert!(!json!(items).to_string().contains("PRIVATE_"));
     f.post("/api/approvals/resolve", json!({"entry_id":request.entry_id,"submission_id":"decision","conversation_id":f.conversation,"decision":"deny"}));
-    assert!(f.items().iter().all(|i| i["request"]["id"] != id));
+    let items = f.items();
+    assert!(items.iter().all(|i| i["request"]["id"] != id));
+    assert_eq!(
+        store::required(&f.conn, "turn").unwrap().status,
+        RunStatus::AwaitingApproval
+    );
+    let turn = items.iter().find(|i| i["id"] == "task:turn").unwrap();
+    assert_eq!(turn["group"], "running");
+    assert_eq!(turn["status"], "running");
 }
 
 #[test]

@@ -18,7 +18,9 @@ empty_hooks!(
 // boundary. Never project objectives, commands, results, form fields or secrets.
 const SNAPSHOT: &str = "
 WITH live_runs AS (
- SELECT r.*,json_extract(r.record,'$.started_at') AS started_at FROM engine_runs r
+ SELECT r.*,json_extract(r.record,'$.started_at') AS started_at,
+ CASE WHEN EXISTS (SELECT 1 FROM engine_run_wakes w WHERE w.run_id=r.run_id AND w.state='pending')
+ THEN 'running' ELSE 'stopped' END AS wait_status FROM engine_runs r
  JOIN wrapper_conversations c ON c.account_id=?1 AND c.id=r.conversation_id AND c.deleted=0
  JOIN wrapper_bots b ON b.account_id=?1 AND b.id=r.bot_id AND b.deleted=0
 ), pending AS (
@@ -47,7 +49,7 @@ WITH live_runs AS (
  CASE r.status WHEN 'finished' THEN CASE WHEN json_extract(r.record,'$.kind')='task'
  AND json_extract(r.record,'$.task_status.status')<>'done' THEN 'stopped' ELSE 'finished' END
  WHEN 'failed' THEN 'failed' WHEN 'cancelled' THEN 'stopped' WHEN 'interrupted' THEN 'stopped'
- WHEN 'awaiting_approval' THEN 'stopped' WHEN 'awaiting_human_input' THEN 'stopped' ELSE 'running' END,
+ WHEN 'awaiting_approval' THEN r.wait_status WHEN 'awaiting_human_input' THEN r.wait_status ELSE 'running' END,
  r.started_at,NULL,NULL,NULL FROM live_runs r
  WHERE r.trigger_kind='user_message'
  AND NOT EXISTS (SELECT 1 FROM pending p WHERE p.run_id=r.run_id)
@@ -56,7 +58,7 @@ WITH live_runs AS (
  CASE json_extract(d.status,'$.status') WHEN 'done' THEN 'finished' WHEN 'failed' THEN 'failed'
  WHEN 'refused' THEN 'failed' WHEN 'cancelled' THEN 'stopped'
  ELSE CASE r.status WHEN 'interrupted' THEN 'stopped' WHEN 'cancelled' THEN 'stopped' WHEN 'failed' THEN 'failed'
- WHEN 'awaiting_approval' THEN 'stopped' WHEN 'awaiting_human_input' THEN 'stopped'
+ WHEN 'awaiting_approval' THEN r.wait_status WHEN 'awaiting_human_input' THEN r.wait_status
  WHEN 'finished' THEN CASE json_extract(r.record,'$.task_status.status') WHEN 'done' THEN 'finished' ELSE 'failed' END
  ELSE 'running' END END,
  COALESCE(r.started_at,p.started_at),NULL,NULL,NULL
@@ -69,7 +71,7 @@ WITH live_runs AS (
  SELECT 'routine:'||o.occurrence_id,'routine',s.bot_id,s.conversation_id,'Routine',
  CASE o.status WHEN 'done' THEN 'finished' WHEN 'failed' THEN 'failed'
  ELSE CASE r.status WHEN 'interrupted' THEN 'stopped' WHEN 'cancelled' THEN 'stopped' WHEN 'failed' THEN 'failed'
- WHEN 'awaiting_approval' THEN 'stopped' WHEN 'awaiting_human_input' THEN 'stopped'
+ WHEN 'awaiting_approval' THEN r.wait_status WHEN 'awaiting_human_input' THEN r.wait_status
  WHEN 'finished' THEN CASE json_extract(r.record,'$.task_status.status') WHEN 'done' THEN 'finished' ELSE 'failed' END
  ELSE 'running' END END,
  COALESCE(r.started_at,o.scheduled_at_utc),NULL,NULL,NULL

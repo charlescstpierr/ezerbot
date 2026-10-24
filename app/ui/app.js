@@ -1025,6 +1025,7 @@
     onRegenerate: (message) => message.error_kind === "local_connection" ? refresh().catch((error) => notify(error.message)) : generation("/api/regenerate", message.id.replace(/^reply-/, "")),
     onSignIn: () => { void signIn(); },
     onCardAction: cardAction,
+    onOpenPage: (id) => { const pages = panels.get("pages"); if (pages) panelCall(pages, pages.openPage, id); },
     get usageUrl() { return usageUrl(); },
     // « Ouvrir la source » : un lien Google dans le navigateur, un fichier de la bibliothèque dans la fiche du bot.
     async onOpenSource(source, message) {

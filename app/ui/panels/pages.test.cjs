@@ -30,7 +30,15 @@ class Element {
     this.disabled = false;
     this.type = "";
     this.id = "";
+    this.style = {};
+    this.offsetWidth = 90;
+    this.offsetHeight = 30;
+    this.rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
   }
+  get firstChild() { return this.children[0]; }
+  contains(node) { return node === this || this.children.some((child) => child === node || (child instanceof Element && child.contains(node))); }
+  getBoundingClientRect() { return this.rect; }
+  scrollIntoView() { this.scrolled = true; }
   append(...children) {
     for (const child of children) {
       if (child instanceof Element) child.parentElement = this;
@@ -51,7 +59,7 @@ class Element {
   getAttribute(key) { return this.attributes[key]; }
   addEventListener(name, action) { this.listeners[name] = action; }
   click() { if (!this.disabled) this.listeners.click?.(); }
-  focus() {}
+  focus() { this.focused = true; this.ownerDocument.activeElement = this; }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   querySelectorAll(selector) {
     const matches = (el) => {
@@ -112,15 +120,37 @@ function harness(page) {
   chat.id = "chat-scroll";
   const composer = new Element("div");
   composer.classes = ["composer-dock"];
+  const area = new Element("div");
+  area.classes = ["composer-area"];
+  const form = new Element("form");
+  form.id = "composer-form";
+  const editor = new Element("div");
+  form.append(editor);
+  area.append(form);
+  composer.append(area);
   main.append(chat, composer);
   sidebar.append(list);
   const nodes = { sidebar, "conversation-list": list, "chat-scroll": chat, "main-panel": main };
   const document = documentOf(nodes);
+  for (const el of [area, form, editor]) el.ownerDocument = document;
   document.querySelector = (selector) => {
     if (selector === ".main-panel") return main;
     if (selector === ".composer-dock") return composer;
+    if (selector === ".composer-area") return area;
+    if (selector === "#composer-input [contenteditable='true']") return editor;
     return main.querySelector(selector) || sidebar.querySelector(selector);
   };
+  const selection = {
+    rangeCount: 0, isCollapsed: true, text: "", range: null,
+    getRangeAt() { return this.range; },
+    toString() { return this.text; },
+    removeAllRanges() { this.change(0, ""); },
+    change(count, text, range = null) { this.rangeCount = count; this.isCollapsed = !count; this.text = text; this.range = range; document.listeners.selectionchange?.(); },
+  };
+  document.listeners = {};
+  document.activeElement = null;
+  document.addEventListener = (name, action) => { document.listeners[name] = action; };
+  document.getSelection = () => selection;
   const requests = [];
   let current = { ...page };
   const panels = {
@@ -150,6 +180,9 @@ function harness(page) {
     main,
     chat,
     sidebar,
+    area,
+    editor,
+    selection,
     current: () => current,
     use(next) { current = next; },
   };
@@ -352,4 +385,163 @@ test("une navigation refusée pendant une réponse prévient au lieu d’affiche
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(notices.length, 1);
   assert.equal(descendants(main).some((el) => el.classes.includes("page-canvas") && el.children.length > 0), false);
+});
+
+const cell = (text) => ({ type: "element", tag: "td", children: [{ type: "text", text }] });
+const forfaits = {
+  id: "page_forfaits", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "ready", diagnostic: null,
+  preview: "Trois forfaitsForfait A9 €Forfait B19 €Forfait C29 €", source_version: "a".repeat(64),
+  document: { states: [], view: { type: "element", tag: "article", children: [
+    { type: "element", tag: "h1", children: [{ type: "text", text: "Trois forfaits" }] },
+    { type: "element", tag: "table", children: [{ type: "element", tag: "tbody", children: [
+      { type: "element", tag: "tr", children: [cell("Forfait A"), cell("9 €")] },
+      { type: "element", tag: "tr", children: [cell("Forfait B"), cell("19 €")] },
+    ] }] },
+    { type: "element", tag: "p", children: [{ type: "text", text: `${"long ".repeat(100)}fin` }] },
+  ] } },
+};
+const textNode = (root, text) => {
+  for (const child of root.children) {
+    if (!(child instanceof Element)) { if (child.textContent === text) return child; continue; }
+    const found = textNode(child, text);
+    if (found) return found;
+  }
+  return null;
+};
+const byClass = (root, name) => descendants(root).find((el) => el.classes.includes(name));
+
+async function openForfaits() {
+  const h = harness(forfaits);
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  const stage = byClass(h.main, "page-stage");
+  stage.rect = { left: 400, top: 60, right: 800, bottom: 660, width: 400, height: 600 };
+  byClass(h.main, "page-canvas").rect = { left: 400, top: 120, right: 800, bottom: 660, width: 400, height: 540 };
+  const comment = byClass(h.main, "page-comment");
+  const quoteBar = byClass(h.area, "gb-quote-chip");
+  const inCanvas = () => textNode(canvasOf(h.main), "Forfait B");
+  const select = (text, container = textNode(canvasOf(h.main), text) || inCanvas(), rect = { left: 450, top: 200, right: 520, bottom: 220, width: 70, height: 20 }) =>
+    h.selection.change(1, text, { startContainer: container, endContainer: container, getBoundingClientRect: () => rect });
+  return { ...h, stage, comment, quoteBar, select, anchor: () => JSON.parse(JSON.stringify(h.panels.panel.sendExtras())) };
+}
+
+test("sélectionner « Forfait B » affiche « Commenter » près de la sélection ; le clic pose la puce au-dessus de la boîte de message", async () => {
+  const { comment, quoteBar, area, select, selection, editor, anchor } = await openForfaits();
+  assert.equal(comment.hidden, true);
+  select("Forfait B");
+  assert.equal(comment.hidden, false);
+  assert.equal(comment.textContent, "Commenter");
+  assert.deepEqual([comment.style.left, comment.style.top], ["50px", "166px"]);
+  assert.equal(quoteBar.hidden, true);
+  comment.click();
+  assert.equal(quoteBar.hidden, false);
+  assert.equal(area.children[0], quoteBar);
+  assert.equal(quoteBar.textContent, "Page « Trois forfaits » — « Forfait B »");
+  assert.equal(comment.hidden, true);
+  assert.equal(selection.rangeCount, 0);
+  assert.equal(editor.focused, true);
+  assert.deepEqual(anchor(), { page_anchor: { page_id: "page_forfaits", source_version: "a".repeat(64), passage: "Forfait B" } });
+});
+
+test("l’envoi transmet la Page, la version lue par le panneau et le passage rogné ; la puce part avec le message", async () => {
+  const { comment, quoteBar, panels, select, selection, anchor } = await openForfaits();
+  select("  Forfait B\n");
+  comment.click();
+  assert.equal(anchor().page_anchor.passage, "Forfait B");
+  panels.panel.composer.onSent({ messageId: "m1", extras: { mentions: [] } });
+  assert.equal(quoteBar.hidden, false, "un envoi sans ancre ne retire pas la puce");
+  panels.panel.composer.onSent({ messageId: "m2", extras: anchor() });
+  assert.equal(quoteBar.hidden, true);
+  assert.deepEqual(anchor(), {});
+  assert.equal(selection.rangeCount, 0);
+});
+
+test("la croix retire la puce : le message part sans ancre", async () => {
+  const { comment, quoteBar, select, anchor } = await openForfaits();
+  select("Forfait B");
+  comment.click();
+  const cross = buttons(quoteBar)[0];
+  assert.equal(cross.attributes["aria-label"], "Retirer la citation");
+  cross.click();
+  assert.equal(quoteBar.hidden, true);
+  assert.equal(quoteBar.children.length, 0);
+  assert.deepEqual(anchor(), {});
+});
+
+test("une sélection de plus de 500 caractères ne donne ni bouton ni ancre ; 500 passent", async () => {
+  const { comment, select, anchor } = await openForfaits();
+  const long = `${"long ".repeat(100)}fin`;
+  select(long);
+  assert.equal(long.length > 500, true);
+  assert.equal(comment.hidden, true);
+  assert.deepEqual(anchor(), {});
+  const exact = "é".repeat(500);
+  select(exact);
+  assert.equal(comment.hidden, false);
+  select("é".repeat(501));
+  assert.equal(comment.hidden, true);
+});
+
+test("une sélection vide, hors de la Page ou qui déborde du canevas ne donne pas de bouton", async () => {
+  const { comment, select, selection, sidebar, main } = await openForfaits();
+  select("   ");
+  assert.equal(comment.hidden, true);
+  select("Forfait B");
+  assert.equal(comment.hidden, false);
+  selection.change(0, "");
+  assert.equal(comment.hidden, true);
+  select("Pages", sidebar.children[0]);
+  assert.equal(comment.hidden, true);
+  const inside = textNode(canvasOf(main), "Forfait B");
+  selection.change(1, "Forfait B et la suite", { startContainer: inside, endContainer: sidebar, getBoundingClientRect: () => ({ left: 450, top: 200, bottom: 220 }) });
+  assert.equal(comment.hidden, true);
+  select("Forfait B", inside, { left: 450, top: 20, right: 520, bottom: 40, width: 70, height: 20 });
+  assert.equal(comment.hidden, true, "une sélection défilée hors du canevas n’a pas de bouton flottant");
+});
+
+test("au clavier, « Commenter » est un bouton après le canevas et garde la sélection quand il prend le focus", async () => {
+  const { comment, quoteBar, stage, select, selection, anchor } = await openForfaits();
+  const order = stage.children;
+  assert.equal(order.indexOf(comment) > order.indexOf(byClass(stage, "page-canvas")), true);
+  assert.equal(comment.tagName, "button");
+  assert.equal(comment.type, "button");
+  assert.equal(comment.attributes.tabindex, undefined);
+  select("Forfait B");
+  comment.focus();
+  selection.change(0, "");
+  assert.equal(comment.hidden, false, "Tab vers le bouton ne le fait pas disparaître");
+  comment.click();
+  assert.equal(quoteBar.textContent, "Page « Trois forfaits » — « Forfait B »");
+  assert.equal(anchor().page_anchor.passage, "Forfait B");
+});
+
+test("changer de fil retire la puce, et « Commenter » depuis la pleine page revient au fil pour écrire", async () => {
+  const h = await openForfaits();
+  h.select("Forfait B");
+  buttons(h.main).find((button) => button.textContent === "Ouvrir en pleine page").click();
+  assert.equal(h.main.classList.contains("page-full"), true);
+  h.comment.click();
+  assert.equal(h.main.classList.contains("page-full"), false);
+  assert.equal(h.quoteBar.hidden, false);
+  await h.panels.panel.onState(h.panels.state, ctxOf("autre"));
+  assert.equal(h.quoteBar.hidden, true);
+  assert.deepEqual(h.anchor(), {});
+});
+
+test("un clic sur la puce du fil montre la Page ; une Page disparue prévient", async () => {
+  const h = await openForfaits();
+  h.panels.state.conversations = [{ id: "fil" }, { id: "autre" }];
+  const opened = [];
+  h.panels.openConversation = (id) => { opened.push(id); return true; };
+  const notices = [];
+  h.panels.notify = (message) => notices.push(message);
+  h.stage.scrolled = false;
+  h.panels.panel.openPage("page_forfaits");
+  assert.deepEqual(opened, []);
+  assert.equal(h.stage.scrolled, true);
+  h.panels.panel.openPage("page_disparue");
+  assert.deepEqual(notices, ["Cette Page n’existe plus."]);
+  await h.panels.panel.onState(h.panels.state, ctxOf("autre"));
+  assert.equal(h.stage.hidden, true);
+  h.panels.panel.openPage("page_forfaits");
+  assert.deepEqual(opened, ["fil"]);
 });

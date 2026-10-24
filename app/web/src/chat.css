@@ -226,6 +226,17 @@
 .gb-instruction-text { margin: 0 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.65; }
 .gb-bubble { max-width: min(560px, 86%); padding: 10px 15px; border-radius: 16px 16px 4px 16px; background: var(--soft); font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 
+.gb-quote-chip { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: min(560px, 86%); margin-bottom: 6px; padding: 6px 8px 6px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); color: var(--muted); font-size: 12px; line-height: 1.4; text-align: left; }
+.gb-quote-chip[hidden] { display: none; }
+button.gb-quote-chip { cursor: pointer; }
+button.gb-quote-chip:hover { color: var(--text); }
+.gb-quote-chip:focus-visible, .gb-quote-remove:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.gb-quote-text { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gb-quote-remove { display: grid; place-items: center; flex: 0 0 auto; width: 22px; height: 22px; border-radius: 5px; color: var(--muted); }
+.gb-quote-remove:hover { color: var(--text); background: var(--pane); }
+.gb-quote-remove .icon { width: 14px; height: 14px; }
+@media (max-width: 600px) { .gb-quote-chip { max-width: 92%; } }
+
 .gb-assistant { display: flex; gap: 12px; align-items: flex-start; }
 .gb-avatar { display: block; width: var(--gb-avatar-width); height: 27px; flex: 0 0 auto; margin-top: -2px; }
 .gb-author-mascot { display: block; width: 100%; height: 100%; --mascot-eye: var(--bot-color); }

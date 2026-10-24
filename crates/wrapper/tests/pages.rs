@@ -460,6 +460,41 @@ fn anchored_message_is_kept_and_the_bot_reads_the_cited_lines() {
 }
 
 #[test]
+fn the_thread_carries_each_messages_anchor_for_the_bubble_chip() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.answer(None);
+    let chat = f.chat.clone();
+    f.send_in(
+        &chat,
+        "citee",
+        Some(Fixture::anchor(&page, "Trois forfaits")),
+    )
+    .unwrap();
+    f.finish("citee");
+    f.answer(None);
+    f.send_in(&chat, "libre", None).unwrap();
+    f.finish("libre");
+
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let messages = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == chat.as_str())
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let payload = |id: &str| messages.iter().find(|m| m["id"] == id).unwrap()["payload"].clone();
+    assert_eq!(
+        payload("citee")["page_anchor"],
+        json!({"page_id": page["id"], "title": page["title"], "passage": "Trois forfaits"})
+    );
+    assert_eq!(payload("libre")["page_anchor"], Value::Null);
+}
+
+#[test]
 fn a_passage_missing_from_the_source_reaches_the_bot_as_a_quote_only() {
     let mut f = after_first_page();
     let page = f.page();

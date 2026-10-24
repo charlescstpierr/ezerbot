@@ -177,6 +177,27 @@ pub fn list(conn: &Connection, page_id: &str) -> Result<Vec<Value>, ApiError> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// Ce que la bulle du fil montre de l'ancre d'un message : la Page (avec son titre actuel) et le passage cité.
+pub fn for_message(conn: &Connection, conversation: &str, message: &str) -> Value {
+    conn.query_row(
+        "SELECT a.page_id, a.passage, p.title FROM wrapper_page_anchors a
+         LEFT JOIN bot_pages p ON p.id = a.page_id
+         WHERE a.conversation_id = ?1 AND a.message_id = ?2",
+        params![conversation, message],
+        |row| {
+            Ok(json!({
+                "page_id": row.get::<_, String>(0)?,
+                "passage": row.get::<_, String>(1)?,
+                "title": row.get::<_, Option<String>>(2)?,
+            }))
+        },
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or(Value::Null)
+}
+
 pub fn discard_conversation(conn: &Connection, conversation: &str) -> Result<(), ApiError> {
     conn.execute(
         "DELETE FROM wrapper_page_anchors WHERE conversation_id = ?1",

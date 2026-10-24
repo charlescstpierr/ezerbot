@@ -17,7 +17,7 @@ Le menu Modèle du compositeur liste le catalogue du compte. Avec le faux OpenAI
 
 Preconditions:
 
-- `doctor: ok` et badge `ChatGPT`.
+- `doctor: ok` et la pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - Le faux catalogue répond sur `GET /v1/models`.
 - Paramètres fermés, pour laisser voir le compositeur.
 
@@ -29,7 +29,7 @@ Preconditions:
 
 ## Gotchas
 
-- Sans jeton fictif, la barre affiche `Local` et la pilule Modèle n’existe pas. Ne pas simuler le menu en écrivant dans le DOM.
+- Sans jeton fictif, la pilule Modèle n’existe pas. Ne pas simuler le menu en écrivant dans le DOM.
 - Un second clic sur la pilule ferme le menu : le document bascule `pickerKind`. Ne cliquer que si `#picker` est `hidden`.
 - Un clic ailleurs dans la page ferme le menu. Capturer tout de suite après l’ouverture.
 - À 1100 px et moins, le libellé `<small>` de la pilule est masqué. Le nom accessible et le menu restent la preuve.

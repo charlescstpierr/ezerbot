@@ -19,11 +19,11 @@ L’accueil est la conversation vide : la marque Ezerbot, le titre « Nouvelle c
 Preconditions:
 
 - `doctor: ok` sur cette instance.
-- `#mode-note` commence par « Quota de votre abonnement ChatGPT ».
+- La pilule Modèle `#composer-tools [data-picker="model"]` est présente.
 - Aucun dialogue ouvert.
 
 - **Ouvrir.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> open <url>`. Le titre du document est `Ezerbot`.
-- **Attendre le compte fictif.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => document.getElementById("mode-note").textContent.startsWith("Quota de votre abonnement ChatGPT")'`. `result:` vaut `true`.
+- **Attendre le compte fictif.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => !!document.querySelector("#composer-tools [data-picker=\"model\"]")'`. `result:` vaut `true`.
 - **Choisir le thème.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => { document.getElementById("settings-button").click(); document.querySelector("[data-theme-choice=dark]").click(); return true; }'`. `document.documentElement.dataset.theme` devient `dark` et le bouton Sombre a `aria-pressed="true"`.
 - **Fermer les Paramètres.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => { document.querySelector("#settings-dialog .dialog-footer [data-close-dialog]").click(); return document.getElementById("settings-dialog").open; }'`. `result:` vaut `false`.
 - **Relire le thème.** Rouvrir Paramètres. Le bouton `[data-theme-choice="dark"]` a encore `aria-pressed="true"`. Fermer.

@@ -777,11 +777,7 @@ pub fn routes(
                 let b: Bot = serde_json::from_value(query(q)?)
                     .map_err(|_| ApiError::new(400, "bot_id required"))?;
                 require_bot(&app.connection, &b.bot_id)?;
-                let costing = Costing::new(
-                    &app.connection,
-                    &app.provider.codex_usage(false),
-                    app.feature_context().now_ms,
-                )?;
+                let costing = Costing::new(&app.provider, app.feature_context().now_ms);
                 let values = routine::list(&app.connection, &b.bot_id)?
                     .iter()
                     .map(|r| {
@@ -1056,7 +1052,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let bots = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let costing = Costing::new(ctx.connection, &ctx.provider.codex_usage(false), ctx.now_ms)?;
+        let costing = Costing::new(ctx.provider, ctx.now_ms);
         let mut list = Vec::new();
         for bot in bots {
             for r in routine::list(ctx.connection, &bot)? {

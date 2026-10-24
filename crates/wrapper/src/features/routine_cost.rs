@@ -1,21 +1,22 @@
-//! Coût en tokens d'une routine, sans écran ni prix : ce que ses passages ont
-//! mesurément consommé, ce que son horaire promet pour 7 jours, et, quand
-//! l'étalonnage tient, la part du quota hebdomadaire Codex que cela représente.
+//! What a routine costs in tokens, never in money: what its passages measurably used,
+//! what its schedule promises over 7 days and, when calibration holds, the share of the
+//! weekly Codex quota that represents.
 //!
-//! Forme renvoyée sous `routine.cost` (aucun nombre à zéro pour « inconnu », aucun
-//! champ en dollars) :
+//! Returned as `routine.cost` (unknown is `null` or an explicit state, never a zero; there
+//! is no price or dollar field):
 //! `{state, average_tokens, average_sample, tokens_7d,
 //!   forecast:{state, reason, runs_next_7d, tokens_per_day, tokens_next_7d},
 //!   quota_share:{state, reason, percent}}`
-//! - `state` : `measured` ou `no_measure_yet` (aucun passage terminé et mesuré).
-//! - `forecast.state` : `estimated`, `impossible` (`reason` : `event_trigger`,
-//!   `schedule_unusable`) ou `no_measure_yet`.
-//! - `quota_share.state` : `estimated` ou `unknown` (`reason` : `forecast_unavailable`,
+//! - `state`: `measured`, or `no_measure_yet` (no finished, measured passage).
+//! - `forecast.state`: `estimated`, `impossible` (`reason`: `event_trigger`,
+//!   `schedule_unusable`) or `no_measure_yet`.
+//! - `quota_share.state`: `estimated`, or `unknown` (`reason`: `forecast_unavailable`,
 //!   `quota_unavailable`, `calibration_weak`).
-use crate::ApiError;
+use crate::{ApiError, Provider};
 use grokbot_scheduler::{cron, routine::Routine};
 use rusqlite::Connection;
 use serde_json::{json, Value};
+use std::cell::OnceCell;
 
 const WEEK_S: u64 = 7 * 86_400;
 const DAY_MS: i64 = 86_400_000;
@@ -36,19 +37,29 @@ enum Calibration {
     Unknown(&'static str),
 }
 
-pub(super) struct Costing {
+pub(super) struct Costing<'a> {
     now_ms: i64,
-    calibration: Calibration,
+    provider: &'a Provider,
+    /// Read once, and only if a routine has a forecast to turn into a share.
+    calibration: OnceCell<Calibration>,
 }
 
-impl Costing {
-    /// `quota` is `provider.codex_usage(false)`, the same source as the Usage panel.
-    pub(super) fn new(conn: &Connection, quota: &Value, now_ms: u64) -> Result<Self, ApiError> {
-        let now_ms = i64::try_from(now_ms).unwrap_or(i64::MAX);
-        Ok(Self {
-            now_ms,
-            calibration: calibrate(conn, quota)?,
-        })
+impl<'a> Costing<'a> {
+    pub(super) fn new(provider: &'a Provider, now_ms: u64) -> Self {
+        Self {
+            now_ms: i64::try_from(now_ms).unwrap_or(i64::MAX),
+            provider,
+            calibration: OnceCell::new(),
+        }
+    }
+
+    fn calibration(&self, conn: &Connection) -> Result<&Calibration, ApiError> {
+        if self.calibration.get().is_none() {
+            // The same source as the Usage panel.
+            let calibration = calibrate(conn, &self.provider.codex_usage(false))?;
+            let _ = self.calibration.set(calibration);
+        }
+        Ok(self.calibration.get().expect("calibration just set"))
     }
 
     pub(super) fn of(&self, conn: &Connection, routine: &Routine) -> Result<Value, ApiError> {
@@ -74,14 +85,16 @@ impl Costing {
                 None,
             ),
         };
-        let quota_share = match (&self.calibration, tokens_next_7d) {
-            (_, None) => json!({"state":"unknown","reason":"forecast_unavailable","percent":null}),
-            (Calibration::Unknown(reason), _) => {
-                json!({"state":"unknown","reason":reason,"percent":null})
-            }
-            (Calibration::TokensPerPercent(per_percent), Some(tokens)) => {
-                json!({"state":"estimated","reason":null,"percent":(tokens as f64 / per_percent * 10.0).round() / 10.0})
-            }
+        let quota_share = match tokens_next_7d {
+            None => json!({"state":"unknown","reason":"forecast_unavailable","percent":null}),
+            Some(tokens) => match self.calibration(conn)? {
+                Calibration::Unknown(reason) => {
+                    json!({"state":"unknown","reason":reason,"percent":null})
+                }
+                Calibration::TokensPerPercent(per_percent) => {
+                    json!({"state":"estimated","reason":null,"percent":(tokens as f64 / per_percent * 10.0).round() / 10.0})
+                }
+            },
         };
         Ok(json!({
             "state":"measured","average_tokens":average,"average_sample":sample,"tokens_7d":week,

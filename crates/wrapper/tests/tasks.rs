@@ -7,10 +7,10 @@ use grokbot_engine::{
     store,
 };
 use grokbot_wrapper::{
-    features::{self, forms, Context},
+    features::{self, forms, tasks, Context},
     App,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, StatementStatus};
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
@@ -663,4 +663,76 @@ fn recent_is_capped_at_twenty_and_sorted_by_recorded_start_and_survives_restart(
     assert_eq!(recent[19]["id"], "task:turn-06");
     f.app = App::open(&f.dir.join("workspace.sqlite")).unwrap();
     assert_eq!(f.items(), recent);
+}
+
+/// SQLite VM instructions of one `GET /api/taches` over `n` finished delegations on two bots.
+fn snapshot_cost(n: usize) -> (i32, usize) {
+    let mut f = Fixture::new();
+    f.post(
+        "/api/bots",
+        json!({"id":"custom","name":"Perso","color":"cyan"}),
+    );
+    let edge = r#"{"texts":[],"entry_ids":[],"fact_ids":[],"skill_ids":[]}"#;
+    with_tx(&f.conn, |c| {
+        for i in 0..n {
+            let bot = if i % 2 == 0 { "grokbot" } else { "custom" };
+            let (parent, child, task) = (format!("p{i}"), format!("c{i}"), format!("task:c{i}"));
+            c.execute("INSERT INTO wrapper_conversations(account_id,id,title,bot_id,kind,parent_id,created_at,updated_at) SELECT account_id,?1,'Sous-tâche','grokbot','task',id,0,0 FROM wrapper_conversations WHERE id=?2", params![task, f.conversation])?;
+            for (id, conversation, trigger) in [
+                (
+                    &parent,
+                    f.conversation.clone(),
+                    Trigger::UserMessage {
+                        message_id: format!("message-{i}"),
+                        attempt: 0,
+                    },
+                ),
+                (
+                    &child,
+                    task.clone(),
+                    Trigger::Delegation {
+                        delegation_id: child.clone(),
+                    },
+                ),
+            ] {
+                let chat = id == &parent;
+                model::start(
+                    c,
+                    &Run {
+                        run_id: id.clone(),
+                        bot_id: if chat { bot } else { "grokbot" }.into(),
+                        conversation_id: conversation,
+                        trigger,
+                        kind: if chat { RunKind::Chat } else { RunKind::Task },
+                        status: RunStatus::Queued,
+                        task_status: (!chat).then_some(TaskStatus::Working),
+                        turn_end: None,
+                        budgets: RunBudgets::default(),
+                        started_at: 1000 + i as i64,
+                    },
+                )?;
+            }
+            c.execute("INSERT INTO delegation_graph(id,parent_run_id,root_run_id,parent_bot,child_bot,depth,child_run_id,conversation_id,selected_context,status) VALUES (?1,?2,?2,?3,'grokbot',1,?1,?4,?5,'{\"status\":\"done\"}')", params![child, parent, bot, task, edge])?;
+        }
+        c.execute("UPDATE engine_runs SET status='finished'", [])?;
+        Ok::<_, grokbot_engine::contracts::Error>(())
+    })
+    .unwrap();
+    let mut statement = f.conn.prepare(tasks::SNAPSHOT).unwrap();
+    let rows = statement
+        .query_map(params!["local-workspace", 2_000_000_000i64], |_| Ok(()))
+        .unwrap()
+        .count();
+    (statement.get_status(StatementStatus::VmStep), rows)
+}
+
+#[test]
+fn the_snapshot_cost_grows_linearly_with_finished_delegations() {
+    let (small, rows) = snapshot_cost(250);
+    let (large, _) = snapshot_cost(500);
+    assert_eq!(rows, 20);
+    assert!(
+        large <= 3 * small,
+        "250 delegations: {small} VM instructions, 500: {large}"
+    );
 }

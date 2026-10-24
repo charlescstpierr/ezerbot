@@ -19,7 +19,10 @@ empty_hooks!(
 // `live_runs` is the one definition of a visible run: a run of a delegation (its
 // own, or a later turn in its task conversation, such as a late approval) is
 // visible only through a chain of visible edges up to a run that was not delegated.
-const SNAPSHOT: &str = "
+// It is computed once (MATERIALIZED), and the CROSS JOIN keeps SQLite walking from an
+// edge to the runs of its conversation by index instead of scanning every run per edge.
+// Public so the scale test can count the VM instructions of this exact statement.
+pub const SNAPSHOT: &str = "
 WITH RECURSIVE open_runs AS (
  SELECT r.*,json_extract(r.record,'$.started_at') AS started_at,
  CASE WHEN EXISTS (SELECT 1 FROM engine_run_wakes w WHERE w.run_id=r.run_id AND w.state='pending')
@@ -37,11 +40,15 @@ WITH RECURSIVE open_runs AS (
  FROM open_edges d JOIN root_runs p ON p.run_id=d.parent_run_id
  UNION
  SELECT d.*,p.conversation_id,p.started_at
- FROM live_edges e JOIN open_runs p ON p.run_id=e.child_run_id OR p.conversation_id=e.conversation_id
+ FROM live_edges e JOIN open_runs p ON p.run_id=e.child_run_id
  JOIN open_edges d ON d.parent_run_id=p.run_id
-), live_runs AS (
- SELECT * FROM open_runs r WHERE r.run_id IN (SELECT run_id FROM root_runs)
- OR EXISTS (SELECT 1 FROM live_edges e WHERE e.child_run_id=r.run_id OR e.conversation_id=r.conversation_id)
+ UNION
+ SELECT d.*,p.conversation_id,p.started_at
+ FROM live_edges e CROSS JOIN open_runs p ON p.conversation_id=e.conversation_id
+ JOIN open_edges d ON d.parent_run_id=p.run_id
+), live_runs AS MATERIALIZED (
+ SELECT * FROM open_runs r WHERE r.run_id IN (SELECT run_id FROM root_runs UNION SELECT child_run_id FROM live_edges)
+ OR r.conversation_id IN (SELECT conversation_id FROM live_edges)
 ), pending AS (
  SELECT q.id,q.run_id,q.entry_id,r.bot_id,c.id AS conversation_id,
  CASE r.trigger_kind WHEN 'delegation' THEN 'delegation' WHEN 'occurrence' THEN 'routine' ELSE 'task' END AS kind,

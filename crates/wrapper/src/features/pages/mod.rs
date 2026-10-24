@@ -274,7 +274,7 @@ struct PageRecord {
     preview: String,
 }
 
-fn load(conn: &Connection, id: &str) -> Result<Value, ApiError> {
+pub(super) fn load(conn: &Connection, id: &str) -> Result<Value, ApiError> {
     let record = conn
         .query_row(
             "SELECT id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview

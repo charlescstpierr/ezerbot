@@ -275,6 +275,18 @@ def response_body(raw: bytes) -> bytes:
                 {"type": "response.completed"},
             ]
         )
+    if outputs and outputs[-1].get("call_id") == "verify-shotpage-write":
+        # La Page vient d'être écrite : la photographier avec l'identifiant que write_page a rendu.
+        found = re.search(r"page_[0-9a-f]{64}", str(outputs[-1].get("output")))
+        call = {
+            "id": "fc-verify-shotpage",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-shotpage",
+            "name": "screenshot_page",
+            "arguments": json.dumps({"target": found.group(0) if found else "page_introuvable", "theme": "dark"}),
+        }
+        return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
     if outputs:
         last = outputs[-1].get("call_id")
         if last == "verify-late":
@@ -282,7 +294,11 @@ def response_body(raw: bytes) -> bytes:
             waiting = "En attente" in str(outputs[-1].get("output"))
             done = "J’attends son accord pour envoyer le résumé." if waiting else "Tu as approuvé : envoyer le résumé. C’est parti. Le résumé est envoyé."
         else:
-            done = "Voici la Page." if last == "verify-page" else "La tâche tourne." if str(last).startswith("verify-task") else "Voici l’image."
+            done = {
+                "verify-page": "Voici la Page.",
+                "verify-shotpage": "Voici la photo de la Page.",
+                "verify-shotnet": "La photo a été refusée.",
+            }.get(last) or ("La tâche tourne." if str(last).startswith("verify-task") else "Voici l’image.")
         return _sse(
             [
                 {"type": "response.output_text.delta", "delta": done},
@@ -320,6 +336,26 @@ def response_body(raw: bytes) -> bytes:
                 {"type": "response.completed"},
             ]
         )
+    if "photographie internet" in _last_user_text(items):
+        call = {
+            "id": "fc-verify-shotnet",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-shotnet",
+            "name": "screenshot_page",
+            "arguments": json.dumps({"target": "https://example.com/"}),
+        }
+        return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
+    if "photographie la page des forfaits" in _last_user_text(items):
+        call = {
+            "id": "fc-verify-shotpage-write",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-shotpage-write",
+            "name": "write_page",
+            "arguments": json.dumps({"name": "forfaits.page.tsx", "title": "Trois forfaits", "source": PAGE_SOURCE}),
+        }
+        return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
     if "une page des forfaits" in json.dumps(items, ensure_ascii=False).lower():
         call = {
             "id": "fc-verify-page",

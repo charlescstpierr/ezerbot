@@ -36,6 +36,7 @@ import signal
 import sqlite3
 import statistics
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -84,8 +85,11 @@ class Server:
 
     def send(self, conversation, message):
         started = time.perf_counter()
-        status, _ = self.request('POST', '/api/send', {
-            'conversation_id': conversation, 'message_id': message, 'body': BODY})
+        try:
+            status, _ = self.request('POST', '/api/send', {
+                'conversation_id': conversation, 'message_id': message, 'body': BODY})
+        except TimeoutError:
+            status = 'délai dépassé'
         return (time.perf_counter() - started) * 1000, status
 
     def stop(self):
@@ -187,6 +191,7 @@ def main():
                              "par ex. 'strace -c -f -o strace.txt -p {pid}' ou 'perf record -g -o perf.data -p {pid}' ; "
                              "les chiffres de cette passe sont faussés par l'outil")
     args = parser.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)
     if args.scenario == 'conversation' and args.sends == 20:
         args.sends = 200
 

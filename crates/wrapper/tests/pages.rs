@@ -598,6 +598,34 @@ fn refused_anchors_create_no_message() {
 }
 
 #[test]
+fn a_passage_across_two_cells_or_blocks_is_accepted_and_stored_as_sent() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.answer(None);
+    let chat = f.chat.clone();
+    let passage = "Trois forfaits\n\nOffre choisie : Essentiel\tOffre";
+    f.send_in(&chat, "deux-blocs", Some(Fixture::anchor(&page, passage)))
+        .unwrap();
+    f.finish("deux-blocs");
+    assert_eq!(f.page()["anchors"][0]["passage"], passage);
+    let cells = "  Confort\t19 €\n";
+    f.answer(None);
+    f.send_in(&chat, "deux-cellules", Some(Fixture::anchor(&page, cells)))
+        .unwrap();
+    f.finish("deux-cellules");
+    assert_eq!(f.page()["anchors"][1]["passage"], cells.trim());
+    let error = f
+        .send_in(
+            &chat,
+            "absent",
+            Some(Fixture::anchor(&page, "Confort\t99 €")),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("n’apparaît pas"), "{error}");
+    assert!(!f.has_message(&chat, "absent"));
+}
+
+#[test]
 fn deleting_the_conversation_deletes_its_anchors() {
     let mut f = after_first_page();
     let page = f.page();

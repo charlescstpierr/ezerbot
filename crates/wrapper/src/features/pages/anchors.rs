@@ -68,6 +68,12 @@ pub fn check_resend(
     Ok(())
 }
 
+/// Le texte affiché colle les nœuds sans séparateur, alors qu'une sélection sur plusieurs cellules ou
+/// paragraphes en porte (tabulations, retours) : on compare sans aucun blanc, le passage reste stocké tel qu'envoyé.
+fn squeezed(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 /// Refuse sans rien écrire ; l'appelant garde le message dans la même transaction.
 pub fn record(
     conn: &Connection,
@@ -114,7 +120,7 @@ pub fn record(
             "Une ancre de Page ne peut viser que le bot propriétaire de la Page : ne mentionnez pas d’autre bot.",
         ));
     }
-    if !shown.contains(passage) {
+    if !squeezed(&shown).contains(&squeezed(passage)) {
         return Err(ApiError::new(
             400,
             "Ce passage n’apparaît pas dans le texte affiché de la Page.",
@@ -178,17 +184,18 @@ pub fn list(conn: &Connection, page_id: &str) -> Result<Vec<Value>, ApiError> {
 }
 
 /// Ce que la bulle du fil montre de l'ancre d'un message : la Page (avec son titre actuel) et le passage cité.
+/// Une Page qui n'existe plus ne laisse pas de puce : elle n'aurait rien à ouvrir.
 pub fn for_message(conn: &Connection, conversation: &str, message: &str) -> Value {
     conn.query_row(
         "SELECT a.page_id, a.passage, p.title FROM wrapper_page_anchors a
-         LEFT JOIN bot_pages p ON p.id = a.page_id
+         JOIN bot_pages p ON p.id = a.page_id
          WHERE a.conversation_id = ?1 AND a.message_id = ?2",
         params![conversation, message],
         |row| {
             Ok(json!({
                 "page_id": row.get::<_, String>(0)?,
                 "passage": row.get::<_, String>(1)?,
-                "title": row.get::<_, Option<String>>(2)?,
+                "title": row.get::<_, String>(2)?,
             }))
         },
     )
@@ -283,7 +290,61 @@ fn source_lines(source: &str, passage: &str) -> Vec<(usize, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::source_lines;
+    use super::{for_message, migrate, source_lines, squeezed};
+    use rusqlite::Connection;
+
+    fn bench() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE bot_pages (id TEXT PRIMARY KEY, title TEXT NOT NULL);")
+            .unwrap();
+        migrate(&conn).unwrap();
+        conn
+    }
+
+    fn anchor(conn: &Connection, conversation: &str, message: &str, page: &str, passage: &str) {
+        conn.execute(
+            "INSERT INTO wrapper_page_anchors VALUES (?1, ?2, ?3, ?4, 'v', 'open', 1)",
+            [conversation, message, page, passage],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_thread_anchor_of_a_deleted_page_is_not_exposed() {
+        let conn = bench();
+        conn.execute("INSERT INTO bot_pages VALUES ('p1', 'Trois forfaits')", [])
+            .unwrap();
+        anchor(&conn, "c1", "m1", "p1", "Confort");
+        assert_eq!(
+            for_message(&conn, "c1", "m1"),
+            serde_json::json!({"page_id": "p1", "passage": "Confort", "title": "Trois forfaits"})
+        );
+        conn.execute("DELETE FROM bot_pages", []).unwrap();
+        assert_eq!(for_message(&conn, "c1", "m1"), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn two_conversations_sharing_a_message_id_each_see_their_own_anchor() {
+        let conn = bench();
+        conn.execute(
+            "INSERT INTO bot_pages VALUES ('p1', 'Un'), ('p2', 'Deux')",
+            [],
+        )
+        .unwrap();
+        anchor(&conn, "c1", "m", "p1", "gauche");
+        anchor(&conn, "c2", "m", "p2", "droite");
+        assert_eq!(for_message(&conn, "c1", "m")["passage"], "gauche");
+        assert_eq!(for_message(&conn, "c2", "m")["passage"], "droite");
+        assert_eq!(for_message(&conn, "c3", "m"), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn squeezing_ignores_every_kind_of_blank() {
+        assert_eq!(
+            squeezed("Forfait B\t19 €\n\u{a0}Famille"),
+            "ForfaitB19€Famille"
+        );
+    }
 
     #[test]
     fn lines_carry_their_one_based_number() {

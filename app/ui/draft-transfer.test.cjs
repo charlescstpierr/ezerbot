@@ -7,6 +7,7 @@ const { test } = require("node:test");
 const vm = require("node:vm");
 
 const appSource = readFileSync(`${__dirname}/app.js`, "utf8");
+const pagesSource = readFileSync(`${__dirname}/panels/pages.js`, "utf8");
 const pageSource = readFileSync(`${__dirname}/index.html`, "utf8");
 const SUITE = "SUITE À GARDER DANS LE PREMIER FIL";
 
@@ -82,6 +83,12 @@ class Element {
     this.parentElement = null;
   }
   contains(node) { return node === this || this.childNodes.some((child) => child.contains?.(node)); }
+  insertBefore(node, before) {
+    if (node.parentElement) node.remove();
+    node.parentElement = this;
+    const index = this.childNodes.indexOf(before);
+    if (index < 0) this.childNodes.push(node); else this.childNodes.splice(index, 0, node);
+  }
   setAttribute(name, value) {
     const key = String(name).toLowerCase();
     this.attributes[key] = String(value);
@@ -249,6 +256,7 @@ function boot() {
     createElementNS: (_ns, tag) => new Element(tag, document),
     createTextNode: (text) => ({ textContent: String(text), parentElement: null, contains: () => false }),
     getElementById(id) { return document.ids.get(id) || null; },
+    getSelection: () => selection,
     addEventListener(type, handler) { (document.listeners[type] ||= []).push(handler); },
     querySelectorAll: (selector) => queryAll(document, selector),
     querySelector: (selector) => queryAll(document, selector)[0] || null,
@@ -260,6 +268,13 @@ function boot() {
   Object.defineProperty(document, "children", { get: () => [document.documentElement] });
   parsePage(document);
 
+  const selection = {
+    rangeCount: 0, isCollapsed: true, text: "", range: null,
+    getRangeAt() { return this.range; },
+    toString() { return this.text; },
+    removeAllRanges() { this.rangeCount = 0; this.isCollapsed = true; this.text = ""; this.range = null; this.fire(); },
+    fire() { for (const handler of document.listeners.selectionchange || []) handler(); },
+  };
   const storage = new Map();
   const localStorage = {
     getItem: (key) => storage.has(key) ? storage.get(key) : null,
@@ -277,6 +292,8 @@ function boot() {
     provider: { connected: false, signin: "idle", backend: "sharing", models: [], connections: {} },
     state_revision: 1,
   };
+  const sent = [];
+  let pageDetail = null;
   let holdCreate = null;
   let failCreate = false;
   let createWaiting = null;
@@ -294,6 +311,7 @@ function boot() {
     const url = String(path);
     const body = options.body ? JSON.parse(options.body) : undefined;
     if (url === "/api/state") return json(state);
+    if (url === `/api/pages/${pageDetail?.id}`) return json({ page: pageDetail });
     if (url === "/api/ping") return json({ revision: state.state_revision });
     if (url === "/api/preferences") return json({ preferences: { ...state.preferences, ...body } });
     if (url === "/api/conversations") {
@@ -309,6 +327,12 @@ function boot() {
       return json({ conversation });
     }
     if (url === "/api/send") {
+      sent.push(body);
+      if (body.page_anchor?.passage === "REFUSÉ") {
+        // Un vrai moteur ne garde pas le message refusé ; ce faux partage l'état avec le client.
+        for (const thread of state.conversations) thread.messages = thread.messages.filter((message) => message.state !== "queued");
+        return json({ error: "Ce passage n’apparaît pas dans le texte affiché de la Page." }, 400);
+      }
       const conversation = state.conversations.find((item) => item.id === body.conversation_id);
       conversation.messages.push({ id: body.message_id, role: "user", body: body.body, state: "accepted", created_at: new Date().toISOString() });
       state.state_revision += 1;
@@ -381,7 +405,8 @@ function boot() {
   vm.createContext(context);
   vm.runInContext(appSource, context);
   return {
-    window, document, storage, state,
+    window, document, storage, state, sent, context,
+    servePage(detail) { pageDetail = detail; },
     composer: () => composer,
     type(text) { composer.api.value = text; composer.onInput(); },
     cmdN() {
@@ -580,4 +605,67 @@ test("short composer names stay whole and a maximal name ellipsizes only when th
   choose(longName);
   assert.equal(label().textContent, longName);
   assert.equal(label().className, "composer-bot-name");
+});
+
+test("l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce", async () => {
+  const app = boot();
+  await ready(app);
+  app.type("Bonjour");
+  await app.document.getElementById("composer-form").requestSubmit();
+  const conversation = app.state.conversations[0];
+  // Ce faux serveur partage son état avec le client : on retire l'envoi optimiste resté « queued ».
+  conversation.messages = conversation.messages.filter((message) => message.state !== "queued");
+  const detail = {
+    id: "page_forfaits", title: "Trois forfaits", status: "ready", diagnostic: null, source_version: "c".repeat(64),
+    document: { states: [], view: { type: "element", tag: "table", children: [
+      { type: "element", tag: "tr", children: [{ type: "element", tag: "td", children: [{ type: "text", text: "Confort" }] }] },
+    ] } },
+  };
+  app.servePage(detail);
+  app.state.pages = { by_bot: { grokbot: [{ id: detail.id, bot_id: "grokbot", conversation_id: conversation.id, title: detail.title, status: "ready" }] } };
+  vm.runInContext(pagesSource, app.context);
+  await ready(app);
+  const doc = app.document;
+  const cell = doc.querySelector(".page-canvas td");
+  const comment = doc.querySelector(".page-comment");
+  const chip = doc.querySelector(".gb-quote-chip");
+  const select = (text) => {
+    const selection = doc.getSelection();
+    selection.rangeCount = 1; selection.isCollapsed = false; selection.text = text;
+    selection.range = { startContainer: cell, endContainer: cell, getBoundingClientRect: () => ({ left: 30, top: 90, right: 90, bottom: 110, width: 60, height: 20 }) };
+    selection.fire();
+  };
+  const sendWith = async (text) => {
+    app.type(text);
+    await doc.getElementById("composer-form").requestSubmit();
+    for (const thread of app.state.conversations) thread.messages = thread.messages.filter((message) => message.state !== "queued");
+  };
+
+  select("Confort");
+  assert.equal(comment.hidden, false);
+  comment.click();
+  assert.equal(chip.hidden, false);
+  await sendWith("Passe-le à 21 €");
+  assert.deepEqual(JSON.parse(JSON.stringify(app.sent.at(-1).page_anchor)), { page_id: "page_forfaits", source_version: "c".repeat(64), passage: "Confort" });
+  assert.equal(chip.hidden, true, "la puce part avec le message");
+
+  select("Confort");
+  comment.click();
+  chip.querySelector(".gb-quote-remove").click();
+  await sendWith("Sans citation");
+  assert.equal(app.sent.at(-1).body, "Sans citation");
+  assert.equal("page_anchor" in app.sent.at(-1), false);
+
+  select("REFUSÉ");
+  comment.click();
+  await sendWith("Mal citée");
+  assert.equal(app.sent.at(-1).page_anchor.passage, "REFUSÉ");
+  assert.equal(chip.hidden, false, "un refus du moteur garde la puce pour corriger");
+
+  // Un suivi de sous-tâche part par /api/delegation/send, sans ancre : pas de citation proposée ni gardée.
+  app.state.conversations[0].kind = "task";
+  await ready(app);
+  assert.equal(chip.hidden, true);
+  select("Confort");
+  assert.equal(comment.hidden, true);
 });

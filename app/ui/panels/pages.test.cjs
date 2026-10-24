@@ -573,3 +573,32 @@ test("dans une sous-tâche déléguée, « Commenter » n’est pas proposé : s
   h.selection.change(1, "Forfait B", { startContainer: node, endContainer: node, getBoundingClientRect: () => ({ left: 450, top: 200, right: 520, bottom: 220, width: 70, height: 20 }) });
   assert.equal(comment.hidden, true);
 });
+
+test("500 caractères en comptant les emoji comme le moteur : 500 passent, 501 non", async () => {
+  const { comment, select, anchor } = await openForfaits();
+  select("😀".repeat(500));
+  assert.equal(comment.hidden, false);
+  comment.click();
+  assert.equal([...anchor().page_anchor.passage].length, 500);
+  select("😀".repeat(501));
+  assert.equal(comment.hidden, true);
+});
+
+test("le rognage suit `str::trim` de Rust : U+0085 est retiré, U+FEFF est gardé", async () => {
+  const { comment, select, anchor } = await openForfaits();
+  select(`\u0085${"a".repeat(500)}`);
+  assert.equal(comment.hidden, false, "500 caractères une fois U+0085 retiré");
+  comment.click();
+  assert.equal(anchor().page_anchor.passage, "a".repeat(500));
+  select("\uFEFFabc");
+  comment.click();
+  assert.equal(anchor().page_anchor.passage, "\uFEFFabc");
+});
+
+test("une sélection sur plusieurs cellules et paragraphes donne le bouton et part telle quelle", async () => {
+  const { comment, select, anchor } = await openForfaits();
+  select("Trois forfaits\n\nForfait A\t9 €\nForfait B");
+  assert.equal(comment.hidden, false);
+  comment.click();
+  assert.equal(anchor().page_anchor.passage, "Trois forfaits\n\nForfait A\t9 €\nForfait B");
+});

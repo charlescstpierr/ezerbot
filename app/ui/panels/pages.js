@@ -133,16 +133,20 @@
     shell.stage.scrollIntoView({ block: "nearest" });
   }
 
+  // L'envoi d'un suivi de sous-tâche (/api/delegation/send) n'emporte pas d'ancre : on ne propose pas de citer.
+  function inTask() {
+    const conversations = lastState && Array.isArray(lastState.conversations) ? lastState.conversations : [];
+    return conversations.some((conversation) => conversation.id === currentConversationId && conversation.kind === "task");
+  }
+
   // Le passage est le texte sélectionné, rogné comme le moteur le rogne ; la sélection doit tenir toute dans le canevas.
   function selectedPassage() {
     const selection = document.getSelection();
-    // L'envoi d'un suivi de sous-tâche n'emporte pas d'ancre : mieux vaut ne pas proposer de citer.
-    const conversations = lastState && Array.isArray(lastState.conversations) ? lastState.conversations : [];
-    if (conversations.some((conversation) => conversation.id === currentConversationId && conversation.kind === "task")) return null;
-    if (!detail || detail.id !== selectedId || shell.stage.hidden || !selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
+    if (inTask() || !detail || detail.id !== selectedId || shell.stage.hidden || !selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
     const range = selection.getRangeAt(0);
     if (!shell.canvas.contains(range.startContainer) || !shell.canvas.contains(range.endContainer)) return null;
-    const passage = selection.toString().trim();
+    // Même rognage que `str::trim` de Rust (propriété Unicode White_Space), pas `String.trim`.
+    const passage = selection.toString().replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
     if (!passage || [...passage].length > passageLimit) return null;
     const target = range.getBoundingClientRect();
     const view = shell.canvas.getBoundingClientRect();
@@ -446,7 +450,7 @@
     knownPages = pages;
     const chosen = choose(pages, conversationId);
     selectedId = chosen ? chosen.id : null;
-    if (quote && (!chosen || chosen.id !== quote.page_id)) clearQuote();
+    if (quote && (!chosen || chosen.id !== quote.page_id || inTask())) clearQuote();
     paintList(pages);
     if (!chosen) {
       hideStage();

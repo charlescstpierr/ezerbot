@@ -38,7 +38,7 @@
     return graph;
   }
   // Le texte d'un souvenir trouvé, raccourci à un mot entier.
-  const excerpt = (text, max = 26) => {
+  const excerpt = (text, max = 22) => {
     const chars = [...String(text).replace(/\s+/g, " ").trim()];
     if (chars.length <= max) return chars.join("");
     const cut = chars.slice(0, max).join(""), space = cut.lastIndexOf(" ");

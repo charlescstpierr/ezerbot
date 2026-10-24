@@ -55,7 +55,7 @@ function fixture({ available = true, remote = false } = {}) {
   };
   const window = {
     GrokbotPanels: panels, GrokbotChat: { voiceNeedsAction }, EzerbotIPhone: remote ? { remote: true } : undefined,
-    EzerbotMicrophone: { current: () => "fake-usb", fellBack() {} },
+    EzerbotMicrophone: { current: () => "fake-usb", fellBack(id) { notices.push("repli:" + id); } },
     EzerbotVoiceMode: { active: () => mode }, EzerbotDictation: { active: () => dictation, refresh() {} },
     addEventListener(name, fn) { listeners[name] = fn; }, dispatchEvent(event) { events.push(event.type); },
   };
@@ -310,4 +310,13 @@ test("quitting the call and calling again listens: the mute never sticks", async
   await f.toggle().onclick();
   assert.equal(f.source.muted, false); assert.equal(muteButton(f).attributes["aria-pressed"], "false"); assert.match(stateOf(f), /^Appel en cours/);
   await f.tick(); assert.match(stateOf(f), /^Appel en cours/);
+});
+
+test("a microphone gone while muted is announced when the microphone is turned back on", async () => {
+  const f = fixture();
+  await f.toggle().onclick(); f.source.microphone_fallback = true;
+  await muteButton(f).onclick();
+  assert.deepEqual(f.notices, [], "muted, nothing is listened to");
+  await muteButton(f).onclick();
+  assert.deepEqual(f.notices, ["repli:fake-usb"]);
 });

@@ -100,6 +100,8 @@
     if (rev !== epoch) return;
     if (errors[receipt.status]) { fail(receipt.status); return; }
     muted = Boolean(receipt.muted); if (muted) liveText = "";
+    // Unmuting listens again to the chosen microphone, which may have gone while muted.
+    if (!muted && receipt.microphone_fallback) window.EzerbotMicrophone?.fellBack(window.EzerbotMicrophone.current());
     render();
   }
   const muteToggled = () => toggleMute().catch(error => panels.notify(error.message));

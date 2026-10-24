@@ -132,6 +132,12 @@ test("leaving the voice mode and starting it again listens: the mute never stick
   await f.tick();assert.match(stateOf(f),/^À l’écoute/);
 });
 
+test("a microphone gone while muted is announced when the microphone is turned back on",async()=>{
+  const f=fixture();f.context.state.voice.microphone="usb";await cls(f.root,"voice-session-toggle").onclick();f.source.microphone_fallback=true;
+  await muteButton(f).onclick();assert.deepEqual(f.notices,[],"muted, nothing is listened to");
+  await muteButton(f).onclick();assert.deepEqual(f.notices,["repli:usb"]);
+});
+
 test("welcome voice creates a thread only after a successful utterance, never for permission refusal",async()=>{
   const f=fixture();f.setContext({...f.context,conversation:null});
   f.scenario="mic_denied";await cls(f.root,"voice-session-toggle").onclick();

@@ -16,14 +16,25 @@
   };
   const states = {
     authorizing: "Ouverture de l’appel…",
+    muted: "Micro coupé · le bot ne vous entend pas",
     listening: "Appel en cours · parlez, le bot vous écoute",
     speaking: "Le bot parle · parlez ou Échap pour couper sa voix",
     waiting: "En attente de vous · répondez dans la carte",
     ending: "Fin de l’appel…",
   };
   let ctx, callId = "", scopeKey = "", conversationId = "", epoch = 0, timer, ticking = false;
-  let button, menuItem, bar, label, notice, transcriptToggle, interrupt, leave, transcript;
+  let button, menuItem, bar, label, notice, transcriptToggle, mute, interrupt, leave, transcript;
   let phase = "idle", detail = "", lines = [], partial = "", written = 0, shown = false, paused = false, speaking = false;
+  // `muted` is the bridge's, as its latest answer said: the screen never guesses it. One mute/unmute command flies at a time
+  // (`muting`, the id of that command); a status read that started before it ended is older than the command (`reads`) and says nothing about `muted`.
+  // A command with no answer after `commandLimit` (50 polls) is over: its answer, if it comes, is dropped and the next status says `muted`.
+  // `requested` is the microphone asked at the start, the one a fallback says is gone; `fellBack` says so once per call.
+  const commandLimit = 5000;
+  let muted = false, muting = false, commands = 0, reads = 0, requested = "", fellBack = false;
+  const noteFallback = answer => {
+    if (!answer.microphone_fallback || answer.muted || fellBack) return;
+    fellBack = true; window.EzerbotMicrophone?.fellBack?.(requested);
+  };
   let lastActive = false, drawn = "";
   // Calls this view already ended: a state read older than the end must not end them twice.
   const finished = new Set();
@@ -55,13 +66,20 @@
     menuItem.setAttribute("aria-pressed", String(active()));
     menuItem.title = button.title;
     bar.hidden = phase === "idle";
-    bar.dataset.phase = phase;
+    // A muted microphone wins over the listening and speaking labels: neither invites the user to speak.
+    const key = muted && ["listening", "speaking"].includes(phase) ? "muted" : phase;
+    bar.dataset.phase = key;
     bar.dataset.tone = detail ? "danger" : "";
-    label.textContent = detail || states[phase] || "";
+    label.textContent = detail || (states[key] || "") + (muted && key === "waiting" ? " · micro coupé" : "");
     notice.hidden = Boolean(detail) && !active();
     transcriptToggle.hidden = !active();
     transcriptToggle.textContent = shown ? "Masquer le transcript" : "Afficher le transcript";
     transcriptToggle.setAttribute("aria-expanded", String(shown));
+    mute.hidden = !active();
+    mute.disabled = ["authorizing", "ending"].includes(phase);
+    mute.setAttribute("aria-pressed", String(muted));
+    const muteName = muted ? "Réactiver le micro" : "Couper le micro";
+    mute.setAttribute("aria-label", muteName); mute.title = `${muteName} (⌘⇧M)`;
     interrupt.hidden = !active() || !speaking;
     leave.textContent = active() ? "Quitter" : "Fermer";
     transcript.hidden = !active() || !shown;
@@ -95,7 +113,7 @@
   }
   function reset() {
     clearTimeout(timer); epoch++;
-    callId = ""; conversationId = ""; scopeKey = ""; lines = []; partial = ""; written = 0; shown = false; paused = false; speaking = false; ticking = false;
+    callId = ""; conversationId = ""; scopeKey = ""; lines = []; partial = ""; written = 0; shown = false; paused = false; speaking = false; ticking = false; muted = muting = false;
   }
   async function quit() {
     const id = callId;
@@ -130,7 +148,7 @@
     if (busy()) { panels.notify(errors.microphone_busy); return; }
     const rev = ++epoch;
     conversationId = ctx.conversation.id; scopeKey = contextKey(ctx);
-    phase = "authorizing"; detail = ""; lines = []; partial = ""; written = 0; shown = false; paused = false; speaking = false;
+    phase = "authorizing"; detail = ""; lines = []; partial = ""; written = 0; shown = false; paused = false; speaking = false; muted = muting = fellBack = false;
     callId = "pending";
     render(); panels.composerChanged();
     let opened;
@@ -139,13 +157,13 @@
     if (rev !== epoch) { try { await panels.api("/api/voice/call/end", {id: opened.call.id}); } catch { /* Closed at the next start. */ } return; }
     callId = opened.call.id;
     try {
-      const requested = window.EzerbotMicrophone?.current() ?? "";
+      requested = window.EzerbotMicrophone?.current() ?? "";
       const voice = botVoice();
       // The secret goes to the provider once. It is never shown, stored or kept past this call.
       const result = await bridge("start", {secret: opened.secret, microphone: requested, voice: voice.voice, speed: voice.speed, language: voice.language});
       opened = null;
       if (rev !== epoch) return;
-      if (result.microphone_fallback) window.EzerbotMicrophone?.fellBack?.(requested);
+      noteFallback(result);
       if (errors[result.status]) { await fail(result.status); return; }
       phase = "listening"; render(); schedule(rev);
     } catch (error) { if (rev === epoch) await fail("failed", error.message); }
@@ -156,10 +174,12 @@
     if (ticking) { schedule(rev); return; }
     ticking = true;
     try {
-      const result = await bridge("status");
+      const seq = ++reads, result = await bridge("status");
       if (rev !== epoch) return;
+      noteFallback(result);
       if (errors[result.status] || result.status === "idle") { await fail(result.status); return; }
-      lines = result.lines || lines; partial = result.transcript || ""; speaking = Boolean(result.speaking);
+      if (!muting && seq === reads) muted = Boolean(result.muted);
+      lines = result.lines || lines; partial = muted ? "" : result.transcript || ""; speaking = Boolean(result.speaking);
       // A card waiting for a click holds the voice. Speaking is not a decision on it.
       const needsAction = window.GrokbotChat.voiceNeedsAction(ctx.conversation?.messages || []);
       if (needsAction !== paused) {
@@ -194,6 +214,25 @@
     speaking = false; render();
     bridge("interrupt").catch(error => panels.notify(error.message));
   }
+  async function toggleMute() {
+    if (!active() || ["authorizing", "ending"].includes(phase) || muting) return;
+    const rev = epoch;
+    const mine = muting = ++commands, limit = setTimeout(() => { if (muting === mine) { muting = false; reads++; } }, commandLimit);
+    reads++;
+    try {
+      let answer;
+      // A refused command changed nothing: the bridge's status says what it still is.
+      try { answer = await bridge(muted ? "unmute" : "mute"); }
+      catch (error) { panels.notify(error.message); answer = await bridge("status"); }
+      if (rev !== epoch || muting !== mine) return;
+      noteFallback(answer);
+      if (errors[answer.status]) { await fail(answer.status); return; }
+      muted = Boolean(answer.muted);
+      if (muted) partial = "";
+      render();
+    } finally { clearTimeout(limit); if (rev === epoch && muting === mine) { muting = false; reads++; } }
+  }
+  const muteToggled = () => toggleMute().catch(error => panels.notify(error.message));
   panels.register({
     id: "voice-call",
     composer: {
@@ -222,15 +261,21 @@
         label = el("strong", "voice-call-state"); label.setAttribute("role", "status");
         transcriptToggle = el("button", "attachment-retry voice-call-transcript-toggle", "Afficher le transcript"); transcriptToggle.type = "button";
         transcriptToggle.onclick = () => { shown = !shown; render(); };
+        mute = el("button", "icon-button voice-mute-toggle"); mute.type = "button"; mute.setAttribute("aria-keyshortcuts", "Meta+Shift+M");
+        mute.innerHTML = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/><path class="voice-mute-slash" d="M3 3l18 18"/></svg>';
+        mute.onclick = muteToggled;
         interrupt = el("button", "attachment-retry", "Couper la voix"); interrupt.type = "button"; interrupt.onclick = cutVoice;
         leave = el("button", "attachment-retry", "Quitter"); leave.type = "button";
         leave.onclick = () => active() ? quit().catch(error => panels.notify(error.message)) : (phase = "idle", detail = "", render());
-        row.append(label, transcriptToggle, interrupt, leave);
+        row.append(label, transcriptToggle, mute, interrupt, leave);
         notice = el("p", "voice-call-notice", disclosure);
         transcript = el("div", "voice-call-transcript"); transcript.setAttribute("role", "log"); transcript.setAttribute("aria-label", "Transcript de l’appel");
         bar.append(row, notice, transcript); container.append(bar);
         document.addEventListener("keydown", event => {
           if (event.key === "Escape" && active()) { event.preventDefault(); event.stopImmediatePropagation(); cutVoice(); }
+          if (event.metaKey && event.shiftKey && !event.ctrlKey && !event.altKey && !event.repeat && event.key?.toLowerCase() === "m" && active()) {
+            event.preventDefault(); event.stopImmediatePropagation(); muteToggled();
+          }
         }, true);
         // Closing the window ends the call: the session stops, and the lines already written stay.
         const stopSession = () => { if (callId && callId !== "pending") bridge("cancel").catch(() => {}); };

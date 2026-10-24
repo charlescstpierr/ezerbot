@@ -13,6 +13,7 @@
 .voice-call-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .voice-call-state { flex: 1 1 180px; color: var(--text); font-weight: 550; line-height: 1.5; }
 .voice-call-state::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 7px; background: var(--accent-ink); }
+.voice-call-bar[data-phase="muted"] .voice-call-state::before,
 .voice-call-bar[data-phase="authorizing"] .voice-call-state::before,
 .voice-call-bar[data-phase="ending"] .voice-call-state::before { background: var(--muted); }
 .voice-call-bar[data-phase="waiting"] .voice-call-state::before { background: var(--warning-text); }

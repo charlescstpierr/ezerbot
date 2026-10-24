@@ -28,7 +28,7 @@ function chromeBinary() {
   return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
 }
 
-function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "", workspace = "", welcome = false, title = "Nouvelle conversation", header = "bench" } = {}) {
+function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "", workspace = "", welcome = false, title = "Nouvelle conversation", header = "bench", unread = "" } = {}) {
   const speedPill = speed
     ? `<button class="tool-pill" type="button" data-picker="speed"><small>Vitesse</small><b>${speed}</b><svg class="icon"><use href="#i-chevron"/></svg></button>`
     : "";
@@ -39,7 +39,7 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
   const threadHeader = header === "direct" || header === "group" ? `<div class="topbar-title"><button class="icon-button sidebar-toggle" type="button" aria-label="Ouvrir les conversations"><svg class="icon"><use href="#i-menu"/></svg></button><button class="workspace-label" type="button">${header === "group" ? "Groupe" : "Ezerbot"}</button><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">${title}</h1></div>
       <div class="topbar-actions">
         <button class="tool-pill screen-button" type="button" aria-label="Écran du Mac"${header === "group" ? " hidden" : ""}>Écran du Mac</button>
-        <button class="tool-pill notifications-button" type="button" aria-label="Notifications"><span class="notifications-icon" aria-hidden="true"><svg class="icon"><use href="#i-plus"/></svg></span><span class="notifications-label">Notifications</span><span class="notification-count" aria-hidden="true" hidden>0</span></button>
+        <button class="tool-pill notifications-button${unread ? " has-unread" : ""}" type="button" aria-label="Notifications"><span class="notifications-icon" aria-hidden="true"><svg class="icon"><use href="#i-plus"/></svg></span><span class="notifications-label">Notifications</span><span class="notification-count" aria-hidden="true"${unread ? "" : " hidden"}>${unread || "0"}</span></button>
         <button class="tool-pill" type="button" data-topbar-intent="create">Créer un groupe</button>
         <button class="tool-pill" type="button" data-topbar-intent="members">Membres</button>
         <span class="mode-badge"><span class="status-dot"></span><span>ChatGPT</span></span>
@@ -1048,14 +1048,15 @@ test("the real header keeps the title clear of Notifications from 761 to 785", {
 test("a direct thread or group title stays clear of every header action from 761 to 1140", { timeout: 300000 }, async () => {
   const widths = sweep(761, 1140, 20, [786, 800, 804, 819, 820, 850, 900, 901, 1100, 1101]);
   for (const header of ["direct", "group"]) {
-    for (const title of ["Fil direct", "Préparer la revue de lancement avec l'équipe"]) {
+    for (const [title, unread] of [["Fil direct", ""], ["Préparer la revue de lancement avec l'équipe", ""], ["Préparer la revue de lancement avec l'équipe", "3"], ["Préparer la revue de lancement avec l'équipe", "999+"]]) {
       for (const width of widths) {
-        const report = await measure(width, 560, "Ezerbot", { header, title, speed: "" });
+        const report = await measure(width, 560, "Ezerbot", { header, title, speed: "", unread });
         for (const theme of report.themes) {
-          const where = `${header} ${width} « ${title} » ${theme.theme} title=${theme.titleClient}/${theme.titleScroll} titleBox=${JSON.stringify(theme.titleBox)} actions=${JSON.stringify(theme.actionsBox)} screen=${theme.screenEntry}`;
+          const where = `${header} ${width} « ${title} » non-lus=${unread || 0} ${theme.theme} title=${theme.titleClient}/${theme.titleScroll} titleBox=${JSON.stringify(theme.titleBox)} actions=${JSON.stringify(theme.actionsBox)} screen=${theme.screenEntry}`;
           assert.equal(theme.titleText, title, where);
           assert.equal(theme.titleClear, true, where);
-          assert.ok(theme.titleClient >= 40, where);
+          // « 999+ » à 761 px ne laisse que quelques pixels au titre : il reste dégagé, sans plancher de lisibilité.
+          if (unread !== "999+") assert.ok(theme.titleClient >= 40, where);
           if (title === "Fil direct" && width >= 820) assert.equal(theme.titleFits, true, where);
           // Écran du Mac reste joignable : dans l'en-tête ou, faute de place, dans le menu de la conversation.
           if (header === "direct") assert.equal(theme.screenEntry.filter((size) => size > 0).length, 1, where);

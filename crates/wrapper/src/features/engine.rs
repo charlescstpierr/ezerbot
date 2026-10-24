@@ -2828,7 +2828,8 @@ fn run_reply(
         proposals,
         kind: "message".into(),
         payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":store::token_usage(conn, &run.run_id)?,
-            "sources":redact::redact_value(&event_vault(conn)?, &json!(super::sources::registry(conn, &run.run_id)?))?,"citations":citations}),
+            "sources":redact::redact_value(&event_vault(conn)?, &json!(super::sources::registry(conn, &run.run_id)?))?,"citations":citations,
+            "recalled_fact_ids":super::memory::recalled_ids(conn, &run.run_id)?}),
         attachments: vec![],
     })
 }

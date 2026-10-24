@@ -193,6 +193,20 @@ def yolo_turn(items: list) -> bytes | None:
     return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
 
 
+def recall_turn(items: list) -> bytes | None:
+    """Le modèle cherche dans sa mémoire (`recall_memory`) puis répond ; le contexte d'amorce n'y compte pas."""
+    if not items or not isinstance(items[-1], dict):
+        return None
+    if items[-1].get("type") == "function_call_output":
+        if items[-1].get("call_id") != "verify-recall":
+            return None
+        return _sse([{"type": "response.output_text.delta", "delta": "J’ai retrouvé le souvenir demandé."}, {"type": "response.completed"}])
+    if "cherche dans ta mémoire" not in _last_user_text(items):
+        return None
+    call = {"id": "fc-verify-recall", "type": "function_call", "status": "completed", "call_id": "verify-recall", "name": "recall_memory", "arguments": json.dumps({"query": "port Boréal", "limit": 5})}
+    return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
+
+
 def parent_message(instructions: str) -> str:
     """Le message parent d'un sous-fil : bloc de données externes JSON dans les instructions."""
     for found in re.finditer(r"<external_data[^>]*>\n(.*?)\n</external_data>", instructions, re.S):
@@ -253,6 +267,9 @@ def response_body(raw: bytes) -> bytes:
     yolo = yolo_turn(items)
     if yolo is not None:
         return yolo
+    recall = recall_turn(items)
+    if recall is not None:
+        return recall
     outputs = [item for item in items if isinstance(item, dict) and item.get("type") == "function_call_output"]
     if outputs and outputs[-1].get("call_id") == "verify-context":
         call = {

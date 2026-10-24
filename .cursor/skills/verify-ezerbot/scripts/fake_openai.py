@@ -228,25 +228,22 @@ def _call(call_id: str, name: str, arguments: dict) -> bytes:
 
 
 def capture_turn(payload: dict, instructions: str, items: list) -> bytes | None:
-    """Un sous-bot photographie l'écran avant puis après, tente une capture inventée, puis termine avec les vraies.
-    Une commande de 6 s ouvre la fenêtre où le pilote HTTP accorde la session d'écran au fil de la sous-tâche."""
+    """Un sous-bot dessine une image avant puis une après, tente une capture inventée, puis termine avec les vraies."""
     asked = CAPTURE_MARKER in json.dumps(items, ensure_ascii=False)
     outputs = [item for item in items if isinstance(item, dict) and item.get("type") == "function_call_output"]
     last = outputs[-1].get("call_id") if outputs else None
     if "You are executing a Task" in instructions and asked:
-        shot = lambda step: next((m for o in outputs if o.get("call_id") == step for m in re.findall(r"screen:[A-Za-z0-9_.:-]+", str(o.get("output")))), "")
+        shot = lambda step: next((m for o in outputs if o.get("call_id") == step for m in re.findall(r"attachment_id[^A-Za-z0-9]+([A-Za-z0-9_.-]+)", str(o.get("output")))), "")
         if last is None:
-            return _call("verify-cap-gate", "run_shell", {"command": "sleep 6; printf 'prêt'", "cwd": "/tmp", "timeout_ms": 30000, "output_limit": 4096})
-        if last == "verify-cap-gate":
-            return _call("verify-cap-before", "computer_screenshot", {})
+            return _call("verify-cap-before", "generate_image", {"description": "la page avant le changement", "aspect_ratio": "16:9"})
         if last == "verify-cap-before":
-            return _call("verify-cap-after", "computer_screenshot", {})
+            return _call("verify-cap-after", "generate_image", {"description": "la page après le changement", "aspect_ratio": "16:9"})
         if last == "verify-cap-after":
-            return _call("verify-cap-bad", "complete_task", {"summary": "Page modifiée.", "captures": [{"id": "screen:inventee", "label": "avant", "caption": "Capture inventée"}]})
+            return _call("verify-cap-bad", "complete_task", {"summary": "Page modifiée.", "captures": [{"id": "image-inventee", "label": "avant", "caption": "Capture inventée"}]})
         if last == "verify-cap-bad":
             captures = [
-                {"id": shot("verify-cap-before"), "label": "avant", "caption": "Écran avant le changement"},
-                {"id": shot("verify-cap-after"), "label": "après", "caption": "Écran après le changement"},
+                {"id": shot("verify-cap-before"), "label": "avant", "caption": "Page avant le changement"},
+                {"id": shot("verify-cap-after"), "label": "après", "caption": "Page après le changement"},
             ]
             return _call("verify-cap-done", "complete_task", {"summary": "Page modifiée, voir les captures.", "captures": captures})
         return _sse([{"type": "response.output_text.delta", "delta": "Terminé."}, {"type": "response.completed"}])

@@ -19,35 +19,43 @@ use serde_json::{json, Value};
 use std::cell::OnceCell;
 
 const WEEK_S: u64 = 7 * 86_400;
-const DAY_MS: i64 = 86_400_000;
 const WEEK_MS: i64 = WEEK_S as i64 * 1000;
 /// Latest finished, measured passages the average is taken over.
 const AVERAGED_PASSAGES: u32 = 10;
-/// How many of a routine's latest occurrences (missed ones included) those passages are sought in.
-const RECENT_OCCURRENCES: u32 = 200;
+/// How many of a routine's latest finished passages those are sought in (a few may sent no usage).
+const RECENT_FINISHED: u32 = 200;
 /// The quota gauge is a rounded percentage: below these, tokens per percent is noise.
 const MIN_USED_PERCENT: f64 = 5.0;
 const MIN_LOCAL_TOKENS: u64 = 50_000;
 
-/// The signed-in Codex account and since when this app has seen it, and the index that lets
-/// the local tokens of a window be summed without reading every run.
+/// The signed-in Codex account and since when this app has seen it; indexes that let a routine's
+/// finished passages, its runs of the week and the local tokens of a window be found without
+/// reading history.
 pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS wrapper_routine_cost_account (
     id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, since INTEGER NOT NULL
-); CREATE INDEX IF NOT EXISTS wrapper_engine_runs_started
-    ON engine_runs(json_extract(record,'$.started_at'));";
+); CREATE INDEX IF NOT EXISTS wrapper_occurrences_finished
+    ON scheduler_occurrences(routine_id, scheduled_at_utc DESC, occurrence_id DESC) WHERE status='done';
+CREATE INDEX IF NOT EXISTS wrapper_engine_runs_started
+    ON engine_runs(json_extract(record,'$.started_at'));
+CREATE INDEX IF NOT EXISTS wrapper_engine_runs_thread_started
+    ON engine_runs(conversation_id, json_extract(record,'$.started_at'));";
 
 /// A passage is its run plus every run below it in the delegation graph, each counted once.
-/// `?1` routine, `?2` earliest scheduled time of the week's passages, `?3` passages averaged,
-/// `?4` occurrences searched for them. Both reads walk `scheduler_history`, so old history is not read.
+/// `?1` routine, `?2` start of the week (in ms), `?3` passages averaged, `?4` finished passages
+/// they are sought in, `?5` the routine's thread. The week's passages are those whose run started
+/// in it, whatever slot they were owed for; both reads go through indexes, so old history is not read.
 const PASSAGES: &str = "WITH RECURSIVE recent(id) AS (
         SELECT occurrence_id FROM (
-            SELECT occurrence_id, status, run_id, scheduled_at_utc FROM scheduler_occurrences
-            WHERE routine_id=?1 ORDER BY scheduled_at_utc DESC, occurrence_id DESC LIMIT ?4)
-        WHERE status='done' AND run_id IN (SELECT run_id FROM engine_response_usage)
+            SELECT occurrence_id, run_id, scheduled_at_utc FROM scheduler_occurrences
+            WHERE routine_id=?1 AND status='done'
+            ORDER BY scheduled_at_utc DESC, occurrence_id DESC LIMIT ?4)
+        WHERE run_id IN (SELECT run_id FROM engine_response_usage)
         ORDER BY scheduled_at_utc DESC, occurrence_id DESC LIMIT ?3),
      tree(occurrence_id, root, run_id) AS (
-        SELECT occurrence_id, run_id, run_id FROM scheduler_occurrences
-        WHERE routine_id=?1 AND scheduled_at_utc>=?2 AND run_id IS NOT NULL
+        SELECT o.occurrence_id, o.run_id, o.run_id FROM engine_runs r
+        JOIN scheduler_occurrences o ON o.run_id=r.run_id
+        WHERE r.conversation_id=?5 AND json_extract(r.record,'$.started_at')>=?2
+          AND o.routine_id=?1
         UNION
         SELECT occurrence_id, run_id, run_id FROM scheduler_occurrences
         WHERE occurrence_id IN recent
@@ -70,6 +78,14 @@ const LOCAL_TOKENS: &str = "SELECT COALESCE(SUM(u.input_tokens+u.output_tokens),
 enum Calibration {
     TokensPerPercent(f64),
     Unknown(&'static str),
+}
+
+/// What the passages measured: `week` is `None` when no run of the week sent usage.
+struct Measured {
+    average: Option<u64>,
+    sample: u64,
+    week: Option<u64>,
+    week_passages: u64,
 }
 
 pub(super) struct Costing<'a> {
@@ -103,7 +119,12 @@ impl<'a> Costing<'a> {
     }
 
     pub(super) fn of(&self, conn: &Connection, routine: &Routine) -> Result<Value, ApiError> {
-        let (average, sample, week) = self.measured(conn, &routine.routine_id)?;
+        let Measured {
+            average,
+            sample,
+            week,
+            week_passages,
+        } = self.measured(conn, routine)?;
         let Some(average) = average else {
             return Ok(json!({
                 "state":"no_measure_yet","average_tokens":null,"average_sample":0,"tokens_7d":week,
@@ -137,28 +158,23 @@ impl<'a> Costing<'a> {
             },
         };
         Ok(json!({
-            "state":"measured","average_tokens":average,"average_sample":sample,"tokens_7d":week.unwrap_or(0),
+            "state":"measured","average_tokens":average,"average_sample":sample,"tokens_7d":week.or((week_passages == 0).then_some(0)),
             "forecast":forecast,"quota_share":quota_share,
         }))
     }
 
-    /// `(average over the latest finished measured passages, their count, tokens of the last 7 days
-    /// if any run of that week sent usage)`.
-    /// A passage is its run plus every run below it in the delegation graph, each counted once;
-    /// a passage whose run sent no usage is unknown, not zero.
-    fn measured(
-        &self,
-        conn: &Connection,
-        routine_id: &str,
-    ) -> Result<(Option<u64>, u64, Option<u64>), ApiError> {
+    /// Average of the latest finished, measured passages and the tokens of the week's. A passage
+    /// whose run sent no usage is unknown, not zero.
+    fn measured(&self, conn: &Connection, routine: &Routine) -> Result<Measured, ApiError> {
         let mut query = conn.prepare(PASSAGES)?;
         let since = self.now_ms.saturating_sub(WEEK_MS);
         let rows = query.query_map(
             rusqlite::params![
-                routine_id,
-                since - DAY_MS,
+                routine.routine_id,
+                since,
                 AVERAGED_PASSAGES,
-                RECENT_OCCURRENCES
+                RECENT_FINISHED,
+                routine.conversation_id
             ],
             |r| {
                 Ok((
@@ -168,22 +184,24 @@ impl<'a> Costing<'a> {
                 ))
             },
         )?;
-        let (mut recent, mut sum, mut week) = (0_u64, 0_u64, None::<u64>);
+        let (mut recent, mut sum, mut week, mut week_passages) = (0_u64, 0_u64, None::<u64>, 0_u64);
         for row in rows {
             let (is_recent, started, tokens) = row?;
             if is_recent {
                 recent += 1;
                 sum += tokens.unwrap_or(0);
             }
-            if let (true, Some(tokens)) = (started >= since, tokens) {
-                week = Some(week.unwrap_or(0) + tokens);
+            if started >= since {
+                week_passages += 1;
+                week = tokens.map(|tokens| week.unwrap_or(0) + tokens).or(week);
             }
         }
-        Ok((
-            (recent > 0).then(|| (sum + recent / 2) / recent),
-            recent,
+        Ok(Measured {
+            average: (recent > 0).then(|| (sum + recent / 2) / recent),
+            sample: recent,
             week,
-        ))
+            week_passages,
+        })
     }
 
     /// Passages the scheduler plans in the next 7 days: its own `next_after` walk on each trigger.
@@ -261,7 +279,7 @@ mod tests {
         grokbot_delegation::graph::migrate(&conn).unwrap();
         grokbot_scheduler::migrate(&conn).unwrap();
         conn.execute_batch(SCHEMA).unwrap();
-        for (sql, params) in [(PASSAGES, 4), (LOCAL_TOKENS, 1)] {
+        for (sql, params) in [(PASSAGES, 5), (LOCAL_TOKENS, 1)] {
             let mut plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
             let bound: Vec<&dyn rusqlite::ToSql> = vec![&0_i64; params];
             let details: Vec<String> = plan

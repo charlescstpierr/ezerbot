@@ -3568,6 +3568,7 @@ fn delete_undelivered(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
         params![conversation_id, message_id],
     )?;
     super::pages::anchors::discard_message(&tx, &conversation_id, &message_id)?;
+    super::voice_session::discard_message(&tx, &conversation_id, &message_id)?;
     tx.commit()?;
     app.conversation_response(&conversation_id)
 }

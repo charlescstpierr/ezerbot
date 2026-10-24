@@ -2,7 +2,8 @@
 //! Real audio remains in the Cocoa process, never in HTTP or model input.
 use super::Context;
 use crate::{parse, ApiError, ACCOUNT};
-use grokbot_engine::contracts::{ContextBlock, ContextRequest, ContextSource};
+use grokbot_engine::contracts::{ContextBlock, ContextRequest, ContextSource, Trigger};
+use grokbot_engine::store;
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -40,12 +41,44 @@ pub(super) fn record_turn(
     Ok(())
 }
 
+pub fn discard_conversation(conn: &Connection, conversation: &str) -> Result<(), ApiError> {
+    conn.execute(
+        "DELETE FROM wrapper_voice_turns WHERE conversation_id = ?1",
+        [conversation],
+    )?;
+    Ok(())
+}
+
+pub fn discard_message(
+    conn: &Connection,
+    conversation: &str,
+    message: &str,
+) -> Result<(), ApiError> {
+    conn.execute(
+        "DELETE FROM wrapper_voice_turns WHERE conversation_id = ?1 AND message_id = ?2",
+        params![conversation, message],
+    )?;
+    Ok(())
+}
+
+/// The human message this turn answers. A turn opened by a late approval is named by the
+/// decision, so it takes the message of the turn that posted the card.
+fn spoken_message(conn: &Connection, request: &ContextRequest) -> Option<String> {
+    let mut run = request.run_id.clone();
+    let mut entry = request.current_message.entry_id.clone();
+    while let Some(origin) = super::forms::late_origin(conn, &run) {
+        let Trigger::UserMessage { message_id, .. } = store::required(conn, &origin).ok()?.trigger
+        else {
+            return None;
+        };
+        entry = message_id.split_once('/')?.1.to_owned();
+        run = origin;
+    }
+    super::multibot::source_message(conn, &run, &entry).ok()
+}
+
 pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock> {
-    let Ok(message) = super::multibot::source_message(
-        ctx.connection,
-        &request.run_id,
-        &request.current_message.entry_id,
-    ) else {
+    let Some(message) = spoken_message(ctx.connection, request) else {
         return Vec::new();
     };
     let spoken: bool = ctx

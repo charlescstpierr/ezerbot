@@ -3822,3 +3822,33 @@ fn a_voice_message_asks_for_a_short_answer_and_a_typed_one_does_not() {
         assert_eq!(sent.contains("au lieu de deviner"), voice, "{id}");
     }
 }
+
+fn voice_marks(f: &Fixture) -> i64 {
+    f.db()
+        .query_row("SELECT count(*) FROM wrapper_voice_turns", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn the_voice_mark_leaves_with_its_undelivered_message_and_with_its_conversation() {
+    let mut f = Fixture::new(false);
+    let c = f.conversation();
+    f.post(
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"v1","body":"Où en est ma tâche ?","voice":true,"simulate_loss":true}),
+    );
+    assert_eq!(voice_marks(&f), 1);
+    f.post(
+        "/api/messages/delete",
+        json!({"conversation_id":c,"message_id":"v1"}),
+    );
+    assert_eq!(voice_marks(&f), 0, "le message non livré est supprimé");
+
+    f.post(
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"v2","body":"Et maintenant ?","voice":true}),
+    );
+    assert_eq!(voice_marks(&f), 1);
+    f.post("/api/conversations/delete", json!({"id":c}));
+    assert_eq!(voice_marks(&f), 0, "la conversation est supprimée");
+}

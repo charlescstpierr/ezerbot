@@ -1,33 +1,16 @@
 // Run with: node --test app/ui/text-input-contrast.test.cjs
 // Optional: CHROME_BIN=/path/to/chrome node --test app/ui/text-input-contrast.test.cjs
 const assert = require("node:assert/strict");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const { mkdtempSync, readdirSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
+const { chromeBinary } = require("./chrome-binary.cjs");
 
 const UI = __dirname;
 const AA = 4.5;
 const FIELDS = ["bot-name", "bot-description", "bot-instructions"];
-const CHROME_CANDIDATES = [
-  "google-chrome",
-  "google-chrome-stable",
-  "chromium",
-  "chromium-browser",
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-];
-
-function chromeOnPath(command) {
-  if (command.includes("/")) return require("node:fs").existsSync(command);
-  return spawnSync("which", [command], { stdio: "ignore" }).status === 0;
-}
-
-function chromeBinary() {
-  if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
-  return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
-}
-
 function panelsCss() {
   return readdirSync(join(UI, "panels"))
     .filter((name) => name.endsWith(".css"))

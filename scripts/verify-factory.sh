@@ -16,7 +16,8 @@
 # --release-size construit aussi grokbot-wrapper en release et consigne sa taille
 # en octets. Les mesures sont comparées au dernier journal local dont le SHA
 # appartient à origin/main ; une comparaison indisponible est notée « — ».
-# Aucune mesure n'impose de seuil de réussite.
+# Aucune mesure n'impose de seuil de réussite : un échec de ce build release
+# est consigné (taille « — ») sans changer le code de sortie.
 #
 # Enchaîne ensuite, depuis la racine du dépôt :
 #   cargo build --workspace --locked

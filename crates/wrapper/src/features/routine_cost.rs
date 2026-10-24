@@ -96,7 +96,7 @@ struct Measured {
 pub(super) struct Costing<'a> {
     now_ms: i64,
     provider: &'a Provider,
-    /// Since when the tick has seen the signed-in Codex account (now, if it has not).
+    /// Since when the tick or a response has seen the signed-in Codex account (now, if it has not).
     account_since: i64,
     /// Read once, and only if a routine has a forecast to turn into a share.
     calibration: OnceCell<Calibration>,
@@ -225,7 +225,7 @@ impl<'a> Costing<'a> {
     }
 }
 
-/// Since when `identity` has been the signed-in account, as the tick noted it; now if it is not the
+/// Since when `identity` has been the signed-in account, as the tick or a response noted it; now if it is not the
 /// one noted. A read never writes: the state and the routine list must stay read-only.
 fn account_since(conn: &Connection, identity: &str, now_ms: i64) -> Result<i64, ApiError> {
     let known: Option<(String, i64)> = conn
@@ -241,7 +241,7 @@ fn account_since(conn: &Connection, identity: &str, now_ms: i64) -> Result<i64, 
     })
 }
 
-/// Called by every tick, window or not: a different account than the one noted dates its sign-in now,
+/// Called by every tick, window or not, and before every model response: a different account than the one noted dates its sign-in now,
 /// so another account's runs never calibrate this one's quota. Writes only on a change.
 pub(super) fn note_account(conn: &Connection, identity: &str, now_ms: i64) -> Result<(), ApiError> {
     if account_since(conn, identity, now_ms)? == now_ms {
@@ -258,7 +258,7 @@ pub(super) fn note_account(conn: &Connection, identity: &str, now_ms: i64) -> Re
 /// is shared with other Codex apps and auxiliary calls are not measured here, which makes the
 /// denominator too small and the share too high; the history of another account would make it
 /// too low, so the share is only given once this account has been the signed-in one since the
-/// window began (the tick notes the account it sees).
+/// window began (the tick, and each model response, note the account they see).
 fn calibrate(
     conn: &Connection,
     quota: &Value,

@@ -711,7 +711,7 @@ fn passages_without_telemetry_never_hide_a_measured_one_however_many_are_newer()
     let mut c = Cost::every_30_minutes();
     c.pass("measured", "done", 2 * DAY_MS, Some(2000));
     for n in 0..200 {
-        c.pass(&format!("blind{n}"), "done", 3_600_000 + n * 1000, None);
+        c.pass(&format!("blind{n}"), "done", 3_600_000 + n * 2000, None);
     }
     let cost = c.cost();
     assert_eq!(

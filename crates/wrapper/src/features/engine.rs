@@ -2562,6 +2562,13 @@ impl RunGatewayCall<'_> {
         if compaction::revision(self.connection, &run.conversation_id)? != self.source_revision {
             return Err(Error::Conflict("context source changed".into()));
         }
+        // The tokens of this response go to the account signed in now: note it as the tick does, so a
+        // sign-in that no tick saw is not taken for the account the last tick noted.
+        let _ = super::routine_cost::note_account(
+            self.connection,
+            &self.provider.demonstration_identity(),
+            i64::try_from(ctx.now_ms).unwrap_or(i64::MAX),
+        );
         let gateway = ProviderGateway {
             provider: self.provider,
             cancel: self.cancel,

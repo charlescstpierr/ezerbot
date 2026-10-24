@@ -117,6 +117,7 @@ mod shell_tasks;
 pub mod skills;
 pub mod sources;
 pub mod storage;
+pub mod tasks;
 pub mod templates;
 pub mod threads;
 pub mod topic_memory;
@@ -184,6 +185,7 @@ registry!(
     iphone,
     floating,
     local,
+    tasks,
     voice,
     voice_call,
     meetings,

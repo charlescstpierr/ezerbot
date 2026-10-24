@@ -9,6 +9,7 @@ so automatic memory can see a small model). Prints one JSON line, then serves.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -193,6 +194,20 @@ def yolo_turn(items: list) -> bytes | None:
     return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
 
 
+def recall_turn(items: list) -> bytes | None:
+    """Le modèle cherche dans sa mémoire (`recall_memory`) puis répond ; le contexte d'amorce n'y compte pas."""
+    if not items or not isinstance(items[-1], dict):
+        return None
+    if items[-1].get("type") == "function_call_output":
+        if items[-1].get("call_id") != "verify-recall":
+            return None
+        return _sse([{"type": "response.output_text.delta", "delta": "J’ai retrouvé le souvenir demandé."}, {"type": "response.completed"}])
+    if "cherche dans ta mémoire" not in _last_user_text(items):
+        return None
+    call = {"id": "fc-verify-recall", "type": "function_call", "status": "completed", "call_id": "verify-recall", "name": "recall_memory", "arguments": json.dumps({"query": "port Boréal", "limit": 5})}
+    return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
+
+
 def parent_message(instructions: str) -> str:
     """Le message parent d'un sous-fil : bloc de données externes JSON dans les instructions."""
     for found in re.finditer(r"<external_data[^>]*>\n(.*?)\n</external_data>", instructions, re.S):
@@ -253,6 +268,9 @@ def response_body(raw: bytes) -> bytes:
     yolo = yolo_turn(items)
     if yolo is not None:
         return yolo
+    recall = recall_turn(items)
+    if recall is not None:
+        return recall
     outputs = [item for item in items if isinstance(item, dict) and item.get("type") == "function_call_output"]
     if outputs and outputs[-1].get("call_id") == "verify-context":
         call = {
@@ -287,6 +305,23 @@ def response_body(raw: bytes) -> bytes:
             "arguments": json.dumps({"target": found.group(0) if found else "page_introuvable", "theme": "light" if "en clair" in _last_user_text(items) else "dark"}),
         }
         return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
+    # Petit changement d'une Page déjà écrite : edit_page, l'id étant celui de write_page pour ce bot et ce fichier.
+    page_id = "page_" + hashlib.sha256(b"grokbot\0forfaits.page.tsx").hexdigest()
+    last_text = "" if items and isinstance(items[-1], dict) and items[-1].get("type") == "function_call_output" else _last_user_text(items)
+    for needle, call_id, before, after in (
+        ("change le prix de confort", "verify-edit", '["Confort", "19 \\u20ac"]', '["Confort", "21 \\u20ac"]'),
+        ("change tous les prix", "verify-edit-double", "\\u20ac", "euros"),
+    ):
+        if needle in last_text:
+            call = {
+                "id": f"fc-{call_id}",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": call_id,
+                "name": "edit_page",
+                "arguments": json.dumps({"id": page_id, "before": before, "after": after}),
+            }
+            return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
     if outputs:
         last = outputs[-1].get("call_id")
         if last == "verify-late":
@@ -296,6 +331,8 @@ def response_body(raw: bytes) -> bytes:
         else:
             done = {
                 "verify-page": "Voici la Page.",
+                "verify-edit": "La Page est modifiée.",
+                "verify-edit-double": "Le passage n’est pas unique.",
                 "verify-shotpage": "Voici la photo de la Page.",
                 "verify-shotnet": "La photo a été refusée.",
             }.get(last) or ("La tâche tourne." if str(last).startswith("verify-task") else "Voici l’image.")

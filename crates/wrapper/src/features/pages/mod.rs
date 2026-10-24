@@ -44,6 +44,14 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             UNIQUE (bot_id, filename)
         );",
     )?;
+    let kept: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bot_pages') WHERE name = 'previous_source')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !kept {
+        conn.execute_batch("ALTER TABLE bot_pages ADD COLUMN previous_source TEXT")?;
+    }
     anchors::migrate(conn)
 }
 
@@ -62,6 +70,20 @@ pub fn tools() -> Vec<ToolSpec> {
             "required": ["name", "title", "source"]
         }),
         requires_approval: false,
+    }, ToolSpec {
+        name: "edit_page".into(),
+        description: "Changer un passage d\u{2019}une Page existante sans la réécrire. À utiliser pour un petit changement (un mot, un prix, une ligne) ; pour une refonte, utiliser write_page. id : la référence page_… renvoyée par write_page. before : le passage exact de la source .page.tsx, espaces et retours à la ligne compris ; il doit y apparaître une seule fois, sinon ajouter du contexte autour. after : son remplaçant (peut être vide). La Page est recompilée ; si la compilation échoue, rien n\u{2019}est enregistré et le message donne la ligne et le caractère. La version d\u{2019}avant est gardée (une seule).".into(),
+        schema: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "id": {"type": "string"},
+                "before": {"type": "string", "maxLength": SOURCE_LIMIT},
+                "after": {"type": "string", "maxLength": SOURCE_LIMIT}
+            },
+            "required": ["id", "before", "after"]
+        }),
+        requires_approval: false,
     }]
 }
 
@@ -73,13 +95,32 @@ struct WritePage {
     source: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditPage {
+    id: String,
+    before: String,
+    after: String,
+}
+
+/// Where a Page lives: its row key, its owner and the file name on this Mac.
+struct PageKey<'a> {
+    id: &'a str,
+    bot: &'a str,
+    conversation: &'a str,
+    title: &'a str,
+    filename: &'a str,
+}
+
 pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
-    if call.name != "write_page" {
-        return None;
-    }
+    let run = match call.name.as_str() {
+        "write_page" => persist,
+        "edit_page" => edit,
+        _ => return None,
+    };
     // The engine already holds the write transaction. Insert on this connection
     // and do not begin another one. The file is outside SQLite and idempotent.
-    Some(match persist(ctx, call) {
+    Some(match run(ctx, call) {
         Ok(output) => ToolOutcome::Done { output },
         Err(error) => ToolOutcome::Failed {
             reason: error.message,
@@ -96,61 +137,23 @@ fn persist(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     })?;
     let filename = page_filename(&args.name)?;
     let title = page_title(&args.title)?;
-    let bot = ctx
-        .bot_id
-        .filter(|id| page_bot(id).is_ok())
-        .ok_or_else(|| ApiError::new(400, "Cette Page n’est pas rattachée à un bot."))?;
-    let conversation = ctx
-        .conversation_id
-        .filter(|id| !id.is_empty() && !id.contains('\0'))
-        .ok_or_else(|| ApiError::new(400, "Cette Page n’est pas rattachée à une conversation."))?;
-    let id = format!(
-        "page_{:x}",
-        Sha256::digest([bot.as_bytes(), b"\0", filename.as_bytes()].concat())
-    );
+    let (bot, conversation) = attached(ctx)?;
+    let id = page_id(bot, &filename);
     let compiled = compile::compile(&args.source);
-    let status = if compiled.is_ok() { "ready" } else { "error" };
-    let diagnostic = compiled.as_ref().err().map(compile::Diagnostic::text);
-    let document = match compiled.as_ref() {
-        Ok(page) => Some(
-            serde_json::to_string(&page.document)
-                .map_err(|_| ApiError::new(500, "La Page compilée n’a pas pu être enregistrée."))?,
-        ),
-        Err(_) => None,
+    let key = PageKey {
+        id: &id,
+        bot,
+        conversation,
+        title: &title,
+        filename: &filename,
     };
-    let preview = compiled
-        .as_ref()
-        .map(|page| page.preview.clone())
-        .unwrap_or_default();
-    if args.source.len() <= SOURCE_LIMIT {
-        write_source(data_dir(ctx), bot, &filename, &args.source)?;
-    }
-    ctx.connection.execute(
-        "INSERT INTO bot_pages (
-            id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
-         ON CONFLICT(id) DO UPDATE SET
-            conversation_id = excluded.conversation_id,
-            title = excluded.title,
-            source = excluded.source,
-            status = excluded.status,
-            diagnostic = excluded.diagnostic,
-            document = excluded.document,
-            preview = excluded.preview,
-            updated_at = excluded.updated_at",
-        params![
-            id,
-            bot,
-            conversation,
-            title,
-            filename,
-            args.source,
-            status,
-            diagnostic,
-            document,
-            preview,
-            ctx.now_ms
-        ],
+    store(
+        ctx.connection,
+        data_dir(ctx.db_path),
+        ctx.now_ms,
+        &key,
+        &args.source,
+        &compiled,
     )?;
     if compiled.is_ok() {
         anchors::settle(ctx, &id, &args.source)?;
@@ -164,6 +167,168 @@ fn persist(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
         })),
         Err(error) => Err(ApiError::new(400, format!("{}. {REWRITE}", error.text()))),
     }
+}
+
+fn attached<'a>(ctx: &Context<'a>) -> Result<(&'a str, &'a str), ApiError> {
+    let bot = ctx
+        .bot_id
+        .filter(|id| page_bot(id).is_ok())
+        .ok_or_else(|| ApiError::new(400, "Cette Page n’est pas rattachée à un bot."))?;
+    let conversation = ctx
+        .conversation_id
+        .filter(|id| !id.is_empty() && !id.contains('\0'))
+        .ok_or_else(|| ApiError::new(400, "Cette Page n’est pas rattachée à une conversation."))?;
+    Ok((bot, conversation))
+}
+
+fn page_id(bot: &str, filename: &str) -> String {
+    format!(
+        "page_{:x}",
+        Sha256::digest([bot.as_bytes(), b"\0", filename.as_bytes()].concat())
+    )
+}
+
+/// The file first, then the row, as for any write. The row keeps the source it
+/// replaces as `previous_source`, but only a source that was ready and differs:
+/// a broken write, or the same text again, never pushes out the version to go back to.
+fn store(
+    conn: &Connection,
+    data: &Path,
+    now_ms: u64,
+    key: &PageKey<'_>,
+    source: &str,
+    compiled: &Result<compile::Compiled, compile::Diagnostic>,
+) -> Result<(), ApiError> {
+    let status = if compiled.is_ok() { "ready" } else { "error" };
+    let diagnostic = compiled.as_ref().err().map(compile::Diagnostic::text);
+    let document = match compiled.as_ref() {
+        Ok(page) => Some(
+            serde_json::to_string(&page.document)
+                .map_err(|_| ApiError::new(500, "La Page compilée n’a pas pu être enregistrée."))?,
+        ),
+        Err(_) => None,
+    };
+    let preview = compiled
+        .as_ref()
+        .map(|page| page.preview.clone())
+        .unwrap_or_default();
+    if source.len() <= SOURCE_LIMIT {
+        write_source(data, key.bot, key.filename, source)?;
+    }
+    conn.execute(
+        "INSERT INTO bot_pages (
+            id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+         ON CONFLICT(id) DO UPDATE SET
+            conversation_id = excluded.conversation_id,
+            title = excluded.title,
+            previous_source = CASE
+                WHEN bot_pages.status = 'ready' AND bot_pages.source <> excluded.source
+                THEN bot_pages.source ELSE bot_pages.previous_source END,
+            source = excluded.source,
+            status = excluded.status,
+            diagnostic = excluded.diagnostic,
+            document = excluded.document,
+            preview = excluded.preview,
+            updated_at = excluded.updated_at",
+        params![
+            key.id,
+            key.bot,
+            key.conversation,
+            key.title,
+            key.filename,
+            source,
+            status,
+            diagnostic,
+            document,
+            preview,
+            now_ms
+        ],
+    )?;
+    Ok(())
+}
+
+/// Number of places `before` occurs in `source`, overlaps included.
+fn occurrences(source: &str, before: &str) -> usize {
+    let step = before.chars().next().map_or(1, char::len_utf8);
+    let mut count = 0;
+    let mut from = 0;
+    while let Some(at) = source[from..].find(before) {
+        count += 1;
+        from += at + step;
+    }
+    count
+}
+
+/// The whole source with its one `before` replaced. Zero or several matches are refused.
+fn replace_once(source: &str, before: &str, after: &str) -> Result<String, ApiError> {
+    if before.is_empty() {
+        return Err(ApiError::new(400, "Le passage à remplacer est vide."));
+    }
+    match occurrences(source, before) {
+        0 => Err(ApiError::new(400, "Passage introuvable dans la Page.")),
+        1 => Ok(source.replacen(before, after, 1)),
+        count => Err(ApiError::new(
+            400,
+            format!("Passage présent {count} fois : ajoute du contexte pour qu’il soit unique."),
+        )),
+    }
+}
+
+fn edit(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
+    let args: EditPage = serde_json::from_value(call.arguments.clone()).map_err(|_| {
+        ApiError::new(
+            400,
+            "Arguments de la Page invalides : id, before et after sont requis.",
+        )
+    })?;
+    let (bot, conversation) = attached(ctx)?;
+    let (title, filename, source): (String, String, String) = ctx
+        .connection
+        .query_row(
+            "SELECT title, filename, source FROM bot_pages WHERE id = ?1 AND bot_id = ?2",
+            params![args.id, bot],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => {
+                ApiError::new(404, "Cette Page est introuvable.")
+            }
+            other => other.into(),
+        })?;
+    let candidate = replace_once(&source, &args.before, &args.after)?;
+    let compiled = compile::compile(&candidate);
+    if let Err(error) = &compiled {
+        return Err(ApiError::new(
+            400,
+            format!(
+                "{}. Les lignes comptent après le remplacement ; rien n’a été modifié.",
+                error.text()
+            ),
+        ));
+    }
+    let key = PageKey {
+        id: &args.id,
+        bot,
+        conversation,
+        title: &title,
+        filename: &filename,
+    };
+    store(
+        ctx.connection,
+        data_dir(ctx.db_path),
+        ctx.now_ms,
+        &key,
+        &candidate,
+        &compiled,
+    )?;
+    anchors::settle(ctx, &args.id, &candidate)?;
+    Ok(json!({
+        "id": args.id,
+        "title": title,
+        "filename": filename,
+        "status": "ready"
+    }))
 }
 
 pub fn state(ctx: &Context<'_>) -> Value {
@@ -209,6 +374,9 @@ pub fn routes(
     if method == "POST" && path == "/api/pages/rename" {
         return Some(rename(app, body).map(ApiResponse::Json));
     }
+    if method == "POST" && path == "/api/pages/revert" {
+        return Some(revert(app, body).map(ApiResponse::Json));
+    }
     if method == "GET" {
         if let Some(id) = path.strip_prefix("/api/pages/") {
             if valid_page_id(id) {
@@ -223,7 +391,7 @@ pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock>
     if ctx.bot_id.is_some_and(|bot| bot != request.bot_id) {
         return Vec::new();
     }
-    let text = "Quand Charles demande une analyse autonome (tableau interactif, graphique ou outil réutilisable), appelle write_page et écris un fichier .page.tsx. N’envoie pas un tableau Markdown à la place : la Page s’affiche à côté du fil, sur ce Mac. Si la compilation échoue, le message indique la ligne et le caractère ; réécris le fichier, Charles ne l’édite pas. Il n’existe aucun lien public et aucun partage.".to_string();
+    let text = "Quand Charles demande une analyse autonome (tableau interactif, graphique ou outil réutilisable), appelle write_page et écris un fichier .page.tsx. N’envoie pas un tableau Markdown à la place : la Page s’affiche à côté du fil, sur ce Mac. Pour un petit changement dans une Page déjà écrite (un mot, un prix, une ligne), appelle edit_page avec son id, le passage exact à remplacer et son remplaçant : le reste de la Page ne bouge pas. Pour une refonte, appelle write_page. Si la compilation échoue, le message indique la ligne et le caractère ; corrige, Charles ne l’édite pas. Il n’existe aucun lien public et aucun partage.".to_string();
     // The instruction category cap is the minimum budget of its blocks. A short
     // budget would drop the bot's private instructions. Priority stays just
     // ahead of those instructions so they remain the last block.
@@ -263,6 +431,65 @@ fn rename(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
     Ok(json!({"page": page}))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Revert {
+    id: String,
+}
+
+/// Puts the one kept version back, recompiled under the same rules as a write.
+/// It is single use: nothing is kept once it is back.
+fn revert(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
+    let input: Revert = parse(body)?;
+    if !valid_page_id(&input.id) {
+        return Err(ApiError::new(400, "Référence de Page invalide."));
+    }
+    let tx = write_transaction(&app.connection)?;
+    let (bot, conversation, title, filename, previous): (String, String, String, String, Option<String>) = tx
+        .query_row(
+            "SELECT bot_id, conversation_id, title, filename, previous_source FROM bot_pages WHERE id = ?1",
+            [&input.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => {
+                ApiError::new(404, "Cette Page est introuvable.")
+            }
+            other => other.into(),
+        })?;
+    let previous =
+        previous.ok_or_else(|| ApiError::new(400, "Cette Page n’a pas de version d’avant."))?;
+    let compiled = compile::compile(&previous);
+    if let Err(error) = &compiled {
+        return Err(ApiError::new(
+            400,
+            format!("{}. Rien n’a été modifié.", error.text()),
+        ));
+    }
+    let key = PageKey {
+        id: &input.id,
+        bot: &bot,
+        conversation: &conversation,
+        title: &title,
+        filename: &filename,
+    };
+    store(
+        &tx,
+        data_dir(&app.db_path),
+        crate::now(),
+        &key,
+        &previous,
+        &compiled,
+    )?;
+    tx.execute(
+        "UPDATE bot_pages SET previous_source = NULL WHERE id = ?1",
+        [&input.id],
+    )?;
+    let page = load(&tx, &input.id)?;
+    tx.commit()?;
+    Ok(json!({"page": page}))
+}
+
 fn read(app: &App, id: &str) -> Result<Value, ApiError> {
     Ok(json!({"page": load(&app.connection, id)?}))
 }
@@ -278,12 +505,13 @@ struct PageRecord {
     diagnostic: Option<String>,
     document: Option<String>,
     preview: String,
+    has_previous: bool,
 }
 
 pub(super) fn load(conn: &Connection, id: &str) -> Result<Value, ApiError> {
     let record = conn
         .query_row(
-            "SELECT id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview
+            "SELECT id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview, previous_source IS NOT NULL
              FROM bot_pages WHERE id = ?1",
             [id],
             |row| {
@@ -298,6 +526,7 @@ pub(super) fn load(conn: &Connection, id: &str) -> Result<Value, ApiError> {
                     diagnostic: row.get(7)?,
                     document: row.get(8)?,
                     preview: row.get(9)?,
+                    has_previous: row.get(10)?,
                 })
             },
         )
@@ -317,6 +546,7 @@ pub(super) fn load(conn: &Connection, id: &str) -> Result<Value, ApiError> {
         "status": status,
         "diagnostic": diagnostic,
         "preview": record.preview,
+        "has_previous": record.has_previous,
         "source_version": source_version(&record.source),
         "anchors": anchors::list(conn, &record.id)?,
         "document": document
@@ -429,8 +659,8 @@ fn page_bot(id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn data_dir<'a>(ctx: &Context<'a>) -> &'a Path {
-    ctx.db_path
+fn data_dir(db_path: &Path) -> &Path {
+    db_path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."))
@@ -651,6 +881,33 @@ mod tests {
             fs::read_to_string(bot.join("forfaits.page.tsx")).unwrap(),
             "contenu secret"
         );
+    }
+
+    #[test]
+    fn occurrences_count_overlaps_on_exact_bytes() {
+        assert_eq!(occurrences("aaa", "aa"), 2);
+        assert_eq!(occurrences("aaaa", "aa"), 3);
+        assert_eq!(occurrences("ééé", "éé"), 2);
+        assert_eq!(occurrences("Essentiel", "essentiel"), 0);
+        assert_eq!(occurrences("a b", "b"), 1);
+        assert_eq!(replace_once("a b", "b", "c").unwrap(), "a c");
+        assert!(replace_once("aaa", "aa", "b")
+            .unwrap_err()
+            .message
+            .contains("2 fois"));
+    }
+
+    #[test]
+    fn migrate_adds_the_kept_version_to_an_existing_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE bot_pages (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, conversation_id TEXT NOT NULL, title TEXT NOT NULL, filename TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL, diagnostic TEXT, document TEXT, preview TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE (bot_id, filename));",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        conn.prepare("SELECT previous_source FROM bot_pages")
+            .unwrap();
     }
 
     fn deep_document(depth: usize) -> String {

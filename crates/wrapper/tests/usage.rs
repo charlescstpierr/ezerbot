@@ -272,6 +272,56 @@ fn local_tokens_roll_up_once_per_bot_and_source_and_survive_deletion_restart() {
     assert_eq!(get(&mut app), data);
 }
 
+fn edge(conn: &Connection, parent: &str, child: &str) {
+    conn.execute("INSERT INTO delegation_graph(id,parent_run_id,root_run_id,parent_bot,child_bot,depth,child_run_id,conversation_id,selected_context,status) VALUES (?1,?2,?2,'b','b',1,?1,NULL,'{}','{\"status\":\"done\"}')", params![child, parent]).unwrap();
+}
+
+#[test]
+fn usage_totals_are_frozen_for_chat_routine_and_delegation_runs() {
+    let f = Fixture::new(ScriptedResponse::json(200, valid()));
+    let mut app = f.app();
+    let conn = Connection::open(f.dir.join("app.sqlite")).unwrap();
+    let bot: String = conn
+        .query_row("SELECT id FROM wrapper_bots LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    let conversation = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (id, source, measured) in [
+        ("chat", "chat", true),
+        ("routine", "routine", true),
+        ("child", "delegation", true),
+        ("grandchild", "delegation", true),
+        ("unknown", "chat", false),
+    ] {
+        seed_run(&conn, id, &bot, &conversation, source, measured);
+    }
+    edge(&conn, "routine", "child");
+    edge(&conn, "child", "grandchild");
+    let name: String = conn
+        .query_row("SELECT name FROM wrapper_bots WHERE id=?1", [&bot], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let tokens = |input: u64, output: u64, cached: u64, measured: u64, unknown: u64| json!({"input_tokens":input,"output_tokens":output,"cached_input_tokens":cached,"measured_runs":measured,"unknown_runs":unknown});
+    let local = app.api("GET", "/api/usage", b"").unwrap()["local"].clone();
+    assert_eq!(
+        local,
+        json!({
+            "total": tokens(800, 160, 240, 4, 1),
+            "by_bot": [{"id":bot,"name":name,"deleted":false,"tokens":tokens(800, 160, 240, 4, 1)}],
+            "by_source": [
+                {"source":"bot_to_bot","tokens":tokens(0, 0, 0, 0, 0)},
+                {"source":"chat","tokens":tokens(200, 40, 60, 1, 1)},
+                {"source":"delegation","tokens":tokens(400, 80, 120, 2, 0)},
+                {"source":"group","tokens":tokens(0, 0, 0, 0, 0)},
+                {"source":"routine","tokens":tokens(200, 40, 60, 1, 0)},
+            ],
+        })
+    );
+}
+
 fn window(reset: Value) -> Value {
     json!({"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":reset}}})
 }

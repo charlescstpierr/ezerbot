@@ -13,7 +13,7 @@
 //! - `quota_share.state`: `estimated`, or `unknown` (`reason`: `forecast_unavailable`,
 //!   `quota_unavailable`, `calibration_weak`).
 use crate::{ApiError, Provider};
-use grokbot_scheduler::{cron, routine::Routine};
+use grokbot_scheduler::{occurrences, routine::Routine};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::cell::OnceCell;
@@ -66,12 +66,12 @@ impl<'a> Costing<'a> {
         let (average, sample, week) = self.measured(conn, &routine.routine_id)?;
         let Some(average) = average else {
             return Ok(json!({
-                "state":"no_measure_yet","average_tokens":null,"average_sample":0,"tokens_7d":null,
+                "state":"no_measure_yet","average_tokens":null,"average_sample":0,"tokens_7d":week,
                 "forecast":{"state":"no_measure_yet","reason":null,"runs_next_7d":null,"tokens_per_day":null,"tokens_next_7d":null},
                 "quota_share":{"state":"unknown","reason":"forecast_unavailable","percent":null},
             }));
         };
-        let (forecast, tokens_next_7d) = match self.runs_next_7d(routine) {
+        let (forecast, tokens_next_7d) = match self.runs_next_7d(conn, routine) {
             Ok(runs) => {
                 let tokens = average * runs;
                 (
@@ -97,19 +97,20 @@ impl<'a> Costing<'a> {
             },
         };
         Ok(json!({
-            "state":"measured","average_tokens":average,"average_sample":sample,"tokens_7d":week,
+            "state":"measured","average_tokens":average,"average_sample":sample,"tokens_7d":week.unwrap_or(0),
             "forecast":forecast,"quota_share":quota_share,
         }))
     }
 
-    /// `(average over the latest finished measured passages, their count, tokens of the last 7 days)`.
+    /// `(average over the latest finished measured passages, their count, tokens of the last 7 days
+    /// if any run of that week sent usage)`.
     /// A passage is its run plus every run below it in the delegation graph, each counted once;
     /// a passage whose run sent no usage is unknown, not zero.
     fn measured(
         &self,
         conn: &Connection,
         routine_id: &str,
-    ) -> Result<(Option<u64>, u64, u64), ApiError> {
+    ) -> Result<(Option<u64>, u64, Option<u64>), ApiError> {
         let mut query = conn.prepare(
             "WITH RECURSIVE recent(id) AS (
                 SELECT occurrence_id FROM scheduler_occurrences
@@ -140,19 +141,19 @@ impl<'a> Costing<'a> {
                 Ok((
                     r.get::<_, bool>(0)?,
                     r.get::<_, i64>(1)?,
-                    r.get::<_, Option<u64>>(2)?.unwrap_or(0),
+                    r.get::<_, Option<u64>>(2)?,
                 ))
             },
         )?;
-        let (mut recent, mut sum, mut week) = (0_u64, 0_u64, 0_u64);
+        let (mut recent, mut sum, mut week) = (0_u64, 0_u64, None::<u64>);
         for row in rows {
             let (is_recent, started, tokens) = row?;
             if is_recent {
                 recent += 1;
-                sum += tokens;
+                sum += tokens.unwrap_or(0);
             }
-            if started >= since {
-                week += tokens;
+            if let (true, Some(tokens)) = (started >= since, tokens) {
+                week = Some(week.unwrap_or(0) + tokens);
             }
         }
         Ok((
@@ -162,41 +163,24 @@ impl<'a> Costing<'a> {
         ))
     }
 
-    /// Passages the schedule plans in the next 7 days, counted with the scheduler's own `next_after`.
-    /// Hourly or sparser schedules are counted over the week itself, so a weekly or weekday-only
-    /// routine is exact. Denser ones repeat each day: one day is counted and multiplied, which keeps
-    /// the count to a few hundred `next_after` calls on every poll.
-    fn runs_next_7d(&self, routine: &Routine) -> Result<u64, &'static str> {
+    /// Passages the scheduler plans in the next 7 days, counted by its own `next_after` walk on
+    /// each trigger's cursor. Hourly or sparser schedules are counted over the week itself, so a
+    /// weekly or weekday-only routine is exact. Denser ones repeat each day: one day is counted and
+    /// multiplied, which keeps the walk to a few hundred steps on every poll.
+    fn runs_next_7d(&self, conn: &Connection, routine: &Routine) -> Result<u64, &'static str> {
         if routine.trigger.has_delivered() {
             return Err("event_trigger");
         }
-        if let Some(runs) = self.planned(routine, WEEK_MS, HOURLY_PER_WEEK)? {
+        let planned = |span_ms, cap| {
+            occurrences::planned(conn, routine, self.now_ms, self.now_ms + span_ms, cap)
+                .map_err(|_| "schedule_unusable")
+        };
+        if let Some(runs) = planned(WEEK_MS, HOURLY_PER_WEEK)? {
             return Ok(runs);
         }
-        self.planned(routine, DAY_MS, MAX_PER_DAY)?
+        planned(DAY_MS, MAX_PER_DAY)?
             .map(|runs| runs * 7)
             .ok_or("schedule_unusable")
-    }
-
-    /// Passages planned in `(now, now + span_ms]`, or `None` past `cap`.
-    fn planned(
-        &self,
-        routine: &Routine,
-        span_ms: i64,
-        cap: u64,
-    ) -> Result<Option<u64>, &'static str> {
-        let (end, mut at, mut runs) = (self.now_ms + span_ms, self.now_ms, 0);
-        while let Some(next) = cron::next_after(&routine.trigger, &routine.time_zone, at)
-            .map_err(|_| "schedule_unusable")?
-            .filter(|next| *next <= end)
-        {
-            runs += 1;
-            if runs > cap {
-                return Ok(None);
-            }
-            at = next;
-        }
-        Ok(Some(runs))
     }
 }
 

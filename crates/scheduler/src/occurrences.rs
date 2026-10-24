@@ -552,6 +552,39 @@ pub fn next_slot(conn: &Connection, routine: &routine::Routine) -> Result<Option
     Ok(first)
 }
 
+/// How many slots the triggers of `routine` plan in `(after_ms, until_ms]`, each trigger
+/// counted on its own cursor as [`materialize`] does (a group's members are separate
+/// streams, and an interval keeps its anchor). `None` once more than `cap` slots were
+/// walked, those between a cursor and `after_ms` included. A paused routine restarts its
+/// cursors on resume, so it is counted from `after_ms`.
+pub fn planned(
+    conn: &Connection,
+    routine: &routine::Routine,
+    after_ms: i64,
+    until_ms: i64,
+    cap: u64,
+) -> Result<Option<u64>> {
+    let (mut walked, mut planned) = (0_u64, 0_u64);
+    for source in sources(conn, routine)? {
+        let mut at = if routine.enabled {
+            source.cursor
+        } else {
+            after_ms
+        };
+        while let Some(next) = cron::next_after(&source.trigger, &routine.time_zone, at)?
+            .filter(|next| *next <= until_ms)
+        {
+            walked += 1;
+            if walked > cap {
+                return Ok(None);
+            }
+            planned += u64::from(next > after_ms);
+            at = next;
+        }
+    }
+    Ok(Some(planned))
+}
+
 /// The limited rule on `first..=latest`: only `latest` can run, and only inside
 /// the window. Every earlier slot is Missed, individually up to the bound and as
 /// a compact range beyond it.

@@ -485,6 +485,28 @@ fn a_routine_without_a_measured_finished_passage_has_no_measure_yet() {
     let cost = c.cost();
     assert_eq!(cost["state"], "no_measure_yet");
     assert!(cost["average_tokens"].is_null());
+    // What the failed passage did use is still the week's measured total.
+    assert_eq!(cost["tokens_7d"], 4000);
+}
+
+#[test]
+fn the_forecast_follows_the_scheduler_cursor_and_counts_each_group_member_on_its_own() {
+    // Every ten days, last due nine days ago: the next passage is tomorrow, inside the week.
+    let mut c = Cost::new(valid(), json!({"kind":"every","interval_ms":864_000_000}));
+    c.pass("a", "done", 3_600_000, Some(2000));
+    let cursor = (now() * 1000) as i64 - 9 * DAY_MS;
+    c.conn
+        .execute(
+            "UPDATE scheduler_routines SET materialized_after=?1 WHERE routine_id=?2",
+            params![cursor, c.routine],
+        )
+        .unwrap();
+    assert_eq!(c.cost()["forecast"]["runs_next_7d"], 1);
+    // Two coincident daily triggers start two passages a day, as the scheduler materializes them.
+    let daily = json!({"trigger":{"kind":"cron","expression":"0 9 * * *","time_zone":"UTC"}});
+    let mut c = Cost::new(valid(), json!({"kind":"group","members":[daily, daily]}));
+    c.pass("a", "done", 3_600_000, Some(2000));
+    assert_eq!(c.cost()["forecast"]["runs_next_7d"], 14);
 }
 
 fn is_money(key: &str) -> bool {

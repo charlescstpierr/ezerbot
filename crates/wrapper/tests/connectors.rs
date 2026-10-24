@@ -1439,7 +1439,11 @@ impl Deadline {
     fn for_current_test() -> Self {
         let test = std::thread::current().name().unwrap_or("?").to_owned();
         Self::start(test, FIXTURE_DEADLINE, |test, limit| {
-            eprintln!(
+            // Straight to stderr: `eprintln!` is captured by libtest, which `exit` cuts off
+            // before it prints what it captured.
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
                 "\nle test `{test}` tient OAUTH_TEST_LOCK depuis plus de {limit:?} sans finir : \
                  les autres tests du binaire l'attendent. Le binaire s'arrête ici plutôt que de rester bloqué."
             );

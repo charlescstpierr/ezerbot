@@ -582,12 +582,12 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             && request.url().split('?').next() == Some("/api/state"))
         .then(std::time::Instant::now);
         if state_started.is_some() {
-            let referer = request
+            let client = request
                 .headers()
                 .iter()
-                .find(|header| header.field.equiv("Referer"))
+                .find(|header| header.field.equiv("X-Ezerbot-Client"))
                 .map(|header| header.value.as_str().to_owned());
-            app.set_state_client(remote, referer.as_deref());
+            app.set_state_client(remote, client.as_deref());
         }
         let mut cookie = None;
         let (mut status, mut body, content_type) = match payload(

@@ -9,7 +9,8 @@ async function api(path, body) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(path, { ...(body === undefined ? { cache: "no-store" } : {
+    // Its reads are measured apart from the main window's (#255).
+    const response = await fetch(path, { ...(body === undefined ? { cache: "no-store", headers: { "X-Ezerbot-Client": "flottant" } } : {
       method: "POST", headers: { "Content-Type": "application/json", "X-Grokbot-Request": "local" }, body: JSON.stringify(body),
     }), signal: controller.signal });
     const value = await response.json();

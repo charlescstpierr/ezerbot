@@ -1300,8 +1300,8 @@ impl App {
     }
 
     /// Display fluidity (#255): the page the next `/api/state` is served to.
-    pub fn set_state_client(&mut self, remote: bool, referer: Option<&str>) {
-        self.state_client = fluidity::client(remote, referer);
+    pub fn set_state_client(&mut self, remote: bool, header: Option<&str>) {
+        self.state_client = fluidity::client(remote, header);
     }
 
     /// Display fluidity (#255): the duration of the last served `/api/state`.

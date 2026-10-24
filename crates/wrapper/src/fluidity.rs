@@ -24,12 +24,13 @@ struct Idle {
 
 /// The polling page a `/api/state` read comes from. Each one is measured on its
 /// own: the floating panel's reads must not split a stall of the main window.
-pub(crate) fn client(remote: bool, referer: Option<&str>) -> &'static str {
-    match referer.map(|url| url.split(['?', '#']).next().unwrap_or(url)) {
+/// Pages send no `Referer` (`Referrer-Policy: no-referrer`), so the floating
+/// panel names itself with `X-Ezerbot-Client`.
+pub(crate) fn client(remote: bool, header: Option<&str>) -> &'static str {
+    match header {
         _ if remote => "iphone",
-        Some(page) if page.ends_with("/floating.html") => "flottant",
-        Some(_) => "principal",
-        None => "autre",
+        Some("flottant") => "flottant",
+        _ => "principal",
     }
 }
 
@@ -334,20 +335,10 @@ mod tests {
 
     #[test]
     fn each_polling_page_keeps_its_own_measurement() {
-        assert_eq!(
-            client(false, Some("http://127.0.0.1:1/floating.html")),
-            "flottant"
-        );
-        assert_eq!(
-            client(false, Some("http://127.0.0.1:1/floating.html?x=1")),
-            "flottant"
-        );
-        assert_eq!(client(false, Some("http://127.0.0.1:1/")), "principal");
-        assert_eq!(
-            client(true, Some("http://127.0.0.1:1/floating.html")),
-            "iphone"
-        );
-        assert_eq!(client(false, None), "autre");
+        assert_eq!(client(false, Some("flottant")), "flottant");
+        assert_eq!(client(false, None), "principal");
+        assert_eq!(client(false, Some("autre chose")), "principal");
+        assert_eq!(client(true, Some("flottant")), "iphone");
         // The main window reads at 0 and 1000 ms; the floating panel in between.
         let directory =
             std::env::temp_dir().join(format!("ezerbot-fluidity-clients-{}", std::process::id()));

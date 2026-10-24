@@ -355,12 +355,33 @@ fn accept(conn: &Connection, offer: &str) -> Result<TopicFact, ApiError> {
 
 /// Ajout à la main (`/api/memory/add`) : texte déjà vérifié, sujet existant.
 /// Un souvenir de sujet est toujours « déclaré » (voir `recall`).
+/// Idempotent : la clé naturelle est (sujet, bot, texte rogné). Dans la transaction
+/// d'écriture de l'appelant, un fait existant avec cette clé est renvoyé tel quel et
+/// rien n'est écrit, donc un réessai après une réponse perdue converge. Un fait oublié
+/// n'a plus de ligne : le même texte redevient un nouveau souvenir. Pas d'index unique :
+/// des doublons ont pu naître avant ce correctif, on renvoie alors le plus ancien.
 pub(super) fn add(
     conn: &Connection,
     topic: &str,
     bot: &str,
     text: &str,
 ) -> Result<Value, ApiError> {
+    let existing = conn
+        .query_row(
+            &format!(
+                "SELECT {FACT_COLUMNS} FROM wrapper_topic_facts
+                 WHERE account_id = ?1 AND topic_id = ?2 AND bot_id = ?3 AND text = ?4
+                 ORDER BY created_at ASC, id ASC LIMIT 1"
+            ),
+            params![ACCOUNT, topic, bot, text],
+            read_fact,
+        )
+        .optional()?;
+    if let Some(fact) = existing {
+        let mut value = fact_json(&fact);
+        value["scope"] = json!("topic");
+        return Ok(value);
+    }
     let id: String = conn.query_row("SELECT 'tf-' || lower(hex(randomblob(16)))", [], |r| {
         r.get(0)
     })?;

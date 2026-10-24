@@ -1052,6 +1052,20 @@ fn manual_add_is_declared_listed_and_found_by_recall_memory() {
 }
 
 #[test]
+fn manual_private_add_keeps_creating_a_fact_per_request() {
+    // Figé : la portée privée n'est pas dédupliquée par la route (retirée en #312).
+    // Seule la portée sujet est idempotente (#341).
+    let db = Database::new();
+    let mut app = db.open();
+    let body =
+        json!({"bot_id": "grokbot", "text": "Le code du portail est 4821", "scope": "private"});
+    let first = post(&mut app, "/api/memory/add", body.clone());
+    let again = post(&mut app, "/api/memory/add", body);
+    assert_ne!(again["fact"]["fact_id"], first["fact"]["fact_id"]);
+    assert_eq!(list(&mut app, "grokbot").len(), 2);
+}
+
+#[test]
 fn manual_add_refuses_empty_or_oversized_text_and_creates_nothing() {
     let db = Database::new();
     let mut app = db.open();

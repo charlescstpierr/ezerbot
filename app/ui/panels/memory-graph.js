@@ -26,7 +26,7 @@
       graph.edges.push({ from: "user", to: group.id });
       group.facts.forEach((fact, j) => {
         // Les souvenirs s'ouvrent en éventail vers l'extérieur, sept par rang.
-        const rank = Math.floor(j / 7), size = Math.min(7, group.facts.length - rank * 7), theta = angle + 0.42 * ((j % 7) - (size - 1) / 2), reach = 56 + 20 * rank;
+        const rank = Math.floor(j / 7), size = Math.min(7, group.facts.length - rank * 7), theta = angle + 0.42 * ((j % 7) - (size - 1) / 2), reach = 72 + 20 * rank;
         const bot = (bots || []).find((item) => item.id === fact.bot_id);
         graph.nodes.push({ id: String(fact.fact_id), group: group.id, scope: group.scope, bot: bot?.name || "Bot", label: String(fact.text ?? ""), x: round(gx + reach * Math.cos(theta)), y: round(gy + reach * Math.sin(theta)) });
         graph.edges.push({ from: group.id, to: String(fact.fact_id) });

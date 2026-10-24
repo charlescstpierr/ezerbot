@@ -18,7 +18,7 @@
 .memory-graph-node:focus-visible circle { stroke: var(--focus); }
 .is-dim { opacity: .18; }
 .memory-graph-label, .memory-graph-initial { text-anchor: middle; pointer-events: none; }
-.memory-graph-label { fill: var(--text); font-size: calc(12px * var(--k, 1)); }
+.memory-graph-label { fill: var(--text); font-size: calc(12px * var(--k, 1)); paint-order: stroke; stroke: var(--pane); stroke-width: 4px; stroke-linejoin: round; }
 .memory-graph-initial { fill: var(--pane); font-size: calc(20px * var(--k, 1)); font-weight: 600; dominant-baseline: central; }
 .memory-graph-legend { grid-row: 2; display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; padding: 0; list-style: none; font-size: 12px; color: var(--muted); }
 .memory-graph-key { display: inline-flex; align-items: center; gap: 6px; }

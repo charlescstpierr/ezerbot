@@ -1,10 +1,8 @@
 //! Journal durable d'une soumission jusqu'à l'écho du transcript.
 //!
-//! La durabilité est simulée en mémoire. L'état validé est le dernier
-//! enregistrement de chaque clé, tenu dans une table ordonnée par clé. La
-//! transaction ouverte tient dans une zone non validée.
-//! [`Journal::crash_and_recover`] jette cette zone : seuls les enregistrements
-//! validés restent consultables.
+//! La durabilité est simulée en mémoire. [`Journal::crash_and_recover`] jette
+//! la transaction ouverte : seuls les enregistrements validés restent
+//! consultables.
 
 #![forbid(unsafe_code)]
 
@@ -91,7 +89,6 @@ pub struct CommittedSubmission {
     pub state: SubmissionState,
 }
 
-/// Clé durable d'une soumission : `(account_id, conversation_id, message_id)`.
 type Key = (AccountId, ConversationId, MessageId);
 
 impl CommittedSubmission {
@@ -118,10 +115,7 @@ impl CommittedSubmission {
 /// Journal d'envoi. Les champs restent privés : l'état consultable passe par [`Journal::get`].
 #[derive(Debug)]
 pub struct Journal {
-    /// Dernier enregistrement validé de chaque clé, ordonné par clé.
     committed: BTreeMap<Key, CommittedSubmission>,
-    /// Étapes de la transaction ouverte, de la plus ancienne à la plus récente.
-    /// Vide hors transaction. Elles recouvrent `committed` pour la consultation.
     uncommitted: Vec<CommittedSubmission>,
 }
 
@@ -391,7 +385,6 @@ impl Journal {
             .map(|record| record.state.clone())
     }
 
-    /// Abandonne la zone non validée : seul le journal validé reste consultable.
     pub fn crash_and_recover(&mut self) {
         self.uncommitted.clear();
     }
@@ -413,7 +406,6 @@ impl Journal {
             .get(&(account.clone(), conversation.clone(), message.clone()))
     }
 
-    /// Copie de [`Journal::committed`]. À éviter sur un chemin chaud.
     pub fn export_committed(&self) -> Vec<CommittedSubmission> {
         self.committed().cloned().collect()
     }

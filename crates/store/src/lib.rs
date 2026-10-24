@@ -53,7 +53,6 @@ pub struct SessionStore {
     database_path: PathBuf,
 }
 
-/// Clé durable d'une soumission du compte de la base : `(conversation, message)`.
 type SubmissionKey = (ConversationId, MessageId);
 
 /// Journal chargé avec la révision et l'origine de cette image.
@@ -130,15 +129,10 @@ impl SessionStore {
     /// Remplace seulement le journal du compte par l'image courante.
     /// Une écriture concurrente impose de recharger le journal avant de réessayer.
     /// Le jeton de cette image avance seulement si le commit réussit.
-    ///
-    /// Seules les lignes qui diffèrent de `journal.saved` sont écrites, et seules
-    /// elles sont copiées, le reste du journal est lu par référence : les
-    /// lignes du compte ne sont écrites que par cette méthode, et la révision
-    /// vérifiée dans la transaction prouve qu'aucun autre écrivain n'a validé
-    /// depuis le chargement ou la dernière sauvegarde de cette image. Le disque
-    /// égale donc `saved`, et supprimer les clés disparues puis insérer ou
-    /// mettre à jour les lignes nouvelles ou modifiées donne le même état
-    /// qu'un remplacement complet. La révision avance même sans ligne modifiée.
+    /// Seules les lignes qui diffèrent de `journal.saved` sont écrites. C'est un
+    /// remplacement complet tant que cette méthode est le seul écrivain des
+    /// soumissions : la révision vérifiée prouve alors que le disque égale `saved`.
+    /// La révision avance même sans ligne modifiée.
     pub fn save_journal(&mut self, journal: &mut StoredJournal) -> Result<(), StoreError> {
         self.check_origin(&journal.account_id, &journal.database_path)?;
         if journal
@@ -504,9 +498,7 @@ fn journal_revision(connection: &Connection, account: &AccountId) -> Result<i64,
     }
 }
 
-/// Clés de `saved` absentes du journal, et éléments du journal nouveaux ou
-/// différents de `saved`. Les deux côtés sont ordonnés par clé : un seul
-/// parcours, sans copier les éléments inchangés.
+/// `journal` doit être ordonné par clé, comme `saved`.
 fn diff_saved<'a>(
     saved: &BTreeMap<SubmissionKey, CommittedSubmission>,
     journal: impl Iterator<Item = &'a CommittedSubmission>,

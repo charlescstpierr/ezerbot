@@ -114,9 +114,7 @@ def show(values):
 
 
 def run_pass(binary, conversations, sends, scratch, profile=None):
-    """Rejoue `conversations × sends` envois puis la sonde ; renvoie les mesures de la passe.
-
-    `profile` est une commande lancée pendant les 50 derniers envois, `{pid}` désignant
+    """`profile` est une commande lancée pendant les 50 derniers envois, `{pid}` désignant
     le serveur ; elle reçoit SIGINT juste après le dernier envoi chronométré.
     """
     workdir = Path(tempfile.mkdtemp(prefix='send-history-', dir=scratch))

@@ -4209,3 +4209,64 @@ mod captures {
         assert!(!stored.contains(secret), "{stored}");
     }
 }
+
+/// What the provider received since `from`, in the instructions of every call.
+fn sent_since(f: &Fixture, from: usize) -> String {
+    let seen = f.server.seen.lock().unwrap();
+    seen.bodies[from..].iter().map(Value::to_string).collect()
+}
+
+#[test]
+fn a_voice_message_asks_for_a_short_answer_and_a_typed_one_does_not() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    for (id, voice) in [("v1", true), ("t1", false), ("v2", true)] {
+        f.events(vec![
+            json!({"type":"response.output_text.delta","delta":"D'accord."}),
+            completed(),
+        ]);
+        let before = f.server.seen.lock().unwrap().bodies.len();
+        f.post(
+            "/api/send",
+            json!({"conversation_id":c,"message_id":id,"body":"Où en est ma tâche ?","voice":voice}),
+        );
+        f.wait_parent(&c, id, RunStatus::Finished);
+        let sent = sent_since(&f, before);
+        assert_eq!(
+            sent.contains("une ou deux phrases"),
+            voice,
+            "{id} : la consigne suit le message, pas l'état précédent"
+        );
+        assert_eq!(sent.contains("au lieu de deviner"), voice, "{id}");
+    }
+}
+
+fn voice_marks(f: &Fixture) -> i64 {
+    f.db()
+        .query_row("SELECT count(*) FROM wrapper_voice_turns", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn the_voice_mark_leaves_with_its_undelivered_message_and_with_its_conversation() {
+    let mut f = Fixture::new(false);
+    let c = f.conversation();
+    f.post(
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"v1","body":"Où en est ma tâche ?","voice":true,"simulate_loss":true}),
+    );
+    assert_eq!(voice_marks(&f), 1);
+    f.post(
+        "/api/messages/delete",
+        json!({"conversation_id":c,"message_id":"v1"}),
+    );
+    assert_eq!(voice_marks(&f), 0, "le message non livré est supprimé");
+
+    f.post(
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"v2","body":"Et maintenant ?","voice":true}),
+    );
+    assert_eq!(voice_marks(&f), 1);
+    f.post("/api/conversations/delete", json!({"id":c}));
+    assert_eq!(voice_marks(&f), 0, "la conversation est supprimée");
+}

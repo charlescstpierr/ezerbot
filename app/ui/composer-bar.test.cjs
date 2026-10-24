@@ -36,7 +36,17 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
     ? `<button class="tool-pill" type="button" data-picker="model"><small>Modèle</small><b>${model}</b><svg class="icon"><use href="#i-chevron"/></svg></button><button class="tool-pill" type="button" data-picker="effort"><small>Effort</small><b>${effort}</b><svg class="icon"><use href="#i-chevron"/></svg></button>${speedPill}`
     : "";
   // L'en-tête réel d'un fil direct (avec Écran du Mac) ou d'un groupe, tel que les panneaux le montent.
-  const threadHeader = header === "direct" || header === "group" ? `<div class="topbar-title"><button class="icon-button sidebar-toggle" type="button" aria-label="Ouvrir les conversations"><svg class="icon"><use href="#i-menu"/></svg></button><button class="workspace-label" type="button">${header === "group" ? "Groupe" : "Ezerbot"}</button><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">${title}</h1></div>
+  // Sur l'accueil, le menu est désactivé : une session d'écran en cours garde son entrée dans l'en-tête.
+  const homeSession = `<div class="topbar-title"><button class="icon-button sidebar-toggle" type="button" aria-label="Ouvrir les conversations"><svg class="icon"><use href="#i-menu"/></svg></button><button class="workspace-label" type="button" disabled>Ezerbot</button><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">${title}</h1></div>
+      <div class="topbar-actions">
+        <button class="tool-pill screen-button screen-button-kept screen-active" type="button" aria-label="Écran du Mac">Écran du Mac</button>
+        <button class="tool-pill notifications-button" type="button" aria-label="Notifications"><span class="notifications-icon" aria-hidden="true"><svg class="icon"><use href="#i-plus"/></svg></span><span class="notifications-label">Notifications</span><span class="notification-count" aria-hidden="true" hidden>0</span></button>
+        <button class="tool-pill" type="button" data-topbar-intent="create">Créer un groupe</button>
+        <span class="mode-badge"><span class="status-dot"></span><span>ChatGPT</span></span>
+        <button class="icon-button" id="conversation-menu-button" type="button" disabled aria-label="Actions de la conversation"><svg class="icon"><use href="#i-more"/></svg></button>
+      </div>
+      <div class="popover conversation-menu" id="conversation-menu" hidden><button class="screen-menu-item" type="button"><span>Écran du Mac</span></button></div>`;
+  const threadHeader = header === "home-session" ? homeSession : header === "direct" || header === "group" ? `<div class="topbar-title"><button class="icon-button sidebar-toggle" type="button" aria-label="Ouvrir les conversations"><svg class="icon"><use href="#i-menu"/></svg></button><button class="workspace-label" type="button">${header === "group" ? "Groupe" : "Ezerbot"}</button><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">${title}</h1></div>
       <div class="topbar-actions">
         <button class="tool-pill screen-button" type="button" aria-label="Écran du Mac"${header === "group" ? " hidden" : ""}>Écran du Mac</button>
         <button class="tool-pill notifications-button${unread ? " has-unread" : ""}" type="button" aria-label="Notifications"><span class="notifications-icon" aria-hidden="true"><svg class="icon"><use href="#i-plus"/></svg></span><span class="notifications-label">Notifications</span><span class="notification-count" aria-hidden="true"${unread ? "" : " hidden"}>${unread || "0"}</span></button>
@@ -1045,10 +1055,10 @@ test("the real header keeps the title clear of Notifications from 761 to 785", {
   }
 });
 
-test("a direct thread or group title stays clear of every header action from 761 to 1140", { timeout: 300000 }, async () => {
+test("a direct thread, group or home title stays clear of every header action from 761 to 1140", { timeout: 300000 }, async () => {
   const widths = sweep(761, 1140, 20, [786, 800, 804, 819, 820, 850, 900, 901, 1100, 1101]);
-  for (const header of ["direct", "group"]) {
-    for (const [title, unread] of [["Fil direct", ""], ["Préparer la revue de lancement avec l'équipe", ""], ["Préparer la revue de lancement avec l'équipe", "3"], ["Préparer la revue de lancement avec l'équipe", "999+"]]) {
+  for (const header of ["direct", "group", "home-session"]) {
+    for (const [title, unread] of header === "home-session" ? [["Nouvelle conversation", ""]] : [["Fil direct", ""], ["Préparer la revue de lancement avec l'équipe", ""], ["Préparer la revue de lancement avec l'équipe", "3"], ["Préparer la revue de lancement avec l'équipe", "999+"]]) {
       for (const width of widths) {
         const report = await measure(width, 560, "Ezerbot", { header, title, speed: "", unread });
         for (const theme of report.themes) {
@@ -1060,6 +1070,7 @@ test("a direct thread or group title stays clear of every header action from 761
           if (title === "Fil direct" && width >= 820) assert.equal(theme.titleFits, true, where);
           // Écran du Mac reste joignable : dans l'en-tête ou, faute de place, dans le menu de la conversation.
           if (header === "direct") assert.equal(theme.screenEntry.filter((size) => size > 0).length, 1, where);
+          if (header === "home-session") assert.ok(theme.screenEntry[0] > 0, where);
         }
       }
     }

@@ -14,6 +14,8 @@
   function updateEntry() {
     entry.hidden = !data.session && !(context.conversation?.kind === "chat" && screenOpen(context.bot?.id));
     menuItem.hidden = entry.hidden;
+    // Sans conversation ouverte, le menu est désactivé : une session en cours garde son entrée dans l'en-tête.
+    entry.classList.toggle("screen-button-kept", Boolean(data.session) && !context.conversation);
   }
   const entry = button("Écran du Mac", () => { renderDialog(); dialog.showModal(); showOverlay(); }, "tool-pill screen-button");
   entry.setAttribute("aria-label", "Écran du Mac"); entry.title = "Écran du Mac";

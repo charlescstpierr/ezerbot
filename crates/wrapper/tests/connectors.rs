@@ -1741,7 +1741,7 @@ fn changing_oauth_application_is_refused_without_losing_tokens_even_when_reconne
 #[test]
 fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     let mut f = Fixture::new();
-    assert_eq!(f.state()["mcp"]["catalogue"].as_array().unwrap().len(), 9);
+    assert_eq!(f.state()["mcp"]["catalogue"].as_array().unwrap().len(), 10);
     assert_eq!(f.item("reunions")["name"], "Réunions");
     assert!(f
         .app

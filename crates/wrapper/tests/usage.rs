@@ -150,6 +150,13 @@ fn seed_run(
     kind: &str,
     measured: bool,
 ) {
+    insert_run(conn, id, bot, conversation, kind, 1);
+    if measured {
+        add_usage(conn, id, 100, 20, 30);
+    }
+}
+
+fn insert_run(conn: &Connection, id: &str, bot: &str, conversation: &str, kind: &str, at: i64) {
     let trigger = match kind {
         "routine" => Trigger::Occurrence {
             occurrence_id: id.into(),
@@ -184,21 +191,22 @@ fn seed_run(
         }),
         turn_end: Some(TurnEnd::Finished),
         budgets: RunBudgets::default(),
-        started_at: 1,
+        started_at: at,
     };
     conn.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) VALUES (?1,?2,?3,?4,?1,0,'finished',?5)", params![id,bot,conversation,trigger_kind,serde_json::to_string(&run).unwrap()]).unwrap();
-    if measured {
-        let tx = conn.unchecked_transaction().unwrap();
-        let usage = TokenUsage {
-            input_tokens: 100,
-            output_tokens: 20,
-            cached_input_tokens: 30,
-        };
-        store::save_token_usage(&tx, id, 1, &usage).unwrap();
-        store::save_token_usage(&tx, id, 1, &usage).unwrap(); // duplicate telemetry
-        store::save_token_usage(&tx, id, 2, &usage).unwrap(); // second model response
-        tx.commit().unwrap();
-    }
+}
+
+fn add_usage(conn: &Connection, id: &str, input: u64, output: u64, cached: u64) {
+    let tx = conn.unchecked_transaction().unwrap();
+    let usage = TokenUsage {
+        input_tokens: input,
+        output_tokens: output,
+        cached_input_tokens: cached,
+    };
+    store::save_token_usage(&tx, id, 1, &usage).unwrap();
+    store::save_token_usage(&tx, id, 1, &usage).unwrap(); // duplicate telemetry
+    store::save_token_usage(&tx, id, 2, &usage).unwrap(); // second model response
+    tx.commit().unwrap();
 }
 
 #[test]
@@ -320,6 +328,216 @@ fn usage_totals_are_frozen_for_chat_routine_and_delegation_runs() {
             ],
         })
     );
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+/// A routine on `schedule` with its bot and conversation, plus the app and a raw connection.
+struct Cost {
+    f: Fixture,
+    app: App,
+    conn: Connection,
+    bot: String,
+    routine: String,
+    conversation: String,
+}
+impl Cost {
+    fn new(quota: Value, trigger: Value) -> Self {
+        let f = Fixture::new(ScriptedResponse::json(200, quota));
+        let mut app = f.app();
+        let conn = Connection::open(f.dir.join("app.sqlite")).unwrap();
+        let bot: String = conn
+            .query_row("SELECT id FROM wrapper_bots LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        let body = json!({"bot_id":bot,"name":"Veille","prompt":"Résume.","trigger":trigger});
+        let created = app
+            .api("POST", "/api/routines", body.to_string().as_bytes())
+            .unwrap();
+        let routine = created["routine"]["routine_id"].as_str().unwrap().into();
+        let conversation = created["routine"]["conversation_id"]
+            .as_str()
+            .unwrap()
+            .into();
+        Self {
+            f,
+            app,
+            conn,
+            bot,
+            routine,
+            conversation,
+        }
+    }
+    fn every_30_minutes() -> Self {
+        Self::new(valid(), json!({"kind":"every","interval_ms":1_800_000}))
+    }
+    /// One passage whose run started `age_ms` ago and used `tokens` in total.
+    fn pass(&self, id: &str, status: &str, age_ms: i64, tokens: Option<u64>) -> &Self {
+        let started = (now() * 1000) as i64 - age_ms;
+        insert_run(
+            &self.conn,
+            id,
+            &self.bot,
+            &self.conversation,
+            "routine",
+            started,
+        );
+        if let Some(tokens) = tokens {
+            add_usage(&self.conn, id, tokens / 2 - 100, 100, 0);
+        }
+        self.conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,run_id) VALUES (?1,?2,1,?3,?4,?1)", params![id, self.routine, started, status]).unwrap();
+        self
+    }
+    /// The cost the routine list and the routines state both return, which must agree.
+    fn cost(&mut self) -> Value {
+        let list = self
+            .app
+            .api("GET", &format!("/api/routines?bot_id={}", self.bot), b"")
+            .unwrap()["routines"][0]["cost"]
+            .clone();
+        let state = self.app.api("GET", "/api/state", b"").unwrap()["routines"]["items"][0]
+            ["routine"]["cost"]
+            .clone();
+        assert_eq!(list, state);
+        list
+    }
+}
+
+#[test]
+fn a_routine_costs_the_mean_of_its_last_ten_finished_passages_and_seven_days_of_tokens() {
+    let mut c = Cost::every_30_minutes();
+    c.pass("a", "done", 3 * 3_600_000, Some(1000))
+        .pass("b", "done", 2 * 3_600_000, Some(2000))
+        .pass("c", "done", 3_600_000, Some(3000));
+    let cost = c.cost();
+    assert_eq!(cost["state"], "measured");
+    assert_eq!(cost["average_tokens"], 2000);
+    assert_eq!(cost["average_sample"], 3);
+    assert_eq!(cost["tokens_7d"], 6000);
+    // Eleven older passages: only the ten latest finished ones average; the 8-day one is out of the 7 days.
+    let mut c = Cost::every_30_minutes();
+    c.pass("old", "done", 8 * DAY_MS, Some(90_000))
+        .pass("older", "done", 6 * DAY_MS, Some(90_000));
+    for n in 0..10 {
+        c.pass(&format!("n{n}"), "done", n * 60_000 + 60_000, Some(1000));
+    }
+    let cost = c.cost();
+    assert_eq!(cost["average_tokens"], 1000);
+    assert_eq!(cost["average_sample"], 10);
+    assert_eq!(cost["tokens_7d"], 100_000);
+}
+
+#[test]
+fn a_subtask_and_its_own_subtask_count_once_in_the_passage_that_started_them() {
+    let mut c = Cost::every_30_minutes();
+    c.pass("root", "done", 3_600_000, Some(1000));
+    for (id, parent, tokens) in [("child", "root", 500), ("grandchild", "child", 250)] {
+        insert_run(&c.conn, id, &c.bot, &c.conversation, "delegation", 1);
+        add_usage(&c.conn, id, tokens / 2 - 50, 50, 0);
+        edge(&c.conn, parent, id);
+    }
+    let cost = c.cost();
+    assert_eq!(cost["average_tokens"], 1750);
+    assert_eq!(cost["tokens_7d"], 1750);
+}
+
+#[test]
+fn the_daily_forecast_is_the_mean_times_the_passages_the_schedule_plans_each_day() {
+    for trigger in [
+        json!({"kind":"every","interval_ms":1_800_000}),
+        json!({"kind":"cron","expression":"*/30 * * * *","time_zone":"UTC"}),
+    ] {
+        let mut c = Cost::new(valid(), trigger);
+        c.pass("a", "done", 3_600_000, Some(2000));
+        let forecast = c.cost()["forecast"].clone();
+        assert_eq!(forecast["state"], "estimated");
+        assert_eq!(forecast["tokens_per_day"], 96_000);
+        assert_eq!(forecast["tokens_7d"], 672_000);
+    }
+    // Events have no clock: the forecast is impossible, not zero.
+    let mut c = Cost::new(valid(), json!({"kind":"webhook"}));
+    c.pass("a", "done", 3_600_000, Some(2000));
+    let forecast = c.cost()["forecast"].clone();
+    assert_eq!(forecast["state"], "impossible");
+    assert_eq!(forecast["reason"], "event_trigger");
+    assert!(forecast["tokens_per_day"].is_null());
+}
+
+#[test]
+fn a_routine_without_a_measured_finished_passage_has_no_measure_yet() {
+    let mut c = Cost::every_30_minutes();
+    let cost = c.cost();
+    assert_eq!(cost["state"], "no_measure_yet");
+    assert!(cost["average_tokens"].is_null() && cost["tokens_7d"].is_null());
+    assert_eq!(cost["forecast"]["state"], "no_measure_yet");
+    // A failed passage, and one whose provider sent no usage, are not zeros.
+    c.pass("failed", "failed", 60_000, Some(4000))
+        .pass("blind", "done", 120_000, None);
+    let cost = c.cost();
+    assert_eq!(cost["state"], "no_measure_yet");
+    assert!(cost["average_tokens"].is_null());
+}
+
+fn is_money(key: &str) -> bool {
+    ["usd", "dollar", "price", "prix", "eur", "currency", "cent"]
+        .iter()
+        .any(|word| key.to_lowercase().contains(word))
+}
+fn money_keys(value: &Value) -> Vec<String> {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .flat_map(|(k, v)| {
+                let mut found = money_keys(v);
+                if is_money(k) {
+                    found.push(k.clone());
+                }
+                found
+            })
+            .collect(),
+        Value::Array(items) => items.iter().flat_map(money_keys).collect(),
+        _ => vec![],
+    }
+}
+
+fn weekly(used: u64) -> Value {
+    json!({"rate_limit":{"primary_window":{"used_percent":used,"limit_window_seconds":604800,"reset_at":now()+3*86400}}})
+}
+
+#[test]
+fn the_weekly_quota_share_is_estimated_from_this_weeks_local_tokens_and_has_no_dollar_field() {
+    // 20 % of the window used while 2 000 000 tokens ran locally since it began:
+    // 100 000 tokens per percent, so a 672 000-token week is 6.72 %.
+    let mut c = Cost::new(weekly(20), json!({"kind":"every","interval_ms":1_800_000}));
+    let f = &c.f;
+    assert_eq!(f.quota()["status"], "ready");
+    insert_run(
+        &c.conn,
+        "chat",
+        &c.bot,
+        &c.conversation,
+        "chat",
+        (now() * 1000) as i64 - DAY_MS,
+    );
+    add_usage(&c.conn, "chat", 999_900, 100, 0);
+    c.pass("a", "done", 3_600_000, Some(2000));
+    let cost = c.cost();
+    assert_eq!(cost["quota_share"]["state"], "estimated");
+    assert_eq!(cost["quota_share"]["percent_7d"], 6.7);
+    assert!(money_keys(&cost).is_empty(), "{cost}");
+    // Too little use of the window, or no quota at all: no share, tokens stay.
+    for (quota, reason) in [
+        (weekly(1), "calibration_weak"),
+        (json!({}), "quota_unavailable"),
+    ] {
+        let mut c = Cost::new(quota, json!({"kind":"every","interval_ms":1_800_000}));
+        c.f.quota();
+        c.pass("a", "done", 3_600_000, Some(2000));
+        let cost = c.cost();
+        assert_eq!(cost["quota_share"]["state"], "unknown");
+        assert_eq!(cost["quota_share"]["reason"], reason);
+        assert!(cost["quota_share"]["percent_7d"].is_null());
+        assert_eq!(cost["average_tokens"], 2000);
+    }
 }
 
 fn window(reset: Value) -> Value {

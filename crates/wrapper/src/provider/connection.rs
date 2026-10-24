@@ -77,16 +77,12 @@ impl Provider {
 
     /// Stable account binding without storing tokens in demonstration metadata.
     pub(crate) fn demonstration_identity(&self) -> String {
-        let session = self.session();
-        let _guard = lock(&session.inner.credentials);
-        let c = session.read().unwrap_or_default();
-        format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&json!([session.inner.codex, c.account_id, c.subject,]))
-                    .unwrap_or_default()
-            )
-        )
+        self.session().identity()
+    }
+
+    /// `hook` is given the identity of the account behind every model request, as it is sent.
+    pub(crate) fn on_account_used(&self, hook: AccountUsed) {
+        *lock(&self.primary.inner.account_used) = Some(hook);
     }
 
     pub fn connected(&self) -> bool {

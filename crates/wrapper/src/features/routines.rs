@@ -234,7 +234,7 @@ struct Enable {
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     routine::migrate(conn)?;
     occurrences::migrate(conn)?;
-    conn.execute_batch(super::routine_cost::SCHEMA)?;
+    super::routine_cost::migrate(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS wrapper_routine_confirmation (
         routine_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
@@ -1584,6 +1584,21 @@ pub fn heartbeat(ctx: &Context<'_>) {
     if let Ok(now) = clock(ctx) {
         let _ = occurrences::heartbeat(ctx.connection, now);
     }
+}
+/// Notes in `db` the account behind every model request, when it is sent: the tick sees an
+/// account only between two requests, and a sign-in can change during one (a renewal after a 401).
+pub fn watch_account(provider: &crate::Provider, db: &std::path::Path) {
+    let db = db.to_path_buf();
+    provider.on_account_used(std::sync::Arc::new(move |identity| {
+        let Ok(conn) = Connection::open(&db) else {
+            return;
+        };
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(400));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as i64);
+        let _ = routine_cost::note_account(&conn, identity, now);
+    }));
 }
 pub fn tick(ctx: &Context<'_>) {
     if let Ok(now) = clock(ctx) {

@@ -365,8 +365,12 @@ struct Inner {
     titling: AtomicUsize,
     catalog: Mutex<Catalog>,
     quota: Mutex<codex::UsageCache>,
+    /// Told the account whose credentials a model request is about to use, request by request.
+    account_used: Mutex<Option<AccountUsed>>,
     mcp: crate::mcp::Manager,
 }
+
+pub(crate) type AccountUsed = Arc<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Clone)]
 struct Session {
@@ -852,6 +856,7 @@ impl Session {
                 titling: AtomicUsize::new(0),
                 catalog: Mutex::new(Catalog::default()),
                 quota: Mutex::new(codex::UsageCache::default()),
+                account_used: Mutex::new(None),
                 mcp: crate::mcp::Manager::default(),
             }),
         }
@@ -895,6 +900,27 @@ impl Session {
 
     pub(crate) fn mcp(&self) -> &crate::mcp::Manager {
         &self.inner.mcp
+    }
+
+    /// Stable account binding without storing tokens in demonstration metadata.
+    fn identity(&self) -> String {
+        let _guard = lock(&self.inner.credentials);
+        let c = self.read().unwrap_or_default();
+        format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&json!([self.inner.codex, c.account_id, c.subject,]))
+                    .unwrap_or_default()
+            )
+        )
+    }
+
+    /// Before each attempt, the renewed one after a 401 included: those are the credentials that spend.
+    fn note_account_used(&self) {
+        let hook = lock(&self.inner.account_used).clone();
+        if let Some(hook) = hook {
+            hook(&self.identity());
+        }
     }
 
     fn read(&self) -> Option<Credentials> {
@@ -1957,6 +1983,7 @@ impl Session {
             if abandoned.load(Ordering::SeqCst) {
                 return Err(Failure::other("Réponse annulée."));
             }
+            self.note_account_used();
             let mut request = self.request(&token, &mut body)?;
             if let Some(deadline) = deadline {
                 // A deadline replaces ureq's per-read timeout, so a stream that

@@ -22,44 +22,80 @@ const WEEK_S: u64 = 7 * 86_400;
 const WEEK_MS: i64 = WEEK_S as i64 * 1000;
 /// Latest finished, measured passages the average is taken over.
 const AVERAGED_PASSAGES: u32 = 10;
-/// How many of a routine's latest finished passages are looked through for them: a bound on the
-/// work of a read when a long run of passages sent no usage, not a sample size.
-const RECENT_FINISHED: u32 = 500;
 /// The quota gauge is a rounded percentage: below these, tokens per percent is noise.
 const MIN_USED_PERCENT: f64 = 5.0;
 const MIN_LOCAL_TOKENS: u64 = 50_000;
 
-/// The signed-in Codex account and since when this app has seen it; indexes that let a routine's
-/// finished passages, its runs of the week and the local tokens of a window be found without
-/// reading history.
+/// The signed-in Codex account and since when this app has seen it; the finished passages whose run
+/// sent usage, kept as they happen so that the latest of them are found without reading the ones that
+/// sent none; indexes that let a routine's runs of the week and the local tokens of a window be
+/// found without reading history. A passage enters the list once it is both finished and measured,
+/// whichever of the two comes last.
 pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS wrapper_routine_cost_account (
     id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, since INTEGER NOT NULL
-); CREATE INDEX IF NOT EXISTS wrapper_occurrences_finished
-    ON scheduler_occurrences(routine_id, scheduled_at_utc DESC, occurrence_id DESC) WHERE status='done';
+); CREATE TABLE IF NOT EXISTS wrapper_measured_passages (
+    routine_id TEXT NOT NULL, scheduled_at_utc INTEGER NOT NULL, occurrence_id TEXT NOT NULL,
+    PRIMARY KEY(routine_id, scheduled_at_utc DESC, occurrence_id DESC)
+) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS wrapper_measured_passages_done_insert
+    AFTER INSERT ON scheduler_occurrences WHEN NEW.status='done'
+BEGIN INSERT OR IGNORE INTO wrapper_measured_passages
+    SELECT NEW.routine_id, NEW.scheduled_at_utc, NEW.occurrence_id
+    WHERE EXISTS (SELECT 1 FROM engine_response_usage WHERE run_id=NEW.run_id); END;
+CREATE TRIGGER IF NOT EXISTS wrapper_measured_passages_done_update
+    AFTER UPDATE OF status ON scheduler_occurrences WHEN NEW.status='done' AND OLD.status!='done'
+BEGIN INSERT OR IGNORE INTO wrapper_measured_passages
+    SELECT NEW.routine_id, NEW.scheduled_at_utc, NEW.occurrence_id
+    WHERE EXISTS (SELECT 1 FROM engine_response_usage WHERE run_id=NEW.run_id); END;
+CREATE TRIGGER IF NOT EXISTS wrapper_measured_passages_usage
+    AFTER INSERT ON engine_response_usage
+BEGIN INSERT OR IGNORE INTO wrapper_measured_passages
+    SELECT routine_id, scheduled_at_utc, occurrence_id FROM scheduler_occurrences
+    WHERE run_id=NEW.run_id AND status='done'; END;
 CREATE INDEX IF NOT EXISTS wrapper_engine_runs_started
     ON engine_runs(json_extract(record,'$.started_at'));
 CREATE INDEX IF NOT EXISTS wrapper_engine_runs_thread_started
     ON engine_runs(conversation_id, json_extract(record,'$.started_at'));";
 
+/// Creates the tables, triggers and indexes of [`SCHEMA`]; the list of measured passages is filled
+/// from the history once, in the same transaction that creates it.
+pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='wrapper_measured_passages')",
+        [],
+        |r| r.get(0),
+    )?;
+    conn.execute_batch("SAVEPOINT routine_cost_schema")?;
+    let created = conn.execute_batch(SCHEMA).and_then(|()| {
+        if exists {
+            return Ok(());
+        }
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO wrapper_measured_passages
+             SELECT routine_id, scheduled_at_utc, occurrence_id FROM scheduler_occurrences
+             WHERE status='done' AND run_id IN (SELECT run_id FROM engine_response_usage)",
+        )
+    });
+    conn.execute_batch(if created.is_ok() {
+        "RELEASE routine_cost_schema"
+    } else {
+        "ROLLBACK TO routine_cost_schema; RELEASE routine_cost_schema"
+    })?;
+    Ok(created?)
+}
+
 /// A passage is its run plus every run below it in the delegation graph, each counted once.
-/// `?1` routine, `?2` start of the week (in ms), `?3` passages averaged, `?4` latest finished
-/// passages looked through for measured ones (the measured filter comes before the `?3` limit, the
-/// `?4` bound is a slot date read off the index), `?5` the routine's thread. The week's passages are
-/// those whose run started in it, whatever slot they were owed for; both reads go through indexes,
-/// so old history is not read.
+/// `?1` routine, `?2` start of the week (in ms), `?3` passages averaged, `?4` the routine's thread.
+/// The averaged passages are the latest of the routine's measured list; the week's are those whose
+/// run started in it, whatever slot they were owed for. Both reads go through indexes, so old
+/// history is not read.
 const PASSAGES: &str = "WITH RECURSIVE recent(id) AS (
-        SELECT occurrence_id FROM scheduler_occurrences
-        WHERE routine_id=?1 AND status='done'
-          AND run_id IN (SELECT run_id FROM engine_response_usage)
-          AND scheduled_at_utc >= COALESCE((
-            SELECT scheduled_at_utc FROM scheduler_occurrences
-            WHERE routine_id=?1 AND status='done'
-            ORDER BY scheduled_at_utc DESC, occurrence_id DESC LIMIT 1 OFFSET ?4 - 1), 0)
+        SELECT occurrence_id FROM wrapper_measured_passages WHERE routine_id=?1
         ORDER BY scheduled_at_utc DESC, occurrence_id DESC LIMIT ?3),
      tree(occurrence_id, root, run_id) AS (
         SELECT o.occurrence_id, o.run_id, o.run_id FROM engine_runs r
         JOIN scheduler_occurrences o ON o.run_id=r.run_id
-        WHERE r.conversation_id=?5 AND json_extract(r.record,'$.started_at')>=?2
+        WHERE r.conversation_id=?4 AND json_extract(r.record,'$.started_at')>=?2
           AND o.routine_id=?1
         UNION
         SELECT occurrence_id, run_id, run_id FROM scheduler_occurrences
@@ -96,7 +132,7 @@ struct Measured {
 pub(super) struct Costing<'a> {
     now_ms: i64,
     provider: &'a Provider,
-    /// Since when the tick or a response has seen the signed-in Codex account (now, if it has not).
+    /// Since when the tick or a request has seen the signed-in Codex account (now, if it has not).
     account_since: i64,
     /// Read once, and only if a routine has a forecast to turn into a share.
     calibration: OnceCell<Calibration>,
@@ -182,7 +218,6 @@ impl<'a> Costing<'a> {
                 routine.routine_id,
                 since,
                 AVERAGED_PASSAGES,
-                RECENT_FINISHED,
                 routine.conversation_id
             ],
             |r| {
@@ -225,7 +260,7 @@ impl<'a> Costing<'a> {
     }
 }
 
-/// Since when `identity` has been the signed-in account, as the tick or a response noted it; now if it is not the
+/// Since when `identity` has been the signed-in account, as the tick or a request noted it; now if it is not the
 /// one noted. A read never writes: the state and the routine list must stay read-only.
 fn account_since(conn: &Connection, identity: &str, now_ms: i64) -> Result<i64, ApiError> {
     let known: Option<(String, i64)> = conn
@@ -241,7 +276,7 @@ fn account_since(conn: &Connection, identity: &str, now_ms: i64) -> Result<i64, 
     })
 }
 
-/// Called by every tick, window or not, and before every model response: a different account than the one noted dates its sign-in now,
+/// Called by every tick, window or not, and by every model request as it is sent: a different account than the one noted dates its sign-in now,
 /// so another account's runs never calibrate this one's quota. Writes only on a change.
 pub(super) fn note_account(conn: &Connection, identity: &str, now_ms: i64) -> Result<(), ApiError> {
     if account_since(conn, identity, now_ms)? == now_ms {
@@ -258,7 +293,7 @@ pub(super) fn note_account(conn: &Connection, identity: &str, now_ms: i64) -> Re
 /// is shared with other Codex apps and auxiliary calls are not measured here, which makes the
 /// denominator too small and the share too high; the history of another account would make it
 /// too low, so the share is only given once this account has been the signed-in one since the
-/// window began (the tick, and each model response, note the account they see).
+/// window began (the tick, and each model request, note the account they see).
 fn calibrate(
     conn: &Connection,
     quota: &Value,
@@ -301,8 +336,8 @@ mod tests {
         grokbot_engine::store::migrate(&conn).unwrap();
         grokbot_delegation::graph::migrate(&conn).unwrap();
         grokbot_scheduler::migrate(&conn).unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
-        for (sql, params) in [(PASSAGES, 5), (LOCAL_TOKENS, 1)] {
+        migrate(&conn).unwrap();
+        for (sql, params) in [(PASSAGES, 4), (LOCAL_TOKENS, 1)] {
             let mut plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
             let bound: Vec<&dyn rusqlite::ToSql> = vec![&0_i64; params];
             let details: Vec<String> = plan
@@ -321,17 +356,12 @@ mod tests {
 
     const NOW: i64 = 2_000_000_000_000;
     /// Written threshold for the whole read of one routine, instructions.
-    const READ_STEPS: u64 = 20_000;
+    const READ_STEPS: u64 = 5_000;
 
-    /// Five recent passages, each with a subtask, and `old` finished and `old` missed ones long ago.
-    fn history(old: i64) -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        grokbot_engine::store::migrate(&conn).unwrap();
-        grokbot_delegation::graph::migrate(&conn).unwrap();
-        grokbot_scheduler::migrate(&conn).unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
+    /// Routine `r1`, every 30 minutes, whose cursor is just behind `NOW`.
+    fn create_routine(conn: &Connection) {
         grokbot_scheduler::routine::create(
-            &conn,
+            conn,
             &Routine {
                 routine_id: "r1".into(),
                 bot_id: "b".into(),
@@ -357,6 +387,16 @@ mod tests {
             [NOW - 1_800_000],
         )
         .unwrap();
+    }
+
+    /// Five recent passages, each with a subtask, and `old` finished and `old` missed ones long ago.
+    fn history(old: i64) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        grokbot_engine::store::migrate(&conn).unwrap();
+        grokbot_delegation::graph::migrate(&conn).unwrap();
+        grokbot_scheduler::migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        create_routine(&conn);
         let counted = "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<?1-1)";
         for (prefix, at, count) in [("old", 1_000_000_i64, old), ("new", NOW - 3_600_000, 5)] {
             conn.execute(
@@ -397,15 +437,90 @@ mod tests {
         conn
     }
 
+    /// The measured list holds a passage once it is finished and measured, whichever comes last,
+    /// and is filled from the history when it is first created.
+    #[test]
+    fn a_passage_is_listed_once_it_is_finished_and_measured_in_either_order() {
+        let conn = Connection::open_in_memory().unwrap();
+        grokbot_engine::store::migrate(&conn).unwrap();
+        grokbot_delegation::graph::migrate(&conn).unwrap();
+        grokbot_scheduler::migrate(&conn).unwrap();
+        create_routine(&conn);
+        let run = |id: &str| {
+            conn.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) VALUES (?1,'b','c1','occurrence',?1,0,'finished','{}')", [id]).unwrap();
+        };
+        let occurrence = |id: &str, status: &str| {
+            conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,run_id,slot_key) VALUES (?1,'r1',1,1000,?2,?1,?1)", [id, status]).unwrap();
+        };
+        let usage = |id: &str| {
+            conn.execute(
+                "INSERT INTO engine_response_usage VALUES (?1,1,10,5,0)",
+                [id],
+            )
+            .unwrap();
+        };
+        let listed = || -> Vec<String> {
+            conn.prepare(
+                "SELECT occurrence_id FROM wrapper_measured_passages ORDER BY occurrence_id",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        // History from before the list existed: finished and measured, finished only, measured only.
+        for (id, status, measured) in [
+            ("old-ok", "done", true),
+            ("old-blind", "done", false),
+            ("old-running", "running", true),
+        ] {
+            run(id);
+            occurrence(id, status);
+            if measured {
+                usage(id);
+            }
+        }
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(listed(), ["old-ok"]);
+        // Finished, then measured.
+        run("late-usage");
+        occurrence("late-usage", "done");
+        assert_eq!(listed(), ["old-ok"]);
+        usage("late-usage");
+        // Measured, then finished.
+        conn.execute(
+            "UPDATE scheduler_occurrences SET status='done' WHERE occurrence_id='old-running'",
+            [],
+        )
+        .unwrap();
+        run("late-done");
+        occurrence("late-done", "running");
+        usage("late-done");
+        assert_eq!(listed(), ["late-usage", "old-ok", "old-running"]);
+        conn.execute(
+            "UPDATE scheduler_occurrences SET status='done' WHERE occurrence_id='late-done'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            listed(),
+            ["late-done", "late-usage", "old-ok", "old-running"]
+        );
+    }
+
     /// SQLite instructions the whole read of a routine's cost takes (`Costing::new` and
     /// `Costing::of`: the account, the passages, the window's tokens, the schedule's cursors),
     /// counted one by one by a progress handler on the connection.
-    /// `blind`: no passage sent usage, so the read looks through its whole bound for measured ones.
+    /// `blind`: no passage sent usage, so there is nothing to average.
     fn read_steps(old: i64, blind: bool) -> u64 {
         let conn = history(old);
         if blind {
-            conn.execute("DELETE FROM engine_response_usage", [])
-                .unwrap();
+            conn.execute_batch(
+                "DELETE FROM engine_response_usage; DELETE FROM wrapper_measured_passages",
+            )
+            .unwrap();
         }
         let provider = Provider::new(std::path::Path::new("routine-cost-scale.sqlite"));
         let steps = Arc::new(AtomicU64::new(0));

@@ -938,6 +938,7 @@ impl App {
             eprintln!("Nettoyage automatique interrompu : {error}");
         }
         features::updates::remember_database(path);
+        features::routines::watch_account(&provider, path);
         Ok(Self {
             db_path: path.to_path_buf(),
             connection,

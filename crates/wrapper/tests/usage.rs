@@ -839,6 +839,18 @@ fn the_tick_notes_the_account_whatever_the_quota_and_a_read_never_writes() {
             )
             .unwrap()
     };
+    // The connection check that a first state read starts is a model request: it notes the account.
+    c.app.api("GET", "/api/state", b"").unwrap();
+    wait("la vérification de connexion", || {
+        c.conn
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_routine_cost_account",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
+    });
     c.conn
         .execute(
             "INSERT OR REPLACE INTO wrapper_routine_cost_account(id,identity,since) VALUES (1,'account-b',0)",

@@ -137,7 +137,10 @@ impl Fixture {
         self.conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,manual_nonce,status,run_id) VALUES ('occurrence','routine',1,4000,'nonce','running','routine-run')", []).unwrap();
     }
     fn request(&self, id: &str, kind: Value) {
-        self.conn.execute("INSERT INTO forms_requests(id,run_id,entry_id,kind_json,route_json,boot_id,created_at) VALUES (?1,'parent',?1,?2,?3,(SELECT boot_id FROM wrapper_forms_boot WHERE singleton=1),5000)", params![id,kind.to_string(),json!({"target_conversation_id":self.conversation}).to_string()]).unwrap();
+        self.request_on("parent", id, kind);
+    }
+    fn request_on(&self, run: &str, id: &str, kind: Value) {
+        self.conn.execute("INSERT INTO forms_requests(id,run_id,entry_id,kind_json,route_json,boot_id,created_at) VALUES (?1,?2,?1,?3,?4,(SELECT boot_id FROM wrapper_forms_boot WHERE singleton=1),5000)", params![id,run,kind.to_string(),json!({"target_conversation_id":self.conversation}).to_string()]).unwrap();
     }
 }
 impl Drop for Fixture {
@@ -391,49 +394,54 @@ fn deleted_bots_conversations_and_delegation_destinations_leave_no_orphans() {
 }
 
 #[test]
-fn recent_is_capped_at_twenty_and_sorted_by_completion_not_start_and_survives_restart() {
+fn runs_waiting_on_a_previous_boot_secret_are_stopped_after_restart_not_running_or_hidden() {
+    let mut f = Fixture::new();
+    f.children();
+    for run in ["parent", "child", "routine-run"] {
+        f.status(run, RunStatus::AwaitingHumanInput);
+        f.request_on(
+            run,
+            &format!("secret-{run}"),
+            json!({"kind":"secret","name":"PRIVATE_SECRET_NAME"}),
+        );
+    }
+    let items = f.items();
+    assert_eq!(items.len(), 3, "{items:?}");
+    assert!(items.iter().all(|i| i["group"] == "decision"));
+    f.app = App::open(&f.dir.join("workspace.sqlite")).unwrap();
+    let items = f.items();
+    for kind in ["task", "delegation", "routine"] {
+        let rows: Vec<_> = items.iter().filter(|i| i["kind"] == kind).collect();
+        assert_eq!(rows.len(), 1, "{kind}: {items:?}");
+        assert_eq!(rows[0]["group"], "recent");
+        assert_eq!(rows[0]["status"], "stopped");
+        assert_eq!(rows[0]["request"], Value::Null);
+    }
+    assert_eq!(items.len(), 3);
+    assert!(!json!(items).to_string().contains("PRIVATE_"));
+}
+
+#[test]
+fn recent_is_capped_at_twenty_and_sorted_by_recorded_start_and_survives_restart() {
     let mut f = Fixture::new();
     for n in 0..25 {
         let id = format!("turn-{n:02}");
         f.turn(&id, 1000 + n);
         f.status(&id, RunStatus::Finished);
-        // Control the durable clock rather than sleep between completions.
-        f.conn
-            .execute(
-                "UPDATE wrapper_task_clock SET changed_at=?2 WHERE source='run' AND id=?1",
-                params![id, 2000 + n],
-            )
-            .unwrap();
     }
-    f.turn("old-but-last", 1);
-    f.conn
-        .execute(
-            "UPDATE wrapper_task_clock SET changed_at=1 WHERE id='old-but-last'",
-            [],
-        )
-        .unwrap();
-    f.status("old-but-last", RunStatus::Failed);
-    let changed: i64 = f
-        .conn
-        .query_row(
-            "SELECT changed_at FROM wrapper_task_clock WHERE source='run' AND id='old-but-last'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(changed > 1, "terminal transition must update the clock");
-    f.conn
-        .execute(
-            "UPDATE wrapper_task_clock SET changed_at=3000 WHERE id='old-but-last'",
-            [],
-        )
-        .unwrap();
+    f.turn("still-running", 1);
+    f.turn("latest-failure", 5000);
+    f.status("latest-failure", RunStatus::Failed);
     let items = f.items();
-    assert_eq!(items.len(), 20);
-    assert_eq!(items[0]["id"], "task:old-but-last");
-    assert_eq!(items[0]["status"], "failed");
-    assert_eq!(items[1]["id"], "task:turn-24");
-    assert!(items.iter().all(|i| i["group"] == "recent"));
+    assert_eq!(items.len(), 21);
+    assert_eq!(items[0]["id"], "task:still-running");
+    assert_eq!(items[0]["group"], "running");
+    let recent = &items[1..];
+    assert!(recent.iter().all(|i| i["group"] == "recent"));
+    assert_eq!(recent[0]["id"], "task:latest-failure");
+    assert_eq!(recent[0]["status"], "failed");
+    assert_eq!(recent[1]["id"], "task:turn-24");
+    assert_eq!(recent[19]["id"], "task:turn-06");
     f.app = App::open(&f.dir.join("workspace.sqlite")).unwrap();
-    assert_eq!(f.items(), items);
+    assert_eq!(f.items(), recent);
 }

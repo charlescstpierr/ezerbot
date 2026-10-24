@@ -17,8 +17,8 @@ globalThis.getComputedStyle = () => ({ getPropertyValue: () => "#111111" });
 globalThis.MutationObserver = class { observe() {} disconnect() {} };
 globalThis.ResizeObserver = class { observe() {} disconnect() {} };
 
-// The sign-in card lives in Thread.jsx. The rest of that module pulls Mermaid,
-// Shiki and ProseMirror, none of which paint this card.
+// The sign-in card lives in Thread.jsx. The rest of that module pulls Streamdown
+// and ProseMirror, none of which paint this card.
 function threadSignInOnly() {
   return {
     name: "thread-sign-in-only",
@@ -27,7 +27,6 @@ function threadSignInOnly() {
       if (!id.endsWith("/src/Thread.jsx")) return null;
       return code
         .replace('import { Streamdown } from "streamdown";\n', "function Streamdown() { return null; }\n")
-        .replace('import { createMathPlugin } from "@streamdown/math";\n', "function createMathPlugin() { return {}; }\n")
         .replace('import { code } from "./code.js";\n', "const code = {};\n")
         .replace('import { splitMentionText } from "./mentions.js";\n', "function splitMentionText() { return []; }\n")
         .replace(

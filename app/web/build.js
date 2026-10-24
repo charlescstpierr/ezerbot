@@ -10,11 +10,12 @@ import { bundles } from "./src/bundles.js";
 const root = import.meta.dirname;
 const outDir = resolve(root, "../ui");
 
-function iife({ entry, name, file, plugins = [], copyPublicDir = false }) {
+function iife({ entry, name, file, plugins = [], alias = [], copyPublicDir = false }) {
   return build({
     root,
     configFile: false,
     plugins,
+    resolve: { alias },
     define: { "process.env.NODE_ENV": '"production"' },
     build: {
       outDir,
@@ -27,7 +28,11 @@ function iife({ entry, name, file, plugins = [], copyPublicDir = false }) {
 }
 
 await iife({ entry: "src/main.jsx", name: "GrokbotChatBundle", file: "chat.js", plugins: [react(), tailwindcss()], copyPublicDir: true });
-const entries = { code: "src/code-bundle.js", mermaid: "src/mermaid-bundle.js" };
-for (const [piece, entry] of Object.entries(entries)) {
-  await iife({ entry, name: bundles[piece].global, file: bundles[piece].file });
+const pieces = {
+  code: { entry: "src/code-bundle.js" },
+  mermaid: { entry: "src/mermaid-bundle.js", alias: [{ find: /^katex$/, replacement: resolve(root, "src/mermaid-katex.js") }] },
+  math: { entry: "src/math-bundle.js" },
+};
+for (const [piece, options] of Object.entries(pieces)) {
+  await iife({ ...options, name: bundles[piece].global, file: bundles[piece].file });
 }

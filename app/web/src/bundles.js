@@ -4,9 +4,19 @@
 export const bundles = {
   code: { file: "chat-code.js", global: "GrokbotCode" },
   mermaid: { file: "chat-mermaid.js", global: "GrokbotMermaid" },
+  math: { file: "chat-math.js", global: "GrokbotMath" },
 };
 
 const loading = new Map();
+const listeners = new Set();
+let arrived = 0;
+
+// For React's useSyncExternalStore: the count changes each time a piece arrives.
+export const subscribeBundles = (listener) => {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+};
+export const arrivedBundles = () => arrived;
 
 export function loadedBundle(name) {
   return globalThis[bundles[name].global];
@@ -14,7 +24,11 @@ export function loadedBundle(name) {
 
 // One <script> per piece. A failed load forgets itself, so a later message retries.
 export function loadBundle(name) {
-  if (!loading.has(name)) loading.set(name, inject(bundles[name]).catch((error) => {
+  if (!loading.has(name)) loading.set(name, inject(bundles[name]).then((bundle) => {
+    arrived += 1;
+    for (const listener of listeners) listener();
+    return bundle;
+  }, (error) => {
     loading.delete(name);
     throw error;
   }));

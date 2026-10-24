@@ -25,3 +25,11 @@ test("chat.js ne contient pas Mermaid, chat-mermaid.js le contient", () => {
   }
   assert.equal(mermaid.startsWith("var GrokbotMermaid="), true, "chat-mermaid.js sets window.GrokbotMermaid");
 });
+
+test("KaTeX n’existe qu’une fois parmi les fichiers servis, dans chat-math.js", () => {
+  const copies = ["chat.js", "chat-code.js", "chat-mermaid.js", "chat-math.js"].filter((file) => has(shipped(file), "Unknown stretchy delimiter"));
+  assert.deepEqual(copies, ["chat-math.js"]);
+  assert.equal(shipped("chat-math.js").startsWith("var GrokbotMath="), true, "chat-math.js sets window.GrokbotMath");
+  assert.match(shipped("chat.css"), /\.katex \.katex-version:after\{content:"0\.16\.47"/);
+  assert.equal(has(shipped("chat-math.js"), "0.16.47"), true, "KaTeX JS matches the CSS");
+});

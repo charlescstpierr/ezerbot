@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { Streamdown } from "streamdown";
 import { installScriptDocument } from "./fake-script-document.js";
 import { code } from "./code.js";
 import { createMermaidPlugin } from "./mermaid.js";
+import { createMathPlugin } from "./math.js";
+import { subscribeBundles } from "./bundles.js";
+import * as mathBundle from "./math-bundle.js";
 import * as codeBundle from "./code-bundle.js";
 
 const page = installScriptDocument();
@@ -66,4 +72,47 @@ test("un diagramme attend chat-mermaid.js, puis Mermaid le dessine avec la confi
   assert.deepEqual(drawn, [{ options: { config: { theme: "base" } }, config: { fontFamily: "serif" }, id: "d3", source: "graph TD; A-->B;" }]);
   await plugin.getMermaid().render("d4", "graph TD; X-->Y;");
   assert.equal(page.appended.filter((script) => script.src === "/chat-mermaid.js").length, 2);
+});
+
+test("un diagramme à libellé $$…$$ attend aussi chat-math.js, dont Mermaid emprunte KaTeX", async () => {
+  let done = false;
+  const rendering = createMermaidPlugin({}).getMermaid().render("m1", 'graph TD; A["$$x^2$$"]-->B;').finally(() => { done = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(done, false);
+  assert.equal(page.live("/chat-math.js").length, 1);
+  page.fail(page.live("/chat-math.js")[0]);
+  await assert.rejects(rendering, /chat-math\.js/);
+});
+
+const markdown = (source) => renderToStaticMarkup(React.createElement(Streamdown, { mode: "static", plugins: { math: createMathPlugin() } }, source));
+
+test("une formule s’affiche en source jusqu’à l’arrivée de chat-math.js, puis KaTeX la compose et le fil se redessine", async () => {
+  const formula = "Aire $\\pi r^2$ et\n\n$$\n\\int_0^1 x\\,dx\n$$\n";
+  assert.match(markdown("Rien à composer, 5 $ seulement."), /5 \$ seulement/);
+  assert.deepEqual(page.live("/chat-math.js"), []);
+
+  const before = markdown(formula);
+  assert.match(before, /\\pi r\^2/);
+  assert.doesNotMatch(before, /class="katex"/);
+  assert.equal(page.live("/chat-math.js").length, 1);
+  page.fail(page.live("/chat-math.js")[0]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.doesNotMatch(markdown(formula), /class="katex"/);
+  assert.equal(page.live("/chat-math.js").length, 1);
+
+  let redraws = 0;
+  const stop = subscribeBundles(() => { redraws += 1; });
+  page.arrive(page.live("/chat-math.js")[0], "GrokbotMath", mathBundle);
+  await new Promise((resolve) => setImmediate(resolve));
+  stop();
+  assert.equal(redraws, 1);
+  const after = markdown(formula);
+  assert.match(after, /class="katex"/);
+  assert.match(after, /class="katex-display"/);
+  assert.match(after, /<annotation encoding="application\/x-tex">\\pi r\^2<\/annotation>/);
+  assert.equal(page.appended.filter((script) => script.src === "/chat-math.js").length, 3);
+
+  assert.deepEqual(await createMermaidPlugin({}).getMermaid().render("m2", 'graph TD; A["$$x^2$$"]-->B;'), { svg: '<svg id="m2"></svg>' });
+  const { default: mermaidKatex } = await import("./mermaid-katex.js");
+  assert.equal(mermaidKatex.renderToString("x^2", { displayMode: true }), mathBundle.katex.renderToString("x^2", { displayMode: true }));
 });

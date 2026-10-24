@@ -23,7 +23,7 @@ use grokbot_engine::{
 };
 use grokbot_forms::{
     approvals::{self, ApprovalDecision, ApprovalRule, RuleScope},
-    forbidden::{classify, Forbidden},
+    forbidden::{classify, classify_in, Forbidden},
     redact::redact_value,
     requests::{self, Field, HumanInputRequest, InputKind, RequestStatus},
     rules,
@@ -636,9 +636,7 @@ fn forbidden(ctx: &Context<'_>, call: &ToolCall) -> Option<Forbidden> {
             .to_owned()
     };
     let (server, tool) = (label("server"), label("tool"));
-    [call.name.clone(), tool.clone(), format!("{server}_{tool}")]
-        .iter()
-        .find_map(|name| classify(name))
+    classify(&call.name).or_else(|| classify_in(&server, &tool))
 }
 
 /// RunServices::check_approval adapter. Existing per-call terminal decisions take

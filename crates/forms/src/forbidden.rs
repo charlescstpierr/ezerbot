@@ -152,22 +152,36 @@ const RULES: &[Rule] = &[
 ];
 
 pub fn classify(name: &str) -> Option<Forbidden> {
-    let normalized = normalize_name(name);
-    let tokens: Vec<&str> = normalized
-        .split(|c: char| c == '_' || c.is_whitespace())
-        .filter(|t| !t.is_empty())
-        .collect();
+    classify_in("", name)
+}
+
+/// Le nom du connecteur ne prête que des objets (« Payments » + `create`) : ses
+/// verbes ne rendent jamais interdite une lecture comme `list_payments` d'un
+/// connecteur appelé « Trade ».
+pub fn classify_in(connector: &str, name: &str) -> Option<Forbidden> {
+    let mut words = split(connector);
+    let start = words.len();
+    words.extend(split(name));
+    let tokens: Vec<&str> = words.iter().map(String::as_str).collect();
     RULES
         .iter()
         .find(|rule| {
-            tokens.iter().enumerate().any(|(at, token)| {
+            tokens.iter().enumerate().skip(start).any(|(at, token)| {
                 rule.verbs.contains(token)
-                    && !tokens[..at].iter().any(|t| READ.contains(t))
+                    && !tokens[start..at].iter().any(|t| READ.contains(t))
                     && (rule.objects.is_empty()
                         || rule.objects.iter().any(|object| names(&tokens, object, at)))
             })
         })
         .map(|rule| rule.family)
+}
+
+fn split(name: &str) -> Vec<String> {
+    normalize_name(name)
+        .split(|c: char| c == '_' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Vrai si les mots de `phrase` se suivent dans `tokens` sans recouvrir le verbe en `verb`.
@@ -218,6 +232,20 @@ mod tests {
         assert_eq!(classify("share_passport"), Some(Forbidden::Identity));
         assert_eq!(classify("sendCreditCard"), Some(Forbidden::Identity));
         assert_eq!(classify("upload_id_card"), Some(Forbidden::Identity));
+    }
+
+    #[test]
+    fn a_connector_name_lends_objects_but_never_verbs() {
+        assert_eq!(classify_in("Trade", "list_payments"), None);
+        assert_eq!(classify_in("Buy Me a Coffee", "get_invoice"), None);
+        assert_eq!(classify_in("Buy Me a Coffee", "update_profile"), None);
+        assert_eq!(classify_in("Payments", "create"), Some(Forbidden::Payment));
+        assert_eq!(
+            classify_in("Caisse", "create_payment"),
+            Some(Forbidden::Payment)
+        );
+        assert_eq!(classify_in("Crypto", "buy"), Some(Forbidden::Trading));
+        assert_eq!(classify_in("", "transfer_funds"), Some(Forbidden::Payment));
     }
 
     #[test]

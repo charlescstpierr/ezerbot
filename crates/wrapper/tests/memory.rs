@@ -1035,14 +1035,6 @@ fn manual_add_is_declared_listed_and_found_by_recall_memory() {
         .expect("souvenir absent de /api/memory/all");
     assert_eq!(in_all["provenance"]["source"], "user_stated");
     assert_eq!(in_all["scope"], "private");
-    // Le même texte ne crée pas de doublon.
-    let again = post(
-        &mut app,
-        "/api/memory/add",
-        json!({"bot_id": "grokbot", "text": "Le code du  portail est 4821", "scope": "private"}),
-    );
-    assert_eq!(again["fact"]["fact_id"], added["fact"]["fact_id"]);
-    assert_eq!(list(&mut app, "grokbot").len(), 1);
     // Le bot le retrouve lui-même, sans passer par le modèle pour l'ajout.
     let found = done(
         app.invoke_tool(
@@ -1056,44 +1048,6 @@ fn manual_add_is_declared_listed_and_found_by_recall_memory() {
     // Il reste privé : un autre bot ne le voit pas.
     add_bot(&mut app);
     assert!(list(&mut app, "other").is_empty());
-}
-
-#[test]
-fn manual_add_of_an_existing_text_keeps_scope_private_and_declares_it() {
-    let db = Database::new();
-    let mut app = db.open();
-    // Un fait déduit par le modèle, redéclaré à la main : provenance « déclaré ».
-    let inferred = done(
-        app.invoke_tool(
-            "grokbot",
-            "remember",
-            json!({"text": "Aime le thé vert", "sensitive": false, "source": "model_inferred"}),
-        )
-        .unwrap(),
-    )["fact"]
-        .clone();
-    let declared = post(
-        &mut app,
-        "/api/memory/add",
-        json!({"bot_id": "grokbot", "text": "Aime le thé vert", "scope": "private"}),
-    );
-    assert_ne!(declared["fact"]["fact_id"], inferred["fact_id"]);
-    assert_eq!(declared["fact"]["provenance"]["source"], "user_stated");
-    let listed = list(&mut app, "grokbot");
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0]["provenance"]["source"], "user_stated");
-    // Un fait déjà partagé avec l'équipe n'est jamais renvoyé comme souvenir privé.
-    post(
-        &mut app,
-        "/api/memory/promote",
-        json!({"bot_id": "grokbot", "fact_ids": [declared["fact"]["fact_id"]]}),
-    );
-    let again = post(
-        &mut app,
-        "/api/memory/add",
-        json!({"bot_id": "grokbot", "text": "Aime le thé vert", "scope": "private"}),
-    );
-    assert_eq!(again["fact"]["scope"], "private");
 }
 
 #[test]

@@ -12,7 +12,8 @@
 //! POST children
 //! /forget, /correct and /promote require bot_id and fact_id/text or fact_ids.
 //! POST /api/memory/add {bot_id, text, scope: "private"|"topic", topic_id?} est
-//! l'ajout à la main : provenance « déclaré » (`Source::UserStated`), sans modèle.
+//! l'ajout à la main : provenance « déclaré » (`Source::UserStated`), sans modèle,
+//! sans déduplication (c'est un geste explicite de l'utilisateur).
 //! Promotion accepts ONE batch of <=100; earlier successful requests survive a
 //! later failure (RC03). Forgetting atomically wipes the correction lineage,
 //! redacts run replay/cards and invalidates covering summaries. Regeneration is
@@ -204,50 +205,24 @@ pub fn routes(
                                 "Un souvenir privé ne prend pas de sujet.",
                             ));
                         }
-                        let provenance = Provenance {
-                            conversation_id: None,
-                            entry_id: None,
-                            source: Source::UserStated,
-                        };
-                        let now = crate::now() as i64;
-                        // Seul un souvenir privé de ce bot compte comme doublon (jamais
-                        // un fait d'équipe). Un doublon déduit par le modèle est
-                        // confirmé : la correction le remplace, provenance « déclaré ».
-                        let wanted = normalize(text);
-                        let existing =
-                            facts::list_active(&tx, &input.bot_id)?
-                                .into_iter()
-                                .find(|f| {
-                                    f.bot_id == input.bot_id
-                                        && f.scope == Scope::Private
-                                        && normalize(&f.text) == wanted
-                                });
-                        let fact = match existing {
-                            Some(f) if f.provenance.source == Source::UserStated => f,
-                            Some(f) => facts::correct(
-                                &tx,
-                                &input.bot_id,
-                                &f.fact_id,
-                                text,
-                                &provenance,
-                                now,
-                            )
-                            .map_err(memory_error)?,
-                            None => facts::remember(
-                                &tx,
-                                &Fact {
-                                    fact_id: String::new(),
-                                    bot_id: input.bot_id.clone(),
-                                    scope: Scope::Private,
-                                    text: text.into(),
-                                    provenance,
-                                    learned_at: now,
-                                    status: FactStatus::Active,
-                                    sensitive: false,
+                        let fact = facts::remember(
+                            &tx,
+                            &Fact {
+                                fact_id: String::new(),
+                                bot_id: input.bot_id.clone(),
+                                scope: Scope::Private,
+                                text: text.into(),
+                                provenance: Provenance {
+                                    conversation_id: None,
+                                    entry_id: None,
+                                    source: Source::UserStated,
                                 },
-                            )
-                            .map_err(memory_error)?,
-                        };
+                                learned_at: crate::now() as i64,
+                                status: FactStatus::Active,
+                                sensitive: false,
+                            },
+                        )
+                        .map_err(memory_error)?;
                         json!(fact)
                     }
                 };

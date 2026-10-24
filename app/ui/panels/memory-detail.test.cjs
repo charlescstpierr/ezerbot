@@ -207,6 +207,11 @@ test("quand la liste change autour du panneau : un bot renommé s'y lit, la sais
   h.reload("Zéphyr");
   await h.settle();
   assert.deepEqual([field().value, Element.active === field()], ["Brouillon", true]);
+  h.button("Annuler").click();
+  h.button("Oublier…").click();
+  h.reload("Aurore");
+  await h.settle();
+  assert.equal(Element.active, h.button("Annuler"), "même chose dans la confirmation d'oubli");
 });
 
 test("Oublier demande confirmation ; annuler ne change rien ; confirmer retire le souvenir du graphe, de la Liste et du panneau", async () => {

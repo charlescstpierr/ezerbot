@@ -39,7 +39,7 @@
       const fact = current();
       if (!fact) return;
       shown = stamp(fact);
-      if (!want && mode === "edit" && root.contains(document.activeElement)) want = "body"; // la saisie garde le focus quand la liste change autour d'elle
+      const controls = () => [...root.querySelectorAll("button, textarea")], held = controls().indexOf(document.activeElement); // le focus reste sur le même contrôle quand la liste change autour du panneau
       const editing = mode === "edit", confirming = mode === "confirm", conversation = fact.provenance?.conversation_id;
       const origin = conversation ? button("Ouvrir la conversation", "memory-detail-link", () => { if (!panels.openConversation?.(conversation)) { problem = "Cette conversation n’existe plus, ou une autre action est en cours."; render("origin"); } }, false) : "Hors conversation";
       const rows = [["Bot", label.bot(fact)], ["Origine", origin], ["Appris le", label.date(fact.learned_at)], ["Provenance", SOURCES[fact.provenance?.source] || "Inconnue"], ["Portée", label.scope(fact)]];
@@ -75,6 +75,7 @@
       root.parentElement.dataset.detail = "open";
       mark();
       ({ title, body, back, edit, ask, origin })[want]?.focus();
+      if (!want) controls()[held]?.focus();
     }
     // Le panneau suit le moteur : il ne montre que ce que la dernière lecture contient.
     async function act(path, request, done, forgetting = false) {

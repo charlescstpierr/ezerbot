@@ -1112,3 +1112,35 @@ fn an_open_question_costs_the_same_whatever_the_age_of_its_thread() {
         "1000 older entries: {small} VM instructions, 10000: {large}"
     );
 }
+
+/// VM instructions of one `GET /api/taches` with a refused call, `later` events of the same run, then an accepted question.
+fn refusal_cost(later: usize) -> i32 {
+    let f = Fixture::new();
+    f.turn("turn", 1000);
+    let refused = f.call("turn", "attendre_reponse", json!({"question": ""}));
+    assert!(matches!(refused, ToolOutcome::Failed { .. }));
+    with_tx(&f.conn, |c| {
+        for _ in 0..later {
+            store::append_event(c, "turn", RunEventKind::TextDelta, &json!({"text": "x"}))?;
+        }
+        Ok::<_, grokbot_engine::contracts::Error>(())
+    })
+    .unwrap();
+    f.ask("turn", "Quelle option ?");
+    let mut statement = f.conn.prepare(tasks::SNAPSHOT).unwrap();
+    let rows = statement
+        .query_map(params!["local-workspace", 2_000_000_000i64], |_| Ok(()))
+        .unwrap()
+        .count();
+    assert_eq!(rows, 2);
+    statement.get_status(StatementStatus::VmStep)
+}
+
+#[test]
+fn a_refused_call_does_not_make_the_snapshot_read_the_rest_of_its_run() {
+    let (small, large) = (refusal_cost(1000), refusal_cost(10_000));
+    assert!(
+        large <= 3 * small,
+        "1000 later events: {small} VM instructions, 10000: {large}"
+    );
+}

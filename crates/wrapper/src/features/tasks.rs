@@ -117,8 +117,8 @@ WITH RECURSIVE open_runs AS (
  FROM engine_run_events e INDEXED BY wrapper_question_calls CROSS JOIN live_runs r ON r.run_id=e.run_id
  JOIN wrapper_messages m ON m.account_id=?1 AND m.conversation_id=r.conversation_id AND m.message_id=e.run_id||':'||e.seq AND m.kind='engine_tool'
  WHERE e.kind='tool_call' AND json_extract(e.payload,'$.name')='attendre_reponse'
- AND EXISTS (SELECT 1 FROM engine_run_events x WHERE x.run_id=e.run_id AND x.seq>e.seq AND x.kind='tool_result'
- AND json_extract(x.payload,'$.call_id')=json_extract(e.payload,'$.call_id') AND json_extract(x.payload,'$.outcome.status')='done')
+ AND (SELECT json_extract(x.payload,'$.outcome.status') FROM engine_run_events x WHERE x.run_id=e.run_id AND x.seq>e.seq
+ AND x.kind='tool_result' AND json_extract(x.payload,'$.call_id')=json_extract(e.payload,'$.call_id') ORDER BY x.seq LIMIT 1)='done'
 ), pending AS (
  SELECT q.id,q.run_id,q.entry_id,r.bot_id,c.id AS conversation_id,
  CASE r.trigger_kind WHEN 'delegation' THEN 'delegation' WHEN 'occurrence' THEN 'routine' ELSE 'task' END AS kind,

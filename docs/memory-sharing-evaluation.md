@@ -86,10 +86,12 @@ Règles de `recall::sharing_class`, dans l'ordre :
 La règle est lexicale et volontairement large : un faux positif coûte une
 abstention, une fuite coûte une divulgation. Limite connue : un fait privé sans
 aucun mot de la liste ni possessif, mais avec un mot professionnel
-(« Je cache une situation à l'équipe »), reste `work`. Le sélecteur reste
-indicatif et l'utilisateur confirme toujours le partage.
+(« Je cache une situation à l'équipe »), reste `work`. Coût assumé : des mots
+techniques courants (« traitement par lots », « héritage multiple », « mon projet
+utilise Rust ») sortent de `work` vers `personal` ou `review`. C'est une exactitude `work` plus basse acceptée contre une fuite, pas un
+défaut. Le sélecteur reste indicatif et l'utilisateur confirme toujours le partage.
 
-Anti-sur-ajustement : douze paraphrases inventées hors du jeu (salaire, santé,
+Anti-sur-ajustement : quatorze paraphrases inventées hors du jeu (salaire, santé,
 dettes, vie intime, avec un mot professionnel, dont deux sans aucun sujet
 privé listé) ne doivent jamais être `work` ; quatre faits professionnels
 (dont « Je travaille sur le projet Boréal ») doivent le rester. Elles sont dans les tests de `recall.rs`

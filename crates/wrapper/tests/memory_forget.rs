@@ -549,9 +549,19 @@ fn task_content_is_redacted_without_changing_task_protocol() {
             "remember",
             json!({"text":secret,"sensitive":true}),
         ),
-        call("finish", "complete_task", json!({"summary":secret})),
+        call(
+            "finish",
+            "complete_task",
+            json!({"summary":secret,"captures":[{"id":"screen:seed:1","label":"après","caption":format!("vu : {secret}")}]}),
+        ),
         complete(),
     ]);
+    f.db()
+        .execute(
+            "INSERT INTO wrapper_screen_shots VALUES ('screen:seed:1',?1,'seed','data:image/png;base64,AA')",
+            [&c],
+        )
+        .unwrap();
     f.send(&c, "task", "Retain and summarize the inference.");
     let id = facts::list_active(&f.db(), "grokbot").unwrap()[0]
         .fact_id
@@ -561,7 +571,12 @@ fn task_content_is_redacted_without_changing_task_protocol() {
     assert_eq!(
         run.task_status,
         Some(grokbot_engine::contracts::TaskStatus::Done {
-            summary: "[redacted]".into()
+            summary: "[redacted]".into(),
+            captures: vec![grokbot_engine::contracts::CaptureRef {
+                id: "screen:seed:1".into(),
+                label: grokbot_engine::contracts::CaptureLabel::Apres,
+                caption: "vu : [redacted]".into(),
+            }],
         })
     );
     assert!(!contains(&f.state(), secret));

@@ -104,6 +104,7 @@ impl Fixture {
             if status == RunStatus::Finished && run.kind == RunKind::Task {
                 run.task_status = Some(TaskStatus::Done {
                     summary: "PRIVATE_RESULT".into(),
+                    captures: vec![],
                 });
             }
             store::save(c, &run)

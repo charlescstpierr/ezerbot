@@ -1136,3 +1136,266 @@ fn the_size_limit_counts_the_bytes_of_the_resulting_source() {
     assert_eq!(std::fs::read_to_string(f.file()).unwrap(), resulting);
     assert_eq!(f.page()["status"], "ready");
 }
+
+/// Photo d’une Page ou d’un site local : sans session d’écran, pour un bot comme
+/// pour un sous-bot, rangée comme une capture d’écran. Le rendu est l’image
+/// fictive du mode test (une par thème) ; le rendu natif est un autre ticket.
+#[cfg(debug_assertions)]
+mod photo {
+    use super::*;
+    use grokbot_delegation::graph::{self, DelegationStatus};
+    use grokbot_wrapper::ApiResponse;
+
+    fn shot(id: &str, target: &str, theme: &str) -> ScriptedResponse {
+        Fixture::call(
+            id,
+            "screenshot_page",
+            json!({"target": target, "theme": theme}),
+        )
+    }
+    fn shot_path(conversation: &str, capture: &str) -> String {
+        format!(
+            "/api/screen/shot?conversation_id={}&id={}",
+            conversation.replace(':', "%3A"),
+            capture.replace(':', "%3A")
+        )
+    }
+    fn fixture() -> Fixture {
+        let mut f = Fixture::new();
+        support::ask_before_acting(&mut f.app);
+        f
+    }
+
+    impl Fixture {
+        fn converse(&mut self, id: &str, calls: Vec<ScriptedResponse>) {
+            self.server.seen.lock().unwrap().responses.extend(calls);
+            self.post(
+                "/api/send",
+                json!({"conversation_id":self.chat,"message_id":id,"body":"Photographie ma Page"}),
+            );
+            self.finish(id);
+        }
+        /// L’identifiant que `write_page` rend pour la Page écrite.
+        fn written(&mut self) -> String {
+            self.converse("write", vec![Fixture::tool("page", FIXED)]);
+            let out = self.outcome("write", "page");
+            out["output"]["id"].as_str().unwrap().to_owned()
+        }
+        fn shots(&self) -> i64 {
+            self.db()
+                .query_row("SELECT count(*) FROM wrapper_screen_shots", [], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        }
+        /// Les vignettes des cartes d’outil du fil, telles que l’interface les reçoit.
+        fn thumbnails(&mut self) -> Vec<String> {
+            let state = self.app.api("GET", "/api/state", b"").unwrap();
+            state["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|c| c["messages"].as_array().unwrap())
+                .filter_map(|m| m["payload"]["screen_image"].as_str().map(str::to_owned))
+                .collect()
+        }
+        fn fetch(&mut self, path: &str) -> Vec<u8> {
+            match self.app.api_response("GET", path, b"").unwrap() {
+                ApiResponse::Bytes { body, content_type } => {
+                    assert_eq!(content_type, "image/png");
+                    assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"), "pas un PNG");
+                    body
+                }
+                ApiResponse::Json(value) => panic!("image non binaire : {value}"),
+            }
+        }
+        fn without_screen_session(&mut self) {
+            let state = self.app.api("GET", "/api/state", b"").unwrap();
+            assert_eq!(state["screen"]["session"], Value::Null);
+            assert_eq!(state["screen"]["bots"], json!([]));
+        }
+    }
+
+    #[test]
+    fn a_page_photo_gives_an_image_and_a_capture_id_usable_in_the_same_thread() {
+        let mut f = fixture();
+        let page = f.written();
+        f.converse("photo", vec![shot("shot", &page, "light")]);
+        let out = f.outcome("photo", "shot");
+        assert_eq!(out["status"], "done", "{out}");
+        assert_eq!(out["output"]["target"], page);
+        assert_eq!(out["output"]["width"], 1280);
+        assert_eq!(out["output"]["height"], 800);
+        let capture = out["output"]["capture_id"].as_str().unwrap();
+        let chat = f.chat.clone();
+        let image = f.fetch(&shot_path(&chat, capture));
+
+        // La vignette de la carte d’outil du fil montre cette image.
+        let thumbnails = f.thumbnails();
+        assert_eq!(thumbnails.len(), 1, "{thumbnails:?}");
+        assert_eq!(f.fetch(&thumbnails[0]), image);
+
+        // Le modèle reçoit l’image au tour suivant, présentée comme une photo de Page.
+        let bodies = f.server.seen.lock().unwrap().bodies.clone();
+        let last = bodies.last().unwrap().to_string();
+        assert!(last.contains("data:image/png;base64,"), "image absente");
+        assert!(last.contains("Photo de la Page ou du site local"));
+        assert!(!last.contains("Coordonnées en pixels"));
+        f.without_screen_session();
+    }
+
+    #[test]
+    fn refused_targets_leave_no_capture_and_a_local_site_is_photographed() {
+        let mut f = fixture();
+        f.converse("broken", vec![Fixture::tool("page", BROKEN)]);
+        let broken = f.page()["id"].as_str().unwrap().to_owned();
+        let missing = format!("page_{}", "0".repeat(64));
+        f.converse(
+            "refus",
+            vec![
+                shot("internet", "https://example.com/", "light"),
+                shot("file", "file:///Users/charles/.ssh/id_ed25519", "light"),
+                shot("missing", &missing, "light"),
+                shot("unready", &broken, "light"),
+                shot("bad-theme", "http://localhost:3000/", "sepia"),
+            ],
+        );
+        for call in ["internet", "file"] {
+            let out = f.outcome("refus", call);
+            assert_eq!(out["status"], "failed", "{call}");
+            assert!(out["reason"].as_str().unwrap().contains("localhost"));
+        }
+        assert_eq!(
+            f.outcome("refus", "missing")["reason"],
+            "Cette Page est introuvable."
+        );
+        let unready = f.outcome("refus", "unready");
+        assert!(unready["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("Cette Page n’est pas prête"));
+        assert_eq!(f.outcome("refus", "bad-theme")["status"], "failed");
+        assert_eq!(f.shots(), 0);
+
+        f.converse(
+            "local",
+            vec![shot("site", "http://localhost:5173/accueil?x=1", "light")],
+        );
+        assert_eq!(f.outcome("local", "site")["status"], "done");
+        assert_eq!(f.shots(), 1);
+    }
+
+    #[test]
+    fn light_and_dark_give_two_different_images_and_light_is_the_default() {
+        let mut f = fixture();
+        let page = f.written();
+        f.converse(
+            "themes",
+            vec![
+                shot("clair", &page, "light"),
+                shot("sombre", &page, "dark"),
+                Fixture::call("defaut", "screenshot_page", json!({"target": page})),
+            ],
+        );
+        let thumbnails = f.thumbnails();
+        assert_eq!(thumbnails.len(), 3, "{thumbnails:?}");
+        let images: Vec<_> = thumbnails.iter().map(|path| f.fetch(path)).collect();
+        assert_ne!(images[0], images[1]);
+        assert_eq!(images[0], images[2]);
+    }
+
+    #[test]
+    fn a_sub_bot_without_a_screen_session_photographs_a_page_but_not_the_screen() {
+        let mut f = Fixture::new();
+        f.post(
+            "/api/bots",
+            json!({"id":"child","name":"child","color":"citron","description":"Worker","instructions":""}),
+        );
+        let mut seen = f.server.seen.lock().unwrap();
+        seen.responses.push_back(Fixture::call(
+            "delegate-call",
+            "delegate",
+            json!({"child_bot":"child","objective":"Photographier la Page","selected_context":{"texts":[],"entry_ids":[],"fact_ids":[],"skill_ids":[]}}),
+        ));
+        // Le sous-bot photographie l’identifiant que son propre write_page a rendu,
+        // puis tente l’écran du Mac.
+        seen.responses.push_back(Fixture::tool("child-page", FIXED));
+        seen.responses.push_back(Fixture::call(
+            "child-screen",
+            "computer_screenshot",
+            json!({}),
+        ));
+        seen.responses.push_back(Fixture::call(
+            "finish-child",
+            "complete_task",
+            json!({"summary":"Page photographiée"}),
+        ));
+        seen.reply_for = Some(Arc::new(|body: &Value| {
+            let outputs = body["input"].as_array()?;
+            let last = outputs
+                .iter()
+                .rfind(|i| i["type"] == "function_call_output")?;
+            if last["call_id"] != "child-page" {
+                return None;
+            }
+            let text = last["output"].to_string();
+            let id = text.get(text.find("page_")?..)?.get(..69)?;
+            Some(Fixture::call(
+                "child-shot",
+                "screenshot_page",
+                json!({"target":id,"theme":"dark"}),
+            ))
+        }));
+        drop(seen);
+        f.post(
+            "/api/send",
+            json!({"conversation_id":f.chat,"message_id":"parent","body":"Délègue la photo"}),
+        );
+        wait("parent waits for the child", || {
+            f.run("parent").status == RunStatus::AwaitingChildren
+        });
+        let edge = graph::descendants(&f.db(), &f.run("parent").run_id)
+            .unwrap()
+            .remove(0);
+        f.app.tick(now());
+        wait("child done", || {
+            matches!(
+                graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
+                DelegationStatus::Done { .. }
+            )
+        });
+        wait("owner released", || f.provider.status()["titling"] == false);
+
+        let child_thread = edge.conversation_id.clone().unwrap();
+        let child_run = graph::get(&f.db(), &edge.id).unwrap().unwrap().child_run_id;
+        let (capture, conversation, run): (String, String, String) = f
+            .db()
+            .query_row(
+                "SELECT id, conversation_id, run_id FROM wrapper_screen_shots",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(conversation, child_thread);
+        assert_ne!(conversation, f.chat);
+        assert_eq!(Some(run), child_run);
+        assert!(!f.fetch(&shot_path(&child_thread, &capture)).is_empty());
+
+        // L’écran du Mac reste refusé au sous-bot : aucune session, aucune seconde capture.
+        let refused = store::events(&f.db(), child_run.as_deref().unwrap(), 0)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == "child-screen")
+            .unwrap()
+            .payload["outcome"]
+            .clone();
+        assert_eq!(refused["status"], "failed", "{refused}");
+        assert_eq!(f.shots(), 1);
+        f.without_screen_session();
+        // La capture du sous-bot ne s’ouvre pas depuis le fil du parent.
+        assert!(f
+            .app
+            .api_response("GET", &shot_path(&f.chat, &capture), b"")
+            .is_err());
+    }
+}

@@ -208,6 +208,54 @@ def recall_turn(items: list) -> bytes | None:
     return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
 
 
+CAPTURE_MARKER = "PREUVE-CAPTURES"
+
+
+def _strings(node: object):
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for value in node.values():
+            yield from _strings(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _strings(value)
+
+
+def _call(call_id: str, name: str, arguments: dict) -> bytes:
+    call = {"id": f"fc-{call_id}", "type": "function_call", "status": "completed", "call_id": call_id, "name": name, "arguments": json.dumps(arguments)}
+    return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
+
+
+def capture_turn(payload: dict, instructions: str, items: list) -> bytes | None:
+    """Un sous-bot dessine une image avant puis une après, tente une capture inventée, puis termine avec les vraies."""
+    asked = CAPTURE_MARKER in json.dumps(items, ensure_ascii=False)
+    outputs = [item for item in items if isinstance(item, dict) and item.get("type") == "function_call_output"]
+    last = outputs[-1].get("call_id") if outputs else None
+    if "You are executing a Task" in instructions and asked:
+        shot = lambda step: next((m for o in outputs if o.get("call_id") == step for m in re.findall(r"attachment_id[^A-Za-z0-9]+([A-Za-z0-9_.-]+)", str(o.get("output")))), "")
+        if last is None:
+            return _call("verify-cap-before", "generate_image", {"description": "la page avant le changement", "aspect_ratio": "16:9"})
+        if last == "verify-cap-before":
+            return _call("verify-cap-after", "generate_image", {"description": "la page après le changement", "aspect_ratio": "9:16"})
+        if last == "verify-cap-after":
+            return _call("verify-cap-bad", "complete_task", {"summary": "Page modifiée.", "captures": [{"id": "image-inventee", "label": "avant", "caption": "Capture inventée"}]})
+        if last == "verify-cap-bad":
+            captures = [
+                {"id": shot("verify-cap-before"), "label": "avant", "caption": "Page avant le changement"},
+                {"id": shot("verify-cap-after"), "label": "après", "caption": "Page après le changement"},
+            ]
+            return _call("verify-cap-done", "complete_task", {"summary": "Page modifiée, voir les captures.", "captures": captures})
+        return _sse([{"type": "response.output_text.delta", "delta": "Terminé."}, {"type": "response.completed"}])
+    if last == "verify-cap-delegate":
+        received = next((line for text in _strings(payload) for line in text.splitlines() if "child_results" in line), "")
+        return _sse([{"type": "response.output_text.delta", "delta": f"Résultat reçu du sous-bot : {received}"}, {"type": "response.completed"}])
+    if last is None and "délègue avec captures" in _last_user_text(items):
+        args = {"child_bot": "child", "objective": f"{CAPTURE_MARKER} : photographie l'écran avant puis après", "selected_context": {"texts": [], "entry_ids": [], "fact_ids": [], "skill_ids": []}}
+        return _call("verify-cap-delegate", "delegate", args)
+    return None
+
+
 def parent_message(instructions: str) -> str:
     """Le message parent d'un sous-fil : bloc de données externes JSON dans les instructions."""
     for found in re.finditer(r"<external_data[^>]*>\n(.*?)\n</external_data>", instructions, re.S):
@@ -268,6 +316,9 @@ def response_body(raw: bytes) -> bytes:
     yolo = yolo_turn(items)
     if yolo is not None:
         return yolo
+    captured = capture_turn(payload, instructions, items)
+    if captured is not None:
+        return captured
     recall = recall_turn(items)
     if recall is not None:
         return recall
@@ -293,6 +344,18 @@ def response_body(raw: bytes) -> bytes:
                 {"type": "response.completed"},
             ]
         )
+    if outputs and outputs[-1].get("call_id") == "verify-shotpage-write":
+        # La Page vient d'être écrite : la photographier avec l'identifiant que write_page a rendu.
+        found = re.search(r"page_[0-9a-f]{64}", str(outputs[-1].get("output")))
+        call = {
+            "id": "fc-verify-shotpage",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-shotpage",
+            "name": "screenshot_page",
+            "arguments": json.dumps({"target": found.group(0) if found else "page_introuvable", "theme": "light" if "en clair" in _last_user_text(items) else "dark"}),
+        }
+        return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
     # Petit changement d'une Page déjà écrite : edit_page, l'id étant celui de write_page pour ce bot et ce fichier.
     page_id = "page_" + hashlib.sha256(b"grokbot\0forfaits.page.tsx").hexdigest()
     last_text = "" if items and isinstance(items[-1], dict) and items[-1].get("type") == "function_call_output" else _last_user_text(items)
@@ -317,7 +380,13 @@ def response_body(raw: bytes) -> bytes:
             waiting = "En attente" in str(outputs[-1].get("output"))
             done = "J’attends son accord pour envoyer le résumé." if waiting else "Tu as approuvé : envoyer le résumé. C’est parti. Le résumé est envoyé."
         else:
-            done = "Voici la Page." if last == "verify-page" else "La Page est modifiée." if last == "verify-edit" else "Le passage n’est pas unique." if last == "verify-edit-double" else "La tâche tourne." if str(last).startswith("verify-task") else "Voici l’image."
+            done = {
+                "verify-page": "Voici la Page.",
+                "verify-edit": "La Page est modifiée.",
+                "verify-edit-double": "Le passage n’est pas unique.",
+                "verify-shotpage": "Voici la photo de la Page.",
+                "verify-shotnet": "La photo a été refusée.",
+            }.get(last) or ("La tâche tourne." if str(last).startswith("verify-task") else "Voici l’image.")
         return _sse(
             [
                 {"type": "response.output_text.delta", "delta": done},
@@ -355,6 +424,26 @@ def response_body(raw: bytes) -> bytes:
                 {"type": "response.completed"},
             ]
         )
+    if "photographie internet" in _last_user_text(items):
+        call = {
+            "id": "fc-verify-shotnet",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-shotnet",
+            "name": "screenshot_page",
+            "arguments": json.dumps({"target": "https://example.com/"}),
+        }
+        return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
+    if "photographie la page des forfaits" in _last_user_text(items):
+        call = {
+            "id": "fc-verify-shotpage-write",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-shotpage-write",
+            "name": "write_page",
+            "arguments": json.dumps({"name": "forfaits.page.tsx", "title": "Trois forfaits", "source": PAGE_SOURCE}),
+        }
+        return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
     if "une page des forfaits" in json.dumps(items, ensure_ascii=False).lower():
         call = {
             "id": "fc-verify-page",

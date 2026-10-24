@@ -571,6 +571,7 @@ fn completed_before_batch_suspension_wake_is_delivered_with_the_group() {
     let mut child = model::set_running_at(&tx, edge.child_run_id.as_ref().unwrap(), 100).unwrap();
     child.task_status = Some(TaskStatus::Done {
         summary: "early summary".into(),
+        captures: vec![],
     });
     store::save(&tx, &child).unwrap();
     let event = store::append_event(
@@ -618,6 +619,7 @@ fn completed_before_batch_suspension_wake_is_delivered_with_the_group() {
     let mut child = model::set_running_at(&tx, later.child_run_id.as_ref().unwrap(), 100).unwrap();
     child.task_status = Some(TaskStatus::Done {
         summary: "later summary".into(),
+        captures: vec![],
     });
     store::save(&tx, &child).unwrap();
     let event = store::append_event(
@@ -656,6 +658,7 @@ fn routines_and_all_delegated_result_tails_survive_assembly() {
             &id,
             &DelegationStatus::Done {
                 result: format!("CHILD_{n}_BEGIN{}CHILD_{n}_END", "x".repeat(7_000)),
+                captures: vec![],
             },
         )
         .unwrap();
@@ -1070,6 +1073,7 @@ fn newest_long_results_and_all_wakees_fit_the_rendered_context_budget() {
             &id,
             &DelegationStatus::Done {
                 result: format!("SUMMARY_{n}_BEGIN{}", "\n\"\\".repeat(10_000)),
+                captures: vec![],
             },
         )
         .unwrap();
@@ -1318,6 +1322,7 @@ fn state_history_is_bounded_and_idle_tick_takes_no_writer_lock() {
             &id,
             &DelegationStatus::Done {
                 result: "historical".into(),
+                captures: vec![],
             },
         )
         .unwrap();
@@ -1338,6 +1343,7 @@ fn state_history_is_bounded_and_idle_tick_takes_no_writer_lock() {
         &active,
         &DelegationStatus::Done {
             result: "done".into(),
+            captures: vec![],
         },
     )
     .unwrap();
@@ -1639,6 +1645,7 @@ fn queued_child_starts_when_slot_frees() {
     let mut child = model::set_running_at(&tx, first.child_run_id.as_ref().unwrap(), 100).unwrap();
     child.task_status = Some(TaskStatus::Done {
         summary: "first complete".into(),
+        captures: vec![],
     });
     store::save(&tx, &child).unwrap();
     let event = store::append_event(
@@ -1900,7 +1907,7 @@ fn hook_storage_failure_is_reconciled_on_tick() {
     db.execute_batch("DROP TRIGGER reject_child_wake").unwrap();
     f.tick();
     assert!(
-        matches!(graph::get(&db, &edge.id).unwrap().unwrap().status, DelegationStatus::Done { result } if result=="Recovered summary")
+        matches!(graph::get(&db, &edge.id).unwrap().unwrap().status, DelegationStatus::Done { result, .. } if result=="Recovered summary")
     );
     assert_eq!(
         store::pending_wakes(&db)
@@ -2075,6 +2082,7 @@ fn delegation_call_retries_keep_binding_and_terminal_result() {
         &id,
         &DelegationStatus::Done {
             result: "stable result".into(),
+            captures: vec![],
         },
     )
     .unwrap();
@@ -2528,7 +2536,7 @@ fn followup_during_final_text_gets_another_model_call() {
     gate.store(true, Ordering::SeqCst);
     wait(
         "follow-up after text",
-        || matches!(graph::get(&f.db(),&edge.id).unwrap().unwrap().status,DelegationStatus::Done{ref result} if result == "Nouvelle réponse"),
+        || matches!(graph::get(&f.db(),&edge.id).unwrap().unwrap().status,DelegationStatus::Done{ref result, ..} if result == "Nouvelle réponse"),
     );
     let body = f
         .server
@@ -3173,7 +3181,7 @@ fn running_followup_beats_stale_completion_and_reaches_same_child_run() {
     gate.store(true, Ordering::SeqCst);
     wait(
         "updated task completion",
-        || matches!(graph::get(&f.db(),&edge.id).unwrap().unwrap().status,DelegationStatus::Done{ref result} if result.contains("française")),
+        || matches!(graph::get(&f.db(),&edge.id).unwrap().unwrap().status,DelegationStatus::Done{ref result, ..} if result.contains("française")),
     );
     assert!(f
         .server
@@ -3790,4 +3798,414 @@ fn thread_scope_places_a_task_turn_by_its_reply_entry() {
     f.shell_task(&after, "sh", "terminé", Some(0), "echo après");
     let caller = f.run_in("caller", "grokbot", &c, 500);
     assert_eq!(summaries(&f.fil(&caller)), ["echo après"]);
+}
+
+mod captures {
+    use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use grokbot_wrapper::ApiResponse;
+
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+
+    /// A screen capture stored in a thread, as `computer_screenshot` does.
+    fn shot(f: &Fixture, conversation: &str, id: &str) {
+        f.db()
+            .execute(
+                "INSERT INTO wrapper_screen_shots VALUES (?1,?2,'run',?3)",
+                rusqlite::params![id, conversation, format!("data:image/png;base64,{PNG}")],
+            )
+            .unwrap();
+    }
+    /// An image attached to a message of a thread.
+    fn attached(f: &mut Fixture, conversation: &str) -> String {
+        let id = f
+            .app
+            .api("POST", "/api/attachments", &STANDARD.decode(PNG).unwrap())
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        grokbot_attachments::staging::link_attachments(
+            &f.db(),
+            conversation,
+            "joined",
+            std::slice::from_ref(&id),
+        )
+        .unwrap();
+        id
+    }
+    fn capture(id: &str, label: &str, caption: &str) -> Value {
+        json!({"id":id,"label":label,"caption":caption})
+    }
+    fn complete(f: &Fixture, summary: &str, captures: Value) {
+        static ATTEMPT: AtomicUsize = AtomicUsize::new(0);
+        let id = format!("finish-child-{}", ATTEMPT.fetch_add(1, Ordering::SeqCst));
+        f.events(vec![
+            call(
+                &id,
+                "complete_task",
+                json!({"summary":summary,"captures":captures}),
+            ),
+            completed(),
+        ]);
+    }
+    fn status(f: &Fixture, edge: &Delegation) -> DelegationStatus {
+        graph::get(&f.db(), &edge.id).unwrap().unwrap().status
+    }
+    fn card(f: &mut Fixture, edge: &Delegation) -> Value {
+        f.app.api("GET", "/api/state", b"").unwrap()["delegation"]["delegations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == edge.id)
+            .unwrap()
+            .clone()
+    }
+    fn image(f: &mut Fixture, url: &str) -> Vec<u8> {
+        match f.app.api_response("GET", url, &[]).unwrap() {
+            ApiResponse::Bytes { content_type, body } => {
+                assert_eq!(content_type, "image/png");
+                body
+            }
+            ApiResponse::Json(_) => panic!("{url} should serve an image"),
+        }
+    }
+
+    #[test]
+    fn a_child_joins_before_and_after_in_order_and_the_parent_only_reads_a_count() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (parent, edge) = f.begin(&c, "captures", args("child"));
+        let thread = edge.conversation_id.clone().unwrap();
+        shot(&f, &thread, "screen:run:before");
+        let after = attached(&mut f, &thread);
+        let long = "x".repeat(12_000);
+        complete(
+            &f,
+            &long,
+            json!([
+                capture("screen:run:before", "avant", "Page vide"),
+                capture(&after, "après", "Page remplie"),
+            ]),
+        );
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        let DelegationStatus::Done { captures, .. } = status(&f, &edge) else {
+            unreachable!()
+        };
+        let refs: Vec<_> = captures
+            .iter()
+            .map(|c| (c.id.as_str(), c.label.as_str()))
+            .collect();
+        assert_eq!(
+            refs,
+            [("screen:run:before", "avant"), (after.as_str(), "après")]
+        );
+        // The card reads the references, in order, with a served thumbnail each,
+        // next to a result that is still bounded.
+        let shown = card(&mut f, &edge);
+        assert!(shown["status"]["result"].as_str().unwrap().chars().count() <= 8_000);
+        let urls: Vec<_> = shown["status"]["captures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["label"].as_str().unwrap(),
+                    c["caption"].as_str().unwrap(),
+                    c["url"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(urls[0].0, "avant");
+        assert_eq!(urls[0].1, "Page vide");
+        assert_eq!(urls[1].0, "après");
+        assert_eq!(urls[1].2, format!("/api/attachments/{after}"));
+        for (_, _, url) in &urls {
+            assert!(image(&mut f, url).starts_with(b"\x89PNG"));
+        }
+        // The parent bot reads a count and the labels: no id, caption or image bytes.
+        f.resume(&c, "captures");
+        let seen = f.server.seen.lock().unwrap();
+        let text = seen.bodies.last().unwrap().to_string();
+        assert!(text.contains("2 captures jointes (avant, après)"), "{text}");
+        for hidden in [
+            "screen:run:before",
+            after.as_str(),
+            "Page vide",
+            "Page remplie",
+            "base64",
+            "data:image",
+            "iVBOR",
+            "/api/",
+        ] {
+            assert!(!text.contains(hidden), "le parent lit « {hidden} »");
+        }
+        drop(seen);
+        assert_eq!(f.run(&c, "captures").run_id, parent.run_id);
+        // check_delegations is read by the parent bot too: no reference, no image bytes.
+        f.events(vec![
+            call("fil", "check_delegations", json!({"portee":"fil"})),
+            completed(),
+        ]);
+        f.events(vec![
+            json!({"type":"response.output_text.delta","delta":"Voilà."}),
+            completed(),
+        ]);
+        f.send(&c, "recheck", "Où en est ma tâche ?");
+        f.wait_parent(&c, "recheck", RunStatus::Finished);
+        let text = f
+            .server
+            .seen
+            .lock()
+            .unwrap()
+            .bodies
+            .last()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("portee"));
+        for hidden in [
+            "screen:run:before",
+            after.as_str(),
+            "Page vide",
+            "Page remplie",
+            "base64",
+            "iVBOR",
+        ] {
+            assert!(
+                !text.contains(hidden),
+                "check_delegations donne « {hidden} »"
+            );
+        }
+    }
+
+    #[test]
+    fn captures_that_are_not_this_threads_or_invalid_are_refused_and_the_child_can_retry() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "refus", args("child"));
+        let thread = edge.conversation_id.clone().unwrap();
+        shot(&f, &thread, "screen:run:own");
+        shot(&f, &c, "screen:run:parent");
+        let elsewhere = attached(&mut f, &c);
+        let five: Vec<_> = (0..5)
+            .map(|_| capture("screen:run:own", "avant", "x"))
+            .collect();
+        let bad = [
+            json!([capture("screen:run:parent", "avant", "d'un autre fil")]),
+            json!([capture(&elsewhere, "après", "image jointe d'un autre fil")]),
+            json!([capture("inventé", "avant", "inconnue")]),
+            json!([capture("screen:run:own", "pendant", "étiquette inconnue")]),
+            json!(five),
+        ];
+        // One response per attempt, queued in order: each refusal goes back to the child.
+        for captures in bad {
+            complete(&f, "fini", captures);
+        }
+        complete(
+            &f,
+            "fini",
+            json!([capture("screen:run:own", "avant", "ok")]),
+        );
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        let fil = f.db();
+        let refusals: Vec<String> = store::events(&fil, edge.child_run_id.as_ref().unwrap(), 0)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == RunEventKind::ToolResult)
+            .map(|e| {
+                e.payload["outcome"]["status"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .collect();
+        assert!(
+            refusals.iter().filter(|s| *s == "failed").count() >= 5,
+            "{refusals:?}"
+        );
+        let DelegationStatus::Done { captures, .. } = status(&f, &edge) else {
+            unreachable!()
+        };
+        assert_eq!(captures.len(), 1);
+        assert_eq!(captures[0].id, "screen:run:own");
+    }
+
+    #[test]
+    fn without_captures_the_result_is_what_it_was() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "sans", args("child"));
+        f.child_done(&edge);
+        assert_eq!(
+            status(&f, &edge),
+            DelegationStatus::Done {
+                result: "Verified child summary".into(),
+                captures: vec![],
+            }
+        );
+        let stored: String = f
+            .db()
+            .query_row(
+                "SELECT status FROM delegation_graph WHERE id=?1",
+                [&edge.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains("captures"), "{stored}");
+        assert!(card(&mut f, &edge)["status"].get("captures").is_none());
+        f.resume(&c, "sans");
+        let text = f
+            .server
+            .seen
+            .lock()
+            .unwrap()
+            .bodies
+            .last()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("Verified child summary"), "{text}");
+        assert!(!text.contains("capture jointe") && !text.contains("captures jointes"));
+    }
+
+    #[test]
+    fn deleting_the_thread_removes_every_reference_from_the_card() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "efface", args("child"));
+        let thread = edge.conversation_id.clone().unwrap();
+        shot(&f, &thread, "screen:run:own");
+        let attachment = attached(&mut f, &thread);
+        complete(
+            &f,
+            "fini",
+            json!([
+                capture("screen:run:own", "avant", "Page"),
+                capture(&attachment, "après", "Page remplie"),
+            ]),
+        );
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        let urls: Vec<String> = card(&mut f, &edge)["status"]["captures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["url"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(urls.len(), 2);
+        assert!(image(&mut f, &urls[0]).starts_with(b"\x89PNG"));
+        f.post("/api/conversations/delete", json!({"id":thread}));
+        f.tick();
+        // The screen pixels are purged with the thread and the card shows no reference at all.
+        assert_eq!(
+            f.app.api_response("GET", &urls[0], &[]).unwrap_err().status,
+            404
+        );
+        let left: i64 = f
+            .db()
+            .query_row(
+                "SELECT count(*) FROM wrapper_screen_shots WHERE conversation_id=?1",
+                [&thread],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+        assert!(card(&mut f, &edge)["status"].get("captures").is_none());
+        assert_eq!(card(&mut f, &edge)["status"]["result"], "fini");
+    }
+
+    #[test]
+    fn masking_a_secret_hides_its_text_but_never_breaks_a_reference() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "masque", args("child"));
+        let thread = edge.conversation_id.clone().unwrap();
+        shot(&f, &thread, "screen:run:before");
+        complete(
+            &f,
+            "fini",
+            json!([capture(
+                "screen:run:before",
+                "avant",
+                "Page avec CLE-SECRETE-9"
+            )]),
+        );
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        // One secret appears in the caption; another one overlaps the generated id and route.
+        let vault = Vault::open(&f.path.with_extension("secrets.json")).unwrap();
+        vault.set("legende", "test", "CLE-SECRETE-9").unwrap();
+        vault.set("recoupe", "test", "screen:run:be").unwrap();
+        let shown = card(&mut f, &edge);
+        let reference = &shown["status"]["captures"][0];
+        assert_eq!(reference["id"], "screen:run:before");
+        assert!(!reference["caption"]
+            .as_str()
+            .unwrap()
+            .contains("CLE-SECRETE-9"));
+        let url = reference["url"].as_str().unwrap().to_owned();
+        assert!(url.contains("screen%3Arun%3Abefore"), "{url}");
+        assert!(image(&mut f, &url).starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn forgetting_a_fact_also_clears_it_from_the_captions_the_card_shows() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "oubli", args("child"));
+        let thread = edge.conversation_id.clone().unwrap();
+        shot(&f, &thread, "screen:run:own");
+        let secret = "Allergique aux kumquats mauves.";
+        f.events(vec![
+            call(
+                "learn",
+                "remember",
+                json!({"text":secret,"sensitive":true}),
+            ),
+            call(
+                "finish-child",
+                "complete_task",
+                json!({"summary":"fini","captures":[capture("screen:run:own", "avant", &format!("Vu : {secret}"))]}),
+            ),
+            completed(),
+        ]);
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        assert!(card(&mut f, &edge)["status"]["captures"][0]["caption"]
+            .as_str()
+            .unwrap()
+            .contains(secret));
+        let fact = grokbot_memory::facts::list_active(&f.db(), "child").unwrap()[0]
+            .fact_id
+            .clone();
+        f.post(
+            "/api/memory/forget",
+            json!({"bot_id":"child","fact_id":fact}),
+        );
+        let shown = card(&mut f, &edge);
+        let reference = &shown["status"]["captures"][0];
+        assert_eq!(reference["id"], "screen:run:own");
+        assert_eq!(reference["label"], "avant");
+        assert!(!reference["caption"].as_str().unwrap().contains(secret));
+        let stored: String = f
+            .db()
+            .query_row(
+                "SELECT status FROM delegation_graph WHERE id=?1",
+                [&edge.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains(secret), "{stored}");
+    }
 }

@@ -523,7 +523,8 @@ fn tool_loop_runs_until_complete_task() {
     assert_eq!(
         run.task_status,
         Some(TaskStatus::Done {
-            summary: "Learned".into()
+            summary: "Learned".into(),
+            captures: vec![],
         })
     );
     let events = store::events(&f.db(), &run.run_id, 0).unwrap();

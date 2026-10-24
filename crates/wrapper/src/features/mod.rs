@@ -103,6 +103,7 @@ pub mod memory;
 pub mod memory_auto;
 pub mod multibot;
 pub mod notifications;
+pub mod page_snapshot;
 pub mod pages;
 pub mod recall;
 pub mod routine_calendar;
@@ -190,6 +191,7 @@ registry!(
     meetings,
     recall,
     screen,
+    page_snapshot,
     templates,
     demonstrations,
     updates

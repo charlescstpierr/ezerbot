@@ -7,7 +7,12 @@ import { composerConnectionState } from "./connection-view.js";
 // Exercise the actual shell function with a small editor/DOM adapter, without
 // adding a second copy of its task/group/composer policy to the tests.
 const shell = readFileSync(new URL("../../ui/app.js", import.meta.url), "utf8");
-const updateSource = shell.slice(shell.indexOf("  function updateComposer()"), shell.indexOf("  function selectConversation("));
+// Only updateComposer itself: from its signature to the closing brace at the same indent, so
+// whatever app.js declares around it (comments, neighbouring functions) cannot reach the sandbox.
+const start = shell.indexOf("  function updateComposer()");
+const end = shell.indexOf("\n  }\n", start);
+assert.ok(start >= 0 && end > start, "updateComposer must be found in app/ui/app.js");
+const updateSource = shell.slice(start, end + "\n  }".length);
 function composer(kind = "task") {
   const ctx = { active: true, streaming: true, conversation: { id: "thread", kind, messages: [] } };
   const removed = [], discarded = [], mascots = [];

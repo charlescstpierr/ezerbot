@@ -21,7 +21,9 @@
   let button, bar, label, transcript, heldNotice, stop, mute, leave, systemSettings;
   let phase = "idle", detail = "", liveText = "", lastUtterance = 0, lastBarge = 0, paused = false, sending = false;
   // Mirror of the bridge `muted`, read from its answers: the click sends the command, the screen follows the reply.
-  let muted = false;
+  // Only the answer to the latest request that carries `muted` may change it; `muteWanted` is the state the next gesture flips.
+  let muted = false, muteWanted = false, muteSeq = 0;
+  const applyMuted = (seq, value) => { if (seq !== muteSeq) return false; muted = muteWanted = Boolean(value); return true; };
   let inputHeld = false, followResumedReply = false;
   let voicesLoaded = false;
   const botViews = new Set();
@@ -47,7 +49,7 @@
     bar.hidden = phase === "idle";
     // A muted microphone wins over the listening and speaking labels: neither invites the user to speak.
     const shown = muted && ["listening","speaking"].includes(phase) ? "muted" : phase;
-    label.textContent = detail || ({authorizing:"Autorisation du microphone…",muted:"Micro coupé · le bot ne vous entend pas",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:"En attente de vous · répondez dans la carte",sending:"Envoi de la transcription…"}[shown] || "");
+    label.textContent = detail || ({authorizing:"Autorisation du microphone…",muted:"Micro coupé · le bot ne vous entend pas",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:`En attente de vous · répondez dans la carte${muted ? " · micro coupé" : ""}`,sending:"Envoi de la transcription…"}[shown] || "");
     bar.dataset.phase = shown;
     bar.dataset.tone = detail ? "danger" : "";
     transcript.textContent = muted ? "" : liveText || "Votre transcription apparaîtra ici. L’audio reste sur ce Mac.";
@@ -69,7 +71,7 @@
     clearTimeout(timer); epoch++;
     if (token) bridge("cancel").catch(() => {});
     token = ""; reader = null; conversationId = null; sending = false; paused = false;
-    inputHeld = false; followResumedReply = false; muted = false;
+    inputHeld = false; followResumedReply = false; muted = muteWanted = false;
     if (clear) { phase = "idle"; detail = ""; liveText = ""; scopeKey = null; }
     render(); panels.composerChanged();
   }
@@ -96,10 +98,12 @@
   }
   async function toggleMute() {
     if (!active() || phase === "authorizing") return;
-    const rev = epoch, receipt = await bridge(muted ? "unmute" : "mute");
+    muteWanted = !muteWanted;
+    const rev = epoch, seq = ++muteSeq, receipt = await bridge(muteWanted ? "mute" : "unmute");
     if (rev !== epoch) return;
     if (errors[receipt.status]) { fail(receipt.status); return; }
-    muted = Boolean(receipt.muted); if (muted) liveText = "";
+    if (!applyMuted(seq, receipt.muted)) return;
+    if (muted) liveText = "";
     // Unmuting listens again to the chosen microphone, which may have gone while muted.
     if (!muted && receipt.microphone_fallback) window.EzerbotMicrophone?.fellBack(window.EzerbotMicrophone.current());
     render();
@@ -118,7 +122,7 @@
     token = crypto.randomUUID(); settingsToken = token; conversationId = ctx.conversation?.id; scopeKey = contextKey(ctx);
     reader = window.GrokbotChat.createVoiceReader(ctx.conversation?.messages || []);
     phase = "authorizing"; detail = ""; liveText = ""; lastUtterance = 0; lastBarge = 0; paused = false;
-    inputHeld = false; followResumedReply = false; muted = false;
+    inputHeld = false; followResumedReply = false; muted = muteWanted = false;
     const rev = ++epoch;
     render(); panels.composerChanged();
     try {
@@ -151,12 +155,12 @@
     if (ticking) { schedule(rev); return; }
     ticking = true;
     try {
-      const result = await bridge("status");
+      const seq = ++muteSeq, result = await bridge("status");
       if (rev !== epoch) return;
       if (errors[result.status] || result.status === "idle") { fail(result.status); return; }
       if (result.status === "authorizing") { phase = "authorizing"; render(); return; }
       if (result.token !== token) { fail("stale"); return; }
-      muted = Boolean(result.muted);
+      applyMuted(seq, result.muted);
       if (muted) liveText = ""; else if (result.transcript) liveText = result.transcript;
       const needsAction = window.GrokbotChat.voiceNeedsAction(ctx.conversation?.messages || []);
       if (result.barged > lastBarge) {

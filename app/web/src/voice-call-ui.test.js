@@ -27,6 +27,7 @@ function fixture({ available = true, remote = false } = {}) {
   const calls = [], notices = [], events = [], listeners = {};
   let source = { status: "listening", lines: [], transcript: "", speaking: false };
   let lineGate = null;
+  const held = [], holding = new Set();
   let startStatus = "listening", mode = false, dictation = false, meeting = false;
   const root = new Element("div"), send = new Element("button"), actions = new Element("div"); actions.className = "topbar-actions";
   actions.insertBefore = (child, reference) => { child.parent = actions; actions.children.splice(reference ? actions.children.indexOf(reference) : actions.children.length, 0, child); };
@@ -39,7 +40,9 @@ function fixture({ available = true, remote = false } = {}) {
     if (body.command === "mute" || body.command === "unmute") { source.muted = body.command === "mute"; if (source.muted) source.transcript = ""; }
     if (body.command === "interrupt") source.speaking = false;
     if (body.command === "cancel") { source.status = "idle"; source.muted = false; }
-    return { ...source };
+    const reply = { ...source };
+    if (holding.has(body.command)) await new Promise(resolve => held.push(resolve));
+    return reply;
   };
   const panels = {
     register(p) { panel = p; p.composer.mount(root, context); p.onState(state, context); },
@@ -70,7 +73,9 @@ function fixture({ available = true, remote = false } = {}) {
     get source() { return source; }, set startStatus(v) { startStatus = v; }, set lineGate(v) { lineGate = v; }, state,
     set mode(v) { mode = v; panel.onState(state, context); }, set dictation(v) { dictation = v; panel.onState(state, context); }, set meeting(v) { meeting = v; panel.onState(state, context); },
     get context() { return context; }, setContext(c) { context = c; panel.onState(state, c); },
-    tick: async () => { await timer?.(); }, keydown: e => keydown(e),
+    tick: async () => { await timer?.(); }, startTick: () => timer?.(),
+    hold(...commands) { holding.clear(); for (const command of commands) holding.add(command); },
+    release() { holding.clear(); for (const resolve of held.splice(0)) resolve(); }, keydown: e => keydown(e),
     toggle: () => cls(root, "voice-call-toggle"), listeners,
   };
 }
@@ -319,4 +324,35 @@ test("a microphone gone while muted is announced when the microphone is turned b
   assert.deepEqual(f.notices, [], "muted, nothing is listened to");
   await muteButton(f).onclick();
   assert.deepEqual(f.notices, ["repli:fake-usb"]);
+});
+
+test("an older bridge answer cannot undo a newer unmute: the screen never says muted while the bridge listens", async () => {
+  const f = fixture();
+  await f.toggle().onclick(); await muteButton(f).onclick();
+  assert.equal(muteButton(f).attributes["aria-pressed"], "true");
+  f.hold("status"); const late = f.startTick(); f.hold();
+  await muteButton(f).onclick(); assert.equal(f.source.muted, false); assert.equal(muteButton(f).attributes["aria-pressed"], "false");
+  f.release(); await late;
+  assert.equal(muteButton(f).attributes["aria-pressed"], "false", "l’état lu pendant la sourdine est plus ancien que la réactivation");
+  assert.match(stateOf(f), /^Appel en cours/);
+});
+
+test("a click then ⌘⇧M before the first answer toggles twice: the microphone ends up listening", async () => {
+  const f = fixture();
+  await f.toggle().onclick();
+  f.hold("mute", "unmute"); const click = muteButton(f).onclick(); const key = shortcut(f);
+  f.release(); await click; await key;
+  assert.deepEqual(f.calls.map(c => c.debug).filter(c => c === "mute" || c === "unmute"), ["mute", "unmute"]);
+  assert.equal(f.source.muted, false); assert.equal(muteButton(f).attributes["aria-pressed"], "false"); assert.match(stateOf(f), /^Appel en cours/);
+});
+
+test("a card waiting for a click and a muted microphone are both said", async () => {
+  const f = fixture();
+  await f.toggle().onclick();
+  f.context.conversation.messages.push({ id: "approval", kind: "approval", payload: { status: { status: "pending" } } });
+  await f.tick(); assert.equal(stateOf(f), "En attente de vous · répondez dans la carte");
+  await muteButton(f).onclick();
+  assert.match(stateOf(f), /carte/); assert.match(stateOf(f), /micro coupé/i); assert.equal(muteButton(f).attributes["aria-pressed"], "true");
+  await f.tick(); assert.match(stateOf(f), /carte/); assert.match(stateOf(f), /micro coupé/i);
+  await muteButton(f).onclick(); assert.equal(stateOf(f), "En attente de vous · répondez dans la carte");
 });

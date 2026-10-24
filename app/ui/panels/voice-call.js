@@ -26,7 +26,9 @@
   let button, menuItem, bar, label, notice, transcriptToggle, mute, interrupt, leave, transcript;
   let phase = "idle", detail = "", lines = [], partial = "", written = 0, shown = false, paused = false, speaking = false;
   // Mirror of the bridge `muted`, read from its answers: the click sends the command, the screen follows the reply.
-  let muted = false;
+  // Only the answer to the latest request that carries `muted` may change it; `muteWanted` is the state the next gesture flips.
+  let muted = false, muteWanted = false, muteSeq = 0;
+  const applyMuted = (seq, value) => { if (seq !== muteSeq) return false; muted = muteWanted = Boolean(value); return true; };
   let lastActive = false, drawn = "";
   // Calls this view already ended: a state read older than the end must not end them twice.
   const finished = new Set();
@@ -62,7 +64,7 @@
     const key = muted && ["listening", "speaking"].includes(phase) ? "muted" : phase;
     bar.dataset.phase = key;
     bar.dataset.tone = detail ? "danger" : "";
-    label.textContent = detail || states[key] || "";
+    label.textContent = detail || (states[key] || "") + (muted && key === "waiting" ? " · micro coupé" : "");
     notice.hidden = Boolean(detail) && !active();
     transcriptToggle.hidden = !active();
     transcriptToggle.textContent = shown ? "Masquer le transcript" : "Afficher le transcript";
@@ -105,7 +107,7 @@
   }
   function reset() {
     clearTimeout(timer); epoch++;
-    callId = ""; conversationId = ""; scopeKey = ""; lines = []; partial = ""; written = 0; shown = false; paused = false; speaking = false; ticking = false; muted = false;
+    callId = ""; conversationId = ""; scopeKey = ""; lines = []; partial = ""; written = 0; shown = false; paused = false; speaking = false; ticking = false; muted = muteWanted = false;
   }
   async function quit() {
     const id = callId;
@@ -140,7 +142,7 @@
     if (busy()) { panels.notify(errors.microphone_busy); return; }
     const rev = ++epoch;
     conversationId = ctx.conversation.id; scopeKey = contextKey(ctx);
-    phase = "authorizing"; detail = ""; lines = []; partial = ""; written = 0; shown = false; paused = false; speaking = false; muted = false;
+    phase = "authorizing"; detail = ""; lines = []; partial = ""; written = 0; shown = false; paused = false; speaking = false; muted = muteWanted = false;
     callId = "pending";
     render(); panels.composerChanged();
     let opened;
@@ -166,10 +168,10 @@
     if (ticking) { schedule(rev); return; }
     ticking = true;
     try {
-      const result = await bridge("status");
+      const seq = ++muteSeq, result = await bridge("status");
       if (rev !== epoch) return;
       if (errors[result.status] || result.status === "idle") { await fail(result.status); return; }
-      muted = Boolean(result.muted);
+      applyMuted(seq, result.muted);
       lines = result.lines || lines; partial = muted ? "" : result.transcript || ""; speaking = Boolean(result.speaking);
       // A card waiting for a click holds the voice. Speaking is not a decision on it.
       const needsAction = window.GrokbotChat.voiceNeedsAction(ctx.conversation?.messages || []);
@@ -207,10 +209,12 @@
   }
   async function toggleMute() {
     if (!active() || ["authorizing", "ending"].includes(phase)) return;
-    const rev = epoch, receipt = await bridge(muted ? "unmute" : "mute");
+    muteWanted = !muteWanted;
+    const rev = epoch, seq = ++muteSeq, receipt = await bridge(muteWanted ? "mute" : "unmute");
     if (rev !== epoch) return;
     if (errors[receipt.status]) { await fail(receipt.status); return; }
-    muted = Boolean(receipt.muted); if (muted) partial = "";
+    if (!applyMuted(seq, receipt.muted)) return;
+    if (muted) partial = "";
     // Unmuting listens again to the chosen microphone, which may have gone while muted.
     if (!muted && receipt.microphone_fallback) window.EzerbotMicrophone?.fellBack?.(window.EzerbotMicrophone.current());
     render();

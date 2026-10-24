@@ -294,6 +294,7 @@ function boot() {
   };
   const sent = [];
   let pageDetail = null;
+  let threadOptions = null;
   let holdCreate = null;
   let failCreate = false;
   let createWaiting = null;
@@ -338,6 +339,7 @@ function boot() {
       state.state_revision += 1;
       return json({ conversation: structuredClone(conversation) });
     }
+    if (url === "/api/messages/resend") return json({ error: "Message introuvable." }, 404);
     return json({ error: `unexpected ${url}` }, 500);
   }
 
@@ -363,7 +365,7 @@ function boot() {
       revealPendingApproval() {},
       teachPrompt: "",
       searchableMessageText: (message) => message.body || "",
-      renderThread() {},
+      renderThread(_host, options) { threadOptions = options; },
       exportMessage: (message) => message,
       mountInput(host, options) {
         const model = { doc: docOf("") };
@@ -407,6 +409,7 @@ function boot() {
   return {
     window, document, storage, state, sent, context,
     servePage(detail) { pageDetail = detail; },
+    thread: () => threadOptions,
     composer: () => composer,
     type(text) { composer.api.value = text; composer.onInput(); },
     cmdN() {
@@ -668,4 +671,46 @@ test("l’envoi d’un passage cité transmet page_anchor ; après la croix, le 
   assert.equal(chip.hidden, true);
   select("Confort");
   assert.equal(comment.hidden, true);
+});
+
+// Après un redémarrage, la carte pendingSends est vide : seule l'ancre enregistrée dans le fil peut la rendre au renvoi.
+async function savedAnchoredMessage(state) {
+  const saved = { page_id: "page_forfaits", source_version: "d".repeat(64), passage: "Confort" };
+  const conversation = state.conversations[0];
+  conversation.messages = [{
+    id: "ancre-enregistree", role: "user", body: "Passe-le à 21 €", state: "queued", created_at: new Date().toISOString(),
+    payload: { page_anchor: { ...saved, title: "Trois forfaits" } },
+  }];
+  state.state_revision += 1;
+  return saved;
+}
+
+test("« Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file", async () => {
+  const app = boot();
+  await ready(app);
+  app.type("Bonjour");
+  await app.document.getElementById("composer-form").requestSubmit();
+  const saved = await savedAnchoredMessage(app.state);
+  await ready(app);
+  const message = app.thread().messages.find((item) => item.id === "ancre-enregistree");
+  assert.ok(message, "le message en file est dans le fil");
+  app.sent.length = 0;
+  await app.thread().onRetry(message);
+  const body = app.sent.at(-1);
+  assert.equal(body.message_id, "ancre-enregistree");
+  assert.deepEqual(structuredClone(body.page_anchor), saved);
+});
+
+test("le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée", async () => {
+  const app = boot();
+  await ready(app);
+  app.type("Bonjour");
+  await app.document.getElementById("composer-form").requestSubmit();
+  const saved = await savedAnchoredMessage(app.state);
+  app.state.conversations[0].messages[0].state = "refused";
+  await ready(app);
+  const message = app.thread().messages.find((item) => item.id === "ancre-enregistree");
+  app.sent.length = 0;
+  await app.thread().onResend(message);
+  assert.deepEqual(structuredClone(app.sent.at(-1).page_anchor), saved);
 });

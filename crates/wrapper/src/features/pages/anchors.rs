@@ -184,10 +184,11 @@ pub fn list(conn: &Connection, page_id: &str) -> Result<Vec<Value>, ApiError> {
 }
 
 /// Ce que la bulle du fil montre de l'ancre d'un message : la Page (avec son titre actuel) et le passage cité.
+/// `source_version` permet au client de rejouer le même envoi après un redémarrage.
 /// Une Page qui n'existe plus ne laisse pas de puce : elle n'aurait rien à ouvrir.
 pub fn for_message(conn: &Connection, conversation: &str, message: &str) -> Value {
     conn.query_row(
-        "SELECT a.page_id, a.passage, p.title FROM wrapper_page_anchors a
+        "SELECT a.page_id, a.passage, p.title, a.source_version FROM wrapper_page_anchors a
          JOIN bot_pages p ON p.id = a.page_id
          WHERE a.conversation_id = ?1 AND a.message_id = ?2",
         params![conversation, message],
@@ -196,6 +197,7 @@ pub fn for_message(conn: &Connection, conversation: &str, message: &str) -> Valu
                 "page_id": row.get::<_, String>(0)?,
                 "passage": row.get::<_, String>(1)?,
                 "title": row.get::<_, String>(2)?,
+                "source_version": row.get::<_, String>(3)?,
             }))
         },
     )
@@ -317,7 +319,7 @@ mod tests {
         anchor(&conn, "c1", "m1", "p1", "Confort");
         assert_eq!(
             for_message(&conn, "c1", "m1"),
-            serde_json::json!({"page_id": "p1", "passage": "Confort", "title": "Trois forfaits"})
+            serde_json::json!({"page_id": "p1", "passage": "Confort", "title": "Trois forfaits", "source_version": "v"})
         );
         conn.execute("DELETE FROM bot_pages", []).unwrap();
         assert_eq!(for_message(&conn, "c1", "m1"), serde_json::Value::Null);

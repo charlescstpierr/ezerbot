@@ -489,9 +489,40 @@ fn the_thread_carries_each_messages_anchor_for_the_bubble_chip() {
     let payload = |id: &str| messages.iter().find(|m| m["id"] == id).unwrap()["payload"].clone();
     assert_eq!(
         payload("citee")["page_anchor"],
-        json!({"page_id": page["id"], "title": page["title"], "passage": "Trois forfaits"})
+        json!({"page_id": page["id"], "source_version": page["source_version"], "title": page["title"], "passage": "Trois forfaits"})
     );
     assert_eq!(payload("libre")["page_anchor"], Value::Null);
+}
+
+#[test]
+fn a_resend_rebuilt_from_the_thread_data_after_a_restart_is_accepted_without_a_second_anchor() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.answer(None);
+    let chat = f.chat.clone();
+    f.send_in(&chat, "citee", Some(Fixture::anchor(&page, "Confort")))
+        .unwrap();
+    f.finish("citee");
+    let kept = f.page()["anchors"].clone();
+    f.reopen();
+
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let shown = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == chat.as_str())
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "citee")
+        .unwrap()["payload"]["page_anchor"]
+        .clone();
+    assert!(shown["source_version"].is_string(), "{shown}");
+    let rebuilt = json!({"page_id": shown["page_id"], "source_version": shown["source_version"], "passage": shown["passage"]});
+    f.send_in(&chat, "citee", Some(rebuilt)).unwrap();
+    assert_eq!(f.page()["anchors"], kept);
 }
 
 #[test]

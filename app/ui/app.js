@@ -1484,6 +1484,18 @@
     return extras.attachments || (message.attachments || []).map((item) => typeof item === "string" ? item : item.id || item.attachment_id).filter(Boolean);
   }
 
+  // Après un rechargement, pendingSends est vide : l'ancre enregistrée avec le message reste celle du premier envoi, que le moteur exige à l'identique.
+  function resendExtras(message) {
+    const pending = pendingSends.get(message.id)?.extras;
+    if (pending) return pending;
+    const anchor = message.payload?.page_anchor;
+    const attachments = attachmentIds(message);
+    return {
+      ...(attachments.length ? { attachments } : {}),
+      ...(anchor ? { page_anchor: { page_id: anchor.page_id, source_version: anchor.source_version, passage: anchor.passage } } : {}),
+    };
+  }
+
   async function reactToMessage(message, emoji) {
     const conversation = currentConversation();
     if (!conversation) return;
@@ -1557,7 +1569,7 @@
         response = await api("/api/messages/resend", { conversation_id: conversation.id, message_id: message.id });
       } catch (error) {
         if (error.status !== 404) throw error;
-        const extras = pendingSends.get(message.id)?.extras || {};
+        const extras = resendExtras(message);
         response = await sendRequest(conversation, message.id, message.body, { ...extras, attachments: attachmentIds(message, extras) });
       }
       upsertConversation(response.conversation);
@@ -1593,8 +1605,7 @@
     let delivered = false;
     render();
     try {
-      const response = await sendRequest(conversation, message.id, message.body,
-        pendingSends.get(message.id)?.extras || (message.attachments?.length ? { attachments: message.attachments.map((item) => typeof item === "string" ? item : item.id || item.attachment_id) } : {}));
+      const response = await sendRequest(conversation, message.id, message.body, resendExtras(message));
       upsertConversation(response.conversation);
       delivered = response.conversation.messages.some((item) => item.id === message.id && ["accepted", "echoed"].includes(item.state));
       render();

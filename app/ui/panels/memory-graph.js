@@ -98,6 +98,7 @@
     // Le glisser ne commence qu'au-delà de 5 px, et ne capture le pointeur qu'alors : un simple clic reste un clic sur son point.
     svg.addEventListener("pointerdown", (event) => { drag = event; dragged = false; });
     svg.addEventListener("pointermove", (event) => {
+      if (event.buttons === 0) drag = null; // le bouton a été relâché hors du graphe : plus de glisser
       if (!drag) return;
       if (!dragged) {
         if (Math.hypot(event.clientX - drag.clientX, event.clientY - drag.clientY) < 5) return;

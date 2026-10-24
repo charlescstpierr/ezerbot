@@ -98,6 +98,11 @@ test("un clic sur un point du graphe ou sur une ligne de la Liste ouvre le panne
   assert.equal(h.text("text"), "L’équipe déjeune à midi");
   assert.deepEqual([h.cells()[1], h.cells()[3], h.item("f2").classes.includes("is-selected")], ["Hors conversation", "Déduit", true]);
   assert.equal(h.item("f2").querySelector(".memory-space-text").tagName, "button", "focalisable et activable au clavier");
+  h.tab("graph");
+  assert.equal(h.point("f2").classes.includes("is-selected"), true, "la sélection suit le changement de vue");
+  h.tab("list");
+  h.escape();
+  assert.equal(Element.active, h.item("f2").querySelector(".memory-space-text"), "le focus revient au bouton de la ligne");
 });
 
 test("Entrée ouvre un point ; Échap ferme le panneau et rend le focus au point ; un glisser n'ouvre rien", async () => {
@@ -107,7 +112,7 @@ test("Entrée ouvre un point ; Échap ferme le panneau et rend le focus au point
   assert.equal(h.text("text"), "L’équipe déjeune à midi");
   h.escape();
   assert.deepEqual([h.open(), h.main.querySelector(".memory-space").dataset.detail, Element.active === h.point("f2")], [false, undefined, true]);
-  const drag = (dx) => { const before = h.svg().attributes.viewBox; h.svg().fire("pointerdown", { clientX: 100, clientY: 100 }); h.svg().fire("pointermove", { clientX: 100 + dx, clientY: 101 }); h.svg().fire("pointerup", {}); return h.svg().attributes.viewBox !== before; };
+  const drag = (dx) => { const before = h.svg().attributes.viewBox; h.svg().fire("pointerdown", { clientX: 100, clientY: 100, buttons: 1 }); h.svg().fire("pointermove", { clientX: 100 + dx, clientY: 101, buttons: 1 }); h.svg().fire("pointerup", {}); return h.svg().attributes.viewBox !== before; };
   assert.equal(drag(2), false, "2 px : encore un clic");
   h.point("f1").click();
   assert.equal(h.open(), true);
@@ -115,6 +120,11 @@ test("Entrée ouvre un point ; Échap ferme le panneau et rend le focus au point
   assert.equal(drag(60), true, "60 px : la vue a bougé");
   h.point("f1").click();
   assert.equal(h.open(), false, "le clic qui termine un glisser ne choisit pas de souvenir");
+  h.svg().fire("pointerdown", { clientX: 100, clientY: 100, buttons: 1 });
+  h.svg().fire("pointermove", { clientX: 102, clientY: 100, buttons: 1 });
+  const parked = h.svg().attributes.viewBox; // le bouton est relâché hors du graphe : aucun pointerup n'arrive
+  h.svg().fire("pointermove", { clientX: 300, clientY: 300, buttons: 0 });
+  assert.equal(h.svg().attributes.viewBox, parked, "pas de glisser fantôme");
 });
 
 test("Modifier envoie /api/memory/correct puis relit : le texte affiché change ; l'erreur du moteur garde la saisie", async () => {

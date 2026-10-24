@@ -104,7 +104,8 @@
       root.replaceChildren();
       mark();
       delete root.parentElement.dataset.detail;
-      if (restore) (find(was) || root.parentElement.querySelector('.memory-space-tab[aria-pressed="true"]'))?.focus();
+      const back = find(was) || root.parentElement.querySelector('.memory-space-tab[aria-pressed="true"]');
+      if (restore) (back?.querySelector("button") || back)?.focus(); // une ligne de la Liste se focalise par son bouton
     }
     // Appelé par l'écran quand la liste a changé : un souvenir disparu ferme le panneau ; la saisie en cours n'est jamais écrasée.
     function refresh() {
@@ -112,6 +113,7 @@
       const fact = current();
       if (!fact) close(!document.activeElement || document.activeElement === document.body || root.contains(document.activeElement));
       else if (JSON.stringify(fact) !== shown) render();
+      else mark(); // la vue a pu être reconstruite (Graphe ↔ Liste)
     }
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || id === null || busy || event.defaultPrevented || document.querySelector("dialog[open]")) return;

@@ -21,7 +21,7 @@
     // mode : "view" (lecture), "edit" (édition ; intacte tant que le brouillon égale le texte du souvenir, modifiée sinon),
     // "forget" (confirmation d'oubli) ou "discard" (confirmation d'abandon d'une édition modifiée).
     let id = null, mode = "view", busy = false, draft = "", note = "", problem = "", shown = null, epoch = 0;
-    let after = null, saved = null; // after : ce que la sortie demandée fera si l'on abandonne ; saved : le brouillon d'un écran quitté en pleine modification
+    let after = null; const saved = new Map(); // after : ce que la sortie demandée fera si l'on abandonne ; saved : souvenir → brouillon, pour un écran quitté en pleine modification
     const moved = new Map(); // ancien identifiant → identifiant du souvenir qui le remplace (réponse du moteur à une correction)
     const root = node("aside", "memory-detail");
     root.hidden = true;
@@ -40,7 +40,7 @@
       if (dirty()) { after = next; mode = "discard"; problem = ""; render("keep"); return; }
       drop(next);
     }
-    function drop(next) { [mode, draft, problem, after] = ["view", "", "", null]; next(); }
+    function drop(next) { [mode, draft, problem, after] = ["view", "", "", null]; next?.(); }
     function resume() { [mode, after] = ["edit", null]; render("body"); } // « Continuer » : le texte et le focus restent dans le champ
     const button = (text, className, action, disabled = busy) => {
       const el = Object.assign(node("button", className, text), { type: "button", disabled });
@@ -138,7 +138,7 @@
     function close(restore = false) {
       const was = id;
       if (was === null) return;
-      if (dirty()) saved = { id: was, draft }; // quitter l'écran ne se refuse pas : le brouillon attend le retour sur ce souvenir
+      if (dirty()) saved.set(was, draft); // quitter l'écran ne se refuse pas : le brouillon attend le retour sur ce souvenir
       [mode, after] = ["view", null];
       [id, shown, root.hidden] = [null, null, true];
       epoch += 1;
@@ -167,9 +167,10 @@
     function open(factId) {
       if (busy || (factId === id && (mode === "edit" || mode === "discard"))) return; // re-cliquer le souvenir en cours de modification ne l'efface pas
       leave(() => {
-        const kept = saved?.id === factId ? saved.draft : null;
+        if (id !== factId && !(facts() || []).some((item) => item.fact_id === factId)) { render("title"); return; } // le souvenir visé a disparu pendant la confirmation : le panneau reste où il est
+        const kept = saved.get(factId) ?? null;
         epoch += 1;
-        if (kept !== null) saved = null;
+        saved.delete(factId);
         [id, mode, draft, note, problem] = [factId, kept === null ? "view" : "edit", kept ?? "", kept === null ? "" : "Brouillon retrouvé : Enregistrer ou Annuler.", ""];
         render(kept === null ? "title" : "body");
       });

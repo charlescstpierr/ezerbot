@@ -587,6 +587,39 @@ test("quitter l'écran Mémoire pendant une édition modifiée garde le brouillo
   assert.equal(h.text("text"), ORIGINAL, "un brouillon abandonné ne revient pas");
 });
 
+test("deux brouillons laissés en quittant l'écran sont gardés chacun pour son souvenir", async () => {
+  const h = await editing();
+  h.write("Brouillon A");
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f2").click();
+  h.button("Modifier").click();
+  h.write("Brouillon B");
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f1").click();
+  assert.equal(h.field().value, "Brouillon A");
+  h.escape();
+  h.button("Abandonner").click();
+  h.item("f2").click();
+  assert.equal(h.field().value, "Brouillon B");
+});
+
+test("le souvenir visé disparaît pendant la confirmation d'abandon : le panneau reste sur la modification abandonnée, sans se figer", async () => {
+  const h = await editing();
+  h.write("Brouillon A");
+  h.item("f2").click();
+  h.net.drop("f2");
+  h.reload();
+  await h.settle();
+  h.button("Abandonner").click();
+  assert.deepEqual([h.open(), h.panel().querySelector(".memory-detail-field"), h.text("text"), h.cells()[0], h.mutations()], [true, null, ORIGINAL, "Ezerbot", []]);
+  h.button("Modifier").click();
+  assert.equal(h.field().value, ORIGINAL, "le panneau répond à nouveau");
+});
+
 test("Échap et Fermer pendant l'envoi ne font rien : la saisie part ou reste, l'erreur du moteur la rend", async () => {
   const h = await editing({ refuse: "Texte refusé par le moteur." });
   let release;

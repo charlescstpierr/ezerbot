@@ -1194,7 +1194,6 @@ fn model_status(status: &DelegationStatus, limit: usize) -> Value {
     let mut value = json!(bounded_status(status, limit));
     if let (DelegationStatus::Done { captures, .. }, Some(fields)) = (status, value.as_object_mut())
     {
-        fields.remove("captures");
         if !captures.is_empty() {
             let labels: Vec<_> = captures.iter().map(|c| c.label.as_str()).collect();
             let plural = if labels.len() > 1 { "s" } else { "" };

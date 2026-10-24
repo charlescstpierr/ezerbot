@@ -2227,7 +2227,7 @@ mod tests {
         )]));
         let gateway = Scripted::new(script);
         let mut services = Services {
-            own_captures: vec!["shot-0".into()],
+            own_captures: (0..5).map(|n| format!("shot-{n}")).collect(),
             ..Services::default()
         };
         run(&conn, &gateway, &mut services, "run")?;

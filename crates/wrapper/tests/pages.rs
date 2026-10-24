@@ -163,7 +163,10 @@ impl Fixture {
         panic!("run inachevée {:?}", self.run(id));
     }
     fn outcome(&self, id: &str) -> Value {
-        store::events(&self.db(), &self.run("compare").run_id, 0)
+        self.outcome_in("compare", id)
+    }
+    fn outcome_in(&self, message: &str, id: &str) -> Value {
+        store::events(&self.db(), &self.run(message).run_id, 0)
             .unwrap()
             .into_iter()
             .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == id)
@@ -313,4 +316,222 @@ fn interactive_table_becomes_a_local_page_and_survives_restart() {
         "Mes forfaits"
     );
     assert_eq!(std::fs::read_to_string(f.file()).unwrap(), FIXED);
+}
+
+const BASE: &str = "export default function Page() {\n  return (\n    <article>\n      <h1>Forfaits</h1>\n      <p>Essentiel : 9 €</p>\n      <p>Confort : 19 €</p>\n    </article>\n  );\n}\n";
+const EDITED: &str = "export default function Page() {\n  return (\n    <article>\n      <h1>Forfaits</h1>\n      <p>Essentiel : 9 €</p>\n      <p>Confort : 21 €</p>\n    </article>\n  );\n}\n";
+
+impl Fixture {
+    /// One turn of `chat`: the bot makes these calls in order, then answers.
+    fn turn(&mut self, chat: &str, message: &str, calls: &[(&str, &str, Value)]) {
+        let mut seen = self.server.seen.lock().unwrap();
+        for (id, name, arguments) in calls {
+            seen.responses.push_back(ScriptedResponse::events(&[
+                json!({"type":"response.output_item.done","item":{"id":format!("fc-{id}"),"type":"function_call","status":"completed","call_id":id,"name":name,"arguments":arguments.to_string()}}),
+                json!({"type":"response.completed"}),
+            ]));
+        }
+        seen.responses.push_back(ScriptedResponse::events(&[
+            json!({"type":"response.output_text.delta","delta":"Fait."}),
+            json!({"type":"response.completed"}),
+        ]));
+        drop(seen);
+        self.post(
+            "/api/send",
+            json!({"conversation_id":chat,"message_id":message,"body":"Change la Page"}),
+        );
+        self.finish(message);
+    }
+    fn write(&mut self, message: &str, source: &str) -> Value {
+        let chat = self.chat.clone();
+        self.turn(
+            &chat,
+            message,
+            &[(
+                message,
+                "write_page",
+                json!({"name":"forfaits.page.tsx","title":"Forfaits","source":source}),
+            )],
+        );
+        self.outcome_in(message, message)
+    }
+    fn edit(&mut self, message: &str, id: &str, before: &str, after: &str) -> Value {
+        let chat = self.chat.clone();
+        self.turn(
+            &chat,
+            message,
+            &[(
+                message,
+                "edit_page",
+                json!({"id":id,"before":before,"after":after}),
+            )],
+        );
+        self.outcome_in(message, message)
+    }
+    fn stored(&self, id: &str) -> (String, Option<String>) {
+        self.db()
+            .query_row(
+                "SELECT source, previous_source FROM bot_pages WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+    fn page(&mut self, id: &str) -> Value {
+        self.app
+            .api("GET", &format!("/api/pages/{id}"), b"")
+            .unwrap()["page"]
+            .clone()
+    }
+}
+
+#[test]
+fn edit_replaces_one_passage_and_leaves_every_other_byte() {
+    let mut f = Fixture::new();
+    let id = f.write("ecrit", BASE)["output"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let outcome = f.edit("modifie", &id, "Confort : 19 €", "Confort : 21 €");
+    assert_eq!(outcome["status"], "done", "{outcome}");
+    assert_eq!(outcome["output"]["id"], id.as_str());
+    assert_eq!(std::fs::read_to_string(f.file()).unwrap(), EDITED);
+    assert_eq!(f.stored(&id).0, EDITED);
+    let page = f.page(&id);
+    assert_eq!(page["status"], "ready");
+    assert!(page["preview"].as_str().unwrap().contains("Confort : 21 €"));
+    assert_eq!(f.page(&id)["has_previous"], true);
+}
+
+#[test]
+fn edit_refuses_a_passage_that_is_missing_empty_or_not_unique() {
+    let mut f = Fixture::new();
+    let id = f.write("ecrit", BASE)["output"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (message, before, reason) in [
+        (
+            "absent",
+            "Platine : 49 €",
+            "Passage introuvable dans la Page.",
+        ),
+        ("vide", "", "Le passage à remplacer est vide."),
+        (
+            "deux",
+            "<p>",
+            "Passage présent 2 fois : ajoute du contexte pour qu’il soit unique.",
+        ),
+    ] {
+        let outcome = f.edit(message, &id, before, "X");
+        assert_eq!(outcome["status"], "failed", "{outcome}");
+        assert_eq!(outcome["reason"], reason);
+        assert_eq!(f.stored(&id), (BASE.to_string(), None), "{message}");
+        assert_eq!(std::fs::read_to_string(f.file()).unwrap(), BASE);
+    }
+    assert_eq!(f.page(&id)["has_previous"], false);
+}
+
+#[test]
+fn edit_that_breaks_the_compilation_changes_neither_the_row_nor_the_file() {
+    let mut f = Fixture::new();
+    let id = f.write("ecrit", BASE)["output"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let outcome = f.edit("casse", &id, "<h1>Forfaits</h1>", "<h1>Forfaits</h2>");
+    assert_eq!(outcome["status"], "failed", "{outcome}");
+    assert_eq!(
+        outcome["reason"],
+        "ligne 4, caractère 19 : balise « h1 » non fermée. Les lignes comptent après le remplacement ; rien n’a été modifié."
+    );
+    assert_eq!(f.stored(&id), (BASE.to_string(), None));
+    assert_eq!(std::fs::read_to_string(f.file()).unwrap(), BASE);
+    let page = f.page(&id);
+    assert_eq!(page["status"], "ready");
+    assert_eq!(page["has_previous"], false);
+}
+
+#[test]
+fn edit_refuses_the_page_of_another_bot() {
+    let mut f = Fixture::new();
+    let id = f.write("ecrit", BASE)["output"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.post(
+        "/api/bots",
+        json!({"id":"autre","name":"Autre","color":"cyan"}),
+    );
+    let other = f.post("/api/conversations", json!({"bot_id":"autre"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.turn(
+        &other,
+        "intrus",
+        &[(
+            "intrus",
+            "edit_page",
+            json!({"id":id,"before":"Confort : 19 €","after":"Confort : 1 €"}),
+        )],
+    );
+    let outcome = f.outcome_in("intrus", "intrus");
+    assert_eq!(outcome["status"], "failed", "{outcome}");
+    assert_eq!(outcome["reason"], "Cette Page est introuvable.");
+    assert_eq!(f.stored(&id), (BASE.to_string(), None));
+    assert_eq!(std::fs::read_to_string(f.file()).unwrap(), BASE);
+}
+
+#[test]
+fn only_the_version_before_the_last_change_can_be_put_back_and_only_once() {
+    let mut f = Fixture::new();
+    let id = f.write("ecrit", BASE)["output"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(f.page(&id)["has_previous"], false);
+    f.edit("un", &id, "Essentiel : 9 €", "Essentiel : 10 €");
+    f.edit("deux", &id, "Confort : 19 €", "Confort : 21 €");
+    let second = "export default function Page() {\n  return (\n    <article>\n      <h1>Forfaits</h1>\n      <p>Essentiel : 10 €</p>\n      <p>Confort : 21 €</p>\n    </article>\n  );\n}\n";
+    let first = second.replace("21 €", "19 €");
+    assert_eq!(f.stored(&id), (second.to_string(), Some(first.clone())));
+
+    let back = f.post("/api/pages/revert", json!({"id":id}));
+    assert_eq!(back["page"]["has_previous"], false);
+    assert_eq!(back["page"]["status"], "ready");
+    assert_eq!(f.stored(&id), (first.clone(), None));
+    assert_eq!(std::fs::read_to_string(f.file()).unwrap(), first);
+
+    let again = f.app.api(
+        "POST",
+        "/api/pages/revert",
+        json!({"id":id}).to_string().as_bytes(),
+    );
+    assert!(again
+        .unwrap_err()
+        .to_string()
+        .contains("pas de version d’avant"));
+    assert_eq!(std::fs::read_to_string(f.file()).unwrap(), first);
+}
+
+#[test]
+fn a_rewrite_keeps_the_version_before_it_and_a_broken_write_does_not_replace_it() {
+    let mut f = Fixture::new();
+    let id = f.write("ecrit", BASE)["output"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.write("refonte", EDITED);
+    assert_eq!(f.stored(&id), (EDITED.to_string(), Some(BASE.to_string())));
+    f.write("casse", BROKEN);
+    assert_eq!(f.page(&id)["status"], "error");
+    assert_eq!(
+        f.stored(&id),
+        (BROKEN.to_string(), Some(EDITED.to_string()))
+    );
+    f.write("repare", FIXED);
+    assert_eq!(f.stored(&id), (FIXED.to_string(), Some(EDITED.to_string())));
+    f.post("/api/pages/revert", json!({"id":id}));
+    assert_eq!(std::fs::read_to_string(f.file()).unwrap(), EDITED);
 }

@@ -136,6 +136,58 @@ impl Fixture {
         self.conn.execute("INSERT INTO scheduler_routines(routine_id,bot_id,conversation_id,name,body,trigger,time_zone,enabled,origin,untrusted,schedule_version,modified_at,materialized_after,active_since) VALUES ('routine','grokbot',?1,'PRIVATE_ROUTINE','{}','{}','UTC',0,'user',0,1,0,0,0)", [&self.conversation]).unwrap();
         self.conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,manual_nonce,status,run_id) VALUES ('occurrence','routine',1,4000,'nonce','running','routine-run')", []).unwrap();
     }
+    fn run_in(&self, id: &str, bot: &str, conversation: &str, trigger: Trigger) {
+        let task = !matches!(trigger, Trigger::UserMessage { .. });
+        with_tx(&self.conn, |c| {
+            model::start(
+                c,
+                &Run {
+                    run_id: id.into(),
+                    bot_id: bot.into(),
+                    conversation_id: conversation.into(),
+                    trigger,
+                    kind: if task { RunKind::Task } else { RunKind::Chat },
+                    status: RunStatus::Queued,
+                    task_status: task.then_some(TaskStatus::Working),
+                    turn_end: None,
+                    budgets: RunBudgets::default(),
+                    started_at: 1000,
+                },
+            )?;
+            model::set_running_at(c, id, 1000)
+        })
+        .unwrap();
+    }
+    /// A delegated child in its own `kind='task'` conversation, linked to `parent`.
+    fn delegate(
+        &self,
+        edge: &str,
+        parent: &str,
+        parent_bot: &str,
+        origin: &str,
+        depth: u8,
+    ) -> String {
+        let conversation = format!("task:{edge}");
+        self.conn.execute("INSERT INTO wrapper_conversations(account_id,id,title,bot_id,kind,parent_id,created_at,updated_at) SELECT account_id,?1,'Sous-tâche','grokbot','task',id,0,0 FROM wrapper_conversations WHERE id=?2", params![conversation, origin]).unwrap();
+        self.run_in(
+            edge,
+            "grokbot",
+            &conversation,
+            Trigger::Delegation {
+                delegation_id: edge.into(),
+            },
+        );
+        self.conn.execute("INSERT INTO delegation_graph(id,parent_run_id,root_run_id,parent_bot,child_bot,depth,child_run_id,conversation_id,selected_context,status) VALUES (?1,?2,'parent',?3,'grokbot',?4,?1,?5,'{\"texts\":[],\"entry_ids\":[],\"fact_ids\":[],\"skill_ids\":[]}','{\"status\":\"running\"}')", params![edge, parent, parent_bot, depth, conversation]).unwrap();
+        conversation
+    }
+    fn background(&self, run: &str, call: &str, status: &str) {
+        self.conn
+            .execute(
+                "INSERT INTO wrapper_shell_tasks(run_id,call_id,status) VALUES (?1,?2,?3)",
+                params![run, call, status],
+            )
+            .unwrap();
+    }
     fn request(&self, id: &str, kind: Value) {
         self.request_on("parent", id, kind);
     }
@@ -200,6 +252,81 @@ fn approval_is_first_has_its_card_and_disappears_after_a_real_decision() {
     let turn = items.iter().find(|i| i["id"] == "task:turn").unwrap();
     assert_eq!(turn["group"], "running");
     assert_eq!(turn["status"], "running");
+}
+
+#[test]
+fn deleting_the_origin_of_a_delegation_hides_every_row_its_descendants_left() {
+    let mut leaked = Vec::new();
+    for row in [
+        "running shell",
+        "finished shell",
+        "request",
+        "delegation",
+        "grandchild shell",
+        "grandchild request",
+        "grandchild delegation",
+    ] {
+        let mut f = Fixture::new();
+        f.post(
+            "/api/bots",
+            json!({"id":"custom","name":"Perso","color":"cyan"}),
+        );
+        let origin = f.post("/api/conversations", json!({"bot_id":"custom"}))["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.run_in(
+            "parent",
+            "custom",
+            &origin,
+            Trigger::UserMessage {
+                message_id: "message-parent".into(),
+                attempt: 0,
+            },
+        );
+        f.delegate("child", "parent", "custom", &origin, 1);
+        f.delegate("grandchild", "child", "grokbot", &origin, 2);
+        match row {
+            "running shell" => f.background("child", "call", "en cours"),
+            "finished shell" => f.background("child", "call", "terminé"),
+            "request" => {
+                f.status("child", RunStatus::AwaitingApproval);
+                f.request_on("child", "approval", json!({"kind":"approval"}));
+            }
+            "grandchild shell" => f.background("grandchild", "call", "en cours"),
+            "grandchild request" => {
+                f.status("grandchild", RunStatus::AwaitingApproval);
+                f.request_on("grandchild", "approval", json!({"kind":"approval"}));
+            }
+            _ => {}
+        }
+        let before = f.items();
+        assert!(
+            before.iter().any(|i| match row {
+                "running shell" | "finished shell" => i["id"] == "shell:child/call",
+                "request" | "grandchild request" => i["id"] == "input:approval",
+                "grandchild shell" => i["id"] == "shell:grandchild/call",
+                "grandchild delegation" => i["id"] == "delegation:grandchild",
+                _ => i["id"] == "delegation:child",
+            }),
+            "{row}: {before:?}"
+        );
+
+        f.post("/api/conversations/delete", json!({"id":origin}));
+        let live: i64 = f.conn.query_row("SELECT COUNT(*) FROM wrapper_conversations WHERE id IN ('task:child','task:grandchild') AND deleted=0", [], |r| r.get(0)).unwrap();
+        assert_eq!(live, 2);
+        let revision = f.app.api("GET", "/api/ping", b"").unwrap();
+        let items = f.items();
+        if !items.is_empty() {
+            leaked.push(format!(
+                "{row}: {:?}",
+                items.iter().map(|i| &i["id"]).collect::<Vec<_>>()
+            ));
+        }
+        assert_eq!(f.items(), items);
+        assert_eq!(f.app.api("GET", "/api/ping", b"").unwrap(), revision);
+    }
+    assert!(leaked.is_empty(), "{leaked:#?}");
 }
 
 #[test]
@@ -416,51 +543,18 @@ fn a_routed_delegation_request_disappears_with_its_custom_bot_parent_conversatio
         .as_str()
         .unwrap()
         .to_owned();
-    let child = format!("task:edge:{origin}");
-    f.conn.execute("INSERT INTO wrapper_conversations(account_id,id,title,bot_id,kind,parent_id,created_at,updated_at) SELECT account_id,?1,'Sous-tâche','grokbot','task',?2,0,0 FROM wrapper_conversations WHERE id=?2", params![child, origin]).unwrap();
-    for (id, bot, conversation, trigger) in [
-        (
-            "parent",
-            "custom",
-            &origin,
-            Trigger::UserMessage {
-                message_id: "message-parent".into(),
-                attempt: 0,
-            },
-        ),
-        (
-            "child",
-            "grokbot",
-            &child,
-            Trigger::Delegation {
-                delegation_id: "edge".into(),
-            },
-        ),
-    ] {
-        let task = id == "child";
-        with_tx(&f.conn, |c| {
-            model::start(
-                c,
-                &Run {
-                    run_id: id.into(),
-                    bot_id: bot.into(),
-                    conversation_id: conversation.clone(),
-                    trigger,
-                    kind: if task { RunKind::Task } else { RunKind::Chat },
-                    status: RunStatus::Queued,
-                    task_status: task.then_some(TaskStatus::Working),
-                    turn_end: None,
-                    budgets: RunBudgets::default(),
-                    started_at: 1000,
-                },
-            )?;
-            model::set_running_at(c, id, 1000)
-        })
-        .unwrap();
-    }
-    f.status("child", RunStatus::AwaitingApproval);
-    f.conn.execute("INSERT INTO delegation_graph(id,parent_run_id,root_run_id,parent_bot,child_bot,depth,child_run_id,conversation_id,selected_context,status) VALUES ('edge','parent','parent','custom','grokbot',1,'child',?1,'{\"texts\":[],\"entry_ids\":[],\"fact_ids\":[],\"skill_ids\":[]}','{\"status\":\"running\"}')", [&child]).unwrap();
-    f.request_on("child", "approval", json!({"kind":"approval"}));
+    f.run_in(
+        "parent",
+        "custom",
+        &origin,
+        Trigger::UserMessage {
+            message_id: "message-parent".into(),
+            attempt: 0,
+        },
+    );
+    let child = f.delegate("edge", "parent", "custom", &origin, 1);
+    f.status("edge", RunStatus::AwaitingApproval);
+    f.request_on("edge", "approval", json!({"kind":"approval"}));
     let items = f.items();
     let decisions: Vec<_> = items.iter().filter(|i| i["group"] == "decision").collect();
     assert_eq!(decisions.len(), 1, "{items:?}");

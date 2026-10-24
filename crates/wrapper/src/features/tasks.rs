@@ -16,17 +16,28 @@ empty_hooks!(
 
 // Only identifiers, fixed labels and allowlisted lifecycle states cross this
 // boundary. Never project objectives, commands, results, form fields or secrets.
+// `live_runs` is the one definition of a visible run: a delegated run is visible
+// only through a chain of visible edges up to a run that was not delegated.
 const SNAPSHOT: &str = "
-WITH live_runs AS (
+WITH RECURSIVE open_runs AS (
  SELECT r.*,json_extract(r.record,'$.started_at') AS started_at,
  CASE WHEN EXISTS (SELECT 1 FROM engine_run_wakes w WHERE w.run_id=r.run_id AND w.state='pending')
  THEN 'running' ELSE 'stopped' END AS wait_status FROM engine_runs r
  JOIN wrapper_conversations c ON c.account_id=?1 AND c.id=r.conversation_id AND c.deleted=0
  JOIN wrapper_bots b ON b.account_id=?1 AND b.id=r.bot_id AND b.deleted=0
+), open_edges AS (
+ SELECT d.* FROM delegation_graph d WHERE d.conversation_id IS NULL
+ OR EXISTS (SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=d.conversation_id AND c.deleted=0)
 ), live_edges AS (
  SELECT d.*,p.conversation_id AS origin_conversation_id,p.started_at AS origin_started_at
- FROM delegation_graph d JOIN live_runs p ON p.run_id=d.parent_run_id
- WHERE d.conversation_id IS NULL OR EXISTS (SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=d.conversation_id AND c.deleted=0)
+ FROM open_edges d JOIN open_runs p ON p.run_id=d.parent_run_id WHERE p.trigger_kind<>'delegation'
+ UNION
+ SELECT d.*,p.conversation_id,p.started_at
+ FROM live_edges e JOIN open_edges d ON d.parent_run_id=e.child_run_id
+ JOIN open_runs p ON p.run_id=d.parent_run_id
+), live_runs AS (
+ SELECT * FROM open_runs WHERE trigger_kind<>'delegation'
+ OR run_id IN (SELECT child_run_id FROM live_edges)
 ), pending AS (
  SELECT q.id,q.run_id,q.entry_id,r.bot_id,c.id AS conversation_id,
  CASE r.trigger_kind WHEN 'delegation' THEN 'delegation' WHEN 'occurrence' THEN 'routine' ELSE 'task' END AS kind,
@@ -37,7 +48,6 @@ WITH live_runs AS (
  JOIN wrapper_conversations c ON c.account_id=?1 AND c.id=json_extract(q.route_json,'$.target_conversation_id') AND c.deleted=0
  JOIN wrapper_bots b ON b.account_id=?1 AND b.id=c.bot_id AND b.deleted=0
  WHERE q.status='pending' AND q.replaced=0
- AND (r.trigger_kind<>'delegation' OR EXISTS (SELECT 1 FROM live_edges e WHERE e.child_run_id=q.run_id))
  AND (json_extract(q.kind_json,'$.expires_at') IS NULL OR json_extract(q.kind_json,'$.expires_at')>?2)
  AND (json_extract(q.kind_json,'$.kind')<>'secret' OR q.boot_id=(SELECT boot_id FROM wrapper_forms_boot WHERE singleton=1))
 ), sources(id,kind,bot_id,conversation_id,title,status,started_at,request_id,request_kind,card_id) AS (

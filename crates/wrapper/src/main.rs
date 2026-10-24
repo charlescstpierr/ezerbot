@@ -99,6 +99,7 @@ static ASSETS: &[Asset] = &[
     asset!("/mascot.css", CSS, ui "mascot.css"),
     asset!("/chat.js", JS, ui "chat.js"),
     asset!("/chat.css", CSS, ui "chat.css"),
+    asset!("/chat-code.js", JS, ui "chat-code.js"),
     asset!("/panels.js", JS, built "panels.js"),
     asset!("/panels.css", CSS, built "panels.css"),
     asset!("/iphone.js", JS, ui "iphone.js"),
@@ -823,6 +824,7 @@ mod asset_tests {
             [
                 "/",
                 "/app.js",
+                "/chat-code.js",
                 "/chat.css",
                 "/chat.js",
                 "/floating",

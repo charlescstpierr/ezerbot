@@ -6,6 +6,7 @@ use grokbot_engine::{
     model::{self, Run, RunStatus},
     store,
 };
+use grokbot_forms::vault::Vault;
 use grokbot_wrapper::{
     features::{self, delegation, Context},
     App, Provider,
@@ -27,6 +28,7 @@ struct Fixture {
     provider: Provider,
     server: FakeOpenAi,
     path: PathBuf,
+    now_ms: u64,
 }
 impl Fixture {
     fn new(live: bool) -> Self {
@@ -58,6 +60,7 @@ impl Fixture {
             provider,
             server,
             path,
+            now_ms: 100,
         };
         for id in ["child", "grandchild", "other"] {
             f.post("/api/bots",json!({"id":id,"name":id,"color":"citron","description":"Worker","instructions":""}));
@@ -140,7 +143,7 @@ impl Fixture {
             connection: db,
             provider: &self.provider,
             db_path: &self.path,
-            now_ms: 100,
+            now_ms: self.now_ms,
             bot_id: Some(&run.bot_id),
             conversation_id: Some(&run.conversation_id),
             run_id: Some(&run.run_id),
@@ -2027,8 +2030,21 @@ fn delegation_call_retries_keep_binding_and_terminal_result() {
     assert!(
         matches!(f.tool(&root,"same","delegate",args("child")),ToolOutcome::Done{output} if output["status"]["result"]=="stable result")
     );
-    assert!(
-        matches!(f.tool(&root,"check","check_delegations",json!({})),ToolOutcome::Done{output} if output["delegations"][0]["status"]["result"]=="stable result")
+    // Sortie sans argument figée sur 9cfe300b, avant la portée « fil » (#298).
+    let ToolOutcome::Done { output } = f.tool(&root, "check", "check_delegations", json!({}))
+    else {
+        panic!("check_delegations must succeed");
+    };
+    assert_eq!(
+        output,
+        json!({"delegations":[{
+            "id":id,"objective":"Verify selected material","parent_run_id":"retry-root",
+            "root_run_id":"retry-root","parent_bot":"grokbot","child_bot":"child","depth":1,
+            "child_run_id":format!("run-{id}"),
+            "conversation_id":format!("task:{id}:{}",root.conversation_id),
+            "parent_conversation_id":root.conversation_id,
+            "status":{"status":"done","result":"stable result"}
+        }]})
     );
 }
 
@@ -3451,71 +3467,21 @@ fn yolo_launches_a_delegated_task_without_the_background_card() {
     f.resume(&c, "yolo-delegate");
 }
 
-#[test]
-fn check_delegations_without_argument_keeps_its_output() {
-    let mut f = Fixture::new(false);
-    let root = f.root("frozen-root");
-    let id = suspended(f.tool(&root, "frozen", "delegate", args("child")));
-    let db = f.db();
-    let tx = features::write_transaction(&db).unwrap();
-    graph::set_status(
-        &tx,
-        &id,
-        &DelegationStatus::Done {
-            result: "stable result".into(),
-        },
-    )
-    .unwrap();
-    tx.commit().unwrap();
-    let ToolOutcome::Done { output } = f.tool(&root, "check", "check_delegations", json!({}))
-    else {
-        panic!("check_delegations must succeed");
-    };
-    // Sortie figée sur 9cfe300b, avant l'ajout de la portée « fil ».
-    assert_eq!(
-        output,
-        json!({"delegations":[{
-            "id":id,"objective":"Verify selected material","parent_run_id":"frozen-root",
-            "root_run_id":"frozen-root","parent_bot":"grokbot","child_bot":"child","depth":1,
-            "child_run_id":format!("run-{id}"),
-            "conversation_id":format!("task:{id}:{}",root.conversation_id),
-            "parent_conversation_id":root.conversation_id,
-            "status":{"status":"done","result":"stable result"}
-        }]})
-    );
-}
-
 const DAY: u64 = 86_400_000;
 impl Fixture {
-    fn at<T>(&self, run: &Run, now_ms: u64, read: impl FnOnce(&Context) -> T) -> T {
-        let db = self.db();
-        let tx = features::write_transaction(&db).unwrap();
-        read(&Context {
-            now_ms,
-            ..self.context(&tx, run)
-        })
-    }
-    fn fil(&self, run: &Run, now_ms: u64) -> Value {
-        let call = ToolCall {
-            call_id: "fil".into(),
-            name: "check_delegations".into(),
-            arguments: json!({"portee":"fil"}),
-        };
-        match self
-            .at(run, now_ms, |ctx| delegation::call_tool(ctx, &call))
-            .unwrap()
-        {
+    fn fil(&self, run: &Run) -> Value {
+        match self.tool(run, "fil", "check_delegations", json!({"portee":"fil"})) {
             ToolOutcome::Done { output } => output,
             other => panic!("portee fil refusée : {other:?}"),
         }
     }
-    fn tasks_block(&self, run: &Run, now_ms: u64) -> Option<String> {
-        let blocks = self.at(run, now_ms, |ctx| {
-            delegation::context(ctx, &context_request(run))
-        });
-        blocks
+    fn tasks_block(&self, run: &Run) -> Option<String> {
+        let db = self.db();
+        let tx = features::write_transaction(&db).unwrap();
+        let blocks = delegation::context(&self.context(&tx, run), &context_request(run));
+        let texts = blocks.into_iter().map(|b| b.text);
+        texts
             .into_iter()
-            .map(|b| b.text)
             .find(|t| t.starts_with("Tâches lancées depuis ce fil"))
     }
     fn delegate_as(&self, run: &Run, objective: &str) {
@@ -3539,11 +3505,10 @@ impl Fixture {
     }
 }
 fn summaries(output: &Value) -> Vec<&str> {
-    output["tasks"]
-        .as_array()
-        .unwrap()
+    let tasks = output["tasks"].as_array().unwrap();
+    tasks
         .iter()
-        .map(|task| task["summary"].as_str().unwrap())
+        .map(|t| t["summary"].as_str().unwrap())
         .collect()
 }
 
@@ -3552,8 +3517,14 @@ fn thread_scope_lists_a_task_started_in_an_earlier_reply() {
     let mut f = Fixture::new(true);
     let c = f.conversation();
     let (_, edge) = f.begin(&c, "r1", args("child"));
-    f.child_done(&edge);
+    f.child_result(&edge, "private-prefix\nprivate-suffix");
     f.resume(&c, "r1");
+    // Only the complete value is in the vault, and only since after the result was
+    // stored: it must be masked before the result is cut to a sentence.
+    let vault = Vault::open(&f.path.with_extension("secrets.json")).unwrap();
+    vault
+        .set("late", "test", "private-prefix\nprivate-suffix")
+        .unwrap();
     f.events(vec![
         call("fil", "check_delegations", json!({"portee":"fil"})),
         completed(),
@@ -3576,22 +3547,46 @@ fn thread_scope_lists_a_task_started_in_an_earlier_reply() {
     let task = &output["tasks"][0];
     assert_eq!(task["bot"], "child");
     assert_eq!(task["status"], "terminée");
-    assert_eq!(task["result"], "Verified child summary");
+    assert_eq!(task["result"], grokbot_forms::redact::MASK);
     let seen = f.server.seen.lock().unwrap();
     assert!(seen.bodies[before]
         .to_string()
         .contains("Tâches lancées depuis ce fil : 1 terminée."));
+    assert!(seen.bodies[before..]
+        .iter()
+        .all(|body| !body.to_string().contains("private-prefix")));
 }
 
 #[test]
-fn thread_scope_never_shows_another_conversation_or_bot() {
+fn thread_scope_keeps_to_its_conversation_and_bot_and_labels_each_task() {
     let mut f = Fixture::new(false);
     let (a, b) = (f.root("iso-a"), f.root("iso-b"));
+    assert_eq!(f.tasks_block(&a), None);
+    assert_eq!(f.fil(&a), json!({"portee":"fil","tasks":[]}));
     f.delegate_as(&a, "Tâche A");
     f.delegate_as(&b, "Tâche B");
-    f.shell_task(&b, "sh", "terminé", Some(0), "echo fil B");
-    assert_eq!(summaries(&f.fil(&a, 100)), ["Tâche A"]);
-    assert_eq!(summaries(&f.fil(&b, 100)), ["Tâche B", "echo fil B"]);
+    f.shell_task(&b, "ok", "terminé", Some(0), "echo fil B");
+    f.shell_task(&b, "ko", "échec", Some(3), "exit 3");
+    f.shell_task(&b, "run", "en cours", None, "sleep 60");
+    assert_eq!(summaries(&f.fil(&a)), ["Tâche A"]);
+    let listed = f.fil(&b);
+    assert_eq!(
+        summaries(&listed),
+        ["Tâche B", "echo fil B", "exit 3", "sleep 60"]
+    );
+    let failed = &listed["tasks"][2];
+    assert_eq!(
+        (
+            failed["kind"].as_str(),
+            failed["status"].as_str(),
+            failed["exit_code"].as_i64()
+        ),
+        (Some("command"), Some("échec"), Some(3))
+    );
+    assert_eq!(
+        f.tasks_block(&b).as_deref(),
+        Some("Tâches lancées depuis ce fil : 2 en cours, 1 terminée, 1 en échec.")
+    );
     let group = f.post(
         "/api/conversations",
         json!({"bot_ids":["grokbot","other"],"title":"Groupe"}),
@@ -3604,78 +3599,68 @@ fn thread_scope_never_shows_another_conversation_or_bot() {
         f.run_in("grp-other", "other", &group, 1),
     );
     f.delegate_as(&mine, "Tâche du groupe");
-    f.delegate_as(&theirs, "Tâche de l'autre bot");
     f.shell_task(&theirs, "sh", "en cours", None, "echo autre bot");
-    assert_eq!(summaries(&f.fil(&mine, 100)), ["Tâche du groupe"]);
-    assert_eq!(
-        summaries(&f.fil(&theirs, 100)),
-        ["Tâche de l'autre bot", "echo autre bot"]
-    );
+    assert_eq!(summaries(&f.fil(&mine)), ["Tâche du groupe"]);
+    assert_eq!(summaries(&f.fil(&theirs)), ["echo autre bot"]);
 }
 
 #[test]
-fn thread_context_block_counts_the_tasks_and_is_absent_without_any() {
-    let mut f = Fixture::new(false);
-    let run = f.root("count");
-    assert_eq!(f.tasks_block(&run, 100), None);
-    assert_eq!(f.fil(&run, 100), json!({"portee":"fil","tasks":[]}));
-    let id = suspended(f.tool(&run, "d", "delegate", args("child")));
-    let db = f.db();
-    let tx = features::write_transaction(&db).unwrap();
-    graph::set_status(
-        &tx,
-        &id,
-        &DelegationStatus::Done {
-            result: "Fini. Détails.".into(),
-        },
-    )
-    .unwrap();
-    tx.commit().unwrap();
-    f.shell_task(&run, "a", "en cours", None, "sleep 60");
-    f.shell_task(&run, "b", "terminé", Some(0), "true");
-    f.shell_task(&run, "c", "échec", Some(3), "exit 3");
-    assert_eq!(
-        f.tasks_block(&run, 100).as_deref(),
-        Some("Tâches lancées depuis ce fil : 1 en cours, 2 terminées, 1 en échec.")
-    );
-    let output = f.fil(&run, 100);
-    let task = |key: &str, value: &str| {
-        output["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t[key] == value)
-            .unwrap()
-            .clone()
-    };
-    assert_eq!(task("kind", "delegation")["result"], "Fini.");
-    let failed = task("summary", "exit 3");
-    assert_eq!(
-        (failed["kind"].as_str(), failed["exit_code"].as_i64()),
-        (Some("command"), Some(3))
-    );
-}
-
-#[test]
-fn thread_scope_keeps_the_ten_newest_tasks_of_the_last_day() {
+fn thread_scope_lists_ten_tasks_of_the_last_day_but_counts_them_all() {
     let mut f = Fixture::new(false);
     let c = f.conversation();
-    let now = 3 * DAY;
-    let at = |ago: u64| (now - ago) as i64;
-    let newest = f.run_in("new", "grokbot", &c, at(0));
-    let older = f.run_in("older", "grokbot", &c, at(3_600_000));
-    let stale = f.run_in("stale", "grokbot", &c, at(DAY + 1));
+    f.now_ms = 3 * DAY;
+    let reply = |name: &str, ago: u64| f.run_in(name, "grokbot", &c, (f.now_ms - ago) as i64);
+    let (newest, older) = (reply("new", 0), reply("older", 3_600_000));
+    let (edge, stale) = (reply("edge", DAY), reply("stale", DAY + 1));
     for i in 0..3 {
         f.shell_task(&newest, &format!("n{i}"), "terminé", Some(0), "cmd new");
     }
-    for i in 0..8 {
+    for i in 0..7 {
         f.shell_task(&older, &format!("o{i}"), "terminé", Some(0), "cmd older");
     }
+    f.shell_task(&older, "o7", "en cours", None, "cmd running");
+    f.shell_task(&edge, "e", "terminé", Some(0), "cmd edge");
     f.shell_task(&stale, "s", "terminé", Some(0), "cmd stale");
-    let listed = f.fil(&newest, now);
-    let listed = summaries(&listed);
+    // A command carries the start of its reply, so a delegation launched later in
+    // that reply comes before it.
+    f.now_ms -= 1_800_000;
+    f.delegate_as(&older, "Plus tard");
+    f.now_ms += 1_800_000;
     assert_eq!(
-        listed,
-        [["cmd new"; 3].as_slice(), ["cmd older"; 7].as_slice()].concat()
+        summaries(&f.fil(&newest)),
+        [
+            ["cmd new"; 3].as_slice(),
+            ["Plus tard"].as_slice(),
+            ["cmd older"; 6].as_slice()
+        ]
+        .concat()
     );
+    assert_eq!(
+        f.tasks_block(&newest).as_deref(),
+        Some("Tâches lancées depuis ce fil : 2 en cours, 11 terminées.")
+    );
+}
+
+#[test]
+fn thread_scope_forgets_the_tasks_a_reset_left_behind() {
+    for kind in ["reset", "engine_reset"] {
+        let mut f = Fixture::new(false);
+        let c = f.conversation();
+        let (old, new) = (
+            f.run_in("old", "grokbot", &c, 100),
+            f.run_in("new", "grokbot", &c, 300),
+        );
+        f.delegate_as(&old, "Avant");
+        f.shell_task(&old, "sh", "terminé", Some(0), "echo avant");
+        f.now_ms = 300;
+        assert_eq!(summaries(&f.fil(&new)), ["Avant", "echo avant"]);
+        let db = f.db();
+        let tx = features::write_transaction(&db).unwrap();
+        features::conversations::append_entry(&tx, &c, kind, "marker", 200).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(f.fil(&new), json!({"portee":"fil","tasks":[]}));
+        assert_eq!(f.tasks_block(&new), None);
+        f.shell_task(&new, "sh", "terminé", Some(0), "echo après");
+        assert_eq!(summaries(&f.fil(&new)), ["echo après"]);
+    }
 }

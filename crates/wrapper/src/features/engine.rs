@@ -77,7 +77,7 @@ struct ConnectionTest {
 struct Empty {}
 
 empty_hooks!(tools, call_tool, link_attachments);
-const BASE_INSTRUCTIONS: &str = "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$.";
+const BASE_INSTRUCTIONS: &str = "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$. Si tu ne peux vraiment pas avancer sans une réponse de Charles, pose ta question avec l'outil attendre_reponse ; sinon avance sans la poser.";
 const INTERRUPTED: &str = "La réponse a été interrompue avant la fin. Vous pouvez la relancer.";
 const CONTEXT_TOO_LARGE: &str = "Le texte et les pièces jointes dépassent ce que le modèle peut lire en un message. Raccourcissez le texte ou joignez moins de documents dans un nouveau message.";
 fn context_budget_failed(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<bool> {

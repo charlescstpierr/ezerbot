@@ -276,7 +276,7 @@ impl Journal {
             record.account_id == actor.account_id && record.generation < actor.generation
         };
         let changed = self.projection.iter().any(older);
-        // In place: `projection` stays `replay(committed)` without one replay per record (#302).
+        // En place : `projection` reste `replay(committed)` sans un rejeu par soumission (#302).
         for record in self
             .committed
             .iter_mut()

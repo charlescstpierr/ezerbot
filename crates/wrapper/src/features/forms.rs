@@ -47,6 +47,12 @@ pub(super) fn reminder_after(conn: &Connection) -> Result<Option<(i64, &'static 
     Ok(waiting::load(conn)?.reminder())
 }
 
+/// The turn whose card this follow-up turn answers (#216), so what was set on the
+/// message that started that turn still applies to the follow-up.
+pub(super) fn late_origin(conn: &Connection, run_id: &str) -> Option<String> {
+    late::origin_run(conn, run_id)
+}
+
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     // Needed before cutover too: the forms HTTP receipt already reads engine wakes.
     store::migrate(conn)?;

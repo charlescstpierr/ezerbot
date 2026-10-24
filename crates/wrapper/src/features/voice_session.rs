@@ -1,6 +1,9 @@
 //! Voice preferences and the debug-only recording synthesizer/live transcription adapter.
 //! Real audio remains in the Cocoa process, never in HTTP or model input.
+use super::Context;
 use crate::{parse, ApiError, ACCOUNT};
+use grokbot_engine::contracts::{ContextBlock, ContextRequest, ContextSource, Trigger};
+use grokbot_engine::store;
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -20,8 +23,81 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         INSERT OR IGNORE INTO wrapper_voice_settings VALUES(1,'',1.0);
         CREATE TABLE IF NOT EXISTS wrapper_voice_bots (bot_id TEXT PRIMARY KEY, voice TEXT NOT NULL, speed REAL NOT NULL, language TEXT NOT NULL, chosen INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS wrapper_voice_catalogue (id INTEGER PRIMARY KEY CHECK(id=1), voices TEXT NOT NULL);
-        INSERT OR IGNORE INTO wrapper_voice_catalogue VALUES(1,'[]');")?;
+        INSERT OR IGNORE INTO wrapper_voice_catalogue VALUES(1,'[]');
+        CREATE TABLE IF NOT EXISTS wrapper_voice_turns (conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY (conversation_id, message_id));")?;
     carry_global_setting(conn)
+}
+
+/// The message came from the voice mode: its answer is read aloud, so it stays short.
+pub(super) fn record_turn(
+    conn: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+) -> Result<(), ApiError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO wrapper_voice_turns (conversation_id, message_id) VALUES (?1, ?2)",
+        params![conversation_id, message_id],
+    )?;
+    Ok(())
+}
+
+pub fn discard_conversation(conn: &Connection, conversation: &str) -> Result<(), ApiError> {
+    conn.execute(
+        "DELETE FROM wrapper_voice_turns WHERE conversation_id = ?1",
+        [conversation],
+    )?;
+    Ok(())
+}
+
+pub fn discard_message(
+    conn: &Connection,
+    conversation: &str,
+    message: &str,
+) -> Result<(), ApiError> {
+    conn.execute(
+        "DELETE FROM wrapper_voice_turns WHERE conversation_id = ?1 AND message_id = ?2",
+        params![conversation, message],
+    )?;
+    Ok(())
+}
+
+/// The human message this turn answers. A turn opened by a late approval is named by the
+/// decision, so it takes the message of the turn that posted the card.
+fn spoken_message(conn: &Connection, request: &ContextRequest) -> Option<String> {
+    let mut run = request.run_id.clone();
+    let mut entry = request.current_message.entry_id.clone();
+    while let Some(origin) = super::forms::late_origin(conn, &run) {
+        let Trigger::UserMessage { message_id, .. } = store::required(conn, &origin).ok()?.trigger
+        else {
+            return None;
+        };
+        entry = message_id.split_once('/')?.1.to_owned();
+        run = origin;
+    }
+    super::multibot::source_message(conn, &run, &entry).ok()
+}
+
+pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock> {
+    let Some(message) = spoken_message(ctx.connection, request) else {
+        return Vec::new();
+    };
+    let spoken: bool = ctx
+        .connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM wrapper_voice_turns WHERE conversation_id=?1 AND message_id=?2)",
+            params![request.conversation_id, message],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !spoken {
+        return Vec::new();
+    }
+    vec![ContextBlock {
+        source: ContextSource::BotInstructions,
+        priority: super::priority::INSTRUCTIONS - 1,
+        budget: 16_384,
+        text: "Cette phrase vient du mode voix : ta réponse sera lue à voix haute. Réponds en une ou deux phrases courtes, sans liste ni mise en forme. Pour toute question sur une tâche lancée depuis ce fil, appelle check_delegations avec portee \"fil\" au lieu de deviner.".into(),
+    }]
 }
 
 /// The global voice and speed become, once, those of the bots that have none.

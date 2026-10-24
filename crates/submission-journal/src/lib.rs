@@ -272,19 +272,18 @@ impl Journal {
         }) {
             return Err(JournalError::StaleAccount);
         }
-        let replacements: Vec<_> = self
-            .projection
-            .iter()
-            .filter(|record| {
-                record.account_id == actor.account_id && record.generation < actor.generation
-            })
-            .cloned()
-            .collect();
-        let changed = !replacements.is_empty();
-        for mut record in replacements {
+        let older = |record: &Record| {
+            record.account_id == actor.account_id && record.generation < actor.generation
+        };
+        let changed = self.projection.iter().any(older);
+        // In place: `projection` stays `replay(committed)` without one replay per record (#302).
+        for record in self
+            .committed
+            .iter_mut()
+            .chain(self.projection.iter_mut())
+            .filter(|record| older(record))
+        {
             record.generation = actor.generation;
-            self.stage(record);
-            self.commit()?;
         }
         Ok(changed)
     }
@@ -711,6 +710,67 @@ mod tests {
         assert_eq!(journal.export_committed(), before);
         journal.crash_and_recover();
         assert_eq!(journal.export_committed(), before);
+    }
+
+    #[test]
+    fn adoption_generation_reprend_chaque_soumission_du_compte_sans_toucher_les_autres() {
+        let mut journal = Journal::new();
+        let old = actor(1);
+        journal.prepare(prepared(&old, "bonjour")).unwrap();
+        let attempt = must(AttemptId::new("attempt-1"));
+        journal
+            .dispatch(&old, &conversation(), &message(), attempt.clone())
+            .unwrap();
+        let mut second = prepared(&old, "deuxième");
+        second.message_id = must(MessageId::new("msg-2"));
+        journal.prepare(second).unwrap();
+        let other = AuthenticatedActor {
+            account_id: must(AccountId::new("acct-2")),
+            team_id: None,
+            generation: AccountGeneration(1),
+        };
+        let mut foreign = prepared(&other, "ailleurs");
+        foreign.actor = other.clone();
+        journal.prepare(foreign).unwrap();
+
+        let new = actor(2);
+        assert_eq!(journal.adopt_generation(&new), Ok(true));
+        assert_eq!(journal.adopt_generation(&new), Ok(false));
+
+        let generations = |journal: &Journal| {
+            journal
+                .export_committed()
+                .into_iter()
+                .map(|item| (item.account_id, item.message_id, item.generation))
+                .collect::<Vec<_>>()
+        };
+        let expected = vec![
+            (old.account_id.clone(), message(), AccountGeneration(2)),
+            (
+                old.account_id.clone(),
+                must(MessageId::new("msg-2")),
+                AccountGeneration(2),
+            ),
+            (other.account_id.clone(), message(), AccountGeneration(1)),
+        ];
+        assert_eq!(generations(&journal), expected);
+        journal.crash_and_recover();
+        assert_eq!(generations(&journal), expected);
+        let reloaded = Journal::from_committed(journal.export_committed());
+        assert_eq!(generations(&reloaded), expected);
+
+        assert_eq!(
+            state_of(&journal),
+            Some(SubmissionState::Dispatching { attempt })
+        );
+        assert_eq!(
+            journal.observe_accept(&old, receipt_for(&old)),
+            Err(JournalError::StaleAccount)
+        );
+        assert!(matches!(
+            journal.observe_accept(&new, receipt_for(&new)),
+            Ok(SubmissionState::AcceptedAwaitingEcho { .. })
+        ));
     }
 
     #[test]

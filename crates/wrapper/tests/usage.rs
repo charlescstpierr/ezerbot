@@ -383,7 +383,20 @@ impl Cost {
         age_ms: i64,
         tokens: Option<u64>,
     ) -> &Self {
+        self.late_pass_for(routine, id, status, age_ms, age_ms, tokens)
+    }
+    /// A passage scheduled `slot_age_ms` ago whose run started `age_ms` ago (a catch-up).
+    fn late_pass_for(
+        &self,
+        routine: &str,
+        id: &str,
+        status: &str,
+        slot_age_ms: i64,
+        age_ms: i64,
+        tokens: Option<u64>,
+    ) -> &Self {
         let started = (now() * 1000) as i64 - age_ms;
+        let scheduled = (now() * 1000) as i64 - slot_age_ms;
         insert_run(
             &self.conn,
             id,
@@ -395,7 +408,7 @@ impl Cost {
         if let Some(tokens) = tokens {
             add_usage(&self.conn, id, tokens / 2 - 100, 100, 0);
         }
-        self.conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,run_id,reason) VALUES (?1,?2,1,?3,?4,?1,'test')", params![id, routine, started, status]).unwrap();
+        self.conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,run_id,reason) VALUES (?1,?2,1,?3,?4,?1,'test')", params![id, routine, scheduled, status]).unwrap();
         self
     }
     /// A local run with `tokens` in total, started a day ago, that no routine owns.
@@ -646,6 +659,53 @@ fn another_account_never_calibrates_this_ones_quota() {
     assert!(share["percent"].is_null());
     // The sign-in is noted from this read on: still unconfirmed for the window it began in.
     assert_eq!(c.cost()["quota_share"]["reason"], "account_unconfirmed");
+}
+
+#[test]
+fn catch_up_passages_count_by_when_their_run_started_and_a_backlog_hides_nothing() {
+    // Twelve slots owed for ten days, run today: the week counts them all, the average takes ten.
+    let mut c = Cost::every_30_minutes();
+    for n in 0..12 {
+        c.late_pass_for(
+            &c.routine,
+            &format!("late{n}"),
+            "done",
+            10 * DAY_MS + n * 1000,
+            3_600_000 - n * 1000,
+            Some(1000),
+        );
+    }
+    let cost = c.cost();
+    assert_eq!(cost["tokens_7d"], 12_000);
+    assert_eq!(
+        (
+            cost["average_tokens"].clone(),
+            cost["average_sample"].clone()
+        ),
+        (json!(1000), json!(10))
+    );
+    // 250 newer catch-up occurrences still pending do not push the finished ones out of sight.
+    let now_ms = (now() * 1000) as i64;
+    for n in 0..250 {
+        c.conn
+            .execute(
+                "INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,catch_up) VALUES (?1,?2,1,?3,'pending',1)",
+                params![format!("backlog{n}"), c.routine, now_ms + n],
+            )
+            .unwrap();
+    }
+    let cost = c.cost();
+    assert_eq!(cost["state"], "measured");
+    assert_eq!(cost["average_sample"], 10);
+}
+
+#[test]
+fn a_week_without_telemetry_is_unknown_and_a_week_without_passages_is_zero() {
+    let mut c = Cost::every_30_minutes();
+    c.pass("old", "done", 10 * DAY_MS, Some(1000));
+    assert_eq!(c.cost()["tokens_7d"], 0);
+    c.pass("blind", "done", 3_600_000, None);
+    assert!(c.cost()["tokens_7d"].is_null());
 }
 
 fn is_money(key: &str) -> bool {

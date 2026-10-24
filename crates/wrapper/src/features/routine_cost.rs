@@ -91,7 +91,7 @@ struct Measured {
 pub(super) struct Costing<'a> {
     now_ms: i64,
     provider: &'a Provider,
-    /// Since when this app has seen the signed-in Codex account, noted on every read.
+    /// Since when the tick has seen the signed-in Codex account (now, if it has not).
     account_since: i64,
     /// Read once, and only if a routine has a forecast to turn into a share.
     calibration: OnceCell<Calibration>,
@@ -107,7 +107,7 @@ impl<'a> Costing<'a> {
         Ok(Self {
             now_ms,
             provider,
-            account_since: note_account(conn, &provider.demonstration_identity(), now_ms)?,
+            account_since: account_since(conn, &provider.demonstration_identity(), now_ms)?,
             calibration: OnceCell::new(),
         })
     }
@@ -220,9 +220,9 @@ impl<'a> Costing<'a> {
     }
 }
 
-/// Since when the signed-in account has been the one this app sees: a different account than the
-/// one noted (or the first read) dates the sign-in now. Noted on every read, window or not.
-fn note_account(conn: &Connection, identity: &str, now_ms: i64) -> Result<i64, ApiError> {
+/// Since when `identity` has been the signed-in account, as the tick noted it; now if it is not the
+/// one noted. A read never writes: the state and the routine list must stay read-only.
+fn account_since(conn: &Connection, identity: &str, now_ms: i64) -> Result<i64, ApiError> {
     let known: Option<(String, i64)> = conn
         .query_row(
             "SELECT identity, since FROM wrapper_routine_cost_account WHERE id=1",
@@ -232,14 +232,20 @@ fn note_account(conn: &Connection, identity: &str, now_ms: i64) -> Result<i64, A
         .optional()?;
     Ok(match known {
         Some((known, since)) if known == identity => since,
-        _ => {
-            conn.execute(
-                "INSERT OR REPLACE INTO wrapper_routine_cost_account(id,identity,since) VALUES (1,?1,?2)",
-                rusqlite::params![identity, now_ms],
-            )?;
-            now_ms
-        }
+        _ => now_ms,
     })
+}
+
+/// Called by every tick, window or not: a different account than the one noted dates its sign-in now,
+/// so another account's runs never calibrate this one's quota. Writes only on a change.
+pub(super) fn note_account(conn: &Connection, identity: &str, now_ms: i64) -> Result<(), ApiError> {
+    if account_since(conn, identity, now_ms)? == now_ms {
+        conn.execute(
+            "INSERT OR REPLACE INTO wrapper_routine_cost_account(id,identity,since) VALUES (1,?1,?2)",
+            rusqlite::params![identity, now_ms],
+        )?;
+    }
+    Ok(())
 }
 
 /// Codex only reports windows as percentages. Dividing the tokens measured locally since the
@@ -247,7 +253,7 @@ fn note_account(conn: &Connection, identity: &str, now_ms: i64) -> Result<i64, A
 /// is shared with other Codex apps and auxiliary calls are not measured here, which makes the
 /// denominator too small and the share too high; the history of another account would make it
 /// too low, so the share is only given once this account has been the signed-in one since the
-/// window began (the app notes the account it sees).
+/// window began (the tick notes the account it sees).
 fn calibrate(
     conn: &Connection,
     quota: &Value,

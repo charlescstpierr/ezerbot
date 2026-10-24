@@ -424,9 +424,9 @@ impl Cost {
         );
         add_usage(&self.conn, "chat", tokens / 2 - 100, 100, 0);
     }
-    /// Reads once so the app notes the signed-in account, then dates that sign-in long ago.
+    /// Ticks so the app notes the signed-in account, then dates that sign-in long ago.
     fn trust_account(&mut self) {
-        self.cost();
+        self.app.tick(now() * 1000);
         self.conn
             .execute("UPDATE wrapper_routine_cost_account SET since=0", [])
             .unwrap();
@@ -657,7 +657,8 @@ fn another_account_never_calibrates_this_ones_quota() {
     assert_eq!(share["state"], "unknown");
     assert_eq!(share["reason"], "account_unconfirmed");
     assert!(share["percent"].is_null());
-    // The sign-in is noted from this read on: still unconfirmed for the window it began in.
+    // The tick dates the new account's sign-in now: still unconfirmed for the window it began in.
+    c.app.tick(now() * 1000);
     assert_eq!(c.cost()["quota_share"]["reason"], "account_unconfirmed");
 }
 
@@ -709,27 +710,34 @@ fn a_week_without_telemetry_is_unknown_and_a_week_without_passages_is_zero() {
 }
 
 #[test]
-fn the_account_is_noted_on_every_read_even_without_a_weekly_window() {
-    // B was the account noted; the quota says nothing, and nothing is even measured yet.
+fn the_tick_notes_the_account_whatever_the_quota_and_a_read_never_writes() {
+    // B was the account noted; the quota has no weekly window and nothing is measured yet.
     let mut c = Cost::new(json!({}), json!({"kind":"every","interval_ms":1_800_000}));
+    let noted = |c: &Cost| -> (String, i64) {
+        c.conn
+            .query_row(
+                "SELECT identity, since FROM wrapper_routine_cost_account",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    };
     c.conn
         .execute(
             "INSERT OR REPLACE INTO wrapper_routine_cost_account(id,identity,since) VALUES (1,'account-b',0)",
             [],
         )
         .unwrap();
-    let before = (now() * 1000) as i64;
     assert_eq!(c.cost()["state"], "no_measure_yet");
-    let (identity, since): (String, i64) = c
-        .conn
-        .query_row(
-            "SELECT identity, since FROM wrapper_routine_cost_account",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
+    assert_eq!(noted(&c), ("account-b".into(), 0)); // reading changed nothing
+    let before = (now() * 1000) as i64;
+    c.app.tick(before as u64);
+    let (identity, since) = noted(&c);
     assert_ne!(identity, "account-b");
     assert!(since >= before);
+    // Ticking again with the same account keeps its date.
+    c.app.tick(before as u64 + 5000);
+    assert_eq!(noted(&c), (identity, since));
 }
 
 fn is_money(key: &str) -> bool {

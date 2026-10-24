@@ -14,8 +14,9 @@
 //! schedule is a cron/@every string, or trigger is a typed scheduler Schedule.
 //! /run-now requires nonce. History includes compact missed_ranges, not only runs.
 use super::{
-    mcp, routine_calendar, routine_cost::Costing, routine_github, routine_mail, routine_webhooks,
-    write_transaction, Context,
+    mcp, routine_calendar,
+    routine_cost::{self, Costing},
+    routine_github, routine_mail, routine_webhooks, write_transaction, Context,
 };
 use crate::{parse, validate_id, ApiError, ApiResponse, App, ACCOUNT, DEFAULT_BOT};
 use grokbot_engine::{
@@ -1585,6 +1586,10 @@ pub fn heartbeat(ctx: &Context<'_>) {
     }
 }
 pub fn tick(ctx: &Context<'_>) {
+    if let Ok(now) = clock(ctx) {
+        let _ =
+            routine_cost::note_account(ctx.connection, &ctx.provider.demonstration_identity(), now);
+    }
     let needed:bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_routines WHERE deleted=0 AND enabled=1) OR EXISTS(SELECT 1 FROM scheduler_occurrences WHERE status IN ('pending','running'))",[],|row|row.get(0)).unwrap_or(false);
     if !needed {
         // Nothing to materialize, so nothing can be hidden: this tick is the pulse.

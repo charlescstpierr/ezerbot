@@ -122,7 +122,7 @@ impl Fixture {
                 bot_id: bot.into(),
                 conversation_id: c.into(),
                 trigger: Trigger::UserMessage {
-                    message_id: format!("manual/{id}"),
+                    message_id: format!("{c}/{id}"),
                     attempt: 0,
                 },
                 kind: RunKind::Chat,
@@ -134,6 +134,7 @@ impl Fixture {
             },
         )
         .unwrap();
+        features::conversations::append_entry(&tx, c, "submission", id, started_at as u64).unwrap();
         let r = model::set_running_at(&tx, &r.run_id, 1).unwrap();
         tx.commit().unwrap();
         r
@@ -3641,26 +3642,101 @@ fn thread_scope_lists_ten_tasks_of_the_last_day_but_counts_them_all() {
     );
 }
 
+impl Fixture {
+    fn reset(&self, c: &str, kind: &str, at: u64) {
+        let db = self.db();
+        let tx = features::write_transaction(&db).unwrap();
+        features::conversations::append_entry(&tx, c, kind, "marker", at).unwrap();
+        tx.commit().unwrap();
+    }
+}
+
 #[test]
 fn thread_scope_forgets_the_tasks_a_reset_left_behind() {
     for kind in ["reset", "engine_reset"] {
         let mut f = Fixture::new(false);
         let c = f.conversation();
-        let (old, new) = (
-            f.run_in("old", "grokbot", &c, 100),
-            f.run_in("new", "grokbot", &c, 300),
-        );
+        let old = f.run_in("old", "grokbot", &c, 100);
         f.delegate_as(&old, "Avant");
         f.shell_task(&old, "sh", "terminé", Some(0), "echo avant");
         f.now_ms = 300;
-        assert_eq!(summaries(&f.fil(&new)), ["Avant", "echo avant"]);
-        let db = f.db();
-        let tx = features::write_transaction(&db).unwrap();
-        features::conversations::append_entry(&tx, &c, kind, "marker", 200).unwrap();
-        tx.commit().unwrap();
+        assert_eq!(summaries(&f.fil(&old)), ["Avant", "echo avant"]);
+        f.reset(&c, kind, 200);
+        let new = f.run_in("new", "grokbot", &c, 300);
         assert_eq!(f.fil(&new), json!({"portee":"fil","tasks":[]}));
         assert_eq!(f.tasks_block(&new), None);
         f.shell_task(&new, "sh", "terminé", Some(0), "echo après");
         assert_eq!(summaries(&f.fil(&new)), ["echo après"]);
     }
+}
+
+#[test]
+fn thread_scope_forgets_a_task_stamped_after_a_reset_set_back_by_the_clock() {
+    for kind in ["reset", "engine_reset"] {
+        let mut f = Fixture::new(false);
+        let c = f.conversation();
+        f.now_ms = 1000;
+        let old = f.run_in("old", "grokbot", &c, 1000);
+        f.delegate_as(&old, "Avant");
+        f.shell_task(&old, "sh", "terminé", Some(0), "echo avant");
+        f.reset(&c, kind, 900);
+        let new = f.run_in("new", "grokbot", &c, 900);
+        assert_eq!(f.fil(&new), json!({"portee":"fil","tasks":[]}));
+        assert_eq!(f.tasks_block(&new), None);
+    }
+}
+
+#[test]
+fn thread_scope_keeps_a_task_launched_in_the_millisecond_of_the_reset() {
+    for kind in ["reset", "engine_reset"] {
+        let mut f = Fixture::new(false);
+        let c = f.conversation();
+        f.now_ms = 500;
+        let old = f.run_in("old", "grokbot", &c, 500);
+        f.delegate_as(&old, "Avant");
+        f.reset(&c, kind, 500);
+        let new = f.run_in("new", "grokbot", &c, 500);
+        f.delegate_as(&new, "Après");
+        f.shell_task(&new, "sh", "terminé", Some(0), "echo après");
+        assert_eq!(summaries(&f.fil(&new)), ["Après", "echo après"]);
+    }
+}
+
+#[test]
+fn thread_scope_places_a_task_turn_by_its_reply_entry() {
+    let mut f = Fixture::new(false);
+    let c = f.conversation();
+    f.now_ms = 500;
+    let turn = |id: &str| {
+        let db = f.db();
+        let tx = features::write_transaction(&db).unwrap();
+        let run = model::start(
+            &tx,
+            &Run {
+                run_id: id.into(),
+                bot_id: "grokbot".into(),
+                conversation_id: c.clone(),
+                trigger: Trigger::Delegation {
+                    delegation_id: id.into(),
+                },
+                kind: RunKind::Task,
+                status: RunStatus::Queued,
+                task_status: Some(TaskStatus::Working),
+                turn_end: None,
+                budgets: RunBudgets::default(),
+                started_at: 500,
+            },
+        )
+        .unwrap();
+        features::conversations::append_entry(&tx, &c, "engine_reply", id, 500).unwrap();
+        tx.commit().unwrap();
+        run
+    };
+    let before = turn("before");
+    f.shell_task(&before, "sh", "terminé", Some(0), "echo avant");
+    f.reset(&c, "reset", 500);
+    let after = turn("after");
+    f.shell_task(&after, "sh", "terminé", Some(0), "echo après");
+    let caller = f.run_in("caller", "grokbot", &c, 500);
+    assert_eq!(summaries(&f.fil(&caller)), ["echo après"]);
 }

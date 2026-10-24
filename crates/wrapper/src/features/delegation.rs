@@ -1576,14 +1576,20 @@ const THREAD_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 /// What this bot launched from this conversation since its last reset, within 24 hours,
 /// newest first: the lines the model reads (at most `THREAD_LINES`), and the status of every task.
 /// A command has no start time of its own; it carries the start of the reply that launched it.
+/// A reset is told by message order, like everywhere else: a task is kept when the message that
+/// started its reply (a run with no message counts as before every reset) comes after the marker.
 struct Thread {
     lines: Vec<Value>,
     statuses: Vec<&'static str>,
 }
 
+/// A run is anchored to its own message: the one that triggered it, or its own reply entry.
+const AFTER_RESET: &str = "COALESCE((SELECT m.ordinal FROM wrapper_messages m WHERE m.account_id=?5 AND m.conversation_id=r.conversation_id
+            AND m.message_id IN (r.run_id,substr(r.trigger_ref,length(r.conversation_id)+2))),0)>?4";
+
 fn thread_tasks(ctx: &Context<'_>, conversation: &str, bot: &str) -> Result<Thread> {
     let reset: i64 = ctx.connection.query_row(
-        "SELECT COALESCE(MAX(created_at),-1) FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind IN ('reset','engine_reset')",
+        "SELECT COALESCE(MAX(ordinal),-1) FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind IN ('reset','engine_reset')",
         params![ACCOUNT, conversation],
         |r| r.get(0),
     )?;
@@ -1591,24 +1597,23 @@ fn thread_tasks(ctx: &Context<'_>, conversation: &str, bot: &str) -> Result<Thre
         .now_ms
         .saturating_sub(THREAD_WINDOW_MS)
         .min(i64::MAX as u64) as i64;
-    let since = since.max(reset + 1);
     let vault = super::forms::vault(ctx).map_err(|_| invalid("vault unavailable"))?;
     // `+r.bot_id` keeps the planner on engine_runs_conversation: the bot index would scan every run of the bot.
-    let mut stmt = ctx.connection.prepare(
+    let mut stmt = ctx.connection.prepare(&format!(
         "SELECT 0,c.objective,d.child_bot,json_extract(d.status,'$.status'),c.created_at,
             COALESCE(json_extract(d.status,'$.result'),json_extract(d.status,'$.reason')),NULL
         FROM delegation_graph d JOIN wrapper_delegation_calls c ON c.id=d.id
         JOIN engine_runs r ON r.run_id=d.parent_run_id
-        WHERE r.conversation_id=?1 AND d.parent_bot=?2 AND c.created_at>=?3
+        WHERE r.conversation_id=?1 AND d.parent_bot=?2 AND c.created_at>=?3 AND {AFTER_RESET}
         UNION ALL
         SELECT 1,json_extract(x.outcome,'$.output.command'),r.bot_id,t.status,
             CAST(json_extract(r.record,'$.started_at') AS INTEGER) AS launched,NULL,t.exit_code
         FROM wrapper_shell_tasks t JOIN engine_runs r ON r.run_id=t.run_id
         LEFT JOIN engine_external_tools x ON x.run_id=t.run_id AND x.call_id=t.call_id
-        WHERE r.conversation_id=?1 AND +r.bot_id=?2 AND launched>=?3
+        WHERE r.conversation_id=?1 AND +r.bot_id=?2 AND launched>=?3 AND {AFTER_RESET}
         ORDER BY 5 DESC,2",
-    )?;
-    let rows = stmt.query_map(params![conversation, bot, since], |r| {
+    ))?;
+    let rows = stmt.query_map(params![conversation, bot, since, reset, ACCOUNT], |r| {
         Ok((
             r.get::<_, bool>(0)?,
             r.get::<_, Option<String>>(1)?,

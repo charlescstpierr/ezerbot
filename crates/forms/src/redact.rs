@@ -11,6 +11,7 @@ use crate::vault::Vault;
 use grokbot_engine::contracts::{Error, Result};
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 // Shorter in UTF-8 bytes than *any* valid secret, so repeated masking converges
 // even if replacement boundaries accidentally form another known secret.
@@ -87,6 +88,34 @@ impl Drop for Hold {
 struct Held {
     vault: Vault,
     patterns: Vec<String>,
+    /// The `app_patterns` paths that opened this vault during the hold.
+    opened_as: Vec<PathBuf>,
+}
+
+/// `Patterns::of(&Vault::open_app(path)?)`. Under a hold, a vault already read through this
+/// path is not opened again: opening locks the file and lists its directory, which a state
+/// read would otherwise do once per reply of the history.
+pub fn app_patterns(path: &Path) -> Result<Patterns> {
+    let kept = HELD.with_borrow(|held| {
+        held.as_ref()?
+            .iter()
+            .find(|read| read.opened_as.iter().any(|opened| opened == path))
+            .map(|read| read.patterns.clone())
+    });
+    if let Some(patterns) = kept {
+        return Ok(Patterns(patterns));
+    }
+    let vault = Vault::open_app(path)?;
+    let patterns = known_patterns(&vault)?;
+    HELD.with_borrow_mut(|held| {
+        if let Some(read) = held
+            .as_mut()
+            .and_then(|kept| kept.iter_mut().find(|read| read.vault.same_store(&vault)))
+        {
+            read.opened_as.push(path.to_owned());
+        }
+    });
+    Ok(Patterns(patterns))
 }
 
 thread_local! {
@@ -158,6 +187,7 @@ fn known_patterns(vault: &Vault) -> Result<Vec<String>> {
         kept.push(Held {
             vault: vault.handle(),
             patterns: patterns.clone(),
+            opened_as: Vec::new(),
         });
         Ok(patterns)
     })
@@ -477,6 +507,37 @@ mod tests {
         assert!(unwound.is_err());
         test.vault.set("THIRD", "", "third-value").unwrap();
         assert_eq!(redact(&test.vault, "third-value").unwrap(), MASK);
+        // Under a hold, a vault read through its path is not opened again (opening would fail
+        // here), and the check still sees the change.
+        let held = hold();
+        assert_eq!(
+            app_patterns(test.vault.path())
+                .unwrap()
+                .text("third-value")
+                .unwrap(),
+            MASK
+        );
+        let content = std::fs::read(test.vault.path()).unwrap();
+        std::fs::write(test.vault.path(), b"broken").unwrap();
+        let reused = app_patterns(test.vault.path());
+        std::fs::write(test.vault.path(), content).unwrap();
+        assert_eq!(reused.unwrap().text("third-value").unwrap(), MASK);
+        test.vault.set("FOURTH", "", "fourth-value").unwrap();
+        assert_eq!(
+            app_patterns(test.vault.path())
+                .unwrap()
+                .text("fourth-value")
+                .unwrap(),
+            "fourth-value"
+        );
+        assert!(!held.settled().unwrap());
+        assert_eq!(
+            app_patterns(test.vault.path())
+                .unwrap()
+                .text("fourth-value")
+                .unwrap(),
+            MASK
+        );
         // Fail closed: a vault unreadable at the check refuses the rendering.
         let held = hold();
         redact(&test.vault, "").unwrap();

@@ -2892,9 +2892,13 @@ fn run_reply(
         attachments: vec![],
     })
 }
-/// The secrets to hide in a rendering, read once for all its fragments.
+/// The secrets to hide in a rendering, read once for all its fragments: those of `event_vault`,
+/// which a state read opens once for all its replies (#377).
 fn redaction_patterns(conn: &Connection) -> grokbot_engine::contracts::Result<redact::Patterns> {
-    redact::Patterns::of(&event_vault(conn)?)
+    let path = conn
+        .path()
+        .ok_or_else(|| Error::InvalidInput("file database required".into()))?;
+    redact::app_patterns(&Path::new(path).with_extension("secrets.json"))
 }
 pub(crate) fn group_reply(ctx: &super::Context<'_>, id: &str) -> Result<Message, ApiError> {
     let run = store::required(ctx.connection, id)?;

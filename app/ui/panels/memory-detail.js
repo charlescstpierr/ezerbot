@@ -116,10 +116,7 @@
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || id === null || busy || event.defaultPrevented || document.querySelector("dialog[open]")) return;
       event.preventDefault();
-      const was = mode;
-      if (was === "view") { close(true); return; }
-      [mode, problem] = ["view", ""];
-      render(was === "edit" ? "edit" : "ask");
+      close(true);
     });
     function open(factId) {
       epoch += 1;

@@ -144,9 +144,6 @@ test("Oublier demande confirmation ; annuler ne change rien ; confirmer retire l
   h.button("Annuler").click();
   assert.deepEqual([h.mutations(), h.points(), h.open(), h.text("text")], [[], 3, true, "Aime le café <b>noir</b>"]);
   h.button("Oublier…").click();
-  h.escape();
-  assert.deepEqual([h.open(), h.mutations().length], [true, 0], "Échap dans la confirmation revient au panneau");
-  h.button("Oublier…").click();
   h.button("Oublier ce souvenir").click();
   await h.settle();
   assert.deepEqual(h.mutations(), [["/api/memory/forget", { bot_id: "grokbot", fact_id: "f1" }]]);

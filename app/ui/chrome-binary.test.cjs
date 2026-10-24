@@ -1,6 +1,7 @@
 // Run with: node --test app/ui/chrome-binary.test.cjs
-// dumpQaResult() against a stand-in browser script (and a stand-in DevTools port where a test needs
-// to see when the deadline asks), so no real Chrome and no load dependence.
+// dumpQaResult() against a stand-in browser script (its processes are listed by the real `ps`, as for a
+// real Chrome; a stand-in DevTools port where a test needs one), so no real Chrome and no load
+// dependence.
 const assert = require("node:assert/strict");
 const { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const http = require("node:http");
@@ -8,7 +9,7 @@ const net = require("node:net");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
-const { dumpQaResult } = require("./chrome-binary.cjs");
+const { dumpQaResult, rendererState } = require("./chrome-binary.cjs");
 
 const REPORT = '<html><body><pre id="qa-result">{"gap":3,"name":"a &amp; b"}</pre></body></html>';
 const DISPLAY_LINK = "[1:2:1024/130000.000000:ERROR:ui/display/mac/cv_display_link_mac.mm:188] CVDisplayLinkCreateWithCGDisplay failed. CVReturn: -6670";
@@ -68,7 +69,8 @@ function withDevtools(targets, run) {
 const announce = (port) => `echo 'DevTools listening on ws://127.0.0.1:${port}/devtools/browser/00000000-0000-0000-0000-000000000001' >&2`;
 const secondLaunchReports = (stall) => `case "$*" in\n*profile-2*) cat <<'EOF'\n${REPORT}\nEOF\n;;\n*) ${stall};;\nesac`;
 
-// A launch is replaced ONLY when it never announced "DevTools listening" within its deadline.
+// A launch is replaced ONLY when, at its deadline, it has not announced "DevTools listening", has no
+// renderer process, and has not exited nor written anything but start-up lines.
 test("a launch that prints nothing is replaced by a fresh Chrome and the report is returned once", () =>
   withBrowser(`case "$*" in\n*profile-3*) cat <<'EOF'\n${REPORT}\nEOF\n;;\n*) exec sleep 60;;\nesac`, [300, 300, 30000], async (options) => {
     const report = await dumpQaResult(options);
@@ -92,6 +94,90 @@ test("Chrome is started with a DevTools port, so that a browser that never start
     assert.deepEqual(await dumpQaResult(options), { gap: 3, name: "a & b" });
     assert.equal(launches(), 1);
   }));
+
+
+// The renderer table. A stand-in Chrome has a renderer when one of its descendants has `--type=renderer`
+// in its command line (argv[0] of a `sleep`, so that `ps` shows it as a real Chrome's renderer is).
+const PROCESS = (type, seconds, { leaveGroup = false } = {}) =>
+  `perl ${leaveGroup ? "-MPOSIX " : ""}-e '${leaveGroup ? "POSIX::setsid(); " : ""}exec {"sleep"} "--type=${type}", "${seconds}"' &`;
+const NO_PROCESS_TABLE = "could not be read to prove that no renderer began";
+
+test("a launch with other Chrome processes but no renderer is replaced, and the report of the second launch is accepted", () =>
+  withBrowser(`case "$*" in\n*profile-2*) cat <<'EOF'\n${REPORT}\nEOF\n;;\n*) ${PROCESS("gpu-process", 60)}\n${PROCESS("utility", 60)}\nexec sleep 60;;\nesac`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+    assert.deepEqual(await dumpQaResult(options), { gap: 3, name: "a & b" });
+    assert.equal(launches(), 2);
+  }));
+
+// A renderer is the page: once one exists, the freeze is a real failure, not a launch to replace.
+test("a launch with a renderer that then stalls, silent on stdout and stderr, fails after its deadline, with no new launch", () =>
+  withBrowser(`${secondLaunchReports(`${PROCESS("renderer", 60)}\nexec sleep 60`)}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+    await assert.rejects(dumpQaResult(options), /chrome started a renderer \(the page began\) but did not report a test report within its deadline/);
+    assert.equal(launches(), 1);
+  }));
+
+test("a renderer that left the process group of the Chrome still counts: the launch fails after its deadline, with no new launch", () =>
+  withBrowser(`${secondLaunchReports(`${PROCESS("renderer", 7, { leaveGroup: true })}\nexec sleep 60`)}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+    await assert.rejects(dumpQaResult(options), /chrome started a renderer \(the page began\) but did not report a test report within its deadline/);
+    assert.equal(launches(), 1);
+  }));
+
+// The list of the processes is the proof: a list that cannot be read, or that does not show this Chrome
+// at the head of its group, proves nothing, and then the launch fails instead of being replaced.
+const UNREADABLE_TABLES = {
+  "ps fails": () => Promise.reject(new Error("ps failed")),
+  "ps throws": () => { throw new Error("ps missing"); },
+  "an empty table": () => Promise.resolve(""),
+  "a table that is not one": () => Promise.resolve("this is not a process table\nat all"),
+  "a table without this Chrome": () => Promise.resolve("    1     0     1 /sbin/launchd\n  100     1   100 /usr/bin/something"),
+  "a table where this Chrome does not lead its group": (pid) => Promise.resolve(`${pid} 1 1 /bin/chrome\n`),
+};
+for (const [name, listProcesses] of Object.entries(UNREADABLE_TABLES)) {
+  test(`${name}: a silent launch with no renderer to be seen fails after its deadline, with no new launch`, () =>
+    withBrowser(secondLaunchReports("exec sleep 60"), [300, 30000, 30000], async (options, launches) => {
+      await assert.rejects(dumpQaResult({ ...options, listProcesses }), new RegExp(NO_PROCESS_TABLE));
+      assert.ok(launches() <= 1, "no second launch"); // the 300 ms deadline may kill the first one before it ran
+    }));
+}
+
+test("without a `ps` to run, a silent launch fails after its deadline, with no new launch", () => {
+  const empty = mkdtempSync(join(tmpdir(), "chrome-binary-nops-"));
+  const path = process.env.PATH;
+  // `sleep` by its full path: the stand-in inherits this PATH.
+  return withBrowser(`case "$*" in\n*profile-2*) cat <<'EOF'\n${REPORT}\nEOF\n;;\n*) exec /bin/sleep 60;;\nesac`, [300, 30000, 30000], async (options, launches) => {
+    process.env.PATH = empty;
+    try {
+      await assert.rejects(dumpQaResult(options), new RegExp(NO_PROCESS_TABLE));
+    } finally {
+      process.env.PATH = path;
+    }
+    assert.ok(launches() <= 1, "no second launch");
+  }).finally(() => rmSync(empty, { recursive: true, force: true }));
+});
+
+test("rendererState reads a ps table: renderer in the group or among the descendants, nothing else", () => {
+  const table = (...rows) => rows.join("\n");
+  const head = "  500   400   500 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --headless=new";
+  assert.equal(rendererState(table(head), 500), "none");
+  assert.equal(rendererState(table(head, "  501   500   500 Helper --type=gpu-process --foo"), 500), "none");
+  assert.equal(rendererState(table(head, "  501   500   500 Helper --type=utility", "  502   500   500 Helper --type=renderer --lang=en"), 500), "present");
+  // A renderer that left the group but descends from the Chrome (through another process).
+  assert.equal(rendererState(table(head, "  501   500   500 Helper --type=utility", "  502   501   502 Helper --type=renderer"), 500), "present");
+  // A renderer in the group whose parent died.
+  assert.equal(rendererState(table(head, "  502     1   500 Helper --type=renderer"), 500), "present");
+  // Not this Chrome's: another group, not descending from it.
+  assert.equal(rendererState(table(head, "  900     1   900 Chrome --type=renderer"), 500), "none");
+  // Only the whole word counts, and only in the command line.
+  assert.equal(rendererState(table(head, "  501   500   500 Helper --type=renderer-extra --x=--type=renderer"), 500), "none");
+  // A command line that spans lines belongs to its row.
+  assert.equal(rendererState(table(head, "  501   500   500 sh -c 'echo", "x' --type=renderer"), 500), "present");
+  assert.equal(rendererState(table(head, "  501   500   500 sh -c 'echo", "x' --type=utility"), 500), "none");
+  // Nothing is proven by a table that does not show the Chrome at the head of its group.
+  assert.equal(rendererState("", 500), "unknown");
+  assert.equal(rendererState(undefined, 500), "unknown");
+  assert.equal(rendererState("garbage", 500), "unknown");
+  assert.equal(rendererState("  501   500   500 Helper", 500), "unknown");
+  assert.equal(rendererState("  500   400   499 Chrome", 500), "unknown");
+});
 
 // Once DevTools is announced, the browser has started: every freeze is a real failure, whatever its
 // DevTools port does (silent, about:blank, a page that began), and whatever the stand-in says next.
@@ -156,6 +242,24 @@ test("an exit that was not yet delivered when the deadline fired still fails the
     assert.equal(launches(), 1);
   });
 });
+
+// The deadline is absolute: an exit before it does not move it. The stand-in announces DevTools, exits
+// 0.5 s before its deadline, and a descendant that left the group (so it survives the exit and keeps the
+// pipes open) writes the complete report 0.3 s after it, while the pipes are still being drained.
+const AFTER = (seconds) => `perl -MTime::HiRes=time,sleep -e 'my $d = $ARGV[0] + $ARGV[1] - time(); sleep($d) if $d > 0' "$START" ${seconds}`;
+const PRINT_REPORT_AT = (seconds) => `QA='${REPORT}' perl -MPOSIX -MTime::HiRes=time,sleep -e 'POSIX::setsid(); open(F, ">", shift); close(F); my $d = $ARGV[0] + $ARGV[1] - time(); sleep($d) if $d > 0; print $ENV{QA}' "$0.ready" "$START" ${seconds} &\nwhile [ ! -e "$0.ready" ]; do sleep 0.05; done`;
+
+test("a report that comes after the deadline is not accepted, even when the Chrome exited before the deadline", () =>
+  withBrowser(`START=$(perl -MTime::HiRes=time -e 'printf "%.3f", time()')\n${announce(9)}\n${PRINT_REPORT_AT((4000 + 300) / 1000)}\n${AFTER((4000 - 500) / 1000)}\nexit 3`, 4000, async (options, launches) => {
+    await assert.rejects(dumpQaResult(options), /chrome (exited without|started \(it announced DevTools\) but did not report) a test report/);
+    assert.equal(launches(), 1);
+  }));
+
+test("a report that comes after the deadline is not accepted, even when a silent Chrome exited before the deadline", () =>
+  withBrowser(`START=$(perl -MTime::HiRes=time -e 'printf "%.3f", time()')\n${PRINT_REPORT_AT((4000 + 300) / 1000)}\n${AFTER((4000 - 500) / 1000)}\nexit 3`, 4000, async (options, launches) => {
+    await assert.rejects(dumpQaResult(options), /chrome exited without a test report/);
+    assert.equal(launches(), 1);
+  }));
 
 // An exit after the deadline came too late to matter: the launch already failed, and nothing is waited for.
 test("a browser that announced DevTools and exits after its deadline, pipes held open, has already failed, with no new launch", () => {

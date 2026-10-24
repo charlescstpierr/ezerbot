@@ -106,6 +106,8 @@
         problem.textContent = error?.message || "Le souvenir n’a pas pu être ajouté.";
         update();
         text.focus();
+        // Sans réponse du moteur (error.status absent), l’ajout a pu aboutir : la liste relue le montre avant un nouvel essai.
+        if (!error?.status) await onAdded?.();
         return;
       }
       busy = false;

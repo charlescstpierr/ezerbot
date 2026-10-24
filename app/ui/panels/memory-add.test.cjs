@@ -29,7 +29,7 @@ const STATE = {
 };
 
 // `engine(body)` répond à la place du moteur : un souvenir ajouté, ou une erreur.
-async function open({ state = STATE, engine } = {}) {
+async function open({ state = STATE, engine, lost = false } = {}) {
   const sidebar = new Element("aside"), main = new Element("main"), dock = new Element("div");
   const bots = new Element("div"); bots.className = "sidebar-bots"; sidebar.append(bots);
   dock.className = "composer-dock"; main.append(dock);
@@ -45,6 +45,7 @@ async function open({ state = STATE, engine } = {}) {
       calls.added.push(JSON.parse(JSON.stringify(body))); // hors du contexte vm, pour comparer en profondeur
       const fact = await (engine ? engine(body) : { fact_id: `n${calls.added.length}`, bot_id: body.bot_id, scope: body.scope, text: body.text.trim(), learned_at: Date.now() });
       facts.unshift(fact);
+      if (lost) throw new Error("La connexion au moteur local est interrompue."); // enregistré, mais la réponse se perd
       return { fact };
     },
     leaveConversation() {},
@@ -114,6 +115,13 @@ test("erreur du moteur : message affiché tel quel, texte conservé, rien d’aj
   assert.equal(h.field("text").value, long);
   assert.equal(h.form.hidden || h.submit.disabled, false);
   assert.deepEqual([h.items(), h.count(), h.calls.toasts], [["Aime le café"], "1", []]);
+});
+
+test("réponse perdue après l’enregistrement : la liste relue montre le souvenir avant tout nouvel essai, le texte reste", async () => {
+  const h = await open({ lost: true });
+  await h.add("grokbot", "Déjà enregistré");
+  assert.deepEqual(h.items(), ["Déjà enregistré", "Aime le café"]);
+  assert.deepEqual([h.error(), h.field("text").value, h.count()], ["La connexion au moteur local est interrompue.", "Déjà enregistré", "2"]);
 });
 
 test("la portée sujet envoie topic_id ; la portée privée n’en envoie pas", async () => {

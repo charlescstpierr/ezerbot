@@ -85,6 +85,14 @@ int main(void) {
         assert([result[@"speech_id"] unsignedIntegerValue] == 3);
         [voice command:@{@"command":@"interrupt",@"token":@"ids"} reply:reply];
         assert([result[@"speech_cut"] unsignedIntegerValue] == 3);
+        // A sentence read to the end moves `speech_heard`; the one behind it, cut, names the cut.
+        [voice command:@{@"command":@"speak",@"token":@"ids",@"text":@"Une.",@"voice":@"fake-fr-CA",@"speed":@1,@"barge":@1} reply:reply];
+        [voice command:@{@"command":@"speak",@"token":@"ids",@"text":@"Deux.",@"voice":@"fake-fr-CA",@"speed":@1,@"barge":@1} reply:reply];
+        assert([result[@"speech_id"] unsignedIntegerValue] == 5);
+        [voice command:@{@"command":@"finish_sentence",@"token":@"ids"} reply:reply];
+        assert([result[@"speech_heard"] unsignedIntegerValue] == 4 && [result[@"speaking"] boolValue]);
+        [voice command:@{@"command":@"interrupt",@"token":@"ids"} reply:reply];
+        assert([result[@"speech_heard"] unsignedIntegerValue] == 4 && [result[@"speech_cut"] unsignedIntegerValue] == 5);
         [voice command:@{@"command":@"start",@"token":@"ids-again"} reply:reply];
         assert([result[@"speech_cut"] unsignedIntegerValue] == 0 && [result[@"speech_heard"] unsignedIntegerValue] == 0);
         [voice cancel];

@@ -565,3 +565,34 @@ test("an announcement whose speak is still unanswered when Charles leaves is sai
   await cls(f.root,"voice-session-toggle").onclick();await f.tick();
   assert.deepEqual(spoken(f),[phrase,phrase]);
 });
+
+test("a synthesis failure reported with the cut of the announcement's own sentence still owes it to the relaunch",async()=>{
+  const f=fixture();const [edge]=tasksOf(f,task("t1","running"));
+  await cls(f.root,"voice-session-toggle").onclick();await f.tick();
+  edge.status={status:"done",result:"Fait."};await f.tick();
+  assert.deepEqual(spoken(f),[phrase]);
+  Object.assign(f.source,{speech_cut:1,speech_heard:0,status:"tts_unavailable",speaking:false});await f.tick();
+  assert.equal(f.panel.wantsPolling(),false);
+  await cls(f.root,"voice-session-toggle").onclick();await f.tick();
+  assert.deepEqual(spoken(f),[phrase,phrase]);
+});
+
+test("an announcement cut by Charles and left before it is said again is said at the relaunch",async()=>{
+  const f=fixture();const [edge]=tasksOf(f,task("t1","running"));
+  await cls(f.root,"voice-session-toggle").onclick();await f.tick();
+  edge.status={status:"done",result:"Fait."};await f.tick();
+  f.talk("Attends");await f.tick();
+  assert.deepEqual(spoken(f),[phrase],"the cut is seen, Charles is still speaking");
+  all(f.root).find(e=>e.textContent==="Quitter").onclick();
+  await cls(f.root,"voice-session-toggle").onclick();await f.tick();
+  assert.deepEqual(spoken(f),[phrase,phrase]);
+});
+
+test("muting during the 5 s of an announcement shows that the microphone is off",async()=>{
+  const f=fixture();const [edge]=tasksOf(f,task("t1","running"));
+  await cls(f.root,"voice-session-toggle").onclick();await f.tick();
+  edge.status={status:"done",result:"Fait."};f.clock=1000;await f.tick();
+  assert.equal(stateOf(f),phrase);
+  await muteButton(f).onclick();
+  assert.equal(stateOf(f),"Micro coupé · le bot ne vous entend pas");
+});

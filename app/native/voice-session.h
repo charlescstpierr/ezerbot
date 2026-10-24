@@ -54,6 +54,9 @@
         @"speech_heard":@(self.speechHeard), @"speech_cut":@(self.speechCut),
         @"microphone_id":self.microphone[@"id"] ?: @"", @"microphone_name":self.microphone[@"name"] ?: @"", @"microphone_fallback":self.microphone[@"fallback"] ?: @NO };
 }
+- (void)sentenceHeard {
+    self.speechHeard = ++self.speechLeft;
+}
 - (void)interrupt {
     if (self.speechLeft < self.speechCount) { self.speechCut = self.speechLeft + 1; self.speechLeft = self.speechCount; }
 #if defined(EZERBOT_RELEASE)
@@ -95,7 +98,7 @@
 // system-output stream that the microphone could mistake for the user.
 - (void)finishSentenceIfDrained {
     if (!self.synthesisFinished || self.pendingBuffers) return;
-    if (self.speechQueue.count) { [self.speechQueue removeObjectAtIndex:0]; self.speechHeard = ++self.speechLeft; }
+    if (self.speechQueue.count) { [self.speechQueue removeObjectAtIndex:0]; [self sentenceHeard]; }
     self.speaking = self.speechQueue.count > 0;
     if (self.speaking) [self synthesizeSentence];
 }
@@ -390,6 +393,11 @@
 #if defined(EZERBOT_DEBUG)
     else if ([command isEqual:@"fail"]) {
         [self cancel]; self.status = @"failed";
+    }
+    // The debug synthesizer plays nothing: the test says when its first sentence ends.
+    else if ([command isEqual:@"finish_sentence"]) {
+        if (self.speechLeft < self.speechCount) [self sentenceHeard];
+        self.speaking = self.speechLeft < self.speechCount;
     }
     else if ([command isEqual:@"feed"]) {
         NSString *text = body[@"text"];

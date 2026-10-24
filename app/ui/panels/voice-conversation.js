@@ -70,9 +70,9 @@
     button.setAttribute("aria-pressed", String(active()));
     button.title = window.EzerbotVoiceCall?.active?.() && !active() ? "Indisponible pendant l’appel vocal" : panels.meetingActive?.() && !active() ? "Indisponible pendant l’enregistrement d’une réunion" : button.disabled ? "Ouvrez une conversation pour utiliser le mode voix" : "Mode voix · parler et écouter les réponses sur ce Mac";
     bar.hidden = phase === "idle";
-    // A muted microphone wins over the listening and speaking labels: neither invites the user to speak.
+    // A muted microphone wins over the listening and speaking labels and an announcement: none says the bot cannot hear.
     const shown = muted && ["listening","speaking"].includes(phase) ? "muted" : phase;
-    label.textContent = detail || announced() || ({authorizing:"Autorisation du microphone…",muted:"Micro coupé · le bot ne vous entend pas",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:`En attente de vous · répondez dans la carte${muted ? " · micro coupé" : ""}`,sending:"Envoi de la transcription…"}[shown] || "");
+    label.textContent = detail || (shown !== "muted" && announced()) || ({authorizing:"Autorisation du microphone…",muted:"Micro coupé · le bot ne vous entend pas",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:`En attente de vous · répondez dans la carte${muted ? " · micro coupé" : ""}`,sending:"Envoi de la transcription…"}[shown] || "");
     bar.dataset.phase = shown;
     bar.dataset.tone = detail ? "danger" : "";
     transcript.textContent = muted ? "" : liveText || "Votre transcription apparaîtra ici. L’audio reste sur ce Mac.";

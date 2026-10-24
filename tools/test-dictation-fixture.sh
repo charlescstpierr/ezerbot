@@ -10,21 +10,29 @@ set -euo pipefail
 [[ $(uname -s) == Darwin ]] || { echo 'ÉCHEC : test audio réel, Mac seulement.' >&2; exit 1; }
 mode=${1:-run}
 case $mode in run | --install | --status) ;; *) echo "usage : $0 [--install|--status]" >&2; exit 2 ;; esac
-cd "$(dirname "$0")/.."
 # Under $HOME, outside every worktree, outside TCC-protected folders (Desktop, Documents) and caches.
 dir="$HOME/.local/share/ezerbot/dictation-fixture-test"
+
+# One install or run at a time across worktrees (so one prompt at most). The lock is taken by running
+# this same script as the command of `lockf FILE COMMAND`: the form of every macOS (the `lockf FD`
+# form only exists since late 2023), kept for the whole install and run, released when it ends.
+# A holder runs at most about 2 min (45 s prompt + 2 x 30 s). -k keeps the file, so waiters queue in order.
+if [[ ${EZERBOT_DICTATION_LOCK_HELD:-} != "$dir" ]]; then
+  mkdir -p "$dir"
+  status=0
+  EZERBOT_DICTATION_LOCK_HELD=$dir lockf -k -s -t 180 "$dir/.lock" "${BASH:-bash}" "$0" "$@" || status=$?
+  # 75 = EX_TEMPFAIL: lockf gave up waiting (our own exit codes are 0, 1, 2 and the binary's).
+  [[ $status -ne 75 ]] || echo "ÉCHEC : $dir/.lock tenu plus de 180 s par un autre test de dictée." >&2
+  exit "$status"
+fi
+
+cd "$(dirname "$0")/.."
 bin="$dir/ezerbot-dictation-fixture-test"
 id=com.ezerbot.dictation-fixture-test
 src=app/native/dictation-fixture-test.m
 plist=app/native/dictation-fixture-test-Info.plist
 cflags=(-fobjc-arc -Wall -Wextra -Werror -framework Cocoa -framework AVFoundation -framework CoreAudio
   -framework AudioToolbox -framework Speech -sectcreate __TEXT __info_plist "$plist")
-
-# One install or run at a time across worktrees (so one prompt at most); the lock is released when
-# this process and its children exit. A holder runs at most about 2 min (45 s prompt + 2 x 30 s).
-mkdir -p "$dir"
-exec 9>"$dir/.lock"
-lockf -t 180 9 || { echo "ÉCHEC : $dir/.lock tenu plus de 180 s par un autre test de dictée." >&2; exit 1; }
 
 # Contents of the local sources (as clang sees them), the plist and the recipe; never paths or dates.
 fingerprint() {

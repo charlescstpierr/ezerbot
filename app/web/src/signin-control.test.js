@@ -27,7 +27,6 @@ function threadSignInOnly() {
       if (!id.endsWith("/src/Thread.jsx")) return null;
       return code
         .replace('import { Streamdown } from "streamdown";\n', "function Streamdown() { return null; }\n")
-        .replace('import { createMermaidPlugin } from "@streamdown/mermaid";\n', "function createMermaidPlugin() { return {}; }\n")
         .replace('import { createMathPlugin } from "@streamdown/math";\n', "function createMathPlugin() { return {}; }\n")
         .replace('import { code } from "./code.js";\n', "const code = {};\n")
         .replace('import { splitMentionText } from "./mentions.js";\n', "function splitMentionText() { return []; }\n")

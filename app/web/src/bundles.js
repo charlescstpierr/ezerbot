@@ -3,6 +3,7 @@
 // classic script with a fixed name that sets one global, never an import() chunk.
 export const bundles = {
   code: { file: "chat-code.js", global: "GrokbotCode" },
+  mermaid: { file: "chat-mermaid.js", global: "GrokbotMermaid" },
 };
 
 const loading = new Map();

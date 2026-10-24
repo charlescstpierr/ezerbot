@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
-import { createMermaidPlugin } from "@streamdown/mermaid";
 import { createMathPlugin } from "@streamdown/math";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { BookOpen, Check, Clock, Monitor, RefreshCw, Square, TriangleAlert } from "lucide-react";
@@ -9,6 +8,7 @@ import { messageActions, messageMenuOpenId } from "./message-actions.js";
 import { MessageAttachments } from "./image-gallery.jsx";
 import { galleryImages, proseWithoutGallery } from "./image-gallery.js";
 import { code } from "./code.js";
+import { createMermaidPlugin } from "./mermaid.js";
 import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
 import { Card as FallbackCard } from "./cards/fallback.jsx";

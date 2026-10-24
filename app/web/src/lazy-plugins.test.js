@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { installScriptDocument } from "./fake-script-document.js";
 import { code } from "./code.js";
+import { createMermaidPlugin } from "./mermaid.js";
 import * as codeBundle from "./code-bundle.js";
 
 const page = installScriptDocument();
@@ -42,4 +43,27 @@ test("le plugin annonce exactement les langues que chat-code.js colore", () => {
   assert.deepEqual(new Set(code.getSupportedLanguages()), new Set(codeBundle.languages));
   assert.equal(code.supportsLanguage("TSX"), true);
   assert.equal(code.supportsLanguage("text"), false);
+});
+
+test("un diagramme attend chat-mermaid.js, puis Mermaid le dessine avec la configuration du fil, même après un premier échec", async () => {
+  const plugin = createMermaidPlugin({ config: { theme: "base" } });
+  const first = plugin.getMermaid({ fontFamily: "serif" }).render("d1", "graph TD; A-->B;");
+  const second = plugin.getMermaid().render("d2", "graph LR; C-->D;");
+  assert.equal(page.live("/chat-mermaid.js").length, 1);
+  page.fail(page.live("/chat-mermaid.js")[0]);
+  await assert.rejects(first, /chat-mermaid\.js/);
+  await assert.rejects(second, /chat-mermaid\.js/);
+
+  const retried = plugin.getMermaid({ fontFamily: "serif" }).render("d3", "graph TD; A-->B;");
+  const drawn = [];
+  const bundle = {
+    createMermaidPlugin: (options) => ({
+      getMermaid: (config) => ({ render: async (id, source) => { drawn.push({ options, config, id, source }); return { svg: `<svg id="${id}"></svg>` }; } }),
+    }),
+  };
+  page.arrive(page.live("/chat-mermaid.js")[0], "GrokbotMermaid", bundle);
+  assert.deepEqual(await retried, { svg: '<svg id="d3"></svg>' });
+  assert.deepEqual(drawn, [{ options: { config: { theme: "base" } }, config: { fontFamily: "serif" }, id: "d3", source: "graph TD; A-->B;" }]);
+  await plugin.getMermaid().render("d4", "graph TD; X-->Y;");
+  assert.equal(page.appended.filter((script) => script.src === "/chat-mermaid.js").length, 2);
 });

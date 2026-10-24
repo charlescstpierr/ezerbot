@@ -27,7 +27,7 @@ function iife({ entry, name, file, plugins = [], copyPublicDir = false }) {
 }
 
 await iife({ entry: "src/main.jsx", name: "GrokbotChatBundle", file: "chat.js", plugins: [react(), tailwindcss()], copyPublicDir: true });
-const entries = { code: "src/code-bundle.js" };
+const entries = { code: "src/code-bundle.js", mermaid: "src/mermaid-bundle.js" };
 for (const [piece, entry] of Object.entries(entries)) {
   await iife({ entry, name: bundles[piece].global, file: bundles[piece].file });
 }

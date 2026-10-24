@@ -15,3 +15,13 @@ test("chat.js ne contient pas la coloration du code, chat-code.js la contient", 
   assert.equal(has(chat, "codeToTokens"), false, "Shiki in chat.js");
   assert.equal(code.startsWith("var GrokbotCode="), true, "chat-code.js sets window.GrokbotCode");
 });
+
+test("chat.js ne contient pas Mermaid, chat-mermaid.js le contient", () => {
+  const chat = shipped("chat.js");
+  const mermaid = shipped("chat-mermaid.js");
+  for (const marker of ["No diagram type detected", "flowchart-v2", "cytoscape", "dagre"]) {
+    assert.equal(has(chat, marker), false, `${marker} in chat.js`);
+    assert.equal(has(mermaid, marker), true, `${marker} in chat-mermaid.js`);
+  }
+  assert.equal(mermaid.startsWith("var GrokbotMermaid="), true, "chat-mermaid.js sets window.GrokbotMermaid");
+});

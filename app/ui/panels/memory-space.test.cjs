@@ -8,7 +8,7 @@ class Element {
   append(...kids) { for (const kid of kids) { if (kid instanceof Element) kid.parentElement = this; this.children.push(kid); } }
   insertBefore(kid, before) { kid.parentElement = this; const i = this.children.indexOf(before); if (i < 0) this.children.push(kid); else this.children.splice(i, 0, kid); }
   replaceChildren(...kids) { this.children = []; this.append(...kids); }
-  setAttribute(key, value) { this.attributes[key] = String(value); }
+  setAttribute(key, value) { this.attributes[key] = String(value); if (key === "class") this.className = value; }
   getAttribute(key) { return this.attributes[key]; }
   removeAttribute(key) { delete this.attributes[key]; }
   addEventListener(name, action) { this.listeners[name] = action; }
@@ -34,7 +34,7 @@ function harness({ facts = FACTS, fail = false, registered = true } = {}) {
   const dock = new Element("div"); dock.className = "composer-dock";
   main.append(dock);
   const nodes = { sidebar, "conversation-title": new Element("h1"), "workspace-label": new Element("button") };
-  const document = { title: "Ezerbot", createElement: (tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (selector) => (selector === ".main-panel" ? main : dock) };
+  const document = { title: "Ezerbot", createElement: (tag) => new Element(tag), createElementNS: (_, tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (selector) => (selector === ".main-panel" ? main : dock) };
   const calls = { left: 0, api: [] };
   let panel = null;
   const panels = {
@@ -43,7 +43,8 @@ function harness({ facts = FACTS, fail = false, registered = true } = {}) {
     async api(path) { calls.api.push(path); if (fail || panels.down) throw new Error("hors ligne"); return { facts }; },
     leaveConversation() { calls.left += 1; },
   };
-  vm.runInContext(fs.readFileSync(`${__dirname}/memory-space.js`, "utf8"), vm.createContext({ window: { GrokbotPanels: panels }, document, setInterval: () => 0, JSON, Number, String, Date, Promise, Object, Array }));
+  const context = vm.createContext({ window: { GrokbotPanels: panels }, document, setInterval: () => 0, JSON, Number, String, Date, Promise, Object, Array, Math, Set, Map });
+  for (const file of ["memory-graph.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
   const state = { bots: [{ id: "grokbot", name: "Ezerbot" }, { id: "chef", name: "Chef" }, { id: "vieux", name: "Ancien" }], memory_auto: { revision: 1 } };
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   return {
@@ -61,7 +62,7 @@ test("l’entrée « Mémoire » se place sous Rechercher, avant les bots, avec 
   assert.equal(h.entry().getAttribute("aria-label"), "Mémoire, 3 souvenirs");
   assert.deepEqual(h.calls.api, ["/api/memory/all"]);
 });
-test("un clic ouvre « Espace personnel / Mémoire · 3 souvenirs » avec Graphe (bientôt) et Liste", async () => {
+test("un clic ouvre « Espace personnel / Mémoire · 3 souvenirs » avec Graphe et Liste", async () => {
   const h = harness();
   await h.open({ id: "c1" });
   assert.equal(h.calls.left, 1, "le fil affiché est quitté");
@@ -71,10 +72,11 @@ test("un clic ouvre « Espace personnel / Mémoire · 3 souvenirs » avec Graphe
   assert.equal(h.nodes["conversation-title"].textContent, "Mémoire · 3 souvenirs");
   assert.equal(h.entry().getAttribute("aria-current"), "page");
   const [graph, list] = named(h.screen(), "memory-space-tab");
-  assert.match(graph.textContent, /Graphe\s*bientôt/);
+  assert.equal(graph.textContent, "Graphe");
   assert.equal(list.getAttribute("aria-pressed"), "true");
   graph.click();
-  assert.match(h.screen().textContent, /arrive bientôt/);
+  assert.equal(graph.getAttribute("aria-pressed"), "true");
+  assert.equal(named(h.screen(), "memory-graph-point").length, 3);
   assert.equal(named(h.screen(), "memory-space-item").length, 0);
 });
 test("la Liste montre tous les souvenirs : texte, bot, portée, date, sans HTML interprété", async () => {
@@ -125,4 +127,61 @@ test("changer d’écran ferme la Mémoire ; occupé, le clic ne fait rien ; non
   h.entry().click();
   assert.equal(h.screen().hidden, true);
   assert.equal(harness({ registered: false }).sidebar.children.length, 1);
+});
+const view = (h) => named(h.screen(), "memory-graph-canvas")[0].getAttribute("viewBox").split(" ").map(Number);
+const hasClass = (el, name) => el.classes.includes(name);
+test("Graphe : un point par souvenir, un centre, une pastille par groupe, la couleur suit la portée", async () => {
+  const h = harness();
+  await h.open();
+  named(h.screen(), "memory-space-tab")[0].click();
+  const points = named(h.screen(), "memory-graph-point");
+  assert.equal(points.length, 3);
+  assert.equal(named(h.screen(), "memory-graph-center").length, 1);
+  assert.equal(named(h.screen(), "memory-graph-group").length, 3, "Personnel, Travail et Déménagement");
+  assert.deepEqual(points.map((point) => point.classes.find((name) => name.startsWith("is-"))), ["is-private", "is-team", "is-topic"]);
+  assert.deepEqual(named(h.screen(), "memory-graph-group").map((group) => group.getAttribute("aria-label")), ["Personnel, 1 souvenir", "Travail, 1 souvenir", "Déménagement, 1 souvenir"]);
+  assert.match(points[0].getAttribute("aria-label"), /^Ezerbot, Privé : Aime le café <b>noir<\/b>$/, "le texte reste du texte, jamais du HTML");
+  assert.deepEqual(named(h.screen(), "memory-graph-key-name").map((key) => key.textContent), ["Privé", "Équipe", "Sujet"]);
+  assert.equal(named(h.screen(), "memory-graph-label").map((label) => label.textContent).join("|"), "Vous|Personnel|Travail|Déménagement");
+});
+test("Graphe : zoom +, −, recadrer ; survol et focus mettent un nœud en avant et estompent les autres", async () => {
+  const h = harness();
+  await h.open();
+  named(h.screen(), "memory-space-tab")[0].click();
+  const [plus, minus, reset] = named(h.screen(), "memory-graph-tool");
+  assert.deepEqual([plus, minus, reset].map((button) => button.getAttribute("aria-label")), ["Zoom avant", "Zoom arrière", "Recadrer"]);
+  const initial = view(h);
+  plus.click();
+  assert.ok(view(h)[2] < initial[2] && view(h)[3] < initial[3], "zoom avant : la vue se resserre");
+  reset.click();
+  assert.deepEqual(view(h), initial);
+  minus.click();
+  assert.ok(view(h)[2] > initial[2], "zoom arrière : la vue s’élargit");
+  reset.click();
+  const [first, second] = named(h.screen(), "memory-graph-point");
+  for (const [on, off] of [["mouseenter", "mouseleave"], ["focus", "blur"]]) {
+    first.listeners[on]();
+    assert.ok(hasClass(first, "is-active") && !hasClass(first, "is-dim"));
+    assert.ok(hasClass(second, "is-dim") && !hasClass(second, "is-active"), "un autre groupe s’estompe");
+    assert.ok(named(h.screen(), "memory-graph-group").some((group) => !hasClass(group, "is-dim")), "son groupe reste lisible");
+    first.listeners[off]();
+    assert.ok(![first, second].some((point) => hasClass(point, "is-active") || hasClass(point, "is-dim")));
+  }
+});
+test("Graphe : sans souvenir, la Liste affiche son état vide au lieu d’un graphe vide", async () => {
+  const h = harness({ facts: [] });
+  await h.open();
+  named(h.screen(), "memory-space-tab")[0].click();
+  assert.equal(named(h.screen(), "memory-graph-point").length, 0);
+  assert.match(named(h.screen(), "memory-space-empty")[0].textContent, /Aucun souvenir pour l’instant/);
+});
+test("Graphe : un rechargement manqué garde le graphe et le signale comme dernier état connu", async () => {
+  const h = harness();
+  await h.open();
+  named(h.screen(), "memory-space-tab")[0].click();
+  h.panels.down = true;
+  h.panel().onState({ bots: [], memory_auto: { revision: 2 } });
+  await h.settle();
+  assert.equal(named(h.screen(), "memory-graph-point").length, 3);
+  assert.match(h.screen().textContent, /dernier état connu/);
 });

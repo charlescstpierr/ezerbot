@@ -10,7 +10,7 @@ class Element {
   append(...kids) { for (const kid of kids) { if (kid instanceof Element) kid.parentElement = this; this.children.push(kid); } }
   insertBefore(kid, before) { kid.parentElement = this; const i = this.children.indexOf(before); if (i < 0) this.children.push(kid); else this.children.splice(i, 0, kid); }
   replaceChildren(...kids) { this.children = []; this.append(...kids); }
-  setAttribute(key, value) { this.attributes[key] = String(value); }
+  setAttribute(key, value) { this.attributes[key] = String(value); if (key === "class") this.className = value; }
   removeAttribute(key) { delete this.attributes[key]; }
   addEventListener(name, action) { (this.listeners[name] ||= []).push(action); }
   fire(name, extra = {}) { const event = { target: this, preventDefault() { this.prevented = true; }, stopPropagation() {}, ...extra }; for (const action of this.listeners[name] || []) action(event); return event; }
@@ -34,7 +34,7 @@ async function open({ state = STATE, engine, lost = false } = {}) {
   const bots = new Element("div"); bots.className = "sidebar-bots"; sidebar.append(bots);
   dock.className = "composer-dock"; main.append(dock);
   const nodes = { sidebar, "conversation-title": new Element("h1"), "workspace-label": new Element("button") };
-  const document = { title: "", createElement: (tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (selector) => (selector === ".main-panel" ? main : dock) };
+  const document = { title: "", createElement: (tag) => new Element(tag), createElementNS: (_, tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (selector) => (selector === ".main-panel" ? main : dock) };
   const facts = [{ fact_id: "f1", bot_id: "grokbot", scope: "private", text: "Aime le café", learned_at: Date.now() }];
   const calls = { added: [], read: 0, toasts: [] }, registered = [];
   const panels = {
@@ -51,8 +51,8 @@ async function open({ state = STATE, engine, lost = false } = {}) {
     leaveConversation() {},
     notify: (message) => calls.toasts.push(message),
   };
-  const context = vm.createContext({ window: { GrokbotPanels: panels }, document, setInterval: () => 0, JSON, Number, String, Date, Promise, Object, Array, Boolean });
-  for (const file of ["memory-add.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
+  const context = vm.createContext({ window: { GrokbotPanels: panels }, document, setInterval: () => 0, JSON, Number, String, Date, Promise, Object, Array, Boolean, Math, Set, Map });
+  for (const file of ["memory-add.js", "memory-graph.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   for (const panel of registered) panel.onState(state, {});
   await settle();
@@ -61,7 +61,7 @@ async function open({ state = STATE, engine, lost = false } = {}) {
   main.querySelector(".memory-add-open").click();
   const field = (id) => main.querySelector(`#memory-add-${id}`), form = main.querySelector(".memory-add");
   return {
-    calls, settle, nodes, form, field, opener: main.querySelector(".memory-add-open"),
+    calls, settle, nodes, main, form, field, opener: main.querySelector(".memory-add-open"),
     submit: main.querySelector(".primary-button"),
     items: () => main.querySelectorAll(".memory-space-text").map((item) => item.textContent),
     count: () => sidebar.querySelector(".memory-entry-count").textContent,
@@ -152,4 +152,16 @@ test("Échap ferme le formulaire en gardant le texte, le focus revient au bouton
   assert.deepEqual([h.form.hidden, Element.active], [true, h.opener]);
   h.opener.click();
   assert.equal(h.field("text").value, "Brouillon");
+});
+
+test("un souvenir ajouté par le formulaire apparaît tout de suite comme un nouveau point du graphe", async () => {
+  const h = await open();
+  h.main.querySelector(".is-graph").click();
+  const points = () => h.main.querySelectorAll(".memory-graph-point");
+  assert.equal(points().length, 1);
+  await h.add("chef", "Le code du portail est 4821");
+  assert.equal(points().length, 2, "N + 1 points après l’ajout, sans recharger");
+  assert.equal(h.main.querySelectorAll(".memory-graph-center").length, 1);
+  assert.ok(points().every((point) => point.classes.includes("is-private")));
+  assert.equal(h.main.querySelector(".memory-graph-group").attributes["aria-label"], "Personnel, 2 souvenirs");
 });

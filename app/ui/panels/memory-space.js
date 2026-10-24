@@ -71,7 +71,6 @@
       const tab = node("button", `memory-space-tab is-${key}`, label);
       tab.type = "button";
       tab.dataset.view = key;
-      if (key === "graph") tab.append(node("small", "memory-space-soon", "bientôt"));
       tab.addEventListener("click", () => { view = key; paint(); });
       switcher.append(tab);
     }
@@ -85,9 +84,11 @@
   }
   function body() {
     const empty = (text) => [node("p", "memory-space-empty", text)];
-    if (view === "graph") return empty("Le graphe de la mémoire arrive bientôt. La Liste montre déjà tous les souvenirs.");
-    if (!facts) return empty(failed ? "La mémoire n’a pas pu être chargée." : "Chargement…");
     const note = failed ? [node("p", "memory-space-help", "La mémoire n’a pas pu être actualisée : voici le dernier état connu.")] : [];
+    // Graphe : sans souvenir (ou pas encore chargé), les messages de la Liste s'appliquent.
+    const graph = view === "graph" && facts?.length ? window.GrokbotMemoryGraph?.view(facts, { bots: latest?.state?.bots || [] }) : null;
+    if (graph) return [...note, graph];
+    if (!facts) return empty(failed ? "La mémoire n’a pas pu être chargée." : "Chargement…");
     if (!facts.length) return [...note, ...empty("Aucun souvenir pour l’instant. Vos bots retiendront ici ce qui compte pour vous.")];
     const list = node("ul", "memory-space-list");
     list.setAttribute("aria-label", "Souvenirs");

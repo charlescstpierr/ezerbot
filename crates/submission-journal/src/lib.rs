@@ -1,12 +1,14 @@
 //! Journal durable d'une soumission jusqu'à l'écho du transcript.
 //!
-//! La durabilité est simulée en mémoire. Les enregistrements validés vivent
-//! dans un `Vec`. La transaction ouverte tient dans une zone non validée.
-//! [`Journal::crash_and_recover`] jette cette zone et recharge la projection
-//! consultable depuis les seuls enregistrements validés.
+//! La durabilité est simulée en mémoire. L'état validé est le dernier
+//! enregistrement de chaque clé, tenu dans une table ordonnée par clé. La
+//! transaction ouverte tient dans une zone non validée.
+//! [`Journal::crash_and_recover`] jette cette zone : seuls les enregistrements
+//! validés restent consultables.
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use grokbot_domain::{
@@ -101,7 +103,18 @@ struct Record {
     state: SubmissionState,
 }
 
+/// Clé durable d'une soumission : `(account_id, conversation_id, message_id)`.
+type Key = (AccountId, ConversationId, MessageId);
+
 impl Record {
+    fn key(&self) -> Key {
+        (
+            self.account_id.clone(),
+            self.conversation_id.clone(),
+            self.message_id.clone(),
+        )
+    }
+
     fn matches(
         &self,
         account: &AccountId,
@@ -112,22 +125,16 @@ impl Record {
             && &self.conversation_id == conversation
             && &self.message_id == message
     }
-
-    fn same_key(&self, other: &Self) -> bool {
-        self.matches(&other.account_id, &other.conversation_id, &other.message_id)
-    }
 }
 
 /// Journal d'envoi. Les champs restent privés : l'état consultable passe par [`Journal::get`].
 #[derive(Debug)]
 pub struct Journal {
-    /// Enregistrements dont le commit a réussi, du plus ancien au plus récent.
-    committed: Vec<Record>,
-    /// Étapes de la transaction ouverte. Vide hors transaction.
+    /// Dernier enregistrement validé de chaque clé, ordonné par clé.
+    committed: BTreeMap<Key, Record>,
+    /// Étapes de la transaction ouverte, de la plus ancienne à la plus récente.
+    /// Vide hors transaction. Elles recouvrent `committed` pour la consultation.
     uncommitted: Vec<Record>,
-    /// Projection consultable. Elle suit la transaction en cours, puis elle est
-    /// reconstruite depuis `committed` au commit et après un crash.
-    projection: Vec<Record>,
 }
 
 impl Default for Journal {
@@ -140,9 +147,8 @@ impl Journal {
     /// Journal vide : aucun enregistrement validé, aucune transaction ouverte.
     pub fn new() -> Self {
         Self {
-            committed: Vec::new(),
+            committed: BTreeMap::new(),
             uncommitted: Vec::new(),
-            projection: Vec::new(),
         }
     }
 
@@ -267,14 +273,15 @@ impl Journal {
     /// sont pas modifiés. Une génération en recul est refusée.
     pub fn adopt_generation(&mut self, actor: &AuthenticatedActor) -> Result<bool, JournalError> {
         self.abandon_open_transaction();
-        if self.projection.iter().any(|record| {
+        debug_assert!(self.uncommitted.is_empty());
+        if self.committed.values().any(|record| {
             record.account_id == actor.account_id && record.generation > actor.generation
         }) {
             return Err(JournalError::StaleAccount);
         }
         let replacements: Vec<_> = self
-            .projection
-            .iter()
+            .committed
+            .values()
             .filter(|record| {
                 record.account_id == actor.account_id && record.generation < actor.generation
             })
@@ -381,9 +388,7 @@ impl Journal {
                 "un message livré ne se retire pas".into(),
             ));
         }
-        self.committed
-            .retain(|record| !record.matches(&actor.account_id, conversation_id, message_id));
-        self.projection = Self::replay(&self.committed);
+        self.committed.remove(&current.key());
         Ok(())
     }
 
@@ -398,16 +403,17 @@ impl Journal {
             .map(|record| record.state.clone())
     }
 
-    /// Abandonne la zone non validée et recharge la projection depuis le journal validé.
+    /// Abandonne la zone non validée : seul le journal validé reste consultable.
     pub fn crash_and_recover(&mut self) {
         self.uncommitted.clear();
-        self.projection = Self::replay(&self.committed);
     }
 
-    /// Dernier état validé de chaque clé. La zone non validée est exclue.
+    /// Dernier état validé de chaque clé, dans l'ordre des clés (compte,
+    /// conversation, message). La zone non validée est exclue.
     pub fn export_committed(&self) -> Vec<CommittedSubmission> {
-        Self::replay(&self.committed)
-            .into_iter()
+        self.committed
+            .values()
+            .cloned()
             .map(|record| CommittedSubmission {
                 account_id: record.account_id,
                 generation: record.generation,
@@ -434,12 +440,11 @@ impl Journal {
                 generation: item.generation,
                 state: item.state,
             })
-            .collect::<Vec<_>>();
-        let projection = Self::replay(&committed);
+            .map(|record| (record.key(), record))
+            .collect();
         Self {
             committed,
             uncommitted: Vec::new(),
-            projection,
         }
     }
 
@@ -550,7 +555,6 @@ impl Journal {
     }
 
     fn stage(&mut self, record: Record) {
-        upsert(&mut self.projection, record.clone());
         self.uncommitted.push(record);
     }
 
@@ -560,9 +564,8 @@ impl Journal {
                 "aucune transaction à valider".into(),
             ));
         };
-        self.committed.push(record);
+        self.committed.insert(record.key(), record);
         self.uncommitted.clear();
-        self.projection = Self::replay(&self.committed);
         Ok(())
     }
 
@@ -572,26 +575,14 @@ impl Journal {
         conversation: &ConversationId,
         message: &MessageId,
     ) -> Option<&Record> {
-        self.projection
+        self.uncommitted
             .iter()
             .rev()
             .find(|record| record.matches(account, conversation, message))
-    }
-
-    fn replay(committed: &[Record]) -> Vec<Record> {
-        let mut projection = Vec::new();
-        for record in committed {
-            upsert(&mut projection, record.clone());
-        }
-        projection
-    }
-}
-
-fn upsert(records: &mut Vec<Record>, record: Record) {
-    if let Some(slot) = records.iter_mut().find(|item| item.same_key(&record)) {
-        *slot = record;
-    } else {
-        records.push(record);
+            .or_else(|| {
+                self.committed
+                    .get(&(account.clone(), conversation.clone(), message.clone()))
+            })
     }
 }
 
@@ -642,17 +633,6 @@ mod tests {
             conversation_id: conversation(),
             message_id: message(),
         }
-    }
-
-    fn records_for(journal: &Journal) -> usize {
-        let account = must(AccountId::new("acct-1"));
-        let conversation = conversation();
-        let message = message();
-        journal
-            .committed
-            .iter()
-            .filter(|record| record.matches(&account, &conversation, &message))
-            .count()
     }
 
     fn state_of(journal: &Journal) -> Option<SubmissionState> {
@@ -750,11 +730,13 @@ mod tests {
 
         assert_eq!(first, SubmissionState::Queued);
         assert_eq!(second, first);
-        assert_eq!(records_for(&journal), 1);
+        let exported = journal.export_committed();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].state, SubmissionState::Queued);
         assert!(journal.uncommitted.is_empty());
 
         journal.crash_and_recover();
-        assert_eq!(records_for(&journal), 1);
+        assert_eq!(journal.export_committed(), exported);
         assert_eq!(state_of(&journal), Some(SubmissionState::Queued));
     }
 
@@ -763,13 +745,14 @@ mod tests {
         let mut journal = Journal::new();
         let actor = actor(1);
         let queued = journal.prepare(prepared(&actor, "bonjour")).unwrap();
+        let before = journal.export_committed();
 
         let err = journal
             .prepare(prepared(&actor, "autre corps"))
             .unwrap_err();
 
         assert_eq!(err, JournalError::Conflict);
-        assert_eq!(records_for(&journal), 1);
+        assert_eq!(journal.export_committed(), before);
         assert_eq!(state_of(&journal), Some(queued));
     }
 
@@ -836,12 +819,12 @@ mod tests {
             accepted,
             SubmissionState::AcceptedAwaitingEcho { .. }
         ));
-        let records_after_accept = records_for(&journal);
+        let exported_after_accept = journal.export_committed();
 
         journal.crash_and_recover();
 
         assert_eq!(state_of(&journal), Some(accepted.clone()));
-        assert_eq!(records_for(&journal), records_after_accept);
+        assert_eq!(journal.export_committed(), exported_after_accept);
         assert_eq!(
             journal
                 .reconcile_before_retry(&actor, &conversation(), &message())
@@ -859,7 +842,7 @@ mod tests {
         journal
             .dispatch(&actor, &conversation(), &message(), attempt.clone())
             .unwrap();
-        let records_before = records_for(&journal);
+        let exported_before = journal.export_committed();
 
         let recovered = journal
             .stage_accept_then_crash(&actor, receipt_for(&actor))
@@ -868,11 +851,12 @@ mod tests {
         let expected = SubmissionState::Dispatching { attempt };
         assert_eq!(recovered, expected);
         assert_eq!(state_of(&journal), Some(expected));
-        assert_eq!(records_for(&journal), records_before);
+        assert_eq!(journal.export_committed(), exported_before);
         assert!(journal.uncommitted.is_empty());
-        assert!(journal.committed.iter().all(|record| {
-            !matches!(record.state, SubmissionState::AcceptedAwaitingEcho { .. })
-        }));
+        assert!(journal
+            .export_committed()
+            .iter()
+            .all(|item| { !matches!(item.state, SubmissionState::AcceptedAwaitingEcho { .. }) }));
     }
 
     #[test]
@@ -959,11 +943,11 @@ mod tests {
             .unwrap();
 
         let first = journal.observe_accept(&actor, receipt_for(&actor)).unwrap();
-        let records = records_for(&journal);
+        let exported = journal.export_committed();
         let second = journal.observe_accept(&actor, receipt_for(&actor)).unwrap();
 
         assert_eq!(first, second);
-        assert_eq!(records_for(&journal), records);
+        assert_eq!(journal.export_committed(), exported);
         assert!(matches!(
             second,
             SubmissionState::AcceptedAwaitingEcho { .. }
@@ -972,19 +956,23 @@ mod tests {
 
     #[test]
     fn refus_et_prepare_guident_le_rejeu_sans_creer_de_message() {
-        let mut journal = Journal::new();
         let owner = actor(1);
-        journal.committed.push(Record {
-            account_id: owner.account_id.clone(),
-            conversation_id: conversation(),
-            message_id: message(),
-            body: "bonjour".into(),
-            generation: owner.generation,
-            state: SubmissionState::Refused {
+        let committed_item =
+            |message_id: MessageId, body: &str, state: SubmissionState| CommittedSubmission {
+                account_id: owner.account_id.clone(),
+                generation: owner.generation,
+                conversation_id: conversation(),
+                message_id,
+                body: body.into(),
+                state,
+            };
+        let mut journal = Journal::from_committed(vec![committed_item(
+            message(),
+            "bonjour",
+            SubmissionState::Refused {
                 reason: Refusal::Conflict,
             },
-        });
-        journal.crash_and_recover();
+        )]);
 
         let decision = journal
             .reconcile_before_retry(&owner, &conversation(), &message())
@@ -997,17 +985,15 @@ mod tests {
                 },
             }
         );
-        assert_eq!(records_for(&journal), 1);
+        assert_eq!(journal.export_committed().len(), 1);
 
-        journal.committed.push(Record {
-            account_id: owner.account_id.clone(),
-            conversation_id: conversation(),
-            message_id: must(MessageId::new("msg-prepare")),
-            body: "brouillon".into(),
-            generation: AccountGeneration(1),
-            state: SubmissionState::Prepared,
-        });
-        journal.crash_and_recover();
+        let mut items = journal.export_committed();
+        items.push(committed_item(
+            must(MessageId::new("msg-prepare")),
+            "brouillon",
+            SubmissionState::Prepared,
+        ));
+        let mut journal = Journal::from_committed(items);
         let prepared_decision = journal
             .reconcile_before_retry(
                 &owner,
@@ -1212,5 +1198,76 @@ mod tests {
             Err(JournalError::StaleAccount)
         );
         assert_eq!(journal.export_committed(), before);
+    }
+
+    #[test]
+    fn l_export_garde_un_element_par_cle_avec_son_dernier_etat() {
+        let owner = actor(1);
+        let mut journal = Journal::new();
+        let ids: Vec<MessageId> = (0..5)
+            .map(|index| must(MessageId::new(format!("msg-{index}"))))
+            .collect();
+        for (index, id) in ids.iter().enumerate().rev() {
+            let mut draft = prepared(&owner, &format!("corps-{index}"));
+            draft.message_id = id.clone();
+            journal.prepare(draft).unwrap();
+        }
+        for (index, id) in ids.iter().enumerate() {
+            journal
+                .dispatch(
+                    &owner,
+                    &conversation(),
+                    id,
+                    must(AttemptId::new(format!("attempt-{index}"))),
+                )
+                .unwrap();
+        }
+        for id in ids.iter().take(3) {
+            let mut receipt = receipt_for(&owner);
+            receipt.message_id = id.clone();
+            journal.observe_accept(&owner, receipt).unwrap();
+        }
+        for id in ids.iter().take(2) {
+            journal
+                .observe_echo(
+                    &owner,
+                    &conversation(),
+                    id,
+                    must(TranscriptEntryId::new(format!("entry-{}", id.as_str()))),
+                )
+                .unwrap();
+        }
+
+        let items = journal.export_committed();
+        assert_eq!(items.len(), ids.len());
+        let account = owner.account_id.clone();
+        for (index, id) in ids.iter().enumerate() {
+            let item = items
+                .iter()
+                .find(|item| &item.message_id == id)
+                .expect("une image par clé");
+            assert_eq!(item.body, format!("corps-{index}"));
+            assert_eq!(
+                Some(item.state.clone()),
+                journal.get(&account, &conversation(), id)
+            );
+            let latest = match index {
+                0 | 1 => matches!(item.state, SubmissionState::Echoed { .. }),
+                2 => matches!(item.state, SubmissionState::AcceptedAwaitingEcho { .. }),
+                _ => matches!(item.state, SubmissionState::Dispatching { .. }),
+            };
+            assert!(latest, "{id:?} : {:?}", item.state);
+        }
+        let exported_ids: Vec<_> = items.iter().map(|item| item.message_id.clone()).collect();
+        assert_eq!(exported_ids, ids);
+
+        let reloaded = Journal::from_committed(items.clone());
+        for id in &ids {
+            assert_eq!(
+                reloaded.get(&account, &conversation(), id),
+                journal.get(&account, &conversation(), id)
+            );
+        }
+        assert_eq!(reloaded.export_committed(), items);
     }
 }

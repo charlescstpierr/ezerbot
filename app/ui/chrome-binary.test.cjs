@@ -1,6 +1,6 @@
 // Run with: node --test app/ui/chrome-binary.test.cjs
-// dumpQaResult() against a stand-in browser script and a stand-in DevTools port, so no real Chrome
-// and no load dependence.
+// dumpQaResult() against a stand-in browser script (and a stand-in DevTools port where a test needs
+// to see when the deadline asks), so no real Chrome and no load dependence.
 const assert = require("node:assert/strict");
 const { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const http = require("node:http");
@@ -32,7 +32,7 @@ function withBrowser(script, launchMs, run) {
   const previous = process.env.CHROME_BIN;
   process.env.CHROME_BIN = browser;
   const work = mkdtempSync(join(tmpdir(), "chrome-binary-work-"));
-  const options = { file: join(work, "page.html"), directory: work, width: 500, height: 780, label: "a test report", launchMs, probeMs: 300 };
+  const options = { file: join(work, "page.html"), directory: work, width: 500, height: 780, label: "a test report", launchMs };
   const launches = () => readFileSync(counter, "utf8").split("\n").filter(Boolean).length;
   return run(options, launches).finally(() => {
     if (previous === undefined) delete process.env.CHROME_BIN;
@@ -44,7 +44,10 @@ function withBrowser(script, launchMs, run) {
 
 // A stand-in DevTools port. `targets` is the list /json/list answers, or a function of the call
 // number (1, 2, ...) returning that list; null = the browser's main thread is stuck: the connection
-// is accepted and never answered.
+// is accepted and never answered. chrome-binary.cjs no longer asks the browser anything: a launch
+// that announced DevTools and did not report fails at its deadline whatever this port would say.
+// The port is there to put the stand-in in the situation where the previous contract waited for it
+// and replaced the launch, so that these tests fail on that contract.
 function withDevtools(targets, run) {
   const sockets = new Set();
   let calls = 0;
@@ -65,6 +68,7 @@ function withDevtools(targets, run) {
 const announce = (port) => `echo 'DevTools listening on ws://127.0.0.1:${port}/devtools/browser/00000000-0000-0000-0000-000000000001' >&2`;
 const secondLaunchReports = (stall) => `case "$*" in\n*profile-2*) cat <<'EOF'\n${REPORT}\nEOF\n;;\n*) ${stall};;\nesac`;
 
+// A launch is replaced ONLY when it never announced "DevTools listening" within its deadline.
 test("a launch that prints nothing is replaced by a fresh Chrome and the report is returned once", () =>
   withBrowser(`case "$*" in\n*profile-3*) cat <<'EOF'\n${REPORT}\nEOF\n;;\n*) exec sleep 60;;\nesac`, [300, 300, 30000], async (options) => {
     const report = await dumpQaResult(options);
@@ -74,18 +78,125 @@ test("a launch that prints nothing is replaced by a fresh Chrome and the report 
 
 test("a launch that never prints fails after three launches and says so", () =>
   withBrowser("exec sleep 60", 300, async (options) => {
-    await assert.rejects(dumpQaResult(options), /chrome did not report a test report: 3 launches, none began loading the page within 300 ms/);
+    await assert.rejects(dumpQaResult(options), /chrome did not report a test report: 3 launches, none announced DevTools within 300 ms/);
   }));
 
+test("a launch that never announced DevTools, whatever start-up line it printed, is replaced and the report of the second launch is accepted", () =>
+  withBrowser(`case "$*" in\n*profile-2*) cat <<'EOF'\n${REPORT}\nEOF\n;;\n*) echo '${DISPLAY_LINK}' >&2; exec sleep 60;;\nesac`, [300, 30000, 30000], async (options) => {
+    // Only the second launch reports; the first one may be killed before it ran a single line.
+    assert.deepEqual(await dumpQaResult(options), { gap: 3, name: "a & b" });
+  }));
+
+test("Chrome is started with a DevTools port, so that a browser that never started is told from one that is running", () =>
+  withBrowser(`case "$*" in\n*--remote-debugging-port=0*) cat <<'EOF'\n${REPORT}\nEOF\n;;\n*) exec sleep 60;;\nesac`, [300, 300, 30000], async (options, launches) => {
+    assert.deepEqual(await dumpQaResult(options), { gap: 3, name: "a & b" });
+    assert.equal(launches(), 1);
+  }));
+
+// Once DevTools is announced, the browser has started: every freeze is a real failure, whatever its
+// DevTools port does (silent, about:blank, a page that began), and whatever the stand-in says next.
+test("a browser that announced DevTools and then stalls fails after its deadline, with no new launch, even if its DevTools port does not answer", () =>
+  withDevtools(() => null, (port) =>
+    withBrowser(`${announce(port)}\necho '${DISPLAY_LINK}' >&2\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+      await assert.rejects(dumpQaResult(options), /chrome started \(it announced DevTools\) but did not report a test report within its deadline\n/);
+      assert.equal(launches(), 1);
+    })));
+
+test("a browser that announced DevTools and then stalls fails after its deadline, with no new launch, even if its DevTools port shows only about:blank", () =>
+  withDevtools(() => [{ type: "page", url: "about:blank" }], (port) =>
+    withBrowser(`${announce(port)}\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+      await assert.rejects(dumpQaResult(options), /chrome started \(it announced DevTools\) but did not report a test report within its deadline/);
+      assert.equal(launches(), 1);
+    })));
+
+test("a browser that announced DevTools and then stalls fails after its deadline, with no new launch, even if no port answers at all", () =>
+  withBrowser(`echo 'DevTools listening on ws://127.0.0.1:9/devtools/browser/00000000-0000-0000-0000-000000000001' >&2\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+    await assert.rejects(dumpQaResult(options), /chrome started \(it announced DevTools\) but did not report a test report within its deadline/);
+    assert.equal(launches(), 1);
+  }));
+
+// Exits.
 test("a Chrome that exits without a report fails at once, with no new launch", () =>
   withBrowser("echo boom >&2; exit 3", 30000, async (options, launches) => {
     await assert.rejects(dumpQaResult(options), /chrome exited without a test report\nboom/);
     assert.equal(launches(), 1);
   }));
 
+// The descendant leaves the process group (setsid) before the stand-in exits, and keeps the pipes
+// open for 20 s: "close" comes long after the deadline, only "exit" tells this Chrome is gone.
+const HOLD_PIPES = `perl -MPOSIX -e 'POSIX::setsid(); open(F, ">", shift); close(F); exec "sleep", "20"' "$0.ready" &\nwhile [ ! -e "$0.ready" ]; do sleep 0.05; done`;
+
+test("a Chrome that exited while a descendant keeps its pipes open fails at once, with no new launch", () =>
+  withBrowser(`${HOLD_PIPES}\nexit 3`, STARTED_MS, async (options, launches) => {
+    await assert.rejects(dumpQaResult(options), /chrome exited without a test report/);
+    assert.equal(launches(), 1);
+  }));
+
+// The stand-in waits for an absolute time (the test's start plus `afterMs`), so how long it took to
+// start does not matter, only that it is not later than the margin.
+const waitUntil = (epochMs) => `perl -MTime::HiRes=time,sleep -e 'my $d = $ARGV[0] - time(); sleep($d) if $d > 0' ${epochMs / 1000}`;
+
+test("a silent Chrome that exits just before its deadline, pipes held open, fails at the exit, with no new launch", () => {
+  const exitAt = Date.now() + 3500;
+  return withBrowser(`${HOLD_PIPES}\n${waitUntil(exitAt)}\nexit 3`, 4000, async (options, launches) => {
+    await assert.rejects(dumpQaResult(options), /chrome exited without a test report/);
+    assert.equal(launches(), 1);
+  });
+});
+
+// The test process is blocked (asleep, not spinning) from 0.1 s to 6 s, so the stand-in's exit (at
+// 3 s) and the 1 s deadline are both overdue when the event loop runs again, the deadline first. The
+// exit still counts: a Chrome that is gone is never replaced. (The block starts in a check-phase
+// callback, so the next turn of the loop runs the overdue timers before it reads the pipes and signals.)
+test("an exit that was not yet delivered when the deadline fired still fails the launch, with no new launch", () => {
+  const exitAt = Date.now() + 3000;
+  setTimeout(() => setImmediate(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5900)), 100);
+  return withBrowser(`${waitUntil(exitAt)}\nexit 3`, [1000, 30000, 30000], async (options, launches) => {
+    await assert.rejects(dumpQaResult(options), /chrome exited without a test report/);
+    assert.equal(launches(), 1);
+  });
+});
+
+// An exit after the deadline came too late to matter: the launch already failed, and nothing is waited for.
+test("a browser that announced DevTools and exits after its deadline, pipes held open, has already failed, with no new launch", () => {
+  const go = join(tmpdir(), `chrome-binary-go-${process.pid}-${Date.now()}`);
+  return withDevtools((call) => { if (call >= 2) writeFileSync(go, ""); return null; }, (port) =>
+    withBrowser(`${announce(port)}\n${HOLD_PIPES}\nn=0; while [ ! -e "${go}" ] && [ $n -lt 160 ]; do sleep 0.1; n=$((n+1)); done\nsleep 2.2\nexit 3`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+      await assert.rejects(dumpQaResult(options), /chrome started \(it announced DevTools\) but did not report a test report within its deadline/);
+      assert.equal(launches(), 1);
+    })).finally(() => rmSync(go, { force: true }));
+});
+
+// The deadline is the deadline: a report that comes after it is not accepted. The stand-in prints its
+// report only once the module has asked its DevTools port a second time (the old last look, at the
+// deadline), or at 16 s at the latest.
+test("a report that arrives after the deadline is not accepted", () => {
+  const go = join(tmpdir(), `chrome-binary-go-${process.pid}-${Date.now()}`);
+  return withDevtools((call) => { if (call >= 2) writeFileSync(go, ""); return null; }, (port) =>
+    withBrowser(`${announce(port)}\nn=0; while [ ! -e "${go}" ] && [ $n -lt 160 ]; do sleep 0.1; n=$((n+1)); done\nsleep 0.2\ncat <<'EOF'\n${REPORT}\nEOF`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+      await assert.rejects(dumpQaResult(options), /chrome started \(it announced DevTools\) but did not report a test report within its deadline/);
+      assert.equal(launches(), 1);
+    })).finally(() => rmSync(go, { force: true }));
+});
+
+// Anything on stderr beyond the two start-up lines, or on stdout without a complete report, fails the
+// launch at its deadline with no new launch, announced or not.
 test("a launch that wrote an error to stderr and then stalls fails after its deadline, with no new launch", () =>
   withBrowser(`echo boom >&2\nexec sleep 60`, STARTED_MS, async (options, launches) => {
     await assert.rejects(dumpQaResult(options), /chrome wrote to stderr and did not report a test report within its deadline\nboom/);
+    assert.equal(launches(), 1);
+  }));
+
+test("a browser that wrote an error next to its start-up lines and then stalls fails after its deadline, with no new launch, even if its DevTools port is stuck", () =>
+  withDevtools(() => null, (port) =>
+    withBrowser(`${announce(port)}\necho 'ERROR: the page crashed' >&2\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+      await assert.rejects(dumpQaResult(options), /chrome wrote to stderr and did not report a test report within its deadline\n.*the page crashed/s);
+      assert.equal(launches(), 1);
+    })));
+
+test("an unexpected stderr line before the announcement, then a stall, fails after its deadline, with no new launch", () =>
+  withBrowser(`echo 'ERROR: boom' >&2\necho 'DevTools listening on ws://127.0.0.1:9/devtools/browser/00000000-0000-0000-0000-000000000001' >&2\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+    await assert.rejects(dumpQaResult(options), /chrome wrote to stderr and did not report a test report within its deadline/);
     assert.equal(launches(), 1);
   }));
 
@@ -95,76 +206,9 @@ test("a launch that began printing the page and then stalls fails after its dead
     assert.equal(launches(), 1);
   }));
 
-// The descendant leaves the process group (setsid) before the stand-in exits, and keeps the pipes
-// open for 20 s: "close" comes long after the deadline, only "exit" tells this Chrome is gone.
-test("a Chrome that exited while a descendant keeps its pipes open fails at once, with no new launch", () =>
-  withBrowser(`perl -MPOSIX -e 'POSIX::setsid(); open(F, ">", shift); close(F); exec "sleep", "20"' "$0.ready" &\nwhile [ ! -e "$0.ready" ]; do sleep 0.05; done\nexit 3`, STARTED_MS, async (options, launches) => {
-    await assert.rejects(dumpQaResult(options), /chrome exited without a test report/);
-    assert.equal(launches(), 1);
-  }));
-
-test("Chrome is started with a DevTools port, so that a browser that never started is told from one that is running", () =>
-  withBrowser(`case "$*" in\n*--remote-debugging-port=0*) cat <<'EOF'\n${REPORT}\nEOF\n;;\n*) exec sleep 60;;\nesac`, [300, 300, 30000], async (options, launches) => {
-    assert.deepEqual(await dumpQaResult(options), { gap: 3, name: "a & b" });
-    assert.equal(launches(), 1);
-  }));
-
-test("a browser whose DevTools port does not answer (stuck main thread) is replaced; its start-up lines on stderr are not errors", () =>
-  withDevtools(null, (port) =>
-    withBrowser(`${announce(port)}\necho '${DISPLAY_LINK}' >&2\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
-      assert.deepEqual(await dumpQaResult(options), { gap: 3, name: "a & b" });
-      assert.equal(launches(), 2);
-    })));
-
-test("a browser that answers but never left about:blank is replaced", () =>
-  withDevtools([{ type: "page", url: "about:blank" }, { type: "iframe", url: "about:blank" }], (port) =>
-    withBrowser(`${announce(port)}\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
-      assert.deepEqual(await dumpQaResult(options), { gap: 3, name: "a & b" });
-      assert.equal(launches(), 2);
-    })));
-
-test("a browser that began loading the page and then stalls fails after its deadline, with no new launch", () =>
-  withDevtools([{ type: "page", url: "file:///work/page.html" }], (port) =>
-    withBrowser(`${announce(port)}\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
-      await assert.rejects(dumpQaResult(options), /chrome began loading the page but did not report a test report within its deadline/);
+test("a browser that announced DevTools, printed part of the page and then stalls fails after its deadline, with no new launch, even if its DevTools port is stuck", () =>
+  withDevtools(() => null, (port) =>
+    withBrowser(`${announce(port)}\necho '<html><body>'\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+      await assert.rejects(dumpQaResult(options), /chrome printed a page without a test report within its deadline/);
       assert.equal(launches(), 1);
     })));
-
-test("a browser that wrote an error next to its start-up lines and then stalls is not replaced even if its DevTools port is stuck", () =>
-  withDevtools(null, (port) =>
-    withBrowser(`${announce(port)}\necho 'ERROR: the page crashed' >&2\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
-      await assert.rejects(dumpQaResult(options), /chrome wrote to stderr and did not report a test report within its deadline\n.*the page crashed/s);
-      assert.equal(launches(), 1);
-    })));
-
-// What the first DevTools answer, shortly before the deadline, saw is not what the deadline decides on.
-// (The early look is at the deadline minus probeMs: the stand-in must have announced its port by then.)
-test("a page that left about:blank after the early look, then stalls, fails after its deadline, with no new launch", () =>
-  withDevtools((call) => [{ type: "page", url: call === 1 ? "about:blank" : "file:///work/page.html" }], (port) =>
-    withBrowser(`${announce(port)}\n${secondLaunchReports("exec sleep 60")}`, [10000, 30000, 30000], async (options, launches) => {
-      await assert.rejects(dumpQaResult({ ...options, probeMs: 3000 }), /chrome began loading the page but did not report a test report within its deadline/);
-      assert.equal(launches(), 1);
-    })));
-
-test("a page seen navigating before the deadline, whose browser then stops answering, fails after its deadline, with no new launch", () =>
-  withDevtools((call) => (call === 1 ? [{ type: "page", url: "file:///work/page.html" }] : null), (port) =>
-    withBrowser(`${announce(port)}\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
-      await assert.rejects(dumpQaResult(options), /chrome began loading the page but did not report a test report within its deadline/);
-      assert.equal(launches(), 1);
-    })));
-
-// The last look at the browser can take PROBE_MS: what the launch prints meanwhile still counts. The
-// stand-in DevTools port makes the stand-in browser print (partial page, error) when it is asked the
-// last time, and then keeps silent, so the look times out after the output.
-test("a launch that prints while the last look at its browser is pending fails after its deadline, with no new launch", () => {
-  const go = join(tmpdir(), `chrome-binary-go-${process.pid}-${Date.now()}`);
-  return withDevtools((call) => {
-    if (call === 1) return [{ type: "page", url: "about:blank" }];
-    writeFileSync(go, "");
-    return null;
-  }, (port) =>
-    withBrowser(`${announce(port)}\nwhile [ ! -e "${go}" ]; do sleep 0.05; done\necho '<html><body>'\necho 'boom' >&2\n${secondLaunchReports("exec sleep 60")}`, [8000, 30000, 30000], async (options, launches) => {
-      await assert.rejects(dumpQaResult({ ...options, probeMs: 3000 }), /chrome printed a page without a test report within its deadline/);
-      assert.equal(launches(), 1);
-    })).finally(() => rmSync(go, { force: true }));
-});

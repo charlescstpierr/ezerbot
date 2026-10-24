@@ -1,7 +1,6 @@
 // The one place the UI tests find a headless Chrome. CHROME_BIN wins; otherwise the first
 // candidate that is installed (on PATH, or the macOS app bundle). Not found is a clear error.
 const { spawn, spawnSync } = require("node:child_process");
-const http = require("node:http");
 const { existsSync, rmSync } = require("node:fs");
 const { join } = require("node:path");
 
@@ -34,36 +33,37 @@ function chromeBinary() {
 // to start its Crashpad handler (crashpad SpawnSubprocess(), called unconditionally for the browser
 // process on macOS) and the fork child sits forever on a mutex in libSystem's atfork handler (libxpc)
 // while the browser waits for it: `sample` = fork -> xpc_atfork_child -> -[OS_xpc_object dealloc] ->
-// __psynch_mutexwait; stderr stays empty. (2) After a normal start (DevTools announced) the browser's
-// main thread blocks for good in rbs_acquire_appnap_assertion -> -[RBSConnection _connection] ->
-// _dispatch_async_and_wait_f (RunningBoard, a macOS service), 0% CPU. No Chrome switch removes
-// either: Chrome already registers NSAppSleepDisabled itself (content/app/mac_init.mm), and
-// --disable-breakpad, --disable-crash-reporter, --disable-crashpad, --no-crash-upload,
-// --disable-features=Crashpad, --crash-dumps-dir and CHROME_HEADLESS all still start the Crashpad
-// handler. So the hang is replaced, not removed: waiting longer never helps (120 s without output).
+// __psynch_mutexwait; stderr stays empty, Chrome never gets as far as announcing DevTools. (2) After
+// a normal start the browser's main thread blocks for good in rbs_acquire_appnap_assertion ->
+// -[RBSConnection _connection] -> _dispatch_async_and_wait_f (RunningBoard, a macOS service), 0% CPU.
+// No Chrome switch removes either: Chrome already registers NSAppSleepDisabled itself
+// (content/app/mac_init.mm), and --disable-breakpad, --disable-crash-reporter, --disable-crashpad,
+// --no-crash-upload, --disable-features=Crashpad, --crash-dumps-dir and CHROME_HEADLESS all still
+// start the Crashpad handler. So waiting longer never helps (120 s without output): a stuck launch
+// has to be replaced.
 //
-// A launch is replaced only when, after LAUNCH_MS, it printed nothing on stdout, has not exited,
-// wrote nothing to stderr beyond Chrome's own start-up lines (the "DevTools listening" announcement
-// that --remote-debugging-port=0 adds, and the CVDisplayLink error every headless launch prints on
-// this Mac), AND the browser process proves that the page never began: no DevTools announcement at
-// all (it never started), or, asked at the deadline itself and not seen navigating PROBE_MS before,
-// its DevTools endpoint does not answer (the main thread is stuck) or lists no page that left
-// about:blank. A page that is stuck lives in the renderer process and cannot stop the browser from
-// answering, so a stuck page never looks like this. Any other byte on stderr, any stdout, an exit,
-// or a navigated page fails at once with no new launch, and so does a wrong layout: the caller's
-// assertions run once, on the one report we got. LAUNCH_MS stays the 20 s the tests always allowed,
-// so a launch that is only slow (up to 13 s with 12 Chromes at once at load 240) still finishes
-// inside it; only the verdict on a launch that is already stuck waits for the DevTools answer, at
-// most PROBE_MS more. A replaced launch gets a fresh Chrome and a fresh profile, 3 launches at
-// most, the whole process group of each one killed.
+// The contract is the narrowest one that is proven: a launch is replaced ONLY when, at LAUNCH_MS
+// after its start, Chrome has not announced "DevTools listening" (--remote-debugging-port=0 makes it
+// the first line it writes to stderr: 300 launches out of 300, at most 3.1 s after the start). No
+// announcement means the browser never started, which is hang (1), and nothing of the page ran.
+// Every other outcome fails at once, with no new launch, because it could hide a real failure of the
+// page or of the test: the announcement was seen and nothing was reported (this includes hang (2),
+// which is therefore a real, visible failure, followed separately), any byte on stdout without a
+// complete report, any line on stderr other than the two start-up lines Chrome always prints (the
+// announcement and the CVDisplayLink error of this Mac), and an exit, whenever it arrives. The
+// verdict is taken in one synchronous step at the deadline and nothing is waited for: no report
+// is accepted after LAUNCH_MS, which stays the 20 s the tests always allowed, so a launch that is
+// only slow (up to 13 s with 12 Chromes at once at load 240) still finishes inside it. A replaced
+// launch gets a fresh Chrome and a fresh profile, 3 launches at most, the whole process group of
+// each one killed.
 const LAUNCH_ATTEMPTS = 3;
 const LAUNCH_MS = 20000;
-const PROBE_MS = 3000;
 // After "exit", only the bytes already written to the pipes are still read: a descendant that keeps
 // the pipes open must not delay the verdict (Node emits "close" only when they are all closed).
 const EXIT_DRAIN_MS = 1000;
+const DEVTOOLS_ANNOUNCEMENT = /^DevTools listening on ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/[0-9a-f-]+$/;
 const START_UP_LINES = [
-  /^DevTools listening on ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/[0-9a-f-]+$/,
+  DEVTOOLS_ANNOUNCEMENT,
   /^\[\d+:\d+:\d+\/\d+\.\d+:ERROR:ui\/display\/mac\/cv_display_link_mac\.mm:\d+\] CVDisplayLinkCreateWithCGDisplay failed\. CVReturn: -?\d+$/,
 ];
 
@@ -76,28 +76,11 @@ function qaResult(dom) {
   return match && match[1].trim() !== "" ? match[1] : null;
 }
 
-const onlyStartUpLines = (err) => err.split("\n").map((line) => line.trim()).filter(Boolean).every((line) => START_UP_LINES.some((pattern) => pattern.test(line)));
-const devtoolsPort = (err) => (err.match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//) || [])[1];
+const linesOf = (err) => err.split("\n").map((line) => line.trim()).filter(Boolean);
+const onlyStartUpLines = (err) => linesOf(err).every((line) => START_UP_LINES.some((pattern) => pattern.test(line)));
+const announcedDevtools = (err) => linesOf(err).some((line) => DEVTOOLS_ANNOUNCEMENT.test(line));
 
-// Asks the browser process, through its DevTools port, what it sees: "unanswered" (nothing within
-// `ms`), "navigated" (a page target left about:blank), "no-page", or "error" (not a proof of anything).
-function askBrowser(port, ms) {
-  return new Promise((resolve) => {
-    const request = http.get({ host: "127.0.0.1", port, path: "/json/list", timeout: ms }, (response) => {
-      let body = "";
-      response.setEncoding("utf8");
-      response.on("data", (chunk) => { body += chunk; });
-      response.on("error", () => resolve("error"));
-      response.on("end", () => {
-        try { resolve(JSON.parse(body).some((target) => target.type === "page" && target.url !== "about:blank") ? "navigated" : "no-page"); } catch { resolve("error"); }
-      });
-    });
-    request.on("timeout", () => { request.destroy(); resolve("unanswered"); });
-    request.on("error", () => resolve("error"));
-  });
-}
-
-function dumpOnce({ file, profile, width, height, launchMs, probeMs }) {
+function dumpOnce({ file, profile, width, height, launchMs }) {
   const chrome = spawn(chromeBinary(), [
     "--headless=new",
     "--no-sandbox",
@@ -116,6 +99,8 @@ function dumpOnce({ file, profile, width, height, launchMs, probeMs }) {
   let err = "";
   return new Promise((resolve, reject) => {
     let settled = false;
+    let over = false; // the deadline has passed: no report is accepted any more
+    let exited = false; // the exit is remembered whenever it arrives, and no new launch follows it
     const timers = [];
     const settle = (action, value) => {
       if (settled) return;
@@ -124,61 +109,54 @@ function dumpOnce({ file, profile, width, height, launchMs, probeMs }) {
       stop();
       action(value);
     };
-    // The browser is asked twice: just before the deadline, where a page seen navigating disqualifies
-    // the launch for good, and again AT the deadline, where the answer is fresh (an earlier "no page"
-    // proves nothing about a page that began since).
-    let navigated = false;
-    const look = async () => {
-      const port = devtoolsPort(err);
-      if (!port) return null;
-      const seen = await askBrowser(port, Math.max(probeMs - 100, 1));
-      if (seen === "navigated") navigated = true;
-      return seen;
+    // Judges the launch on what it printed, in one step. `replace` is true only for a Chrome that never
+    // announced DevTools and wrote nothing but start-up lines.
+    const judge = () => {
+      if (exited) return settle(resolve, { exited: true, err });
+      if (dom !== "") return settle(resolve, { replace: false, why: "page", err });
+      if (!onlyStartUpLines(err)) return settle(resolve, { replace: false, why: "stderr", err });
+      if (announcedDevtools(err)) return settle(resolve, { replace: false, why: "started", err });
+      return settle(resolve, { replace: true, why: "silent", err });
     };
-    timers.push(setTimeout(look, Math.max(launchMs - probeMs, 0)));
-    const deadline = setTimeout(async () => {
-      const stalled = (replace, why) => settle(resolve, { stalled: true, replace, why, err });
-      // What the launch printed disqualifies it, now and again after the (slow) last look at the browser.
-      const printed = () => (dom !== "" ? "page" : onlyStartUpLines(err) ? null : "stderr");
-      if (printed()) return stalled(false, printed());
-      if (!devtoolsPort(err)) return stalled(err.trim() === "", "stderr"); // silent: never started
-      const seen = await look();
-      if (printed()) return stalled(false, printed());
-      return stalled(!navigated && (seen === "unanswered" || seen === "no-page"), navigated ? "navigated" : "unproven");
+    const deadline = setTimeout(() => {
+      over = true;
+      // One turn of the event loop lets an exit that happened before the deadline (but that a busy
+      // test process has not delivered yet) be remembered before the launch is judged.
+      setImmediate(judge);
     }, launchMs);
     timers.push(deadline);
     chrome.stdout.on("data", (chunk) => {
       dom += chunk;
+      if (over) return;
       const text = qaResult(dom);
       if (text === null) return;
       try { settle(resolve, { report: JSON.parse(unescapeDom(text)) }); } catch (error) { settle(reject, error); }
     });
     chrome.stderr.on("data", (chunk) => { err += chunk; });
     chrome.on("error", (error) => settle(reject, error));
-    const exited = () => settle(resolve, { exited: true, err });
+    const gone = () => settle(resolve, { exited: true, err });
     // An exit is final, whatever the pipes do: the deadline no longer applies.
-    chrome.on("exit", () => { clearTimeout(deadline); stop(); timers.push(setTimeout(exited, EXIT_DRAIN_MS)); });
-    chrome.on("close", () => { if (qaResult(dom) === null) exited(); });
+    chrome.on("exit", () => { exited = true; clearTimeout(deadline); stop(); timers.push(setTimeout(gone, EXIT_DRAIN_MS)); });
+    chrome.on("close", () => { if (qaResult(dom) === null) gone(); });
   });
 }
 
 const WHY = {
   page: "chrome printed a page without",
   stderr: "chrome wrote to stderr and did not report",
-  navigated: "chrome began loading the page but did not report",
-  unproven: "chrome started but its DevTools endpoint could not show that the page never began, and it did not report",
+  started: "chrome started (it announced DevTools) but did not report",
 };
 
 // launchMs may be an array of per-launch deadlines (the tests use it to stay independent of load).
-async function dumpQaResult({ file, directory, width, height, label, launchMs = LAUNCH_MS, probeMs = PROBE_MS }) {
+async function dumpQaResult({ file, directory, width, height, label, launchMs = LAUNCH_MS }) {
   try {
     for (let attempt = 1; attempt <= LAUNCH_ATTEMPTS; attempt += 1) {
-      const outcome = await dumpOnce({ file, profile: join(directory, `profile-${attempt}`), width, height, launchMs: Array.isArray(launchMs) ? launchMs[attempt - 1] : launchMs, probeMs });
+      const outcome = await dumpOnce({ file, profile: join(directory, `profile-${attempt}`), width, height, launchMs: Array.isArray(launchMs) ? launchMs[attempt - 1] : launchMs });
       if (outcome.report) return outcome.report;
       if (outcome.exited) throw new Error(`chrome exited without ${label}\n${outcome.err.slice(-500)}`);
       if (!outcome.replace) throw new Error(`${WHY[outcome.why]} ${label} within its deadline\n${outcome.err.slice(-500)}`);
     }
-    throw new Error(`chrome did not report ${label}: ${LAUNCH_ATTEMPTS} launches, none began loading the page within ${[].concat(launchMs).join("/")} ms`);
+    throw new Error(`chrome did not report ${label}: ${LAUNCH_ATTEMPTS} launches, none announced DevTools within ${[].concat(launchMs).join("/")} ms`);
   } finally {
     try { rmSync(directory, { recursive: true, force: true }); } catch { /* temp dir, best effort */ }
   }

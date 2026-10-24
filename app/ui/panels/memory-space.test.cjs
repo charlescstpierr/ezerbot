@@ -13,13 +13,14 @@ class Element {
   removeAttribute(key) { delete this.attributes[key]; }
   addEventListener(name, action) { this.listeners[name] = action; }
   click() { this.listeners.click?.({ target: this }); }
-  focus() {}
+  focus() { Element.focused = this; }
   querySelectorAll(selector) { return this.children.filter((kid) => kid instanceof Element).flatMap((kid) => [...(kid.classes.includes(selector.slice(1)) ? [kid] : []), ...kid.querySelectorAll(selector)]); }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   set className(value) { this.classes = String(value).split(/\s+/).filter(Boolean); }
   set textContent(text) { this.children = [String(text)]; }
   get textContent() { return this.children.map((kid) => (kid instanceof Element ? kid.textContent : String(kid))).join(""); }
 }
+const hasClass = (el, name) => el.classes.includes(name);
 const named = (root, className) => root.querySelectorAll(`.${className}`);
 const FACTS = [
   { fact_id: "f1", bot_id: "grokbot", bot_deleted: false, scope: "private", text: "Aime le café <b>noir</b>", learned_at: Date.parse("2026-10-20T10:00:00Z") },
@@ -44,7 +45,7 @@ function harness({ facts = FACTS, fail = false, registered = true } = {}) {
     leaveConversation() { calls.left += 1; },
   };
   const context = vm.createContext({ window: { GrokbotPanels: panels }, document, setInterval: () => 0, JSON, Number, String, Date, Promise, Object, Array, Math, Set, Map });
-  for (const file of ["memory-graph.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
+  for (const file of ["memory-filter.js", "memory-graph.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
   const state = { bots: [{ id: "grokbot", name: "Ezerbot" }, { id: "chef", name: "Chef" }, { id: "vieux", name: "Ancien" }], memory_auto: { revision: 1 } };
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   return {
@@ -129,7 +130,6 @@ test("changer d’écran ferme la Mémoire ; occupé, le clic ne fait rien ; non
   assert.equal(harness({ registered: false }).sidebar.children.length, 1);
 });
 const view = (h) => named(h.screen(), "memory-graph-canvas")[0].getAttribute("viewBox").split(" ").map(Number);
-const hasClass = (el, name) => el.classes.includes(name);
 test("Graphe : un point par souvenir, un centre, une pastille par groupe, la couleur suit la portée", async () => {
   const h = harness();
   await h.open();
@@ -184,4 +184,124 @@ test("Graphe : un rechargement manqué garde le graphe et le signale comme derni
   await h.settle();
   assert.equal(named(h.screen(), "memory-graph-point").length, 3);
   assert.match(h.screen().textContent, /dernier état connu/);
+});
+
+// --- Recherche et filtres (#262) ---
+const WIDE = [
+  ...FACTS,
+  { fact_id: "f4", bot_id: "grokbot", bot_deleted: false, scope: "team", text: "Voyage à Lisbonne en mai, avec un très long programme de visites et de repas", learned_at: 1 },
+  { fact_id: "f5", bot_id: "chef", bot_deleted: false, scope: "private", text: "Ma nièce est élève au lycée", learned_at: 2 },
+];
+const bar = (h) => ({ search: named(h.screen(), "text-input")[0], bot: named(h.screen(), "text-input")[1], scope: named(h.screen(), "text-input")[2], count: named(h.screen(), "memory-filter-count")[0], clear: named(h.screen(), "secondary-button").find((el) => el.textContent === "Effacer les filtres") });
+const type = (h, text) => { const { search } = bar(h); search.value = text; search.listeners.input(); };
+const pick = (h, key, value) => { const select = bar(h)[key]; select.value = value; select.listeners.change(); };
+const listed = (h) => named(h.screen(), "memory-space-item").map((item) => item.dataset.factId);
+const lit = (h) => named(h.screen(), "memory-graph-point").filter((point) => hasClass(point, "is-match")).map((point) => point.attributes["data-id"]);
+const dimmed = (h) => named(h.screen(), "memory-graph-point").filter((point) => hasClass(point, "is-dim")).map((point) => point.attributes["data-id"]).sort();
+test("Recherche : « lisbonne » trouve « Lisbonne », « eleve » trouve « élève », la casse est ignorée ; la Liste ne garde que les résultats", async () => {
+  const h = harness({ facts: WIDE });
+  await h.open();
+  assert.deepEqual(listed(h), ["f1", "f2", "f3", "f4", "f5"], "sans filtre, tout est là");
+  type(h, "lisbonne");
+  assert.deepEqual(listed(h), ["f4"]);
+  type(h, "ÉLEVE");
+  assert.deepEqual(listed(h), ["f5"]);
+  type(h, "  café  ");
+  assert.deepEqual(listed(h), ["f1"], "les espaces autour sont ignorés");
+  assert.equal(bar(h).count.textContent, "1 souvenir sur 5");
+});
+test("Filtres : bot, portée et recherche se combinent ; le menu des bots cite aussi un bot supprimé", async () => {
+  const h = harness({ facts: WIDE });
+  await h.open();
+  const { bot, scope } = bar(h);
+  assert.deepEqual(bot.children.map((option) => option.textContent), ["Tous les bots", "Ancien (supprimé)", "Chef", "Ezerbot"]);
+  assert.deepEqual(scope.children.map((option) => option.textContent), ["Toutes les portées", "Privé", "Équipe", "Sujet"]);
+  pick(h, "bot", "chef");
+  assert.deepEqual(listed(h), ["f2", "f5"]);
+  pick(h, "scope", "team");
+  assert.deepEqual(listed(h), ["f2"], "bot + portée");
+  pick(h, "bot", "grokbot");
+  assert.deepEqual(listed(h), ["f4"], "autre bot, même portée");
+  type(h, "lisbonne");
+  assert.deepEqual(listed(h), ["f4"], "bot + portée + recherche");
+  type(h, "midi");
+  assert.deepEqual(listed(h), [], "aucun souvenir de ce bot ne contient « midi »");
+  assert.match(h.screen().textContent, /Aucun souvenir ne correspond à ces filtres/);
+  pick(h, "bot", "vieux");
+  pick(h, "scope", "topic");
+  type(h, "");
+  assert.deepEqual(listed(h), ["f3"], "le bot supprimé reste filtrable");
+  bar(h).clear.listeners.click();
+  assert.deepEqual(listed(h), ["f1", "f2", "f3", "f4", "f5"]);
+  assert.equal(bar(h).count.textContent, "");
+});
+test("Graphe : les résultats ressortent avec leur texte, le reste s’estompe ; zéro résultat, un message et pas de graphe", async () => {
+  const h = harness({ facts: WIDE });
+  await h.open();
+  named(h.screen(), "memory-space-tab")[0].click();
+  assert.deepEqual([lit(h), dimmed(h)], [[], []], "sans filtre, rien ne s’estompe");
+  type(h, "lisbonne");
+  assert.deepEqual(lit(h), ["f4"]);
+  assert.deepEqual(dimmed(h), ["f1", "f2", "f3", "f5"]);
+  const labels = named(h.screen(), "memory-graph-label").map((label) => label.textContent);
+  assert.ok(labels.includes("Voyage à Lisbonne en mai…"), `texte tronqué à un mot entier : ${labels}`);
+  assert.equal(labels.length, 4 + 1, "Vous, trois groupes, un seul souvenir légendé");
+  const groups = named(h.screen(), "memory-graph-group");
+  assert.deepEqual(groups.map((group) => [group.attributes["aria-label"].split(",")[0], hasClass(group, "is-dim")]), [["Personnel", true], ["Travail", false], ["Déménagement", true]], "seul le groupe du résultat reste net");
+  // Le survol d’un point puis son départ rend l’état filtré, pas un graphe entièrement net.
+  const [first] = named(h.screen(), "memory-graph-point");
+  first.listeners.mouseenter();
+  first.listeners.mouseleave();
+  assert.deepEqual(dimmed(h), ["f1", "f2", "f3", "f5"]);
+  type(h, "introuvable");
+  assert.equal(named(h.screen(), "memory-graph-point").length, 0);
+  assert.match(named(h.screen(), "memory-space-empty")[0].textContent, /Aucun souvenir ne correspond/);
+});
+test("le texte d’un résultat reste du texte, jamais du HTML", async () => {
+  const h = harness();
+  await h.open();
+  named(h.screen(), "memory-space-tab")[0].click();
+  type(h, "<b>");
+  assert.equal(named(h.screen(), "memory-graph-label").map((label) => label.textContent).join("|"), "Vous|Personnel|Travail|Déménagement|Aime le café <b>noir</b>");
+});
+test("le filtre survit au changement Graphe/Liste et au rechargement périodique de la liste", async () => {
+  const h = harness({ facts: WIDE });
+  await h.open();
+  pick(h, "scope", "team");
+  type(h, "lisbonne");
+  const [graph, list] = named(h.screen(), "memory-space-tab");
+  graph.click();
+  assert.deepEqual(lit(h), ["f4"]);
+  list.click();
+  assert.deepEqual(listed(h), ["f4"]);
+  const search = bar(h).search;
+  h.panel().onState({ bots: [{ id: "grokbot", name: "Ezerbot" }], memory_auto: { revision: 2 } }); // la mémoire a changé : la liste est relue
+  await h.settle();
+  assert.deepEqual(listed(h), ["f4"]);
+  assert.equal(bar(h).search, search, "la barre n’est pas reconstruite : le champ garde sa valeur et son focus");
+  assert.equal(search.value, "lisbonne");
+  assert.equal(bar(h).scope.value, "team");
+});
+test("un bot filtré dont plus aucun souvenir ne subsiste est abandonné, pas un filtre invisible", async () => {
+  const h = harness({ facts: WIDE });
+  await h.open();
+  pick(h, "bot", "vieux");
+  assert.deepEqual(listed(h), ["f3"]);
+  h.panel().onState({ bots: [], memory_auto: { revision: 1 } });
+  h.panels.api = async () => ({ facts: WIDE.filter((fact) => fact.bot_id !== "vieux") });
+  h.panel().onState({ bots: [], memory_auto: { revision: 3 } });
+  await h.settle();
+  assert.equal(bar(h).bot.value, "");
+  assert.deepEqual(listed(h), ["f1", "f2", "f4", "f5"]);
+});
+test("à l’ouverture, le focus va à l’onglet actif : « Graphe » quand c’est lui qui est affiché", async () => {
+  const h = harness();
+  await h.open();
+  assert.ok(hasClass(Element.focused, "is-list"), "Liste par défaut");
+  named(h.screen(), "memory-space-tab")[0].click();
+  h.panel().onNavigate();
+  h.entry().click();
+  await h.settle();
+  assert.ok(hasClass(Element.focused, "is-graph"), "Graphe était actif : l’anneau de focus ne reste pas sur Liste");
+  assert.equal(Element.focused.getAttribute("aria-pressed"), "true");
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { runInNewContext } from "node:vm";
+import { createContext, runInContext } from "node:vm";
 import { memoryPresentation, collapseMemoryReceipts } from "./memory-presentation.js";
 
 class Element {
@@ -46,10 +46,12 @@ async function fixture() {
       registration.onState(state);
     },
   };
-  runInNewContext(readFileSync(new URL("../../ui/panels/memory.js", import.meta.url), "utf8"), {
-    window: { GrokbotPanels: panels }, setTimeout, clearTimeout, HTMLInputElement: Element,
+  const context = createContext({
+    window: { GrokbotPanels: panels }, setTimeout, clearTimeout, HTMLInputElement: Element, String,
     document: { createElement: (tag) => new Element(tag), createTextNode: (text) => { const el = new Element("#text"); el.textContent = text; return el; } },
   });
+  // Comme dans le bundle des panneaux, memory-filter.js (la normalisation partagée) passe avant memory.js.
+  for (const file of ["memory-filter.js", "memory.js"]) runInContext(readFileSync(new URL(`../../ui/panels/${file}`, import.meta.url), "utf8"), context);
   registration.onState(state);
   const cleanup = registration.botSection(state.bots[0], root);
   await flush();

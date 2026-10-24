@@ -37,9 +37,18 @@
     graph.bounds = { x, y, w: Math.max(...xs) + 70 - x, h: Math.max(...ys) + 70 - y };
     return graph;
   }
+  // Le texte d'un souvenir trouvé, raccourci à un mot entier.
+  const excerpt = (text, max = 28) => {
+    const chars = [...String(text).replace(/\s+/g, " ").trim()];
+    if (chars.length <= max) return chars.join("");
+    const cut = chars.slice(0, max).join(""), space = cut.lastIndexOf(" ");
+    return `${(space > max / 2 ? cut.slice(0, space) : cut).replace(/[\s,;:.!?-]+$/, "")}…`;
+  };
   let observer = null;
+  const kept = { zoom: 1, ox: 0, oy: 0 }; // le cadrage survit au redessin, par exemple à chaque frappe de la recherche
+  // `options.matches` : ids des souvenirs trouvés (Set) ; ils ressortent avec leur texte, le reste s'estompe. Absent : rien ne change.
   function view(facts, options) {
-    const graph = buildGraph(facts, options), box = graph.bounds;
+    const graph = buildGraph(facts, options), box = graph.bounds, matches = options?.matches || null;
     const make = (tag, attrs = {}, text) => {
       const el = document.createElementNS(SVG, tag);
       for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value);
@@ -56,10 +65,16 @@
     }
     const at = new Map([[graph.center.id, graph.center], ...graph.groups.map((item) => [item.id, item]), ...graph.nodes.map((item) => [item.id, item])]);
     for (const [edge, line] of lines) for (const [key, id] of [["1", edge.from], ["2", edge.to]]) { line.setAttribute(`x${key}`, at.get(id).x); line.setAttribute(`y${key}`, at.get(id).y); }
+    // Au repos, seuls les éléments sans rapport avec la recherche sont estompés : le centre, les groupes et les liens qui mènent aux résultats restent.
+    const base = new Set();
+    if (matches) {
+      const keep = new Set(["user", ...graph.nodes.filter((item) => matches.has(item.id)).flatMap((item) => [item.id, item.group])]);
+      for (const key of [...graph.groups, ...graph.nodes].map((item) => item.id)) if (!keep.has(key)) base.add(key);
+    }
     const highlight = (id) => {
       const lit = new Set(id ? [id, ...(links.get(id) || [])] : []);
-      for (const [key, el] of drawn) { el.classList.toggle("is-active", key === id); el.classList.toggle("is-dim", Boolean(id) && !lit.has(key)); }
-      for (const [edge, line] of lines) line.classList.toggle("is-dim", Boolean(id) && edge.from !== id && edge.to !== id);
+      for (const [key, el] of drawn) { el.classList.toggle("is-active", key === id); el.classList.toggle("is-dim", id ? !lit.has(key) : base.has(key)); }
+      for (const [edge, line] of lines) line.classList.toggle("is-dim", id ? edge.from !== id && edge.to !== id : base.has(edge.from) || base.has(edge.to));
     };
     const add = (item, kind, scope, radius, name, caption) => {
       const el = make("g", { class: `memory-graph-node memory-graph-${kind} is-${scope}`, tabindex: "0", role: "img", "aria-label": name, "data-id": item.id });
@@ -78,15 +93,21 @@
     edgeLayer.append(...lines.map(([, line]) => line));
     nodeLayer.append(center,
       ...graph.groups.map((group) => add(group, "group", group.scope, 20, `${group.label}, ${group.count} souvenir${group.count > 1 ? "s" : ""}`, short(group.label))),
-      ...graph.nodes.map((node) => add(node, "point", node.scope, 6, `${node.bot}, ${SCOPE_LABELS[node.scope]} : ${node.label.slice(0, 120)}`)));
+      ...graph.nodes.map((node) => {
+        const hit = Boolean(matches?.has(node.id)), el = add(node, "point", node.scope, 6, `${node.bot}, ${SCOPE_LABELS[node.scope]} : ${node.label.slice(0, 120)}`, hit ? excerpt(node.label) : "");
+        el.classList.toggle("is-match", hit);
+        return el;
+      }));
     svg.append(edgeLayer, nodeLayer);
+    highlight(null);
     // Zoom : le viewBox se resserre autour du centre de la vue ; le texte garde sa taille à l'écran (--k = unités par pixel).
-    let zoom = 1, ox = 0, oy = 0, scale = 1, drag = null;
+    let { zoom, ox, oy } = kept, scale = 1, drag = null;
     const apply = () => {
       const w = box.w / zoom, h = box.h / zoom, rect = svg.getBoundingClientRect?.();
       scale = rect?.width ? Math.min(rect.width / w, rect.height / h) : 1;
       svg.setAttribute("viewBox", [box.x + box.w / 2 + ox - w / 2, box.y + box.h / 2 + oy - h / 2, w, h].map(round).join(" "));
       svg.setAttribute("style", `--k:${Number((1 / scale).toFixed(3))}`);
+      Object.assign(kept, { zoom, ox, oy });
     };
     const step = (factor) => () => { zoom = Math.min(4, Math.max(0.5, zoom * factor)); apply(); };
     svg.addEventListener("pointerdown", (event) => { drag = event; svg.setPointerCapture?.(event.pointerId); });

@@ -6,6 +6,21 @@ Le contexte contient un aperçu des faits récents (2 000 caractères, enregistr
 
 Recherche lexicale locale, sans réseau ni embeddings : mots exacts prioritaires, sous-chaînes ensuite, accents français ignorés, dates puis identifiants pour départager. `query` accepte 1–300 caractères, `limit` 1–20 ; les résultats ont un budget d’environ 12 000 caractères. Le modèle doit reformuler avec des mots-clés/synonymes en cas de résultat vide. Ce n’est pas une garantie de rappel sémantique ni de justesse d’un modèle particulier.
 
+## Lecture globale de l’espace
+
+`GET /api/memory/all` (sans paramètres) renvoie `{"facts": [...]}` : tous les
+faits actifs privés, d’équipe et de sujet, sans pagination ni doublons d’équipe.
+Chaque fait expose `fact_id`, `text`, `bot_id`, `bot_deleted`, `scope`
+(`private`, `team`, `topic`), `topic_id`, `topic_name`, `learned_at` (millisecondes
+Unix), `provenance` (`conversation_id`, `entry_id`, `source`) et `sensitive`.
+Les champs de sujet sont `null` hors sujet ; un bot supprimé ou manquant garde
+son identifiant avec `bot_deleted: true`. Les faits de sujet suivent la convention
+de rappel existante : `source: user_stated`, `sensitive: false`.
+Les faits remplacés ou oubliés et les propositions non acceptées sont exclus.
+Tri : date décroissante, puis identifiant. Cette route locale en lecture seule
+est destinée au propriétaire ; elle ne change ni l’écran ni l’accès des bots à
+leur mémoire ou leur contexte.
+
 ## Score synthétique de rappel
 
 ```sh

@@ -33,12 +33,12 @@
       });
     });
     const xs = [graph.center, ...graph.groups, ...graph.nodes].map((item) => item.x), ys = [graph.center, ...graph.groups, ...graph.nodes].map((item) => item.y);
-    const x = Math.min(...xs) - 70, y = Math.min(...ys) - 50;
-    graph.bounds = { x, y, w: Math.max(...xs) + 70 - x, h: Math.max(...ys) + 70 - y };
+    const x = Math.min(...xs) - 100, y = Math.min(...ys) - 50;
+    graph.bounds = { x, y, w: Math.max(...xs) + 100 - x, h: Math.max(...ys) + 70 - y };
     return graph;
   }
   // Le texte d'un souvenir trouvé, raccourci à un mot entier.
-  const excerpt = (text, max = 28) => {
+  const excerpt = (text, max = 26) => {
     const chars = [...String(text).replace(/\s+/g, " ").trim()];
     if (chars.length <= max) return chars.join("");
     const cut = chars.slice(0, max).join(""), space = cut.lastIndexOf(" ");

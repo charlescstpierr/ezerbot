@@ -662,6 +662,48 @@ fn another_account_never_calibrates_this_ones_quota() {
     assert_eq!(c.cost()["quota_share"]["reason"], "account_unconfirmed");
 }
 
+impl Cost {
+    /// A chat message sent while another account is signed in (the session file says which),
+    /// then that account's own heavy use of the quota; nothing ticks. Returns once the run is over.
+    fn chat_as_another_account(&mut self) {
+        let conversation = self.app.api("POST", "/api/conversations", b"{}").unwrap()
+            ["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let body = json!({"conversation_id":conversation,"message_id":"b1","body":"Bonjour"});
+        self.app
+            .api("POST", "/api/send", body.to_string().as_bytes())
+            .unwrap();
+        wait("la réponse de l'autre compte", || {
+            self.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM engine_runs WHERE conversation_id=?1 AND status='finished'",
+                    [&conversation],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                > 0
+        });
+        let started = (now() * 1000) as i64 - 1000;
+        insert_run(
+            &self.conn,
+            "chat-b",
+            &self.bot,
+            &conversation,
+            "chat",
+            started,
+        );
+        add_usage(&self.conn, "chat-b", 1_999_900, 100, 0);
+    }
+    fn assert_account_unconfirmed(&mut self) {
+        let share = self.cost()["quota_share"].clone();
+        assert_eq!(share["state"], "unknown", "{share}");
+        assert_eq!(share["reason"], "account_unconfirmed");
+        assert!(share["percent"].is_null());
+    }
+}
+
 #[test]
 fn a_return_to_the_confirmed_account_after_another_one_ran_stays_unconfirmed_without_a_tick() {
     // Account A is confirmed since before the window; its gauge says 20 % used.
@@ -677,40 +719,52 @@ fn a_return_to_the_confirmed_account_after_another_one_ran_stays_unconfirmed_wit
     let session = c.f.dir.join("app.codex-auth.json");
     let account_a = std::fs::read(&session).unwrap();
     support::write_codex_session(&session, "account-b");
-    let conversation = c.app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]
-        ["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let body = json!({"conversation_id":conversation,"message_id":"b1","body":"Bonjour"});
-    c.app
-        .api("POST", "/api/send", body.to_string().as_bytes())
-        .unwrap();
-    wait("la réponse du compte B", || {
-        c.conn
-            .query_row(
-                "SELECT COUNT(*) FROM engine_runs WHERE conversation_id=?1 AND status='finished'",
-                [&conversation],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap()
-            > 0
-    });
-    let started = (now() * 1000) as i64 - 1000;
-    insert_run(&c.conn, "chat-b", &c.bot, &conversation, "chat", started);
-    add_usage(&c.conn, "chat-b", 1_999_900, 100, 0);
+    c.chat_as_another_account();
     std::fs::write(&session, account_a).unwrap();
-    let share = c.cost()["quota_share"].clone();
-    assert_eq!(share["state"], "unknown", "{share}");
-    assert_eq!(share["reason"], "account_unconfirmed");
-    assert!(share["percent"].is_null());
+    c.assert_account_unconfirmed();
+}
+
+#[test]
+fn an_account_that_signs_in_while_a_response_is_renewed_after_a_401_is_still_noted() {
+    let mut c = Cost::new(
+        weekly(20.0),
+        json!({"kind":"every","interval_ms":1_800_000}),
+    );
+    c.chat(50_000);
+    c.pass("a", "done", 3_600_000, Some(2000));
+    c.trust_account();
+    assert_eq!(c.cost()["quota_share"]["state"], "estimated");
+    // The call starts under A; B signs in while the answer is a 401; the renewed attempt is B's.
+    let session = c.f.dir.join("app.codex-auth.json");
+    let account_a = std::fs::read(&session).unwrap();
+    let refused = Arc::new(AtomicBool::new(false));
+    let (file, flag) = (session.clone(), refused.clone());
+    // The fake token endpoint issues tokens of "account-test": B is that account.
+    c.f.server.seen.lock().unwrap().reply_for = Some(Arc::new(move |body| {
+        let title = body["instructions"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("titre");
+        if title || flag.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        support::write_codex_session(&file, "account-test");
+        Some(ScriptedResponse::json(
+            401,
+            json!({"error":{"message":"expired"}}),
+        ))
+    }));
+    c.chat_as_another_account();
+    assert!(refused.load(Ordering::SeqCst));
+    std::fs::write(&session, account_a).unwrap();
+    c.assert_account_unconfirmed();
 }
 
 #[test]
 fn passages_without_telemetry_never_hide_a_measured_one_however_many_are_newer() {
     let mut c = Cost::every_30_minutes();
     c.pass("measured", "done", 2 * DAY_MS, Some(2000));
-    for n in 0..200 {
+    for n in 0..1500 {
         c.pass(&format!("blind{n}"), "done", 3_600_000 + n * 2000, None);
     }
     let cost = c.cost();
@@ -734,7 +788,7 @@ fn catch_up_passages_count_by_when_their_run_started_and_a_backlog_hides_nothing
             &c.routine,
             &format!("late{n}"),
             "done",
-            10 * DAY_MS + n * 1000,
+            10 * DAY_MS + n * 2000,
             3_600_000 - n * 1000,
             Some(1000),
         );

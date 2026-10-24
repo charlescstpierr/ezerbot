@@ -291,7 +291,7 @@ fn checkpoint(
         return Err(invalid("engine owner handover"));
     }
     if services.is_cancelled(run_id) {
-        return cancel(conn, services, run_id, TurnEnd::Stopped).map(Some);
+        return ended(&cancel(conn, services, run_id, TurnEnd::Stopped)?).map(Some);
     }
     if run.status == RunStatus::Running
         && store::budget_usage(conn, run_id, now_ms())?.elapsed_ms >= run.budgets.duration_ms
@@ -446,12 +446,14 @@ pub fn append_unsettled_results(conn: &Connection, run_id: &str, reason: &str) -
 /// Stop/regenerate entry point. Settle every outstanding call and deliver the
 /// cancellation reaction in the same transaction. External writers must use
 /// this instead of model::cancel; use with_run_events for other lifecycle writes.
+/// Returns the run as the cancellation left it: Stopped on a run that had
+/// already ended, even in failure, keeps its outcome and succeeds without effect.
 pub fn cancel(
     conn: &Connection,
     services: &mut dyn RunServices,
     run_id: &str,
     end: TurnEnd,
-) -> Result<RunProgress> {
+) -> Result<Run> {
     commit(conn, services, run_id, |conn, _| {
         if !store::required(conn, run_id)?.status.is_terminal() {
             settle_pending(
@@ -464,7 +466,7 @@ pub fn cancel(
                 },
             )?;
         }
-        ended(&model::cancel(conn, run_id, end)?)
+        model::cancel(conn, run_id, end)
     })
 }
 
@@ -3259,8 +3261,8 @@ mod tests {
             Ok(())
         })?;
         assert_eq!(
-            cancel(&conn, &mut services, "run", TurnEnd::Stopped)?,
-            RunProgress::Ended(TurnEnd::Stopped)
+            cancel(&conn, &mut services, "run", TurnEnd::Stopped)?.turn_end,
+            Some(TurnEnd::Stopped)
         );
         assert!(pending_calls(&store::events(&conn, "run", 0)?)?.is_empty());
         assert_eq!(
@@ -3272,8 +3274,8 @@ mod tests {
             1
         );
         assert_eq!(
-            cancel(&conn, &mut services, "run", TurnEnd::Stopped)?,
-            RunProgress::Ended(TurnEnd::Stopped)
+            cancel(&conn, &mut services, "run", TurnEnd::Stopped)?.turn_end,
+            Some(TurnEnd::Stopped)
         );
         assert_eq!(
             services

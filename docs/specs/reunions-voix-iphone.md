@@ -97,7 +97,13 @@ L’appel ne se lance pas depuis la PWA. Le transcript, une fois dans le fil, se
 
 ### iPhone
 
-L’app iPhone de ce lot est la PWA déjà prévue : Safari, Sur l’écran d’accueil, puis l’icône. Pas d’app App Store, pas de TestFlight, pas de QR. L’appairage reste le code à usage unique, la confirmation sur le Mac, le cookie d’appareil, Tailscale privé. La phrase « le Mac doit rester allumé et Ezerbot ouvert » reste.
+L’app iPhone de ce lot est la PWA déjà prévue : Safari, Sur l’écran d’accueil, puis l’icône. Pas d’app App Store, pas de TestFlight. L’appairage reste le code à usage unique, la confirmation sur le Mac, le cookie d’appareil, Tailscale privé. La phrase « le Mac doit rester allumé et Ezerbot ouvert » reste.
+
+Le jumelage passe par un QR. Dans Paramètres › iPhone, Créer un QR de jumelage affiche un QR et, dessous, le même code. Le QR contient l’adresse HTTPS Tailscale du Mac et le code, sous la forme `https://<mac>.ts.net/#jumelage=<code>`. Le code est dans le fragment : aucune requête ne l’envoie, ni à Tailscale ni au Mac, et l’app le retire de l’adresse dès qu’elle l’a lu. Scanné avec l’appareil photo, le QR ouvre Ezerbot avec l’adresse et le code déjà remplis. Charles vérifie le nom de l’appareil et demande l’association. Elle n’aboutit qu’une fois confirmée sur le Mac. Les garde-fous ne changent pas : code à usage unique, valable 2 minutes, cinq essais par minute. Sans adresse Tailscale, le Mac affiche le code seul, à taper sur l’iPhone.
+
+iOS ouvre le QR dans Safari, pas dans l’app installée sur l’écran d’accueil, et ne transmet pas le code à cette app. Pour associer l’app installée, Charles l’ouvre depuis son icône et y tape une seule fois le code affiché sur le Mac. L’écran d’association de Safari le dit.
+
+Le code et le QR ne s’écrivent dans aucun journal. Les captures d’écran de ce parcours les masquent.
 
 Quand le bot a un message pour Charles et que la PWA n’est pas ouverte sur cette conversation, une notification s’affiche sur l’iPhone. Le titre est le nom du bot. Le corps reste générique : il ne contient pas le texte de la réponse, pas le transcript, pas un secret, pas un argument d’outil. Un toucher simple ouvre la conversation, comme aujourd’hui.
 

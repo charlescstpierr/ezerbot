@@ -410,6 +410,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     &input.conversation_id,
                     &input.message_id,
                     anchor,
+                    &input.mentions,
                     now(),
                 )?;
             }

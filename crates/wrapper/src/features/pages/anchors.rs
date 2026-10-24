@@ -2,6 +2,7 @@
 //! suit le message, reste « ouverte » tant que la Page n'a pas été écrite avec
 //! succès dans la réponse à ce message, puis passe à « traitée ».
 use super::{source_version, Context};
+use crate::features::multibot::Mention;
 use crate::{ApiError, ACCOUNT};
 use grokbot_engine::contracts::{ContextBlock, ContextRequest, ContextSource};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -44,8 +45,17 @@ pub fn record(
     conversation: &str,
     message: &str,
     anchor: &PageAnchor,
+    mentions: &[Mention],
     now_ms: u64,
 ) -> Result<(), ApiError> {
+    let accepted: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM wrapper_page_anchors WHERE conversation_id = ?1 AND message_id = ?2)",
+        params![conversation, message],
+        |row| row.get(0),
+    )?;
+    if accepted {
+        return Ok(());
+    }
     let passage = anchor.passage.trim();
     if passage.is_empty() || passage.chars().count() > PASSAGE_LIMIT {
         return Err(ApiError::new(
@@ -77,6 +87,12 @@ pub fn record(
             "Cette Page appartient à un autre bot que celui de ce fil.",
         ));
     }
+    if mentions.iter().any(|mention| mention.id != page_bot) {
+        return Err(ApiError::new(
+            409,
+            "Une ancre de Page ne peut viser que le bot propriétaire de la Page : ne mentionnez pas d’autre bot.",
+        ));
+    }
     if !shown.contains(passage) {
         return Err(ApiError::new(
             400,
@@ -85,8 +101,7 @@ pub fn record(
     }
     conn.execute(
         "INSERT INTO wrapper_page_anchors (conversation_id, message_id, page_id, passage, source_version, state, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6)
-         ON CONFLICT(conversation_id, message_id) DO NOTHING",
+         VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6)",
         params![
             conversation,
             message,
@@ -174,8 +189,8 @@ pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock>
         .query_row(
             "SELECT p.title, p.filename, p.source, a.passage
              FROM wrapper_page_anchors a JOIN bot_pages p ON p.id = a.page_id
-             WHERE a.conversation_id = ?1 AND a.message_id = ?2",
-            params![request.conversation_id, message],
+             WHERE a.conversation_id = ?1 AND a.message_id = ?2 AND p.bot_id = ?3",
+            params![request.conversation_id, message, request.bot_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional();

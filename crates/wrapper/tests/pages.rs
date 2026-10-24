@@ -156,14 +156,15 @@ impl Fixture {
         for _ in 0..500 {
             self.app.tick(now());
             if self.run(id).status.is_terminal() && self.provider.status()["titling"] == false {
+                assert_eq!(self.run(id).status, RunStatus::Finished);
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("run inachevée {:?}", self.run(id));
     }
-    fn outcome(&self, id: &str) -> Value {
-        store::events(&self.db(), &self.run("compare").run_id, 0)
+    fn outcome(&self, message: &str, id: &str) -> Value {
+        store::events(&self.db(), &self.run(message).run_id, 0)
             .unwrap()
             .into_iter()
             .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == id)
@@ -227,11 +228,11 @@ fn interactive_table_becomes_a_local_page_and_survives_restart() {
     f.finish("compare");
     assert_eq!(f.run("compare").status, RunStatus::Finished);
 
-    let broken = f.outcome("page-broken");
+    let broken = f.outcome("compare", "page-broken");
     assert_eq!(broken["status"], "failed", "{broken}");
     assert_eq!(broken["reason"], DIAGNOSTIC);
 
-    let fixed = f.outcome("page-fixed");
+    let fixed = f.outcome("compare", "page-fixed");
     assert_eq!(fixed["status"], "done", "{fixed}");
     assert_eq!(std::fs::read_to_string(f.file()).unwrap(), FIXED);
 
@@ -476,6 +477,9 @@ fn anchor_stays_open_after_a_compile_failure() {
         .unwrap();
     f.finish("retouche");
 
+    let failed = f.outcome("retouche", "edit-bad");
+    assert_eq!(failed["status"], "failed", "{failed}");
+    assert_eq!(failed["reason"], DIAGNOSTIC);
     let after = f.page();
     assert_eq!(after["anchors"][0]["state"], "open");
     assert_eq!(
@@ -551,4 +555,59 @@ fn a_message_without_anchor_behaves_as_before() {
     assert!(f.has_message(&chat, "merci"));
     assert_eq!(f.page()["anchors"], json!([]));
     assert!(f.instructions_with("Passage cité").is_empty());
+}
+
+#[test]
+fn retrying_an_accepted_anchored_message_survives_the_edit_that_removed_its_passage() {
+    let mut f = after_first_page();
+    let page = f.page();
+    let rewritten = FIXED.replace("Confort", "Premium");
+    f.answer(Some(Fixture::tool("edit-ok", &rewritten)));
+    let chat = f.chat.clone();
+    let anchor = Fixture::anchor(&page, "Confort");
+    f.send_in(&chat, "retouche", Some(anchor.clone())).unwrap();
+    f.finish("retouche");
+
+    f.send_in(&chat, "retouche", Some(anchor)).unwrap();
+    let anchors = f.page()["anchors"].clone();
+    assert_eq!(anchors.as_array().unwrap().len(), 1);
+    assert_eq!(anchors[0]["state"], "done");
+}
+
+#[test]
+fn an_anchor_can_only_address_the_bot_owning_the_page() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.post(
+        "/api/bots",
+        json!({"id": "autre", "name": "Voisin", "color": "orange"}),
+    );
+    let group = f.post(
+        "/api/conversations",
+        json!({"bot_ids": ["grokbot", "autre"], "title": "Groupe"}),
+    )["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let send = |f: &mut Fixture, id: &str, mention: &str, label: &str| {
+        let body = json!({"conversation_id": group, "message_id": id, "body": "Retouche ce passage",
+            "mentions": [{"id": mention, "label": label}], "page_anchor": Fixture::anchor(&page, "Confort")});
+        f.app.api("POST", "/api/send", body.to_string().as_bytes())
+    };
+    for (id, mention, label) in [
+        ("voisin", "autre", "Voisin"),
+        ("tous", "@everyone", "everyone"),
+    ] {
+        let error = send(&mut f, id, mention, label).unwrap_err();
+        assert!(error.to_string().contains("propriétaire"), "{error}");
+        assert!(!f.has_message(&group, id));
+    }
+
+    f.answer(None);
+    send(&mut f, "proprio", "grokbot", "Ezerbot").unwrap();
+    wait("réponse du propriétaire", || {
+        f.app.tick(now());
+        !f.instructions_with("Passage cité").is_empty()
+    });
+    assert!(f.instructions_with("Tu t'appelles Voisin").is_empty());
 }

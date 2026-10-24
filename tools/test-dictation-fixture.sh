@@ -36,20 +36,28 @@ fingerprint() {
   } | shasum -a 256 | cut -d' ' -f1
 }
 
+cdhash() { codesign -dvvv "$1" 2>&1 | sed -n 's/^CDHash=//p' || true; }
+
 work=
 trap '[[ -z $work ]] || rm -rf "${work:?}"' EXIT
 want=$(fingerprint)
 # A rebuild changes the cdhash, so macOS asks for the permission again: rebuild only on a real change.
-if [[ ! -f $dir/fingerprint || $(<"$dir/fingerprint") != "$want" ]] || ! codesign --verify --strict "$bin" 2>/dev/null; then
+# The record is "<fingerprint> <cdhash of the binary built from it>": it is trusted only if that
+# cdhash is the installed binary's, and it is removed before the binary is replaced, so a run that
+# dies between the two renames leaves no record (rebuild), never another binary's record.
+if [[ ! -f $dir/fingerprint || $(<"$dir/fingerprint") != "$want $(cdhash "$bin")" ]] || ! codesign --verify --strict "$bin" 2>/dev/null; then
   rm -rf "${dir:?}"/.build.* # left by a run that died mid-build; we hold the lock
   work=$(mktemp -d "$dir/.build.XXXXXX")
   clang "${cflags[@]}" "$src" -o "$work/bin"
   codesign --force --sign - --identifier "$id" "$work/bin"
   codesign --verify --strict "$work/bin"
-  printf '%s\n' "$want" >"$work/fingerprint"
+  built=$(cdhash "$work/bin")
+  [[ $built =~ ^[0-9a-f]{40}$ ]] || { echo "ÉCHEC : CDHash illisible pour $work/bin." >&2; exit 1; }
+  printf '%s %s\n' "$want" "$built" >"$work/fingerprint"
+  rm -f "${dir:?}/fingerprint"
   mv -f "$work/bin" "$bin" # rename(2) in one directory: a reader sees the old or the new binary
   mv -f "$work/fingerprint" "$dir/fingerprint"
-  echo "Binaire de dictée installé : $bin ($(codesign -dvvv "$bin" 2>&1 | grep '^CDHash='))" >&2
+  echo "Binaire de dictée installé : $bin (CDHash=$built)" >&2
 fi
 
 case $mode in

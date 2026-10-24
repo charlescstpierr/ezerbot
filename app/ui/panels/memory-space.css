@@ -1,0 +1,21 @@
+/* Mémoire (Espace personnel) : entrée de la barre latérale et écran Liste. Jetons Galet uniquement. */
+.sidebar-memory { margin: -8px 0 14px; }
+.memory-entry-count { flex: 0 0 auto; font-size: 11.5px; color: var(--sidebar-muted); }
+.main-panel[data-memory-space] > .chat-scroll,
+.main-panel[data-memory-space] > .thread-banner,
+.main-panel[data-memory-space] > .find-bar,
+.main-panel[data-memory-space] .composer-dock > :not(.toast) { display: none; }
+.memory-space { flex: 1; min-height: 0; padding: 28px 27px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.memory-space > * { max-width: 720px; }
+.memory-space-switch { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); }
+.memory-space-tab { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 7px; font-size: 11.5px; font-weight: 500; color: var(--muted); }
+.memory-space-tab[aria-pressed="true"] { background: var(--pane); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+.memory-space-tab:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.memory-space-help { margin: 14px 0 18px; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.memory-space-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.memory-space-item { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--pane); }
+.memory-space-text { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text); overflow-wrap: anywhere; white-space: pre-line; }
+.memory-space-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.memory-space-chip { max-width: 100%; padding: 2px 8px; border-radius: 999px; background: var(--soft); color: var(--text); font-size: 11.5px; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-space-soon, .memory-space-date { font-size: 11.5px; color: var(--muted); }
+.memory-space-empty { margin: 0; padding: 18px; font-size: 12px; line-height: 1.6; color: var(--muted); border: 1px dashed var(--line); border-radius: 9px; }

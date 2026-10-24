@@ -7,6 +7,7 @@ La mémoire automatique est un réglage par bot dans Paramètres. La mémoire du
 - `memoire-reglage` montre « Mémoire automatique » et l’interrupteur du bot Ezerbot.
 - `memoire-liste` ouvre la section « Mémoire du bot » avec la recherche.
 - `memoire-vide` affiche zéro fait actif, sans en inventer.
+- `memoire-espace` : l’entrée « Mémoire » sous « Rechercher » (`.memory-entry`, compteur `.memory-entry-count`) ouvre `.memory-space` (« Espace personnel / Mémoire · N souvenirs », Graphe « bientôt » / Liste lue depuis `GET /api/memory/all`). Pas encore une sphère de `drive.sh` : se pilote à la main avec `browser.sh eval`.
 
 ## How to get to it (user POV)
 

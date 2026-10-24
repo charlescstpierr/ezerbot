@@ -36,12 +36,61 @@ impl Patterns {
     pub fn value(&self, value: &Value) -> Result<Value> {
         mask_value(value, &self.0)
     }
-    /// Whether the vault still holds exactly the secrets of this snapshot. A caller that
-    /// masked several outputs with it reads this after the last one: false means a secret
-    /// was stored or removed meanwhile, and those outputs must be masked again.
-    pub fn unchanged_in(&self, vault: &Vault) -> Result<bool> {
-        Ok(known_patterns(vault)? == self.0)
+}
+
+/// A rendering made of many masked outputs (a state read, #377) masks them all with one
+/// content of the vault. While a `Hold` lives, the first read of a vault on this thread is
+/// kept, and every later redaction of that vault on this thread (`redact`, `redact_value`,
+/// `Patterns::of`, whatever the caller) reuses it. Nothing else changes: outside a hold every
+/// redaction still reads the vault. A hold taken inside another one joins it: the outer
+/// hold keeps the reads and checks them.
+pub fn hold() -> Hold {
+    let outermost = HELD.with_borrow_mut(|held| {
+        let outermost = held.is_none();
+        held.get_or_insert_with(Vec::new);
+        outermost
+    });
+    Hold { outermost }
+}
+
+/// See `hold`. Dropping it, even while a panic unwinds, ends the hold.
+pub struct Hold {
+    outermost: bool,
+}
+
+impl Hold {
+    /// Ends the hold and reads every vault it kept again: true when each still holds exactly
+    /// what was used to mask. False means a secret was stored or removed meanwhile, and what
+    /// was masked during the hold must be rendered again. Nothing read means nothing masked.
+    pub fn settled(self) -> Result<bool> {
+        if !self.outermost {
+            return Ok(true);
+        }
+        let kept = HELD.take().unwrap_or_default();
+        for held in &kept {
+            if read_patterns(&held.vault)? != held.patterns {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        if self.outermost {
+            HELD.take();
+        }
+    }
+}
+
+struct Held {
+    vault: Vault,
+    patterns: Vec<String>,
+}
+
+thread_local! {
+    static HELD: std::cell::RefCell<Option<Vec<Held>>> = const { std::cell::RefCell::new(None) };
 }
 /// Redact a cumulative live snapshot and withhold enough trailing characters
 /// to cover a secret split across reads, including its JSON-escaped form.
@@ -96,7 +145,25 @@ pub fn redact_value(vault: &Vault, value: &Value) -> Result<Value> {
     Patterns::of(vault)?.value(value)
 }
 
+/// What the vault holds now, or what it held at its first read under the current `hold`.
 fn known_patterns(vault: &Vault) -> Result<Vec<String>> {
+    HELD.with_borrow_mut(|held| {
+        let Some(kept) = held else {
+            return read_patterns(vault);
+        };
+        if let Some(read) = kept.iter().find(|read| read.vault.same_store(vault)) {
+            return Ok(read.patterns.clone());
+        }
+        let patterns = read_patterns(vault)?;
+        kept.push(Held {
+            vault: vault.handle(),
+            patterns: patterns.clone(),
+        });
+        Ok(patterns)
+    })
+}
+
+fn read_patterns(vault: &Vault) -> Result<Vec<String>> {
     let mut patterns = BTreeSet::new();
     for value in vault.known_values()? {
         let encoded = serde_json::to_string(&value)?;
@@ -352,13 +419,8 @@ mod tests {
             snapshot.value(&value).unwrap(),
             redact_value(&test.vault, &value).unwrap()
         );
-        // The snapshot is a point in time; a new one sees what was added since,
-        // and the snapshot knows it is no longer the vault's.
-        assert!(snapshot.unchanged_in(&test.vault).unwrap());
-        test.vault.set("TOKEN", "", "private-value").unwrap();
-        assert!(snapshot.unchanged_in(&test.vault).unwrap());
+        // The snapshot is a point in time; a new one sees what was added since.
         test.vault.set("OTHER", "", "another-value").unwrap();
-        assert!(!snapshot.unchanged_in(&test.vault).unwrap());
         assert_eq!(snapshot.text("another-value").unwrap(), "another-value");
         assert_eq!(
             Patterns::of(&test.vault)
@@ -369,6 +431,56 @@ mod tests {
         );
         std::fs::write(test.vault.path(), b"broken").unwrap();
         assert!(Patterns::of(&test.vault).is_err());
-        assert!(snapshot.unchanged_in(&test.vault).is_err());
+    }
+
+    #[test]
+    fn a_hold_masks_with_its_first_read_and_knows_when_the_vault_moved() {
+        let test = TestVault::new();
+        test.vault.set("TOKEN", "", "private-value").unwrap();
+        // Nothing read under a hold: nothing was masked, nothing to check.
+        assert!(hold().settled().unwrap());
+        // Every redaction under the hold, whatever its entry point, uses the first read.
+        let held = hold();
+        assert_eq!(redact(&test.vault, "private-value").unwrap(), MASK);
+        test.vault.set("OTHER", "", "another-value").unwrap();
+        assert_eq!(
+            redact(&test.vault, "another-value").unwrap(),
+            "another-value"
+        );
+        assert_eq!(
+            redact_value(&test.vault, &json!("another-value")).unwrap(),
+            json!("another-value")
+        );
+        // A hold taken inside joins it and leaves the check to the outer one.
+        assert!(hold().settled().unwrap());
+        assert_eq!(
+            redact(&test.vault, "another-value").unwrap(),
+            "another-value"
+        );
+        assert!(
+            !held.settled().unwrap(),
+            "a secret was stored during the hold"
+        );
+        // The hold is over: redaction reads the vault again.
+        assert_eq!(redact(&test.vault, "another-value").unwrap(), MASK);
+        // The same content stored again is no change.
+        let held = hold();
+        redact(&test.vault, "").unwrap();
+        test.vault.set("OTHER", "", "another-value").unwrap();
+        assert!(held.settled().unwrap());
+        // A hold dropped by a panic ends too.
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = hold();
+            redact(&test.vault, "").unwrap();
+            panic!("rendering failed");
+        }));
+        assert!(unwound.is_err());
+        test.vault.set("THIRD", "", "third-value").unwrap();
+        assert_eq!(redact(&test.vault, "third-value").unwrap(), MASK);
+        // Fail closed: a vault unreadable at the check refuses the rendering.
+        let held = hold();
+        redact(&test.vault, "").unwrap();
+        std::fs::write(test.vault.path(), b"broken").unwrap();
+        assert!(held.settled().is_err());
     }
 }

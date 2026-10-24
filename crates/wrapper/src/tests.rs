@@ -2595,3 +2595,132 @@ fn a_secret_stored_while_the_replies_are_masked_never_leaves_in_clear() {
         .unwrap_err();
     assert_eq!(refused.status, 503);
 }
+
+/// A conversation without any direct reply (#377): one routine reply (`engine_reply`) and one
+/// group reply (`group_reply`), both quoting `secret`, which the vault does not hold yet.
+fn routine_and_group_quoting(app: &mut App, secret: &str) -> String {
+    use grokbot_engine::{
+        contracts::{RunEventKind, RunKind, TaskStatus, Trigger},
+        model::{self, RunStatus},
+        store,
+    };
+    // A sent message gives a complete run to copy. Its conversation is then deleted: the
+    // state read below projects no direct reply at all.
+    let source = history_quoting(app, "pas-un-secret");
+    let template = store::latest_run_for_trigger(
+        &app.connection,
+        &Trigger::UserMessage {
+            message_id: format!("{source}/premier"),
+            attempt: 0,
+        },
+    )
+    .unwrap()
+    .expect("the message started a run");
+    app.connection
+        .execute(
+            "UPDATE wrapper_conversations SET deleted=1 WHERE id=?1",
+            [&source],
+        )
+        .unwrap();
+    let id = conversation(app);
+    for (kind, entry, run_id) in [
+        ("engine_reply", "routine-du-matin", "routine-du-matin"),
+        ("group_reply", "tour-de-groupe", "run-du-tour"),
+    ] {
+        let mut run = template.clone();
+        run.run_id = run_id.into();
+        run.conversation_id = id.clone();
+        run.status = RunStatus::Queued;
+        run.turn_end = None;
+        run.task_status = None;
+        if kind == "engine_reply" {
+            run.trigger = Trigger::Occurrence {
+                occurrence_id: format!("occurrence-{run_id}"),
+            };
+            run.kind = RunKind::Task;
+            run.task_status = Some(TaskStatus::Working);
+        } else {
+            run.trigger = Trigger::UserMessage {
+                message_id: format!("{id}/{entry}"),
+                attempt: 0,
+            };
+        }
+        let tx = app.connection.unchecked_transaction().unwrap();
+        model::start(&tx, &run).unwrap();
+        tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) SELECT ?1,input_json,0,'simulated' FROM wrapper_engine_runs WHERE run_id=?2",rusqlite::params![run_id, template.run_id]).unwrap();
+        tx.execute(
+            "INSERT INTO engine_run_events(run_id,seq,kind,payload)
+             SELECT ?1, COALESCE(MAX(seq),0)+1, ?2, ?3 FROM engine_run_events WHERE run_id=?1",
+            rusqlite::params![
+                run_id,
+                serde_json::to_value(RunEventKind::TextDelta)
+                    .unwrap()
+                    .as_str(),
+                json!({"text": format!("Le jeton renouvelé est {secret}."), "response": 1})
+                    .to_string()
+            ],
+        )
+        .unwrap();
+        if kind == "group_reply" {
+            tx.execute("INSERT INTO wrapper_group_turns(account_id,conversation_id,id,root_id,bot_id,cause_id,prompt,priority,status,run_id) VALUES (?1,?2,?3,'racine',?4,'cause','Avis',1,'completed',?5)",rusqlite::params![super::ACCOUNT, id, entry, run.bot_id, run_id]).unwrap();
+        }
+        super::features::conversations::append_entry(&tx, &id, kind, entry, 1).unwrap();
+        tx.commit().unwrap();
+    }
+    id
+}
+
+#[test]
+fn a_secret_stored_while_routine_and_group_replies_are_masked_never_leaves_in_clear() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let secret = "jeton-oauth-renouvele-pendant-la-routine";
+    let id = routine_and_group_quoting(&mut app, secret);
+    let vault = super::features::engine::event_vault(&app.connection).unwrap();
+    let state = |conversations: &[super::Conversation]| {
+        let conversation = conversations
+            .iter()
+            .find(|c| c.id == id)
+            .expect("the conversation is listed");
+        assert!(
+            conversations
+                .iter()
+                .flat_map(|c| &c.messages)
+                .all(|m| m.role == "assistant"),
+            "no message was sent, hence no direct reply"
+        );
+        conversation
+            .messages
+            .iter()
+            .map(|m| serde_json::to_string(m).unwrap())
+            .collect::<Vec<_>>()
+    };
+    // Without a vault change, both replies are projected and quote the secret in clear:
+    // the fixture really renders the quoted text through both paths.
+    let plain = state(&app.conversations().unwrap());
+    assert_eq!(plain.len(), 2);
+    assert!(
+        plain.iter().all(|reply| reply.contains(secret)),
+        "{plain:?}"
+    );
+    // Synchronisation point: right after the routine reply is masked, a tool worker stores the
+    // renewed token, before the group reply is masked.
+    let mut stored = false;
+    let conversations = app
+        .conversations_settled(&mut || {
+            if !stored {
+                vault.set("OAUTH_RENOUVELE", "", secret).unwrap();
+                stored = true;
+            }
+        })
+        .unwrap();
+    assert!(stored, "the vault changed during the projection");
+    let replies = state(&conversations);
+    assert_eq!(replies.len(), 2);
+    for reply in &replies {
+        assert!(!reply.contains(secret), "secret in clear: {reply}");
+        assert!(reply.contains("[...]"), "{reply}");
+    }
+    let state = app.api("GET", "/api/state", b"").unwrap().to_string();
+    assert!(!state.contains(secret));
+}

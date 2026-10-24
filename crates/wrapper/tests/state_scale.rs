@@ -4,6 +4,7 @@
 use grokbot_wrapper::App;
 use rusqlite::{ffi, StatementStatus};
 use serde_json::json;
+use std::cell::Cell;
 use std::os::raw::{c_int, c_uint, c_void};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
@@ -20,6 +21,12 @@ const PER_MESSAGE: [&str; 6] = [
         FROM engine_response_usage WHERE run_id=?1 HAVING COUNT(*)>0",
 ];
 
+std::thread_local! {
+    /// Calls of `add_steps` on this thread, whatever counter they reach: what shows the callback
+    /// is gone once its guard is.
+    static CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
 /// SQLITE_TRACE_PROFILE fires when a statement run ends: add its `StatementStatus::VmStep`
 /// and reset it, so a cached statement counts each run once.
 unsafe extern "C" fn add_steps(
@@ -28,36 +35,64 @@ unsafe extern "C" fn add_steps(
     statement: *mut c_void,
     _elapsed: *mut c_void,
 ) -> c_int {
+    CALLS.set(CALLS.get() + 1);
     let steps = ffi::sqlite3_stmt_status(statement.cast(), StatementStatus::VmStep as c_int, 1);
     (*total.cast::<AtomicI64>()).fetch_add(i64::from(steps), Ordering::Relaxed);
     0
 }
 
+/// Counts the VM instructions of every statement run on the app connection while it lives.
+/// SQLite keeps a pointer to the counter: dropping the guard unregisters the callback, and only
+/// then are its fields (the counter) freed. That order holds when the measure ends and when a
+/// panic unwinds it, before the App is dropped (its destructor still runs queries).
+struct Steps {
+    db: *mut ffi::sqlite3,
+    total: Box<AtomicI64>,
+}
+
+impl Steps {
+    fn on(app: &App) -> Self {
+        let db = unsafe { app.feature_context().connection.handle() };
+        let total = Box::new(AtomicI64::new(0));
+        let context = &*total as *const AtomicI64 as *mut c_void;
+        let code = unsafe {
+            ffi::sqlite3_trace_v2(
+                db,
+                ffi::SQLITE_TRACE_PROFILE as c_uint,
+                Some(add_steps),
+                context,
+            )
+        };
+        assert_eq!(code, ffi::SQLITE_OK);
+        Self { db, total }
+    }
+    fn reset(&self) {
+        self.total.store(0, Ordering::Relaxed);
+    }
+    fn count(&self) -> i64 {
+        self.total.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Steps {
+    fn drop(&mut self) {
+        let code = unsafe { ffi::sqlite3_trace_v2(self.db, 0, None, std::ptr::null_mut()) };
+        if code != ffi::SQLITE_OK {
+            // Still registered, the callback would reach the counter freed right after this.
+            std::process::abort();
+        }
+    }
+}
+
 /// VM instructions of one `/api/state` on the app connection, every statement included.
 fn state_steps(app: &mut App) -> i64 {
-    let total = Box::new(AtomicI64::new(0));
-    let db = unsafe { app.feature_context().connection.handle() };
-    let trace = |on: bool| unsafe {
-        let callback: Option<
-            unsafe extern "C" fn(c_uint, *mut c_void, *mut c_void, *mut c_void) -> c_int,
-        > = if on { Some(add_steps) } else { None };
-        let mask = if on {
-            ffi::SQLITE_TRACE_PROFILE as c_uint
-        } else {
-            0
-        };
-        let context = &*total as *const AtomicI64 as *mut c_void;
-        assert_eq!(
-            ffi::sqlite3_trace_v2(db, mask, callback, context),
-            ffi::SQLITE_OK
-        );
-    };
-    trace(true);
+    let steps = Steps::on(app);
     // The first read also clears what cached statements counted before the trace.
     app.api("GET", "/api/state", b"").unwrap();
-    total.store(0, Ordering::Relaxed);
+    steps.reset();
     let state = app.api("GET", "/api/state", b"").unwrap();
-    trace(false);
+    let total = steps.count();
+    drop(steps);
     assert!(
         state["conversations"][0]["messages"]
             .as_array()
@@ -65,7 +100,7 @@ fn state_steps(app: &mut App) -> i64 {
             .len()
             > 1
     );
-    total.load(Ordering::Relaxed)
+    total
 }
 
 fn history(messages: usize) -> (App, std::path::PathBuf) {
@@ -140,4 +175,27 @@ fn a_state_read_costs_no_more_than_ten_times_for_ten_times_the_history() {
     drop((small_app, large_app));
     let _ = std::fs::remove_dir_all(small_dir);
     let _ = std::fs::remove_dir_all(large_dir);
+}
+
+#[test]
+fn a_panic_during_the_measure_unregisters_the_callback_before_the_app_is_dropped() {
+    let (mut app, dir) = history(1);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _steps = Steps::on(&app);
+        app.api("GET", "/api/state", b"").unwrap();
+        assert!(CALLS.get() > 0, "the callback counts while measuring");
+        panic!("a state read fails in the middle of the measure");
+    }));
+    assert!(unwound.is_err());
+    let after = CALLS.get();
+    // Same thread, same connection: another read, then the App's destructor, which records
+    // the routines' departure with a query. Neither reaches the callback any more.
+    app.api("GET", "/api/state", b"").unwrap();
+    drop(app);
+    assert_eq!(
+        CALLS.get(),
+        after,
+        "SQLite called the callback after its counter was freed"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }

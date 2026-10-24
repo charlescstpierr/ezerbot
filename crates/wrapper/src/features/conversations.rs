@@ -348,27 +348,24 @@ impl App {
         self.conversations_settled(&mut || {})
     }
 
-    /// The replies share one vault snapshot (#377). A secret stored meanwhile (a tool renewing
-    /// an OAuth token) would escape it: once every reply is masked the vault is read again, and
-    /// the projection starts over with the new snapshot if it changed. What is returned was
-    /// masked with the vault as it stands after the last reply, never with an older one.
-    /// `after_reply` runs after each masked reply: a no-op, except in the test that writes
-    /// to the vault at that point.
+    /// Every output of the projection is masked with one content of the vault (#377): a
+    /// `redact::hold` makes the first vault read the one used by every masking that follows on
+    /// this thread, whatever the entry (a direct reply, a routine or group reply, a meeting card,
+    /// a delegation or form card). A secret stored meanwhile (a tool renewing an OAuth token)
+    /// would escape that read: once the projection is done the vault is read again, and the
+    /// projection starts over if it changed. What is returned was masked with the vault as it
+    /// stands after the last output, never with an older one.
+    /// `after_entry` runs after each projected reply or entry: a no-op, except in the tests
+    /// that write to the vault at that point.
     pub(crate) fn conversations_settled(
         &self,
-        after_reply: &mut dyn FnMut(),
+        after_entry: &mut dyn FnMut(),
     ) -> Result<Vec<Conversation>, ApiError> {
         for _ in 0..VAULT_SETTLE_ATTEMPTS {
-            let mut secrets = None;
-            let result = self.project_conversations(&mut secrets, after_reply)?;
-            match secrets {
-                None => return Ok(result),
-                Some(used)
-                    if used.unchanged_in(&super::engine::event_vault(&self.connection)?)? =>
-                {
-                    return Ok(result)
-                }
-                Some(_) => continue,
+            let held = grokbot_forms::redact::hold();
+            let result = self.project_conversations(after_entry)?;
+            if held.settled()? {
+                return Ok(result);
             }
         }
         Err(ApiError::new(
@@ -379,8 +376,7 @@ impl App {
 
     fn project_conversations(
         &self,
-        secrets: &mut Option<grokbot_forms::redact::Patterns>,
-        after_reply: &mut dyn FnMut(),
+        after_entry: &mut dyn FnMut(),
     ) -> Result<Vec<Conversation>, ApiError> {
         let mut conversations = BTreeMap::new();
         let mut hidden = HashSet::new();
@@ -484,17 +480,16 @@ impl App {
                 record.state,
                 SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. }
             ) {
-                if let Some(reply) = super::engine::reply_with(
+                if let Some(reply) = super::engine::reply(
                     &ctx,
                     id,
                     record.message_id.as_str(),
                     proposals
                         .remove(&(id.to_owned(), record.message_id.as_str().to_owned()))
                         .unwrap_or_default(),
-                    secrets,
                 )? {
                     pair.push(reply);
-                    after_reply();
+                    after_entry();
                 }
             }
             // Meeting summaries are projected inside their durable meeting card,
@@ -544,6 +539,7 @@ impl App {
                 payload: Value::Null,
                 attachments: Vec::new(),
             });
+            after_entry();
             conversation.updated_at = conversation.updated_at.max(created_at);
             ordered
                 .entry(conversation_id)

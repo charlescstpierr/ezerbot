@@ -2775,14 +2775,15 @@ fn projected_parts(
     conn: &Connection,
     run: &Run,
 ) -> grokbot_engine::contracts::Result<Vec<ReplyPart>> {
-    projected_parts_with(conn, run, &redaction_patterns(conn)?)
+    let events = store::events(conn, &run.run_id, 0)?;
+    projected_parts_with(run, &events, &redaction_patterns(conn)?)
 }
+/// `events` are read before `secrets`: a secret stored by one of them is masked.
 fn projected_parts_with(
-    conn: &Connection,
     run: &Run,
+    events: &[RunEvent],
     secrets: &redact::Patterns,
 ) -> grokbot_engine::contracts::Result<Vec<ReplyPart>> {
-    let events = store::events(conn, &run.run_id, 0)?;
     let completed: HashSet<_> = events
         .iter()
         .filter(|e| matches!(e.kind, RunEventKind::ToolCall | RunEventKind::TurnEnded))
@@ -2799,7 +2800,7 @@ fn projected_parts_with(
         .map_or(0, |e| e.seq);
     let mut parts = Vec::new();
     let mut text = String::new();
-    for event in &events {
+    for event in events {
         let anchor = event.kind == RunEventKind::ToolCall
             || (run.kind == RunKind::Task
                 && matches!(
@@ -2851,24 +2852,13 @@ fn run_reply(
     id: String,
     proposals: Vec<Proposal>,
 ) -> Result<Message, ApiError> {
-    run_reply_with(conn, run, id, proposals, &redaction_patterns(conn)?)
-}
-/// The secrets to hide in a rendering. Read once per state read, not once per reply (#377).
-pub(crate) fn redaction_patterns(
-    conn: &Connection,
-) -> grokbot_engine::contracts::Result<redact::Patterns> {
-    redact::Patterns::of(&event_vault(conn)?)
-}
-fn run_reply_with(
-    conn: &Connection,
-    run: &Run,
-    id: String,
-    proposals: Vec<Proposal>,
-    secrets: &redact::Patterns,
-) -> Result<Message, ApiError> {
-    let parts = projected_parts_with(conn, run, secrets)?;
-    let body: String = parts.iter().map(|part| part.body.as_str()).collect();
+    let events = store::events(conn, &run.run_id, 0)?;
     let sources = super::sources::registry(conn, &run.run_id)?;
+    // One vault read for the whole reply, after what it masks. Under the hold of a state
+    // read, the one read of the whole projection (#377).
+    let secrets = redaction_patterns(conn)?;
+    let parts = projected_parts_with(run, &events, &secrets)?;
+    let body: String = parts.iter().map(|part| part.body.as_str()).collect();
     let citations = super::sources::citations_in(&sources, &body);
     let mut metadata: (Option<String>, Option<String>, Option<String>) = conn
         .prepare_cached("SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1")?
@@ -2902,6 +2892,10 @@ fn run_reply_with(
         attachments: vec![],
     })
 }
+/// The secrets to hide in a rendering, read once for all its fragments.
+fn redaction_patterns(conn: &Connection) -> grokbot_engine::contracts::Result<redact::Patterns> {
+    redact::Patterns::of(&event_vault(conn)?)
+}
 pub(crate) fn group_reply(ctx: &super::Context<'_>, id: &str) -> Result<Message, ApiError> {
     let run = store::required(ctx.connection, id)?;
     run_reply(ctx.connection, &run, format!("reply-{id}"), vec![])
@@ -2912,33 +2906,17 @@ pub fn reply(
     message: &str,
     proposals: Vec<Proposal>,
 ) -> Result<Option<Message>, ApiError> {
-    reply_with(ctx, conversation, message, proposals, &mut None)
-}
-/// `reply` for a caller that renders many replies: `secrets` stays empty until a reply needs
-/// it, then keeps the one vault read for the next ones.
-pub(crate) fn reply_with(
-    ctx: &super::Context<'_>,
-    conversation: &str,
-    message: &str,
-    proposals: Vec<Proposal>,
-    secrets: &mut Option<redact::Patterns>,
-) -> Result<Option<Message>, ApiError> {
     let Some(run) =
         store::latest_run_for_trigger(ctx.connection, &user_trigger(conversation, message, 0))?
             .filter(|r| r.conversation_id == conversation)
     else {
         return Ok(None);
     };
-    if secrets.is_none() {
-        *secrets = Some(redaction_patterns(ctx.connection)?);
-    }
-    let secrets = secrets.as_ref().expect("filled above");
-    Ok(Some(run_reply_with(
+    Ok(Some(run_reply(
         ctx.connection,
         &run,
         format!("reply-{message}"),
         proposals,
-        secrets,
     )?))
 }
 pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> {

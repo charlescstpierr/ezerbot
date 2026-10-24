@@ -33,6 +33,7 @@ enum Fault {
     Incomplete,
     Drip(Duration),
     Paced,
+    Words,
 }
 struct Fake {
     base: String,
@@ -208,6 +209,10 @@ impl Fake {
                         Fault::Drip(every) => drip(&mut socket,&s,every,&drip_closed),
                         Fault::Paced => {
                             for _ in 0..5 { event(&mut socket,json!({"type":"response.output_text.delta","delta":"Lent. "})); std::thread::sleep(Duration::from_millis(400)); }
+                            event(&mut socket,json!({"type":"response.completed"}));
+                        },
+                        Fault::Words => {
+                            for word in 0..40 { event(&mut socket,json!({"type":"response.output_text.delta","delta":format!("mot{word} ")})); std::thread::sleep(Duration::from_millis(50)); }
                             event(&mut socket,json!({"type":"response.completed"}));
                         },
                         Fault::EndlessEvents => { while !s.load(Ordering::SeqCst) { event(&mut socket,json!({"type":"response.in_progress"})); std::thread::sleep(Duration::from_millis(25)); } },
@@ -1229,4 +1234,127 @@ fn restart_exposes_interruption_and_recovers_the_same_durable_run() {
         store::events(&conn, &id, 0).unwrap()
     );
     assert_eq!(recovered["payload"]["run_id"], id);
+}
+
+/// Poll like the shell during a reply, every 100 ms, and keep each distinct
+/// visible text with the instant it was first seen.
+fn watch_words(f: &mut Fixture) -> Vec<(Instant, String)> {
+    f.send(Fault::Words);
+    let mut seen: Vec<(Instant, String)> = Vec::new();
+    let start = Instant::now();
+    let mut next = start;
+    loop {
+        let reply = f.reply();
+        let body = reply["body"].as_str().unwrap_or_default().to_owned();
+        if !body.is_empty() && seen.last().is_none_or(|(_, last)| *last != body) {
+            seen.push((Instant::now(), body));
+        }
+        if !reply.is_null() && reply["state"] != "streaming" {
+            return seen;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "fake chat did not settle"
+        );
+        next += Duration::from_millis(100);
+        std::thread::sleep(next.saturating_duration_since(Instant::now()));
+    }
+}
+fn assert_fluid(seen: &[(Instant, String)], max_gap: Option<Duration>) {
+    let words: Vec<usize> = seen
+        .iter()
+        .map(|(_, body)| body.split_whitespace().count())
+        .collect();
+    let gaps: Vec<u128> = seen
+        .windows(2)
+        .map(|w| (w[1].0 - w[0].0).as_millis())
+        .collect();
+    eprintln!(
+        "fluidité : {} textes visibles, mots {words:?}, écarts ms {gaps:?}",
+        seen.len()
+    );
+    assert_eq!(seen.last().unwrap().1.split_whitespace().count(), 40);
+    assert!(seen
+        .windows(2)
+        .all(|w| w[1].1.starts_with(&w[0].1) && w[1].1.len() > w[0].1.len()));
+    assert!(
+        seen.len() >= 15,
+        "seulement {} textes visibles : {words:?}",
+        seen.len()
+    );
+    if let Some(max_gap) = max_gap {
+        let worst = gaps.iter().copied().max().unwrap_or(0);
+        assert!(
+            worst <= max_gap.as_millis(),
+            "saut de {worst} ms entre deux textes visibles"
+        );
+    }
+}
+fn fluidity_log(f: &Fixture) -> String {
+    let log = std::fs::read_to_string(f.db.parent().unwrap().join("logs/engine.log")).unwrap();
+    assert!(log.contains("api_state client=principal duree_ms=") && log.contains("messages="));
+    assert!(log.contains("ecart_max_ms="));
+    assert!(!log.contains("mot1 ") && !log.contains("Question privée") && !log.contains(&token()));
+    log
+}
+
+#[test]
+fn a_streamed_reply_is_seen_growing_not_as_one_final_block() {
+    let mut f = Fixture::with_deadline(true, Duration::from_secs(10));
+    let seen = watch_words(&mut f);
+    assert_fluid(&seen, None);
+    fluidity_log(&f);
+}
+
+#[test]
+#[ignore = "défaut connu #255 : avec 200 messages, /api/state sérialise tout l'historique et l'interface voit moins de 15 textes ou des sauts de plus de 300 ms"]
+fn a_long_history_still_shows_the_reply_growing_without_long_jumps() {
+    let mut f = Fixture::with_deadline(true, Duration::from_secs(10));
+    for turn in 0..100 {
+        f.fake.queue.lock().unwrap().push_back(Fault::Happy);
+        let id = format!("ancien-{turn}");
+        post(
+            &mut f.app,
+            "/api/send",
+            json!({"conversation_id":f.chat,"message_id":id,"body":"Historique"}),
+        );
+        let reply = format!("reply-{id}");
+        until(|| {
+            let state = f.app.api("GET", "/api/state", b"").unwrap();
+            state["conversations"].as_array().unwrap().iter().any(|c| {
+                c["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m["id"] == reply && m["state"] != "streaming")
+            })
+        });
+    }
+    let seen = watch_words(&mut f);
+    let log = fluidity_log(&f);
+    let mut served: Vec<(u64, u64)> = log
+        .lines()
+        .filter_map(|line| {
+            let field = |name: &str| {
+                line.split(name)
+                    .nth(1)?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()
+            };
+            Some((field("duree_ms=")?, field("messages=")?))
+        })
+        .collect();
+    let events = served.last().map_or(0, |(_, events)| *events);
+    let during: Vec<u64> = served
+        .split_off(served.len().saturating_sub(seen.len() * 2))
+        .iter()
+        .map(|(ms, _)| *ms)
+        .collect();
+    eprintln!(
+        "historique de 200 messages : /api/state pendant la réponse {during:?} ms, {events} messages ; {}",
+        log.lines().rev().find(|line| line.contains("ecart_max_ms=")).unwrap_or_default()
+    );
+    assert_fluid(&seen, Some(Duration::from_millis(300)));
 }

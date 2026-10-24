@@ -177,22 +177,20 @@ test("une relecture manquée ne masque pas une correction réussie ; une action 
   release();
   await lost.settle();
   assert.equal(lost.open(), false, "pas de panneau figé");
-  const race = await harness(); // on rouvre le même souvenir pendant qu'une correction attend sa réponse
+  const race = await harness(); // pendant qu'une correction attend sa réponse, aucun autre souvenir ne s'ouvre
   race.net.hold = new Promise((resolve) => { release = resolve; });
   race.item("f1").click();
   race.button("Modifier").click();
   await race.type("Enregistrer", "A");
-  race.item("f1").click();
-  race.button("Modifier").click();
-  const second = race.panel().querySelector(".memory-detail-field");
-  second.value = "B";
-  second.fire("input");
+  race.item("f2").click();
   race.reload();
   await race.settle();
-  assert.deepEqual([race.open(), race.panel().querySelector(".memory-detail-field").value], [true, "B"], "la relecture ne détruit pas la saisie");
+  assert.deepEqual([race.open(), race.cells()[0]], [true, "Ezerbot"], "le panneau reste sur la correction en cours");
   release();
   await race.settle();
-  assert.deepEqual([race.panel().querySelector(".memory-detail-field").value, Element.active === race.panel().querySelector(".memory-detail-field")], ["B", true], "ni le focus");
+  assert.deepEqual([race.text("text"), race.cells()[0]], ["A", "Ezerbot"]);
+  race.item("f2").click();
+  assert.equal(race.text("text"), "L’équipe déjeune à midi", "une fois la réponse reçue, un autre souvenir s'ouvre");
 });
 
 test("Oublier demande confirmation ; annuler ne change rien ; confirmer retire le souvenir du graphe, de la Liste et du panneau", async () => {

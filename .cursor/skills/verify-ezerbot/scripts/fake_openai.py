@@ -284,7 +284,7 @@ def response_body(raw: bytes) -> bytes:
             "status": "completed",
             "call_id": "verify-shotpage",
             "name": "screenshot_page",
-            "arguments": json.dumps({"target": found.group(0) if found else "page_introuvable", "theme": "dark"}),
+            "arguments": json.dumps({"target": found.group(0) if found else "page_introuvable", "theme": "light" if "en clair" in _last_user_text(items) else "dark"}),
         }
         return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
     if outputs:

@@ -13,10 +13,10 @@ use serde_json::{json, Value};
 use support::{form, wait, FakeOpenAi, Seen, CLIENT};
 
 fn scratch(label: &str) -> grokbot_test_support::TestDir {
-    // La sonde de connexion du fournisseur est un thread détaché : elle écrit encore son journal
-    // après la fin du test, contre un faux serveur déjà fermé.
+    // Un test qui appelle `status()` lance la sonde de connexion et le rafraîchissement du
+    // catalogue, deux fils détachés qui écrivent le journal et le verrou du dossier : il termine
+    // par `wait_for_background_work()`, avant que le dossier soit supprimé.
     grokbot_test_support::TestDir::new(&format!("ezerbot-session-{label}"))
-        .settling_for(std::time::Duration::from_secs(2))
 }
 
 fn now() -> u64 {
@@ -138,12 +138,14 @@ fn expired_token_refreshes_silently_and_survives_restart() {
 
     let refresh = file["refresh_token"].clone();
     let forms = seen.lock().unwrap().forms.len();
+    session.wait_for_background_work();
     drop(session);
     let restarted = provider(&db, &server);
     assert!(restarted.connected());
     assert_eq!(saved(&auth_path)["refresh_token"], refresh);
     assert_eq!(seen.lock().unwrap().forms.len(), forms);
     assert_eq!(restarted.status()["signin"], "idle");
+    restarted.wait_for_background_work();
 }
 
 #[test]
@@ -234,6 +236,7 @@ fn a_refused_refresh_does_not_delete_a_token_saved_by_the_other_process() {
     assert_eq!(saved(&auth_path)["refresh_token"], "winner-refresh");
     assert!(session.connected());
     assert_ne!(session.status()["signin"], "pending");
+    session.wait_for_background_work();
 }
 
 #[test]
@@ -327,6 +330,7 @@ fn charles_codex_file_in_application_support_is_found_without_reconnect() {
     assert!(seen.lock().unwrap().forms.is_empty());
     assert_eq!(saved(&auth_path)["refresh_token"], "refresh-charles");
     assert!(session.status()["error"].is_null());
+    session.wait_for_background_work();
 }
 
 #[test]
@@ -357,6 +361,7 @@ fn a_single_invalid_grant_retries_the_stored_token_before_clearing() {
         .filter(|form| form.get("grant_type").map(String::as_str) == Some("refresh_token"))
         .count();
     assert_eq!(refreshes, 2);
+    session.wait_for_background_work();
 }
 
 #[test]
@@ -470,6 +475,7 @@ fn refresh_success_does_not_overwrite_a_newer_pair() {
     assert_eq!(saved(&auth_path)["refresh_token"], "winner-refresh");
     assert!(session.connected());
     assert_eq!(session.status()["signin"], "idle");
+    session.wait_for_background_work();
 }
 
 #[test]
@@ -555,6 +561,7 @@ fn sign_in_write_requires_the_lock_and_keeps_a_newer_pair() {
     assert_eq!(saved(&auth_path)["refresh_token"], "signin-winner");
     assert!(session.connected());
     assert_ne!(session.status()["signin"], "failed");
+    session.wait_for_background_work();
 }
 
 #[test]
@@ -646,6 +653,7 @@ fn a_newer_source_refresh_replaces_the_older_destination() {
     assert_eq!(saved(&imported)["refresh_token"], "new-refresh");
     assert!(saved(&legacy)["refresh_token"].is_null());
     assert_ne!(again.status()["signin"], "failed");
+    again.wait_for_background_work();
 }
 
 #[test]
@@ -702,6 +710,7 @@ fn a_newer_temporary_is_adopted_on_the_next_startup() {
     assert_ne!(outcome.kind, "signin");
     assert!(seen.lock().unwrap().forms.is_empty());
     assert_eq!(session.status()["signin"], "idle");
+    session.wait_for_background_work();
 
     let stale_tmp = auth_path.with_extension("json.tmp");
     write_auth(
@@ -768,6 +777,9 @@ fn codex_rotation_is_kept_when_the_profile_update_fails() {
     assert!(seen.lock().unwrap().forms.is_empty());
     assert_eq!(saved(&auth_path)["refresh_token"], refresh);
     assert_eq!(restarted.status()["signin"], "idle");
+    // `status()` a lancé la sonde de connexion et le rafraîchissement du catalogue : on attend leur
+    // fin avant que le faux serveur et le dossier disparaissent.
+    restarted.wait_for_background_work();
 }
 
 fn flock_child() {
@@ -789,7 +801,11 @@ fn flock_child() {
     } else {
         outcome.kind.to_owned()
     };
-    fs::write(result, label).unwrap();
+    // Écriture atomique : le parent sonde `result.exists()` et lit aussitôt ; un fichier créé
+    // mais pas encore rempli lui rendrait une chaîne vide.
+    let partial = result.with_extension("partial");
+    fs::write(&partial, label).unwrap();
+    fs::rename(&partial, result).unwrap();
 }
 
 #[test]
@@ -919,4 +935,5 @@ fn several_threads_share_a_single_refresh() {
     assert_ne!(saved(&auth_path)["refresh_token"], "stale-refresh");
     assert!(session.connected());
     assert_eq!(session.status()["signin"], "idle");
+    session.wait_for_background_work();
 }

@@ -167,7 +167,7 @@ impl Provider {
             *probe = json!({"state":"running"});
             session.inner.probe_generation.load(Ordering::SeqCst)
         };
-        thread::spawn(move || {
+        self.primary.spawn_background(move || {
             let mut failure = None;
             let mut responded = false;
             let mut visible = false;
@@ -229,6 +229,14 @@ impl Provider {
                 json!({"state":"failed","message":failure.unwrap_or_else(|| "La connexion a été interrompue. Réessayez.".into())})
             };
         });
+    }
+    /// Pour les tests : attend la fin des fils réseau de fond de cette connexion (sonde de
+    /// connexion, catalogue de modèles, quota), pour que le dossier de la fixture ne soit plus
+    /// écrit quand le test le supprime. Absent de la version livrée.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn wait_for_background_work(&self) {
+        self.primary.wait_background();
     }
     pub fn start_signin(&self) -> Result<String, Failure> {
         self.session().start_signin()

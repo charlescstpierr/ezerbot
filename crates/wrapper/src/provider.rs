@@ -366,6 +366,11 @@ struct Inner {
     catalog: Mutex<Catalog>,
     quota: Mutex<codex::UsageCache>,
     mcp: crate::mcp::Manager,
+    /// Fils réseau de fond (sonde de connexion, catalogue, quota, lecture d'un tour), gardés
+    /// seulement pour qu'un test attende leur fin. Compilé dans les versions de développement et
+    /// de test uniquement : la version livrée n'a ni ce champ ni cette attente.
+    #[cfg(debug_assertions)]
+    background: Mutex<Vec<thread::JoinHandle<()>>>,
 }
 
 #[derive(Clone)]
@@ -853,7 +858,43 @@ impl Session {
                 catalog: Mutex::new(Catalog::default()),
                 quota: Mutex::new(codex::UsageCache::default()),
                 mcp: crate::mcp::Manager::default(),
+                #[cfg(debug_assertions)]
+                background: Mutex::new(Vec::new()),
             }),
+        }
+    }
+
+    /// Lance un fil réseau de fond détaché, comme `thread::spawn` : l'appelant n'attend jamais
+    /// sa fin. En développement et en test, la poignée est retenue pour `wait_background`.
+    fn spawn_background(&self, work: impl FnOnce() + Send + 'static) {
+        let handle = thread::spawn(work);
+        #[cfg(debug_assertions)]
+        {
+            let mut handles = lock(&self.inner.background);
+            handles.retain(|handle| !handle.is_finished());
+            handles.push(handle);
+        }
+        #[cfg(not(debug_assertions))]
+        drop(handle);
+    }
+
+    /// Attend la fin de tous les fils de fond lancés par cette session, y compris ceux que la fin
+    /// d'un autre fil vient de lancer. Réservé aux tests, qui veulent supprimer leur dossier
+    /// seulement quand plus rien ne peut y écrire ; jamais appelé par le produit.
+    #[cfg(debug_assertions)]
+    pub(crate) fn wait_background(&self) {
+        let current = thread::current().id();
+        loop {
+            let pending: Vec<_> = std::mem::take(&mut *lock(&self.inner.background))
+                .into_iter()
+                .filter(|handle| handle.thread().id() != current)
+                .collect();
+            if pending.is_empty() {
+                return;
+            }
+            for handle in pending {
+                let _ = handle.join();
+            }
         }
     }
 
@@ -1657,7 +1698,7 @@ impl Session {
         }
         let provider = self.clone();
         let generation = self.inner.probe_generation.load(Ordering::SeqCst);
-        thread::spawn(move || {
+        self.spawn_background(move || {
             let models = provider.fetch_models();
             let mut catalog = lock(&provider.inner.catalog);
             if provider.inner.probe_generation.load(Ordering::SeqCst) != generation {

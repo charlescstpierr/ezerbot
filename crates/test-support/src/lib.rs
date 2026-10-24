@@ -17,7 +17,6 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug)]
 pub struct TestDir {
     path: PathBuf,
-    quiet: Duration,
 }
 
 impl TestDir {
@@ -33,15 +32,7 @@ impl TestDir {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&path).expect("create the test directory");
-        Self { path, quiet: QUIET }
-    }
-
-    /// Allonge la fenêtre calme de la suppression pour une fixture dont un thread de fond du produit
-    /// (sonde de connexion, rafraîchissement du catalogue) écrit encore une à deux secondes après
-    /// la fin du test.
-    pub fn settling_for(mut self, quiet: Duration) -> Self {
-        self.quiet = quiet;
-        self
+        Self { path }
     }
 
     pub fn path(&self) -> &Path {
@@ -67,7 +58,7 @@ impl Drop for TestDir {
         let started = Instant::now();
         let mut last_removal = Instant::now();
         let _ = std::fs::remove_dir_all(&self.path);
-        while last_removal.elapsed() < self.quiet && started.elapsed() < LIMIT {
+        while last_removal.elapsed() < QUIET && started.elapsed() < LIMIT {
             std::thread::sleep(POLL);
             if self.path.exists() {
                 let _ = std::fs::remove_dir_all(&self.path);

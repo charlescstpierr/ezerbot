@@ -12,7 +12,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 Les avertissements Clippy sont des erreurs (`-D warnings`). Les tests passent sur le workspace verrouillé (`--locked`).
 
-Un test Rust qui a besoin d'un dossier ou d'une base temporaire utilise `grokbot_test_support::TestDir` (crate `crates/test-support`, en `[dev-dependencies]`) : un sous-dossier unique de `$TMPDIR`, supprimé en entier à la fin du test, échec compris. Jamais `std::env::temp_dir().join(..)` (le test `no_raw_temp_dir` le refuse) : une base posée directement dans `$TMPDIR` fuit au moindre échec et fait balayer tout `$TMPDIR` par `Vault::open`. Déclarer le `TestDir` avant l'application ou la connexion qu'il contient, ou en dernier champ d'une fixture, pour qu'il soit supprimé après eux.
+Un test Rust qui a besoin d'un dossier ou d'une base temporaire utilise `grokbot_test_support::TestDir` (crate `crates/test-support`, en `[dev-dependencies]`) : un sous-dossier unique de `$TMPDIR`, supprimé en entier à la fin du test, échec compris. Jamais `std::env::temp_dir().join(..)` (le test `no_raw_temp_dir` le refuse) : une base posée directement dans `$TMPDIR` fuit au moindre échec et fait balayer tout `$TMPDIR` par `Vault::open`. Déclarer le `TestDir` avant l'application ou la connexion qu'il contient, ou en dernier champ d'une fixture, pour qu'il soit supprimé après eux. Un test qui appelle `Provider::status()` lance des fils de fond (sonde de connexion, catalogue de modèles) qui écrivent dans ce dossier : il termine par `provider.wait_for_background_work()`, jamais par une attente plus longue.
 
 ## JavaScript
 

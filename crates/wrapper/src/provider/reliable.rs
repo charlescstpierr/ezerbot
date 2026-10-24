@@ -176,7 +176,7 @@ impl Session {
         // ureq cuts a blocked read at this instant; the session loop below only
         // reports the timeout, it cannot close a socket the worker is reading.
         let deadline = Instant::now() + limits.total;
-        thread::spawn(move || {
+        self.spawn_background(move || {
             let worker = Worker {
                 inner: session.inner.clone(),
                 settled: worker_settled,

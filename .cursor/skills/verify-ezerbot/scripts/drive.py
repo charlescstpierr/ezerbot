@@ -25,7 +25,7 @@ THEMES = ("dark", "light")
 CANVAS = {"dark": "#0e0f12", "light": "#ffffff"}
 # EZERBOT_VERIFY_BASELINE=1 rejoue la sphère approbation-rappel sur un produit sans le rappel : mêmes gestes, aucune attente des éléments nouveaux, seules les captures « avant » comptent.
 BASELINE = os.environ.get("EZERBOT_VERIFY_BASELINE") == "1"
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "iphone-jumelage", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive", "approbation-rappel", "sujets", "mode-yolo", "sources-citees")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "iphone-jumelage", "voix-appel", "voix-micro", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive", "approbation-rappel", "sujets", "mode-yolo", "sources-citees")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -617,13 +617,18 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
             }""",
             "conversation neuve non prête",
         )
-    if sphere == "voix-appel":
+    if sphere in ("voix-appel", "voix-micro"):
         # Une conversation neuve à chaque passage, puis l’appel lancé depuis l’en-tête : le fil ne porte que le transcript de ce passage.
         eval_js(evidence, close_overlays_js())
         eval_js(
             evidence,
             """async () => {
               const panels = window.GrokbotPanels;
+              if (window.EzerbotVoiceMode?.active()) {
+                [...document.querySelectorAll(".voice-session-bar button")].find((node) => node.textContent === "Quitter").click();
+                const deadline = Date.now() + 8000;
+                while (window.EzerbotVoiceMode.active() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+              }
               if (window.EzerbotVoiceCall?.active()) {
                 [...document.querySelectorAll(".voice-call-bar button")].find((node) => node.textContent === "Quitter").click();
                 const deadline = Date.now() + 8000;
@@ -1854,6 +1859,111 @@ def voice_call_step(evidence: Path, index: int) -> None:
             raise SystemExit(f"le fil ne garde pas le transcript marqué Appel vocal: {state}")
 
 
+MUTE_HELPERS_JS = """
+  const panels = window.GrokbotPanels;
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const waitFor = async (test) => { const deadline = Date.now() + 8000; while (!test() && Date.now() < deadline) await pause(100); return Boolean(test()); };
+  // Le jeton du mode voix reste dans l’écran : on lit celui que le faux pont reçoit.
+  if (!window.__muteTap) {
+    window.__muteTap = {};
+    const api = panels.api;
+    panels.api = function (path, body) { if (path === "/api/voice/session/debug" && body?.token) window.__muteTap.token = body.token; return api.apply(this, arguments); };
+  }
+  const key = () => document.dispatchEvent(new KeyboardEvent("keydown", {key: "M", metaKey: true, shiftKey: true, bubbles: true, cancelable: true}));
+  const modeStatus = () => panels.api("/api/voice/session/debug", {command: "status", token: window.__muteTap.token});
+  const callStatus = () => panels.api("/api/voice/call/debug", {command: "status", token: panels.state.voice_call.active.id});
+"""
+
+
+def voice_mute_step(evidence: Path, index: int) -> None:
+    """Avant chaque capture : 0 le mode voix à l’écoute, 1 micro coupé (clic, puis ⌘⇧M deux fois, le faux pont lu à chaque fois), 2 quitter puis relancer (micro actif) et l’appel à l’écoute, 3 l’appel micro coupé."""
+    expected = "Micro coupé · le bot ne vous entend pas"
+    if index == 0:
+        said = eval_js(
+            evidence,
+            "async () => {" + MUTE_HELPERS_JS + """
+              document.querySelector(".voice-session-toggle").click();
+              await waitFor(() => document.querySelector(".voice-session-state")?.textContent.startsWith("À l’écoute") && window.__muteTap.token);
+              const mute = document.querySelector(".voice-session-bar .voice-mute-toggle");
+              return {label: document.querySelector(".voice-session-state").textContent, pressed: mute.getAttribute("aria-pressed"), name: mute.getAttribute("aria-label"), muted: (await modeStatus()).muted};
+            }""",
+        )
+        if not said["label"].startswith("À l’écoute") or said["pressed"] != "false" or said["name"] != "Couper le micro" or said["muted"] is not False:
+            raise SystemExit(f"le mode voix n’est pas à l’écoute, micro actif: {said}")
+    if index == 1:
+        said = eval_js(
+            evidence,
+            "async () => {" + MUTE_HELPERS_JS + """
+              const label = () => document.querySelector(".voice-session-state").textContent;
+              const mute = document.querySelector(".voice-session-bar .voice-mute-toggle");
+              const sayNow = (text) => panels.api("/api/voice/session/debug", {command: "feed", token: window.__muteTap.token, text});
+              await sayNow("Bonjour Ezerbot");
+              const heard = await waitFor(() => document.querySelector(".voice-live-transcript").textContent === "Bonjour Ezerbot");
+              mute.click();
+              const clicked = await waitFor(() => label() === "%s");
+              const afterClick = {pressed: mute.getAttribute("aria-pressed"), muted: (await modeStatus()).muted, transcript: document.querySelector(".voice-live-transcript").hidden};
+              await sayNow("Rien ne doit passer");
+              const deaf = (await modeStatus()).transcript === "";
+              key();
+              const listening = await waitFor(() => label().startsWith("À l’écoute"));
+              const afterKey = (await modeStatus()).muted;
+              key();
+              const muted = await waitFor(() => label() === "%s");
+              return {heard, clicked, afterClick, deaf, listening, afterKey, muted, afterSecondKey: (await modeStatus()).muted, pressed: mute.getAttribute("aria-pressed")};
+            }""" % (expected, expected),
+        )
+        if not (said["heard"] and said["clicked"] and said["afterClick"] == {"pressed": "true", "muted": True, "transcript": True} and said["deaf"]
+                and said["listening"] and said["afterKey"] is False and said["muted"] and said["afterSecondKey"] is True and said["pressed"] == "true"):
+            raise SystemExit(f"le bouton ou ⌘⇧M ne coupent pas le micro du mode voix: {said}")
+    if index == 2:
+        said = eval_js(
+            evidence,
+            "async () => {" + MUTE_HELPERS_JS + """
+              const quit = () => [...document.querySelectorAll(".voice-session-bar button")].find((node) => node.textContent === "Quitter").click();
+              quit();
+              await waitFor(() => !window.EzerbotVoiceMode.active());
+              const idle = (await modeStatus()).status;
+              // Relancé, le mode voix écoute : la sourdine ne reste pas collée.
+              window.__muteTap.token = "";
+              document.querySelector(".voice-session-toggle").click();
+              await waitFor(() => document.querySelector(".voice-session-state")?.textContent.startsWith("À l’écoute") && window.__muteTap.token);
+              const mute = document.querySelector(".voice-session-bar .voice-mute-toggle");
+              const relaunched = {label: document.querySelector(".voice-session-state").textContent, pressed: mute.getAttribute("aria-pressed"), muted: (await modeStatus()).muted};
+              quit();
+              await waitFor(() => !window.EzerbotVoiceMode.active());
+              document.querySelector(".voice-call-toggle").click();
+              await waitFor(() => document.querySelector(".voice-call-state")?.textContent.startsWith("Appel en cours") && panels.state.voice_call.active);
+              const callMute = document.querySelector(".voice-call-bar .voice-mute-toggle");
+              return {idle, relaunched, call: {label: document.querySelector(".voice-call-state").textContent, pressed: callMute.getAttribute("aria-pressed"), name: callMute.getAttribute("aria-label"), muted: (await callStatus()).muted}};
+            }""",
+        )
+        if (said["idle"] != "idle" or not said["relaunched"]["label"].startswith("À l’écoute") or said["relaunched"]["pressed"] != "false" or said["relaunched"]["muted"] is not False
+                or not said["call"]["label"].startswith("Appel en cours") or said["call"]["pressed"] != "false" or said["call"]["name"] != "Couper le micro" or said["call"]["muted"] is not False):
+            raise SystemExit(f"quitter puis relancer ne rend pas le micro, ou l’appel n’est pas à l’écoute: {said}")
+    if index == 3:
+        said = eval_js(
+            evidence,
+            "async () => {" + MUTE_HELPERS_JS + """
+              const label = () => document.querySelector(".voice-call-state").textContent;
+              const mute = document.querySelector(".voice-call-bar .voice-mute-toggle");
+              const sayNow = (text) => panels.api("/api/voice/call/debug", {command: "feed", token: panels.state.voice_call.active.id, text});
+              await sayNow("Bonjour Ezerbot");
+              mute.click();
+              const clicked = await waitFor(() => label() === "%s");
+              const afterClick = {pressed: mute.getAttribute("aria-pressed"), muted: (await callStatus()).muted, partial: (await callStatus()).transcript};
+              key();
+              const listening = await waitFor(() => label().startsWith("Appel en cours"));
+              const afterKey = (await callStatus()).muted;
+              key();
+              const muted = await waitFor(() => label() === "%s");
+              return {clicked, afterClick, listening, afterKey, muted, afterSecondKey: (await callStatus()).muted, pressed: mute.getAttribute("aria-pressed")};
+            }""" % (expected, expected),
+        )
+        if not (said["clicked"] and said["afterClick"] == {"pressed": "true", "muted": True, "partial": ""} and said["listening"] and said["afterKey"] is False
+                and said["muted"] and said["afterSecondKey"] is True and said["pressed"] == "true"):
+            raise SystemExit(f"le bouton ou ⌘⇧M ne coupent pas le micro de l’appel: {said}")
+
+
 MEMO_SPEED_JS = """(text) => {
   const input = document.querySelector(".gb-voice-memo .gb-memo-speed input");
   input.focus();
@@ -2236,6 +2346,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
     if sphere == "voix-appel":
         return [f"avant-{theme}-{size}.png", f"appel-{theme}-{size}.png", f"transcript-{theme}-{size}.png", f"fil-{theme}-{size}.png"]
+    if sphere == "voix-micro":
+        return [f"mode-ecoute-{theme}-{size}.png", f"mode-coupe-{theme}-{size}.png", f"appel-ecoute-{theme}-{size}.png", f"appel-coupe-{theme}-{size}.png"]
     if sphere == "mode-yolo":
         return [f"parametres-{theme}-{size}.png", f"terminal-{theme}-{size}.png", f"ecriture-{theme}-{size}.png"]
     if sphere == "taches-de-fond":
@@ -2312,6 +2424,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             voice_bots_step(evidence, index)
         if sphere == "voix-appel":
             voice_call_step(evidence, index)
+        if sphere == "voix-micro":
+            voice_mute_step(evidence, index)
         if sphere == "memo-vocal":
             memo_step(evidence, index)
         if sphere == "reunions-routines" and index == 1:

@@ -26,17 +26,32 @@ function chromeBinary() {
 }
 
 // Loads `file` in a fresh headless Chrome and returns the JSON the page wrote into
-// <pre id="qa-result">. A Chrome that never prints anything is a launch hang, not a slow page:
-// measured on the loaded Mac (#387), the browser's own fork child sits forever on a mutex inside
-// libSystem's atfork handler, so waiting longer never helps (120 s with zero output and zero
-// stderr). Such a launch is killed with its whole process group after LAUNCH_MS and replaced by a
-// fresh Chrome and a fresh profile, at most LAUNCH_ATTEMPTS times. LAUNCH_MS stays the 20 s the
-// tests always allowed, so a launch that is only slow (up to 11 s with 12 Chromes at once at load
-// 240) still finishes inside it. Only a launch that printed
-// nothing is retried: a Chrome that exits or prints a page without a report, or a report with the
-// wrong layout, fails at once, and the caller's assertions run once, on the one report we got.
+// <pre id="qa-result">.
+//
+// A launch hang, measured on the loaded Mac (#387): the browser process forks, at about 135 ms
+// into its start, to start its Crashpad handler (crashpad SpawnSubprocess(), called unconditionally
+// for the browser process on macOS), and the fork child sits forever on a mutex inside libSystem's
+// atfork handler (libxpc), while the browser waits for it (`sample`: fork -> xpc_atfork_child ->
+// -[OS_xpc_object dealloc] -> __psynch_mutexwait). No Chrome switch turns that fork off (probed:
+// --disable-breakpad, --disable-crash-reporter, --disable-crashpad, --no-crash-upload,
+// --disable-features=Crashpad, --crash-dumps-dir and CHROME_HEADLESS all still start the handler),
+// so the hang is replaced, not removed: waiting longer never helps (120 s with zero output).
+//
+// A launch is replaced only in the one state that proves it never started: after LAUNCH_MS it has
+// printed NOTHING, neither on stdout nor on stderr, and has not exited. `--remote-debugging-port=0`
+// makes that state observable: a browser that finished starting announces "DevTools listening on
+// ws://..." on stderr (about 300 ms in, long before the page is navigated), so a silent stderr means
+// the browser never got that far, and the page never ran. Any byte on stdout or stderr, an exit, or
+// a page printed without the report fails at once with no new launch, and so does a wrong layout:
+// the caller's assertions run once, on the one report we got. LAUNCH_MS stays the 20 s the tests
+// always allowed, so a launch that is only slow (up to 13 s with 12 Chromes at once at load 240)
+// still finishes inside it; a replaced launch gets a fresh Chrome and a fresh profile, 3 launches at
+// most, the whole process group of each one killed.
 const LAUNCH_ATTEMPTS = 3;
 const LAUNCH_MS = 20000;
+// After "exit", only the bytes already written to the pipes are still read: a descendant that keeps
+// the pipes open must not delay the verdict (Node emits "close" only when they are all closed).
+const EXIT_DRAIN_MS = 1000;
 
 function unescapeDom(text) {
   return text.replaceAll("&quot;", "\"").replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">");
@@ -55,6 +70,7 @@ function dumpOnce({ file, profile, width, height, launchMs }) {
     "--disable-dev-shm-usage",
     "--force-device-scale-factor=1",
     `--user-data-dir=${profile}`,
+    "--remote-debugging-port=0",
     "--virtual-time-budget=2000",
     `--window-size=${width},${height}`,
     "--dump-dom",
@@ -65,14 +81,17 @@ function dumpOnce({ file, profile, width, height, launchMs }) {
   let err = "";
   return new Promise((resolve, reject) => {
     let settled = false;
+    const timers = [];
     const settle = (action, value) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      timers.forEach(clearTimeout);
       stop();
       action(value);
     };
-    const timer = setTimeout(() => settle(resolve, { stalled: true, silent: dom === "", err }), launchMs);
+    // Never started: nothing on stdout, nothing on stderr, no "exit". The only replaceable state.
+    const deadline = setTimeout(() => settle(resolve, { stalled: true, blocked: dom === "" && err === "", dom, err }), launchMs);
+    timers.push(deadline);
     chrome.stdout.on("data", (chunk) => {
       dom += chunk;
       const text = qaResult(dom);
@@ -81,24 +100,24 @@ function dumpOnce({ file, profile, width, height, launchMs }) {
     });
     chrome.stderr.on("data", (chunk) => { err += chunk; });
     chrome.on("error", (error) => settle(reject, error));
-    chrome.on("close", () => {
-      if (qaResult(dom) === null) settle(resolve, { exited: true, err });
-    });
+    const exited = () => settle(resolve, { exited: true, err });
+    // An exit is final, whatever the pipes do: the deadline no longer applies.
+    chrome.on("exit", () => { clearTimeout(deadline); stop(); timers.push(setTimeout(exited, EXIT_DRAIN_MS)); });
+    chrome.on("close", () => { if (qaResult(dom) === null) exited(); });
   });
 }
 
 // launchMs may be an array of per-launch deadlines (the tests use it to stay independent of load).
 async function dumpQaResult({ file, directory, width, height, label, launchMs = LAUNCH_MS }) {
-  let last = "";
   try {
     for (let attempt = 1; attempt <= LAUNCH_ATTEMPTS; attempt += 1) {
       const outcome = await dumpOnce({ file, profile: join(directory, `profile-${attempt}`), width, height, launchMs: Array.isArray(launchMs) ? launchMs[attempt - 1] : launchMs });
       if (outcome.report) return outcome.report;
       if (outcome.exited) throw new Error(`chrome exited without ${label}\n${outcome.err.slice(-500)}`);
-      if (!outcome.silent) throw new Error(`chrome printed a page without ${label} within its deadline\n${outcome.err.slice(-500)}`);
-      last = outcome.err;
+      if (outcome.dom !== "") throw new Error(`chrome printed a page without ${label} within its deadline\n${outcome.err.slice(-500)}`);
+      if (!outcome.blocked) throw new Error(`chrome started (it wrote to stderr) but did not report ${label} within its deadline\n${outcome.err.slice(-500)}`);
     }
-    throw new Error(`chrome did not report ${label}: ${LAUNCH_ATTEMPTS} launches, none printed anything within ${[].concat(launchMs).join("/")} ms\n${last.slice(-500)}`);
+    throw new Error(`chrome did not report ${label}: ${LAUNCH_ATTEMPTS} launches, none printed anything within ${[].concat(launchMs).join("/")} ms`);
   } finally {
     try { rmSync(directory, { recursive: true, force: true }); } catch { /* temp dir, best effort */ }
   }

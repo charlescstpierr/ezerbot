@@ -46,15 +46,16 @@ function chromeBinary() {
 // wrote nothing to stderr beyond Chrome's own start-up lines (the "DevTools listening" announcement
 // that --remote-debugging-port=0 adds, and the CVDisplayLink error every headless launch prints on
 // this Mac), AND the browser process proves that the page never began: no DevTools announcement at
-// all (it never started), or its DevTools endpoint does not answer (the main thread is stuck) or
-// lists no page that left about:blank. A page that is stuck lives in the renderer process and
-// cannot stop the browser from answering, so a stuck page never looks like this. Any other byte on
-// stderr, any stdout, an exit, or a navigated page fails at once with no new launch, and so does a
-// wrong layout: the caller's assertions run once, on the one report we got. LAUNCH_MS stays the
-// 20 s the tests always allowed, the DevTools question is asked in its last PROBE_MS, so a launch
-// that is only slow (up to 13 s with 12 Chromes at once at load 240) still finishes inside it;
-// a replaced launch gets a fresh Chrome and a fresh profile, 3 launches at most, the whole process
-// group of each one killed.
+// all (it never started), or, asked at the deadline itself and not seen navigating PROBE_MS before,
+// its DevTools endpoint does not answer (the main thread is stuck) or lists no page that left
+// about:blank. A page that is stuck lives in the renderer process and cannot stop the browser from
+// answering, so a stuck page never looks like this. Any other byte on stderr, any stdout, an exit,
+// or a navigated page fails at once with no new launch, and so does a wrong layout: the caller's
+// assertions run once, on the one report we got. LAUNCH_MS stays the 20 s the tests always allowed,
+// so a launch that is only slow (up to 13 s with 12 Chromes at once at load 240) still finishes
+// inside it; only the verdict on a launch that is already stuck waits for the DevTools answer, at
+// most PROBE_MS more. A replaced launch gets a fresh Chrome and a fresh profile, 3 launches at
+// most, the whole process group of each one killed.
 const LAUNCH_ATTEMPTS = 3;
 const LAUNCH_MS = 20000;
 const PROBE_MS = 3000;
@@ -123,18 +124,25 @@ function dumpOnce({ file, profile, width, height, launchMs, probeMs }) {
       stop();
       action(value);
     };
-    // The browser is asked just before the deadline, so that the deadline stays what it was.
-    let asked = null;
-    const ask = () => { const port = devtoolsPort(err); if (port && asked === null) asked = askBrowser(port, Math.max(probeMs - 100, 1)); };
-    timers.push(setTimeout(ask, Math.max(launchMs - probeMs, 0)));
+    // The browser is asked twice: just before the deadline, where a page seen navigating disqualifies
+    // the launch for good, and again AT the deadline, where the answer is fresh (an earlier "no page"
+    // proves nothing about a page that began since).
+    let navigated = false;
+    const look = async () => {
+      const port = devtoolsPort(err);
+      if (!port) return null;
+      const seen = await askBrowser(port, Math.max(probeMs - 100, 1));
+      if (seen === "navigated") navigated = true;
+      return seen;
+    };
+    timers.push(setTimeout(look, Math.max(launchMs - probeMs, 0)));
     const deadline = setTimeout(async () => {
       const stalled = (replace, why) => settle(resolve, { stalled: true, replace, why, err });
       if (dom !== "") return stalled(false, "page");
       if (!onlyStartUpLines(err)) return stalled(false, "stderr");
       if (!devtoolsPort(err)) return stalled(err.trim() === "", "stderr"); // silent: never started
-      ask();
-      const seen = await asked;
-      return stalled(seen === "unanswered" || seen === "no-page", seen === "navigated" ? "navigated" : "unproven");
+      const seen = await look();
+      return stalled(!navigated && (seen === "unanswered" || seen === "no-page"), navigated ? "navigated" : "unproven");
     }, launchMs);
     timers.push(deadline);
     chrome.stdout.on("data", (chunk) => {

@@ -42,13 +42,18 @@ function withBrowser(script, launchMs, run) {
   });
 }
 
-// A stand-in DevTools port. `targets` null = the browser's main thread is stuck: it accepts the
-// connection and never answers; otherwise it answers /json/list with those targets.
+// A stand-in DevTools port. `targets` is the list /json/list answers, or a function of the call
+// number (1, 2, ...) returning that list; null = the browser's main thread is stuck: the connection
+// is accepted and never answered.
 function withDevtools(targets, run) {
   const sockets = new Set();
-  const server = targets === null ? net.createServer((socket) => { sockets.add(socket); socket.on("error", () => {}); }) : http.createServer((request, response) => {
+  let calls = 0;
+  const server = http.createServer((request, response) => {
+    calls += 1;
+    const answer = typeof targets === "function" ? targets(calls) : targets;
+    if (answer === null) return;
     response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify(targets));
+    response.end(JSON.stringify(answer));
   });
   server.on("connection", (socket) => { sockets.add(socket); socket.on("error", () => {}); });
   return new Promise((resolve) => server.listen(0, "127.0.0.1", resolve)).then(() => run(server.address().port)).finally(() => {
@@ -129,5 +134,20 @@ test("a browser that wrote an error next to its start-up lines and then stalls i
   withDevtools(null, (port) =>
     withBrowser(`${announce(port)}\necho 'ERROR: the page crashed' >&2\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
       await assert.rejects(dumpQaResult(options), /chrome wrote to stderr and did not report a test report within its deadline\n.*the page crashed/s);
+      assert.equal(launches(), 1);
+    })));
+
+// What the first DevTools answer, shortly before the deadline, saw is not what the deadline decides on.
+test("a page that left about:blank after the early look, then stalls, fails after its deadline, with no new launch", () =>
+  withDevtools((call) => [{ type: "page", url: call === 1 ? "about:blank" : "file:///work/page.html" }], (port) =>
+    withBrowser(`${announce(port)}\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+      await assert.rejects(dumpQaResult(options), /chrome began loading the page but did not report a test report within its deadline/);
+      assert.equal(launches(), 1);
+    })));
+
+test("a page seen navigating before the deadline, whose browser then stops answering, fails after its deadline, with no new launch", () =>
+  withDevtools((call) => (call === 1 ? [{ type: "page", url: "file:///work/page.html" }] : null), (port) =>
+    withBrowser(`${announce(port)}\n${secondLaunchReports("exec sleep 60")}`, [STARTED_MS, 30000, 30000], async (options, launches) => {
+      await assert.rejects(dumpQaResult(options), /chrome began loading the page but did not report a test report within its deadline/);
       assert.equal(launches(), 1);
     })));

@@ -164,6 +164,7 @@ function harness(page) {
         return { page: current };
       }
       if (path === `/api/pages/${page.id}`) return { page: current };
+      if (panels.others?.[path]) return { page: panels.others[path] };
       throw new Error(`adresse inattendue ${path}`);
     },
     async refresh() {},
@@ -544,4 +545,31 @@ test("un clic sur la puce du fil montre la Page ; une Page disparue prévient", 
   assert.equal(h.stage.hidden, true);
   h.panels.panel.openPage("page_forfaits");
   assert.deepEqual(opened, ["fil"]);
+});
+
+test("ouvrir une autre Page du même fil retire la citation de la première avant tout envoi", async () => {
+  const other = { id: "page_autre", title: "Autre", filename: "autre.page.tsx", status: "ready", diagnostic: null, preview: "Autre", source_version: "b".repeat(64), document: readyDocument };
+  const h = await openForfaits();
+  h.panels.others = { "/api/pages/page_autre": other };
+  h.panels.state.conversations = [{ id: "fil" }];
+  h.panels.state.pages.by_bot.grokbot.push({ id: "page_autre", bot_id: "grokbot", conversation_id: "fil", title: "Autre", filename: "autre.page.tsx", status: "ready" });
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  h.select("Forfait B");
+  h.comment.click();
+  assert.equal(h.anchor().page_anchor.page_id, "page_forfaits");
+  descendants(h.sidebar).find((el) => el.tagName === "button" && el.dataset.pageId === "page_autre").click();
+  assert.equal(h.quoteBar.hidden, true);
+  assert.deepEqual(h.anchor(), {});
+});
+
+test("dans une sous-tâche déléguée, « Commenter » n’est pas proposé : son envoi n’emporte pas d’ancre", async () => {
+  const h = harness(forfaits);
+  h.panels.state.conversations = [{ id: "fil", kind: "task" }];
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  const comment = byClass(h.main, "page-comment");
+  byClass(h.main, "page-stage").rect = { left: 400, top: 60, right: 800, bottom: 660, width: 400, height: 600 };
+  byClass(h.main, "page-canvas").rect = { left: 400, top: 120, right: 800, bottom: 660, width: 400, height: 540 };
+  const node = textNode(canvasOf(h.main), "Forfait B");
+  h.selection.change(1, "Forfait B", { startContainer: node, endContainer: node, getBoundingClientRect: () => ({ left: 450, top: 200, right: 520, bottom: 220, width: 70, height: 20 }) });
+  assert.equal(comment.hidden, true);
 });

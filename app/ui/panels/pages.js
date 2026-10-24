@@ -105,6 +105,7 @@
   }
 
   function openPage(page, pages) {
+    if (quote && quote.page_id !== page.id) clearQuote();
     if (page.conversation_id && conversationExists(page.conversation_id)) {
       if (!host.openConversation(page.conversation_id)) {
         host.notify("Impossible d’ouvrir la conversation de cette Page pendant qu’une réponse est en cours.");
@@ -135,6 +136,9 @@
   // Le passage est le texte sélectionné, rogné comme le moteur le rogne ; la sélection doit tenir toute dans le canevas.
   function selectedPassage() {
     const selection = document.getSelection();
+    // L'envoi d'un suivi de sous-tâche n'emporte pas d'ancre : mieux vaut ne pas proposer de citer.
+    const conversations = lastState && Array.isArray(lastState.conversations) ? lastState.conversations : [];
+    if (conversations.some((conversation) => conversation.id === currentConversationId && conversation.kind === "task")) return null;
     if (!detail || detail.id !== selectedId || shell.stage.hidden || !selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
     const range = selection.getRangeAt(0);
     if (!shell.canvas.contains(range.startContainer) || !shell.canvas.contains(range.endContainer)) return null;

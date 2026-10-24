@@ -258,7 +258,9 @@ test("a report that comes after the deadline is not accepted, even when the Chro
 test("a report that comes after the deadline is not accepted, even when a silent Chrome exited before the deadline", () =>
   withBrowser(`START=$(perl -MTime::HiRes=time -e 'printf "%.3f", time()')\n${PRINT_REPORT_AT((4000 + 300) / 1000)}\n${AFTER((4000 - 500) / 1000)}\nexit 3`, 4000, async (options, launches) => {
     await assert.rejects(dumpQaResult(options), /chrome exited without a test report/);
-    assert.equal(launches(), 1);
+    // A stand-in that a loaded Mac starts more than 0.5 s late exits after the deadline, and a silent
+    // Chrome with no renderer is then replaced (by the same stand-in, which exits again): never a success.
+    assert.ok(launches() >= 1, "the stand-in ran");
   }));
 
 // An exit after the deadline came too late to matter: the launch already failed, and nothing is waited for.

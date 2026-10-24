@@ -28,6 +28,8 @@ fn speech_fixtures_are_valid_pcm() {
 /// Mac only: needs installed en-US/fr-CA locales and the Speech permission, granted once to the
 /// test binary that tools/test-dictation-fixture.sh installs (the first run shows the macOS prompt).
 /// `tools/test-dictation-fixture.sh --status` prints the permission without asking for it.
+/// Apple frameworks only exist on macOS, where it always runs (no ignore, no skip).
+#[cfg(target_os = "macos")]
 #[test]
 fn french_audio_recognized_on_device_after_english() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

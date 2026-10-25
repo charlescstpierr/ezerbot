@@ -1,0 +1,67 @@
+name: Preuve fixture Chrome
+
+on:
+  push:
+    branches: [pm/ez-mv-i490]
+  pull_request:
+    paths:
+      - app/ui/wrapper-chrome-*.cjs
+      - app/ui/chrome-binary*.cjs
+      - app/ui/local-api-client.cjs
+      - app/web/src/generated-dialogs.test.js
+      - tools/*chrome-headless-shell*
+      - .github/workflows/wrapper-chrome-fixture.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wrapper-chrome-fixture-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '3'
+      CARGO_INCREMENTAL: '0'
+      CARGO_TARGET_DIR: target
+      CARGO_TERM_COLOR: never
+      RUSTC_WRAPPER: ''
+      PROBE_EVIDENCE: ${{ runner.temp }}/wrapper-chrome-proof
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Installer explicitement le shell épinglé
+        run: node tools/install-chrome-headless-shell.cjs
+      - name: Prouver la faisabilité sur le vrai shell Linux
+        run: |
+          mkdir -p "$PROBE_EVIDENCE"
+          git rev-parse HEAD > "$PROBE_EVIDENCE/head.txt"
+          node app/ui/wrapper-chrome-feasibility.cjs | tee "$PROBE_EVIDENCE/feasibility.log"
+      - name: Compiler le wrapper et le web
+        run: |
+          rustup show active-toolchain
+          npm ci --prefix app/web
+          npm run build --prefix app/web
+          cargo build --locked -p grokbot-wrapper
+      - name: Vérifier les utilisateurs de la fixture
+        run: node --test app/ui/chrome-binary.test.cjs app/ui/wrapper-chrome-fixture.test.cjs app/web/src/generated-dialogs.test.js
+      - name: Conserver seulement les reçus sans données applicatives
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: wrapper-chrome-fixture-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/wrapper-chrome-proof/head.txt
+            ${{ runner.temp }}/wrapper-chrome-proof/feasibility.log
+            ${{ runner.temp }}/wrapper-chrome-proof/*.result.json
+          if-no-files-found: error
+          retention-days: 14

@@ -416,13 +416,6 @@ impl Cost {
         );
         add_usage(&self.conn, "chat", tokens / 2 - 100, 100, 0);
     }
-    /// Ticks so the app notes the signed-in account, then dates that sign-in long ago.
-    fn trust_account(&mut self) {
-        self.app.tick(now() * 1000);
-        self.conn
-            .execute("UPDATE wrapper_routine_cost_account SET since=0", [])
-            .unwrap();
-    }
     /// The cost the routine list and the routines state both return, which must agree.
     fn cost(&mut self) -> Value {
         let ours = |routines: &Value, routine: &str| {
@@ -604,155 +597,6 @@ fn a_weekday_schedule_is_counted_whatever_the_day_it_is_read() {
 }
 
 #[test]
-fn the_quota_share_needs_five_percent_used_and_fifty_thousand_local_tokens() {
-    // The routine's own passage ("a", 2 000 tokens) is local too: chat + 2 000 = local.
-    for (used, chat, share) in [
-        (4.9, 98_000, "unknown"),
-        (5.0, 98_000, "estimated"),
-        (20.0, 47_998, "unknown"),
-        (20.0, 48_000, "estimated"),
-    ] {
-        let mut c = Cost::new(
-            weekly(used),
-            json!({"kind":"every","interval_ms":1_800_000}),
-        );
-        c.chat(chat);
-        c.pass("a", "done", 3_600_000, Some(2000));
-        c.trust_account();
-        let quota_share = c.cost()["quota_share"].clone();
-        assert_eq!(
-            quota_share["state"], share,
-            "{used} % {chat}: {quota_share}"
-        );
-        if share == "unknown" {
-            assert_eq!(quota_share["reason"], "calibration_weak");
-        }
-    }
-}
-
-#[test]
-fn another_account_never_calibrates_this_ones_quota() {
-    // Account A ran 2 000 000 tokens; account B signs in, and its gauge says 20 % used.
-    let mut c = Cost::new(
-        weekly(20.0),
-        json!({"kind":"every","interval_ms":1_800_000}),
-    );
-    c.chat(2_000_000);
-    c.pass("a", "done", 3_600_000, Some(2000));
-    c.conn
-        .execute(
-            "INSERT OR REPLACE INTO wrapper_routine_cost_account(id,identity,since) VALUES (1,'account-a',0)",
-            [],
-        )
-        .unwrap();
-    let share = c.cost()["quota_share"].clone();
-    assert_eq!(share["state"], "unknown");
-    assert_eq!(share["reason"], "account_unconfirmed");
-    assert!(share["percent"].is_null());
-    // The tick dates the new account's sign-in now: still unconfirmed for the window it began in.
-    c.app.tick(now() * 1000);
-    assert_eq!(c.cost()["quota_share"]["reason"], "account_unconfirmed");
-}
-
-impl Cost {
-    /// A chat message sent while another account is signed in (the session file says which),
-    /// then that account's own heavy use of the quota; nothing ticks. Returns once the run is over.
-    fn chat_as_another_account(&mut self) {
-        let conversation = self.app.api("POST", "/api/conversations", b"{}").unwrap()
-            ["conversation"]["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let body = json!({"conversation_id":conversation,"message_id":"b1","body":"Bonjour"});
-        self.app
-            .api("POST", "/api/send", body.to_string().as_bytes())
-            .unwrap();
-        wait("la réponse de l'autre compte", || {
-            self.conn
-                .query_row(
-                    "SELECT COUNT(*) FROM engine_runs WHERE conversation_id=?1 AND status='finished'",
-                    [&conversation],
-                    |r| r.get::<_, i64>(0),
-                )
-                .unwrap()
-                > 0
-        });
-        let started = (now() * 1000) as i64 - 1000;
-        insert_run(
-            &self.conn,
-            "chat-b",
-            &self.bot,
-            &conversation,
-            "chat",
-            started,
-        );
-        add_usage(&self.conn, "chat-b", 1_999_900, 100, 0);
-    }
-    fn assert_account_unconfirmed(&mut self) {
-        let share = self.cost()["quota_share"].clone();
-        assert_eq!(share["state"], "unknown", "{share}");
-        assert_eq!(share["reason"], "account_unconfirmed");
-        assert!(share["percent"].is_null());
-    }
-}
-
-#[test]
-fn a_return_to_the_confirmed_account_after_another_one_ran_stays_unconfirmed_without_a_tick() {
-    // Account A is confirmed since before the window; its gauge says 20 % used.
-    let mut c = Cost::new(
-        weekly(20.0),
-        json!({"kind":"every","interval_ms":1_800_000}),
-    );
-    c.chat(50_000);
-    c.pass("a", "done", 3_600_000, Some(2000));
-    c.trust_account();
-    assert_eq!(c.cost()["quota_share"]["state"], "estimated");
-    // Account B signs in and uses the app; no tick runs. Then A signs back in, still no tick.
-    let session = c.f.dir.join("app.codex-auth.json");
-    let account_a = std::fs::read(&session).unwrap();
-    support::write_codex_session(&session, "account-b");
-    c.chat_as_another_account();
-    std::fs::write(&session, account_a).unwrap();
-    c.assert_account_unconfirmed();
-}
-
-#[test]
-fn an_account_that_signs_in_while_a_response_is_renewed_after_a_401_is_still_noted() {
-    let mut c = Cost::new(
-        weekly(20.0),
-        json!({"kind":"every","interval_ms":1_800_000}),
-    );
-    c.chat(50_000);
-    c.pass("a", "done", 3_600_000, Some(2000));
-    c.trust_account();
-    assert_eq!(c.cost()["quota_share"]["state"], "estimated");
-    // The call starts under A; B signs in while the answer is a 401; the renewed attempt is B's.
-    let session = c.f.dir.join("app.codex-auth.json");
-    let account_a = std::fs::read(&session).unwrap();
-    let refused = Arc::new(AtomicBool::new(false));
-    let (file, flag) = (session.clone(), refused.clone());
-    // The fake token endpoint issues tokens of "account-test": B is that account.
-    c.f.server.seen.lock().unwrap().reply_for = Some(Arc::new(move |body| {
-        let title = body["instructions"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("titre");
-        if title || flag.swap(true, Ordering::SeqCst) {
-            return None;
-        }
-        support::write_codex_session(&file, "account-test");
-        Some(ScriptedResponse::json(
-            401,
-            json!({"error":{"message":"expired"}}),
-        ))
-    }));
-    c.chat_as_another_account();
-    assert!(refused.load(Ordering::SeqCst));
-    std::fs::write(&session, account_a).unwrap();
-    c.assert_account_unconfirmed();
-}
-
-#[test]
 fn passages_without_telemetry_never_hide_a_measured_one_however_many_are_newer() {
     let mut c = Cost::every_30_minutes();
     c.pass("measured", "done", 2 * DAY_MS, Some(2000));
@@ -816,66 +660,6 @@ fn a_week_without_telemetry_is_unknown_and_a_week_without_passages_is_zero() {
     assert_eq!(c.cost()["tokens_7d"], 0);
     c.pass("blind", "done", 3_600_000, None);
     assert!(c.cost()["tokens_7d"].is_null());
-}
-
-#[test]
-fn the_tick_notes_the_account_whatever_the_quota_and_a_read_never_writes() {
-    // B was the account noted; the quota has no weekly window and nothing is measured yet.
-    let mut c = Cost::new(json!({}), json!({"kind":"every","interval_ms":1_800_000}));
-    let noted = |c: &Cost| -> (String, i64) {
-        c.conn
-            .query_row(
-                "SELECT identity, since FROM wrapper_routine_cost_account",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap()
-    };
-    c.conn
-        .execute(
-            "INSERT OR REPLACE INTO wrapper_routine_cost_account(id,identity,since) VALUES (1,'account-b',0)",
-            [],
-        )
-        .unwrap();
-    assert_eq!(c.cost()["state"], "no_measure_yet");
-    // The connection check that the first state read starts is over: it must not have written either.
-    c.f.provider.wait_for_background_work().unwrap();
-    assert_eq!(noted(&c), ("account-b".into(), 0)); // reading changed nothing
-    let before = (now() * 1000) as i64;
-    c.app.tick(before as u64);
-    let (identity, since) = noted(&c);
-    assert_ne!(identity, "account-b");
-    assert!(since >= before);
-    // Ticking again with the same account keeps its date.
-    c.app.tick(before as u64 + 5000);
-    assert_eq!(noted(&c), (identity, since));
-}
-
-#[test]
-fn the_account_noted_is_the_one_whose_token_was_sent_whoever_signs_in_before_the_note() {
-    let mut c = Cost::new(
-        weekly(20.0),
-        json!({"kind":"every","interval_ms":1_800_000}),
-    );
-    c.chat(50_000);
-    c.pass("a", "done", 3_600_000, Some(2000));
-    c.trust_account();
-    assert_eq!(c.cost()["quota_share"]["state"], "estimated");
-    c.f.provider.wait_for_background_work().unwrap();
-    // B signs in and the request takes B's token; A signs back in before anything else is done with it.
-    let session = c.f.dir.join("app.codex-auth.json");
-    let account_a = std::fs::read(&session).unwrap();
-    support::write_codex_session(&session, "account-b");
-    let (file, switched) = (session.clone(), Arc::new(AtomicBool::new(false)));
-    let flag = switched.clone();
-    c.f.provider.after_token(Arc::new(move || {
-        if !flag.swap(true, Ordering::SeqCst) {
-            std::fs::write(&file, &account_a).unwrap();
-        }
-    }));
-    c.chat_as_another_account();
-    assert!(switched.load(Ordering::SeqCst));
-    c.assert_account_unconfirmed();
 }
 
 #[test]
@@ -949,22 +733,25 @@ fn deleting_a_passage_takes_it_out_of_the_average_and_the_eleventh_comes_back() 
 }
 
 #[test]
-fn a_cold_state_read_and_its_connection_check_never_write_the_account() {
-    let mut c = Cost::new(json!({}), json!({"kind":"every","interval_ms":1_800_000}));
-    let rows = |c: &Cost| -> i64 {
+fn reading_routine_costs_never_writes_even_the_first_state_read() {
+    let mut c = Cost::new(
+        weekly(20.0),
+        json!({"kind":"every","interval_ms":1_800_000}),
+    );
+    c.chat(2_000_000);
+    c.pass("a", "done", 3_600_000, Some(2000));
+    // Changes when another connection commits anything to the database.
+    let version = |c: &Cost| -> i64 {
         c.conn
-            .query_row(
-                "SELECT COUNT(*) FROM wrapper_routine_cost_account",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("PRAGMA data_version", [], |r| r.get(0))
             .unwrap()
     };
-    assert_eq!(rows(&c), 0);
-    c.app.api("GET", "/api/state", b"").unwrap();
+    let before = version(&c);
+    // The first state read starts the connection check: it must not write either.
+    c.cost();
     c.f.provider.wait_for_background_work().unwrap();
     c.cost();
-    assert_eq!(rows(&c), 0);
+    assert_eq!(version(&c), before);
 }
 
 fn is_money(key: &str) -> bool {
@@ -993,43 +780,29 @@ fn weekly(used: f64) -> Value {
     json!({"rate_limit":{"primary_window":{"used_percent":used,"limit_window_seconds":604800,"reset_at":now()+3*86400}}})
 }
 
+/// The share of the weekly quota is not attributed to a Codex account yet (a follow-up ticket notes
+/// the account on every response): whatever the gauge says, it is an explicit state without a number.
 #[test]
-fn the_weekly_quota_share_is_estimated_from_this_weeks_local_tokens_and_has_no_dollar_field() {
-    // 20 % of the window used while 2 000 000 tokens ran locally since it began:
-    // 100 000 tokens per percent, so a 672 000-token week is 6.72 %.
-    let mut c = Cost::new(
-        weekly(20.0),
-        json!({"kind":"every","interval_ms":1_800_000}),
-    );
-    assert_eq!(c.f.quota()["status"], "ready");
-    insert_run(
-        &c.conn,
-        "chat",
-        &c.bot,
-        &c.conversation,
-        "chat",
-        (now() * 1000) as i64 - DAY_MS,
-    );
-    add_usage(&c.conn, "chat", 999_900, 100, 0);
-    c.pass("a", "done", 3_600_000, Some(2000));
-    c.trust_account();
-    let cost = c.cost();
-    assert_eq!(cost["quota_share"]["state"], "estimated");
-    assert_eq!(cost["quota_share"]["percent"], 6.7);
-    assert!(money_keys(&cost).is_empty(), "{cost}");
-    // Too little use of the window, or no quota at all: no share, tokens stay.
-    for (quota, reason) in [
-        (weekly(1.0), "calibration_weak"),
-        (json!({}), "quota_unavailable"),
+fn the_quota_share_is_explicitly_not_attributed_and_no_field_is_money() {
+    let not_attributed = json!({"state":"unknown","reason":"quota_not_attributed"});
+    let every = json!({"kind":"every","interval_ms":1_800_000});
+    for (quota, trigger, measured) in [
+        (weekly(20.0), every.clone(), true),
+        (json!({}), every.clone(), true),
+        (weekly(20.0), json!({"kind":"webhook"}), true),
+        (weekly(20.0), every, false),
     ] {
-        let mut c = Cost::new(quota, json!({"kind":"every","interval_ms":1_800_000}));
-        c.pass("a", "done", 3_600_000, Some(2000));
-        c.trust_account();
+        let mut c = Cost::new(quota, trigger);
+        c.chat(2_000_000);
+        if measured {
+            c.pass("a", "done", 3_600_000, Some(2000));
+        }
         let cost = c.cost();
-        assert_eq!(cost["quota_share"]["state"], "unknown");
-        assert_eq!(cost["quota_share"]["reason"], reason);
-        assert!(cost["quota_share"]["percent"].is_null());
-        assert_eq!(cost["average_tokens"], 2000);
+        assert_eq!(cost["quota_share"], not_attributed, "{cost}");
+        assert!(money_keys(&cost).is_empty(), "{cost}");
+        if measured {
+            assert_eq!(cost["average_tokens"], 2000);
+        }
     }
 }
 

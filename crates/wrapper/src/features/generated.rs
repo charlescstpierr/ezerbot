@@ -458,8 +458,10 @@ pub fn routes(
                             "Le dossier personnel est introuvable. Saisissez un chemin complet.",
                         )
                     })?;
+                // The name comes from the bot: a secret learned since is masked.
+                let path = json!({"path": home.join("Desktop").join(file.name)});
                 Ok(ApiResponse::Json(
-                    json!({"path": home.join("Desktop").join(file.name)}),
+                    super::engine::redaction_patterns(&app.connection)?.value(&path)?,
                 ))
             })());
         }
@@ -474,6 +476,7 @@ pub fn routes(
                     [id],
                     |r| r.get(0),
                 )?;
+                let preview = super::engine::redaction_patterns(&app.connection)?.text(&preview)?;
                 Ok(ApiResponse::Bytes {
                     content_type: "image/svg+xml".into(),
                     body: preview.into_bytes(),

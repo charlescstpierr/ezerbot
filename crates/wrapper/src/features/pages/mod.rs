@@ -448,7 +448,7 @@ fn rename(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
     }
     let page = load(&tx, &input.id)?;
     tx.commit()?;
-    Ok(json!({"page": page}))
+    masked(&app.connection, json!({"page": page}))
 }
 
 #[derive(Deserialize)]
@@ -508,11 +508,17 @@ fn revert(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
     )?;
     let page = load(&tx, &input.id)?;
     tx.commit()?;
-    Ok(json!({"page": page}))
+    masked(&app.connection, json!({"page": page}))
 }
 
 fn read(app: &App, id: &str) -> Result<Value, ApiError> {
-    Ok(json!({"page": load(&app.connection, id)?}))
+    masked(&app.connection, json!({"page": load(&app.connection, id)?}))
+}
+
+/// What a route sends out: a secret the vault learned since the bot wrote the Page is hidden,
+/// as in the thread.
+fn masked(conn: &Connection, page: Value) -> Result<Value, ApiError> {
+    Ok(super::engine::redaction_patterns(conn)?.value(&page)?)
 }
 
 struct PageRecord {

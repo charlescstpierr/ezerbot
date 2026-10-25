@@ -869,3 +869,42 @@ fn a_page_masks_a_secret_written_with_character_references() {
         "{text}"
     );
 }
+/// VM instructions to find the text a document was made from, with `noise` older run events.
+fn source_cost(noise: usize) -> i32 {
+    let f = Fixture::new();
+    let db = f.db();
+    db.execute_batch("BEGIN").unwrap();
+    db.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) VALUES ('ancien','alpha','c','t','r',1,'finished','{}')", []).unwrap();
+    for i in 0..noise {
+        db.execute("INSERT INTO engine_run_events VALUES ('ancien', ?1, 'tool_call', '{\"call_id\":\"c\",\"arguments\":{}}')", [i + 1]).unwrap();
+        db.execute("INSERT INTO wrapper_livrables VALUES (?1,?1,'document',?2,'Rapport','alpha','c','/api/x',?3)", rusqlite::params![format!("ancien:{}", i + 1), format!("generated_{i}"), i]).unwrap();
+    }
+    db.execute_batch("COMMIT").unwrap();
+    let mut steps = 0;
+    let mut card = db
+        .prepare(grokbot_wrapper::features::generated::SOURCE_CARD)
+        .unwrap();
+    let entry: String = card.query_row(["generated_7"], |r| r.get(0)).unwrap();
+    steps += card.get_status(rusqlite::StatementStatus::VmStep);
+    let mut call = db
+        .prepare(grokbot_wrapper::features::generated::SOURCE_CALL)
+        .unwrap();
+    let (run, seq) = entry.rsplit_once(':').unwrap();
+    let arguments: Option<String> = call
+        .query_row(rusqlite::params![run, seq.parse::<i64>().unwrap()], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(arguments.as_deref(), Some("{}"));
+    steps + call.get_status(rusqlite::StatementStatus::VmStep)
+}
+
+#[test]
+fn finding_the_text_of_a_preview_does_not_grow_with_the_history() {
+    let (small, large) = (source_cost(1000), source_cost(10_000));
+    assert!(
+        large <= small + small / 10,
+        "1000 events: {small} VM instructions, 10000: {large}"
+    );
+    eprintln!("VmStep source de l’aperçu : 1000 événements {small}, 10000 {large}");
+}

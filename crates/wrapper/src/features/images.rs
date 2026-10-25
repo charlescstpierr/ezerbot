@@ -490,15 +490,10 @@ fn store(
     {
         return failed(FAILED);
     }
-    let title: String = call.arguments["description"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .chars()
-        .take(80)
-        .collect();
+    // Kept whole: the list cuts it once masked, never inside a secret.
+    let title = call.arguments["description"].as_str().unwrap_or("").trim();
     let url = format!("/api/attachments/{}", staged.id);
-    if super::livrables::record(&tx, ctx, &call.call_id, "image", &staged.id, &title, &url).is_err()
+    if super::livrables::record(&tx, ctx, &call.call_id, "image", &staged.id, title, &url).is_err()
         || tx.commit().is_err()
     {
         return failed(FAILED);

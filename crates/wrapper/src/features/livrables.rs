@@ -57,10 +57,14 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             "image",
             "attachment_id",
             "'/api/attachments/'||f.id",
-            "substr(COALESCE(json_extract(c.payload,'$.arguments.description'),'Image générée'),1,80)",
+            "COALESCE(json_extract(c.payload,'$.arguments.description'),'Image générée')",
         ),
     ] {
-        let table = if kind == "document" { "attachments_generated" } else { "attachments_staged" };
+        let table = if kind == "document" {
+            "attachments_generated"
+        } else {
+            "attachments_staged"
+        };
         conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO wrapper_livrables
@@ -212,7 +216,21 @@ pub fn routes(
         })?;
         let livrables = json!({"livrables": rows.collect::<rusqlite::Result<Vec<Value>>>()?});
         // Titles come from the bot: a secret registered since is masked, as in the thread.
-        let secrets = super::engine::redaction_patterns(&app.connection)?;
-        Ok(ApiResponse::Json(secrets.value(&livrables)?))
+        let mut livrables =
+            super::engine::redaction_patterns(&app.connection)?.value(&livrables)?;
+        // An image is titled by its whole description, cut only now: a cut made before the
+        // mask would show the first characters of a secret.
+        for item in livrables["livrables"].as_array_mut().into_iter().flatten() {
+            if item["type"] == "image" {
+                let title: String = item["title"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(80)
+                    .collect();
+                item["title"] = Value::String(title);
+            }
+        }
+        Ok(ApiResponse::Json(livrables))
     })())
 }

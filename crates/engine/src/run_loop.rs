@@ -1193,18 +1193,13 @@ fn execute(
             // Roll back internal effects, budget reservation and approval consumption.
             return Err(invalid("run stopped during tool execution"));
         }
-        let code = if spec.is_none() {
-            ToolCode::UnknownTool
-        } else if !valid_arguments {
-            ToolCode::InvalidArguments
-        } else if waiting {
-            ToolCode::ApprovalPending
-        } else if denied {
-            ToolCode::ApprovalDenied
-        } else if follow_up {
-            ToolCode::FollowUpPending
-        } else {
-            ToolCode::of(&outcome)
+        let code = match () {
+            _ if spec.is_none() => ToolCode::UnknownTool,
+            _ if !valid_arguments => ToolCode::InvalidArguments,
+            _ if waiting => ToolCode::ApprovalPending,
+            _ if denied => ToolCode::ApprovalDenied,
+            _ if follow_up => ToolCode::FollowUpPending,
+            _ => ToolCode::of(&outcome),
         };
         let mut payload = json!({"call_id": call.call_id, "outcome": outcome});
         payload = stamp(payload, code, started);

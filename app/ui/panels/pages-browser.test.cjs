@@ -73,6 +73,7 @@ test("le panneau réel conserve les sélections, annote les passages et isole le
   })();
   const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then(response => response.json());
   cdp = await connectCdp(targets.find(target => target.type === "page").webSocketDebuggerUrl);
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1140, height: 780, deviceScaleFactor: 1, mobile: false });
   const run = async source => {
     const result = await cdp.send("Runtime.evaluate", { expression: `(${source})()`, awaitPromise: true, returnByValue: true });
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
@@ -93,6 +94,8 @@ test("le panneau réel conserve les sélections, annote les passages et isole le
   await run(() => repaint());
   assert.deepEqual(await run(() => ({ text: getSelection().toString(), same: getSelection().anchorNode === selectedNode, html: document.querySelector(".page-canvas").innerHTML === initialCanvas, badges: document.querySelectorAll(".page-anchor-number").length })), { text: "Confort", same: true, html: true, badges: 2 });
   assert.equal(await run(() => document.querySelectorAll(".page-anchor-line").length >= 2), true);
+  assert.equal(await run(() => { document.querySelector(".main-panel").style.width = "700px"; return document.querySelector(".page-rename").getBoundingClientRect().width >= 140; }), true, "le titre reste lisible quand les commentaires ajoutent un bouton");
+  await run(() => { document.querySelector(".main-panel").style.width = "850px"; });
   await run(() => { document.dispatchEvent(new Event("selectionchange")); button("Commenter").click(); });
   assert.match(await run(() => document.querySelector(".composer-area > .gb-quote-chip").textContent), /Confort/);
   await run(() => document.querySelector(".gb-quote-remove").click());

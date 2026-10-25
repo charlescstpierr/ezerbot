@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 
 use grokbot_engine::contracts::{
-    Error, ModelEvent, ModelGateway, ModelRequest, Result, Role, TokenUsage, ToolItem,
+    Error, ModelEvent, ModelGateway, ModelRequest, Result, Role, TokenUsage, ToolItem, ToolSpec,
 };
 use serde_json::{json, Value};
 
@@ -102,28 +102,7 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
         body["prompt_cache_key"] = json!(key);
     }
     if !request.tools.is_empty() {
-        // Canonical order, even if a future registry obtains specs from a map.
-        let mut tools = request.tools.iter().collect::<Vec<_>>();
-        tools.sort_by(|a, b| a.name.cmp(&b.name));
-        body["tools"] = Value::Array(
-            tools
-                .into_iter()
-                .map(|tool| {
-                    let mut function = json!({
-                        "type": "function", "name": tool.name, "parameters": tool.schema,
-                        // ToolSpec permits ordinary JSON schemas, not only OpenAI's strict subset.
-                        "strict": false,
-                    });
-                    if !tool.description.is_empty() {
-                        function["description"] = json!(tool.description);
-                    } else if let Some(description) = tool.schema["description"].as_str() {
-                        // Retain compatibility with legacy serde-defaulted specs.
-                        function["description"] = json!(description);
-                    }
-                    function
-                })
-                .collect(),
-        );
+        body["tools"] = wire_tools(&request.tools);
     }
     if let Some(effort) = &request.effort {
         body["reasoning"] = json!({"effort": effort});
@@ -132,6 +111,32 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
         body["service_tier"] = json!(tier);
     }
     Ok(body)
+}
+
+/// The tool definitions exactly as the Responses body carries them.
+pub(crate) fn wire_tools(tools: &[ToolSpec]) -> Value {
+    // Canonical order, even if a future registry obtains specs from a map.
+    let mut tools = tools.iter().collect::<Vec<_>>();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    Value::Array(
+        tools
+            .into_iter()
+            .map(|tool| {
+                let mut function = json!({
+                    "type": "function", "name": tool.name, "parameters": tool.schema,
+                    // ToolSpec permits ordinary JSON schemas, not only OpenAI's strict subset.
+                    "strict": false,
+                });
+                if !tool.description.is_empty() {
+                    function["description"] = json!(tool.description);
+                } else if let Some(description) = tool.schema["description"].as_str() {
+                    // Retain compatibility with legacy serde-defaulted specs.
+                    function["description"] = json!(description);
+                }
+                function
+            })
+            .collect(),
+    )
 }
 
 fn output_text(item: &Value) -> String {

@@ -55,8 +55,8 @@ pub fn shell_leader_started(pid: u32) -> Option<String> {
 pub fn startup(conn: &rusqlite::Connection) -> Result<(), ApiError> {
     super::shell_tasks::startup(conn)
 }
-pub(crate) fn shutdown(conn: &rusqlite::Connection, db: &Path) {
-    super::shell_tasks::shutdown(conn, db);
+pub(crate) fn shutdown(conn: &rusqlite::Connection, db: &Path) -> Result<(), String> {
+    super::shell_tasks::shutdown(conn, db)
 }
 pub fn context(
     ctx: &Context<'_>,
@@ -1678,106 +1678,111 @@ fn shell(
         );
         let db = ctx.db_path.to_path_buf();
         let stop = control.stop.clone();
-        std::thread::spawn(move || {
-            use std::os::unix::process::ExitStatusExt;
-            let _done = super::shell_tasks::DoneFlag(control.done);
-            let mut redactor = grokbot_forms::redact::SnapshotRedactor::default();
-            let live = |stdout: &super::shell_tasks::Piece, stderr: &super::shell_tasks::Piece| {
-                super::shell_tasks::Snap {
-                    status: "en cours",
-                    stdout: stdout.text.clone(),
-                    stderr: stderr.text.clone(),
-                    truncated: stdout.truncated || stderr.truncated,
-                    incomplete: stdout.incomplete || stderr.incomplete,
-                    exit_code: None,
-                    signal: None,
-                }
-            };
-            loop {
-                if stop.load(Ordering::SeqCst) {
-                    break;
-                }
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) => {}
-                    Err(_) => break,
-                }
-                if let (Ok(stdout), Ok(stderr)) = (stdout_piece.lock(), stderr_piece.lock()) {
-                    match super::shell_tasks::publish(
-                        &db,
-                        &run_id,
-                        &call_id,
-                        &live(&stdout, &stderr),
-                        &mut redactor,
-                    ) {
-                        Ok(super::shell_tasks::Publish::Terminal)
-                        | Ok(super::shell_tasks::Publish::Closed)
-                            if !stop.load(Ordering::SeqCst) =>
-                        {
-                            stop.store(true, Ordering::SeqCst);
-                            super::shell_tasks::kill_group(pgid);
-                            break;
+        // Suivi par le fournisseur : détruire l'App lève `stop`, le moniteur tue le groupe,
+        // publie « arrêtée » et finit avant que l'App ne disparaisse (#463).
+        ctx.provider
+            .spawn_background_stoppable(stop.clone(), move || {
+                use std::os::unix::process::ExitStatusExt;
+                let _done = super::shell_tasks::DoneFlag(control.done);
+                let mut redactor = grokbot_forms::redact::SnapshotRedactor::default();
+                let live = |stdout: &super::shell_tasks::Piece,
+                            stderr: &super::shell_tasks::Piece| {
+                    super::shell_tasks::Snap {
+                        status: "en cours",
+                        stdout: stdout.text.clone(),
+                        stderr: stderr.text.clone(),
+                        truncated: stdout.truncated || stderr.truncated,
+                        incomplete: stdout.incomplete || stderr.incomplete,
+                        exit_code: None,
+                        signal: None,
+                    }
+                };
+                loop {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) => {}
+                        Err(_) => break,
+                    }
+                    if let (Ok(stdout), Ok(stderr)) = (stdout_piece.lock(), stderr_piece.lock()) {
+                        match super::shell_tasks::publish(
+                            &db,
+                            &run_id,
+                            &call_id,
+                            &live(&stdout, &stderr),
+                            &mut redactor,
+                        ) {
+                            Ok(super::shell_tasks::Publish::Terminal)
+                            | Ok(super::shell_tasks::Publish::Closed)
+                                if !stop.load(Ordering::SeqCst) =>
+                            {
+                                stop.store(true, Ordering::SeqCst);
+                                super::shell_tasks::kill_group(pgid);
+                                break;
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                    }
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                // Closed under the input lock before anything else: from here the
+                // task takes no more lines, and the reader sees its last echo.
+                drop(
+                    wire.lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .take(),
+                );
+                finished.store(true, Ordering::SeqCst);
+                if stop.load(Ordering::SeqCst) {
+                    super::shell_tasks::kill_group(pgid);
+                }
+                let status = child.wait().ok();
+                drop(group);
+                let (stdout, t1, i1) = out.join().unwrap_or_else(|_| (String::new(), false, true));
+                let (stderr, t2, i2) = err.join().unwrap_or_else(|_| (String::new(), false, true));
+                let stopped = stop.load(Ordering::SeqCst);
+                let code = status.as_ref().and_then(|status| status.code());
+                let signal = status.as_ref().and_then(|status| status.signal());
+                let snap = if stopped {
+                    super::shell_tasks::Snap {
+                        status: "arrêtée",
+                        stdout,
+                        stderr,
+                        truncated: t1 || t2,
+                        incomplete: i1 || i2,
+                        exit_code: None,
+                        signal: None,
+                    }
+                } else {
+                    super::shell_tasks::Snap {
+                        status: if code == Some(0) {
+                            "terminé"
+                        } else {
+                            "échec"
+                        },
+                        stdout,
+                        stderr,
+                        truncated: t1 || t2,
+                        incomplete: i1 || i2,
+                        exit_code: code,
+                        signal,
+                    }
+                };
+                for _ in 0..100 {
+                    match super::shell_tasks::publish(&db, &run_id, &call_id, &snap, &mut redactor)
+                    {
+                        Ok(
+                            super::shell_tasks::Publish::Updated
+                            | super::shell_tasks::Publish::Closed
+                            | super::shell_tasks::Publish::Terminal,
+                        ) => break,
+                        _ => std::thread::sleep(Duration::from_millis(20)),
                     }
                 }
-                std::thread::sleep(Duration::from_millis(150));
-            }
-            // Closed under the input lock before anything else: from here the
-            // task takes no more lines, and the reader sees its last echo.
-            drop(
-                wire.lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .take(),
-            );
-            finished.store(true, Ordering::SeqCst);
-            if stop.load(Ordering::SeqCst) {
-                super::shell_tasks::kill_group(pgid);
-            }
-            let status = child.wait().ok();
-            drop(group);
-            let (stdout, t1, i1) = out.join().unwrap_or_else(|_| (String::new(), false, true));
-            let (stderr, t2, i2) = err.join().unwrap_or_else(|_| (String::new(), false, true));
-            let stopped = stop.load(Ordering::SeqCst);
-            let code = status.as_ref().and_then(|status| status.code());
-            let signal = status.as_ref().and_then(|status| status.signal());
-            let snap = if stopped {
-                super::shell_tasks::Snap {
-                    status: "arrêtée",
-                    stdout,
-                    stderr,
-                    truncated: t1 || t2,
-                    incomplete: i1 || i2,
-                    exit_code: None,
-                    signal: None,
-                }
-            } else {
-                super::shell_tasks::Snap {
-                    status: if code == Some(0) {
-                        "terminé"
-                    } else {
-                        "échec"
-                    },
-                    stdout,
-                    stderr,
-                    truncated: t1 || t2,
-                    incomplete: i1 || i2,
-                    exit_code: code,
-                    signal,
-                }
-            };
-            for _ in 0..100 {
-                match super::shell_tasks::publish(&db, &run_id, &call_id, &snap, &mut redactor) {
-                    Ok(
-                        super::shell_tasks::Publish::Updated
-                        | super::shell_tasks::Publish::Closed
-                        | super::shell_tasks::Publish::Terminal,
-                    ) => break,
-                    _ => std::thread::sleep(Duration::from_millis(20)),
-                }
-            }
-            super::shell_tasks::finish(&db, &run_id, &call_id);
-        });
+                super::shell_tasks::finish(&db, &run_id, &call_id);
+            });
         return Ok(
             json!({"command":a.command,"cwd":cwd,"status":"en cours","exit_code":Value::Null,"signal":Value::Null,"stdout":"","stderr":"","truncated":false,"output_incomplete":false,"background":true}),
         );

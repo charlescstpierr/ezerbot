@@ -601,7 +601,24 @@ impl Drop for App {
         // Fermer l’app avec l’agent désactivé est une absence voulue des routines.
         features::routines::depart(&self.feature_context());
         // Quitter l’app tue les groupes encore suivis. Le redémarrage ne les relance pas.
-        features::local::shutdown(&self.connection, &self.db_path);
+        // Les fils de fond (tour du moteur, sonde de connexion, suivis, moniteurs des tâches
+        // shell) ne doivent plus rien écrire dans le dossier de l'application une fois celle-ci
+        // détruite (#463). Seules les versions de développement et de test retiennent leurs
+        // fils : la version livrée n'attend rien, l'arrêt de l'application ne change pas.
+        // L'attente passe avant l'arrêt des tâches shell : un tour encore en vol peut lancer une
+        // tâche pendant la vidange, et son moniteur est alors arrêté et joint comme les autres.
+        // Les deux échecs sont explicites : l'attente bornée, puis les tâches non finies.
+        #[cfg(debug_assertions)]
+        let waited = self.provider.wait_for_background_work();
+        let stopped = features::local::shutdown(&self.connection, &self.db_path);
+        #[cfg(debug_assertions)]
+        let stopped = waited.and(stopped);
+        if let Err(message) = stopped {
+            if cfg!(debug_assertions) && !std::thread::panicking() {
+                panic!("{message}");
+            }
+            eprintln!("{message}");
+        }
     }
 }
 
@@ -634,11 +651,8 @@ impl App {
         let account_id = AccountId::new(ACCOUNT).expect("constant account ID");
         let reader = SessionStore::open(path, &account_id)?;
         let generation = reader
-            .list_submissions()?
-            .iter()
-            .map(|item| item.generation.0)
-            .max()
-            .unwrap_or(0)
+            .latest_generation()?
+            .map_or(0, |generation| generation.0)
             .checked_add(1)
             .filter(|value| *value <= i64::MAX as u64)
             .ok_or_else(|| ApiError::new(500, "La génération locale est épuisée."))?;
@@ -1007,9 +1021,7 @@ impl App {
 
     fn conversation_response(&self, id: &str) -> Result<Value, ApiError> {
         let conversation = self
-            .conversations()?
-            .into_iter()
-            .find(|c| c.id == id)
+            .conversation(id)?
             .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?;
         Ok(json!({"conversation": conversation}))
     }

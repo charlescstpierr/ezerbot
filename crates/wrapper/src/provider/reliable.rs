@@ -3,6 +3,7 @@
 //! refresh: no new Responses request is dispatched after abandonment. ureq closes
 //! the socket on its next read/deadline (it has no socket-abort API).
 use super::*;
+use crate::upstream::Timing;
 use grokbot_engine::contracts::{Error, ModelEvent, Result};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 
@@ -19,6 +20,60 @@ impl Default for Deadlines {
             stall: Duration::from_secs(60),
             total: Duration::from_secs(60),
         }
+    }
+}
+struct Pace {
+    started: Instant,
+    last: Instant,
+    first_event: Option<Duration>,
+    max_gap: Duration,
+}
+impl Pace {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            started: now,
+            last: now,
+            first_event: None,
+            max_gap: Duration::ZERO,
+        }
+    }
+    fn event(&mut self) {
+        let now = Instant::now();
+        if self.first_event.is_none() {
+            self.first_event = Some(now - self.started);
+        } else {
+            self.max_gap = self.max_gap.max(now - self.last);
+        }
+        self.last = now;
+    }
+    fn timing(&self, input_chars: usize) -> Timing {
+        let now = Instant::now();
+        let total = now - self.started;
+        let max_gap = if self.first_event.is_some() {
+            self.max_gap.max(now - self.last)
+        } else {
+            Duration::ZERO
+        };
+        Timing {
+            first_event: self.first_event.unwrap_or(total),
+            max_gap,
+            total,
+            input_chars,
+        }
+    }
+}
+/// The request's keys and strings, without serializing it again: only the JSON
+/// punctuation is left out, and an image-heavy body costs no copy.
+fn chars(value: &Value) -> usize {
+    match value {
+        Value::String(text) => text.chars().count(),
+        Value::Array(items) => items.iter().map(chars).sum(),
+        Value::Object(map) => map
+            .iter()
+            .map(|(key, v)| key.chars().count() + chars(v))
+            .sum(),
+        _ => 0,
     }
 }
 enum Wire {
@@ -131,8 +186,8 @@ impl Session {
         emit: &mut dyn FnMut(ModelEvent) -> Result<()>,
     ) -> Result<()> {
         let directory = self.inner.file.parent().unwrap_or(Path::new("."));
-        let log = |status, code| {
-            crate::upstream::turn(directory, turn.unwrap_or("internal"), status, code)
+        let log = |status, code, timing: Option<&Timing>| {
+            crate::upstream::turn(directory, turn.unwrap_or("internal"), status, code, timing)
         };
         if cancel.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput("run cancelled".into()));
@@ -143,12 +198,13 @@ impl Session {
             let failure = Failure::other(
                 "Les connexions précédentes se ferment encore. Réessayez dans une minute.",
             );
-            log(0, "transport_busy");
+            log(0, "transport_busy", None);
             metadata(None, Some(&failure))?;
             return emit(ModelEvent::Failed {
                 reason: failure.message,
             });
         }
+        let input_chars = chars(&body);
         let (tx, rx) = mpsc::sync_channel(32);
         let abandoned = Arc::new(AtomicBool::new(false));
         let settled = Arc::new(Mutex::new(Settled {
@@ -276,10 +332,8 @@ impl Session {
             inner: self.inner.clone(),
             settled: settled.clone(),
         };
-        log(0, "started");
-        let started = Instant::now();
-        let mut last = started;
-        let mut first = false;
+        log(0, "started", None);
+        let mut pace = Pace::new();
         let mut http = 0;
         let mut tool_notice = false;
         let mut previous_notice = String::new();
@@ -302,7 +356,7 @@ impl Session {
                         self.inner.closing.fetch_add(1, Ordering::SeqCst);
                     }
                 }
-                log(http, "cancelled");
+                log(http, "cancelled", Some(&pace.timing(input_chars)));
                 loop {
                     if lock(&settled).worker_done {
                         break;
@@ -323,8 +377,14 @@ impl Session {
                     "turn_timeout",
                     "La réponse a dépassé le délai maximal. Réessayez.",
                 ))
-            } else if last.elapsed() >= if first { limits.stall } else { limits.first } {
-                Some(if first {
+            } else if pace.last.elapsed()
+                >= if pace.first_event.is_some() {
+                    limits.stall
+                } else {
+                    limits.first
+                }
+            {
+                Some(if pace.first_event.is_some() {
                     (
                         "stream_stalled",
                         "La réponse d’OpenAI est bloquée : aucun nouvel événement reçu. Réessayez.",
@@ -336,7 +396,7 @@ impl Session {
                 None
             };
             if let Some((code, message)) = timeout {
-                log(http, code);
+                log(http, code, Some(&pace.timing(input_chars)));
                 let failure = Failure::other(message);
                 metadata(
                     if tool_notice {
@@ -353,11 +413,10 @@ impl Session {
             match rx.recv_timeout(Duration::from_millis(25)) {
                 Ok(Wire::Headers(status)) => {
                     http = status;
-                    log(http, "headers");
+                    log(http, "headers", None);
                 }
                 Ok(Wire::Progress) => {
-                    first = true;
-                    last = Instant::now();
+                    pace.event();
                 }
                 Ok(Wire::Notice(notice)) => {
                     tool_notice = notice.starts_with("Préparation d’un outil");
@@ -379,7 +438,7 @@ impl Session {
                         _ => None,
                     };
                     if let Some(code) = terminal {
-                        log(http, code);
+                        log(http, code, Some(&pace.timing(input_chars)));
                         if tool_notice {
                             metadata(Some(&previous_notice), None)?;
                         }
@@ -391,7 +450,7 @@ impl Session {
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
-                    log(http, "transport_closed");
+                    log(http, "transport_closed", Some(&pace.timing(input_chars)));
                     let failure =
                         Failure::other("La connexion à OpenAI a été interrompue. Réessayez.");
                     metadata(
@@ -1137,5 +1196,342 @@ mod elapsed_interval {
                     .to_string()
             )
         )
+    }
+}
+
+#[cfg(test)]
+mod call_timings {
+    use super::{Deadlines, Session};
+    use crate::Endpoints;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use grokbot_engine::contracts::ModelEvent;
+    use sha2::{Digest, Sha256};
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        path::Path,
+        sync::atomic::{AtomicBool, Ordering},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    const FIRST_PAUSE: Duration = Duration::from_millis(150);
+    const SILENCE: Duration = Duration::from_millis(500);
+    // The gap is timed where deltas are read, so a busy consumer can shrink it.
+    const JITTER: Duration = Duration::from_millis(250);
+    const CUT: Duration = Duration::from_millis(300);
+    const HANG: Duration = Duration::from_secs(1);
+
+    const TRAPS: [&str; 6] = [
+        "PIEGE-PROMPT",
+        "PIEGE-QUESTION",
+        "PIEGE-REPONSE",
+        "PIEGE-ENTETE",
+        "PIEGE-JETON",
+        "PIEGE-TOUR",
+    ];
+
+    fn serve_with(reply: fn(&mut TcpStream)) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { break };
+                thread::spawn(move || {
+                    let mut reader = BufReader::new(socket.try_clone().unwrap());
+                    let mut line = String::new();
+                    let mut length = 0usize;
+                    while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                        if let Some((name, value)) = line.split_once(':') {
+                            if name.eq_ignore_ascii_case("content-length") {
+                                length = value.trim().parse().unwrap_or(0);
+                            }
+                        }
+                        line.clear();
+                    }
+                    let mut body = vec![0; length];
+                    if reader.read_exact(&mut body).is_ok() {
+                        reply(&mut socket);
+                    }
+                });
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn session(root: &Path, base: &str, deadlines: Deadlines) -> Session {
+        let token = format!(
+            "e30.{}.sig",
+            URL_SAFE_NO_PAD.encode(
+                serde_json::json!({
+                    "https://api.openai.com/auth": {"chatgpt_account_id": "timings"},
+                    "piege": "PIEGE-JETON"
+                })
+                .to_string()
+            )
+        );
+        std::fs::write(
+            root.join("app.codex-auth.json"),
+            serde_json::json!({
+                "host_id": "timings",
+                "account_id": "timings",
+                "client_id": "timings",
+                "access_token": token,
+                "refresh_token": "PIEGE-JETON-refresh",
+                "expires_at": 4_102_444_800u64,
+                "scopes": "openid offline_access",
+                "welcomed": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let endpoints = Endpoints {
+            api: format!("{base}/backend-api/codex"),
+            token: format!("{base}/token"),
+            ..Endpoints::default()
+        };
+        let session = Session::with_endpoints(&root.join("app.sqlite"), endpoints, false, true);
+        *super::lock(&session.inner.deadlines) = deadlines;
+        session
+    }
+
+    fn body() -> serde_json::Value {
+        serde_json::json!({
+            "model": "gpt-test",
+            "instructions": "PIEGE-PROMPT : réponds en français",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "PIEGE-QUESTION élevée"}]}]
+        })
+    }
+
+    struct Call {
+        events: Vec<ModelEvent>,
+        fields: Vec<(String, String)>,
+    }
+
+    impl Call {
+        fn millis(&self, key: &str) -> u64 {
+            let value = &self
+                .fields
+                .iter()
+                .find(|(name, _)| name == key)
+                .unwrap_or_else(|| panic!("{key} missing: {:?}", self.fields))
+                .1;
+            value
+                .parse()
+                .unwrap_or_else(|_| panic!("{key} is not a number: {:?}", self.fields))
+        }
+
+        fn code(&self) -> &str {
+            &self
+                .fields
+                .iter()
+                .find(|(name, _)| name == "code")
+                .unwrap()
+                .1
+        }
+    }
+
+    fn call(session: &Session, root: &Path, turn: &str, cancel: &AtomicBool) -> Call {
+        let mut events = Vec::new();
+        let _ = session.reliable_stream(
+            body(),
+            cancel,
+            Some(turn),
+            &mut |_, _| Ok(()),
+            &mut |event| {
+                events.push(event);
+                Ok(())
+            },
+        );
+        session.wait_background().unwrap();
+        let log = std::fs::read_to_string(root.join("logs/engine.log")).unwrap();
+        let digest = format!("{:x}", Sha256::digest(turn.as_bytes()));
+        let line = log
+            .lines()
+            .rfind(|line| line.contains(&format!("turn={}", &digest[..16])))
+            .unwrap_or_else(|| panic!("no line for the turn: {log}"))
+            .to_owned();
+        let fields = line
+            .split_once("] upstream ")
+            .unwrap_or_else(|| panic!("not a turn line: {line}"))
+            .1
+            .split(' ')
+            .map(|field| {
+                let (key, value) = field.split_once('=').unwrap();
+                (key.to_owned(), value.to_owned())
+            })
+            .collect();
+        Call { events, fields }
+    }
+
+    fn long() -> Deadlines {
+        Deadlines {
+            first: Duration::from_secs(10),
+            stall: Duration::from_secs(10),
+            total: Duration::from_secs(20),
+        }
+    }
+
+    fn two_spaced_deltas(socket: &mut TcpStream) {
+        let _ = write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Piege: PIEGE-ENTETE\r\nConnection: close\r\n\r\n"
+        );
+        let _ = socket.flush();
+        thread::sleep(FIRST_PAUSE);
+        let _ = write!(
+            socket,
+            "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"PIEGE-REPONSE \"}}\n\n"
+        );
+        let _ = socket.flush();
+        thread::sleep(SILENCE);
+        let _ = write!(socket, "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"fin.\"}}\n\ndata: {{\"type\":\"response.completed\"}}\n\n");
+    }
+
+    fn one_delta_then_silence(socket: &mut TcpStream) {
+        let _ = write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {{\"type\":\"response.output_text.delta\",\"delta\":\"Début\"}}\n\n"
+        );
+        let _ = socket.flush();
+        thread::sleep(HANG);
+    }
+
+    fn no_answer(_: &mut TcpStream) {
+        thread::sleep(HANG);
+    }
+
+    #[test]
+    fn a_completed_call_logs_its_durations_and_request_size() {
+        let root = grokbot_test_support::TestDir::new("ezerbot-timings-ok");
+        let session = session(&root, &serve_with(two_spaced_deltas), long());
+        let call = call(&session, &root, "timings-ok", &AtomicBool::new(false));
+        assert!(
+            matches!(call.events.last(), Some(ModelEvent::Completed)),
+            "{:?}",
+            call.events
+        );
+        assert_eq!(call.code(), "completed");
+        let (ttfe, gap, total) = (
+            call.millis("ttfe_ms"),
+            call.millis("max_gap_ms"),
+            call.millis("total_ms"),
+        );
+        assert!(ttfe >= FIRST_PAUSE.as_millis() as u64, "{:?}", call.fields);
+        assert!(
+            gap >= (SILENCE - JITTER).as_millis() as u64,
+            "{:?}",
+            call.fields
+        );
+        assert!(total >= ttfe + gap && total < 10_000, "{:?}", call.fields);
+        let serialized = body().to_string().chars().count() as u64;
+        let size = call.millis("input_chars");
+        assert!(
+            size <= serialized && size + 64 >= serialized,
+            "{size} is not the request size ({serialized} serialized)"
+        );
+    }
+
+    #[test]
+    fn a_first_byte_timeout_logs_the_wait_it_cut() {
+        let root = grokbot_test_support::TestDir::new("ezerbot-timings-first");
+        let deadlines = Deadlines {
+            first: CUT,
+            ..long()
+        };
+        let session = session(&root, &serve_with(no_answer), deadlines);
+        let call = call(&session, &root, "timings-first", &AtomicBool::new(false));
+        assert!(
+            matches!(call.events.last(), Some(ModelEvent::Failed { .. })),
+            "{:?}",
+            call.events
+        );
+        assert_eq!(call.code(), "first_byte_timeout");
+        assert!(
+            call.millis("ttfe_ms") >= CUT.as_millis() as u64,
+            "{:?}",
+            call.fields
+        );
+        assert_eq!(call.millis("ttfe_ms"), call.millis("total_ms"));
+        assert_eq!(call.millis("max_gap_ms"), 0, "{:?}", call.fields);
+    }
+
+    #[test]
+    fn a_stalled_stream_logs_the_silence_it_cut() {
+        let root = grokbot_test_support::TestDir::new("ezerbot-timings-stall");
+        let deadlines = Deadlines {
+            stall: CUT,
+            ..long()
+        };
+        let session = session(&root, &serve_with(one_delta_then_silence), deadlines);
+        let call = call(&session, &root, "timings-stall", &AtomicBool::new(false));
+        assert_eq!(call.code(), "stream_stalled");
+        let (ttfe, gap) = (call.millis("ttfe_ms"), call.millis("max_gap_ms"));
+        assert!(gap >= CUT.as_millis() as u64, "{:?}", call.fields);
+        assert!(call.millis("total_ms") >= ttfe + gap, "{:?}", call.fields);
+    }
+
+    #[test]
+    fn a_cancelled_call_logs_how_long_it_ran() {
+        let root = grokbot_test_support::TestDir::new("ezerbot-timings-cancel");
+        let session = session(&root, &serve_with(no_answer), long());
+        let cancel = AtomicBool::new(false);
+        let call = thread::scope(|scope| {
+            scope.spawn(|| {
+                let started = Instant::now();
+                while !std::fs::read_to_string(root.join("logs/engine.log"))
+                    .unwrap_or_default()
+                    .contains("code=started")
+                {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(10),
+                        "the call never started"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
+                thread::sleep(CUT);
+                cancel.store(true, Ordering::SeqCst);
+            });
+            call(&session, &root, "timings-cancel", &cancel)
+        });
+        assert_eq!(call.code(), "cancelled");
+        assert!(
+            call.millis("total_ms") >= CUT.as_millis() as u64,
+            "{:?}",
+            call.fields
+        );
+        assert_eq!(call.millis("max_gap_ms"), 0, "{:?}", call.fields);
+    }
+
+    #[test]
+    fn the_timing_line_holds_no_content_token_or_header() {
+        let root = grokbot_test_support::TestDir::new("ezerbot-timings-traps");
+        let session = session(&root, &serve_with(two_spaced_deltas), long());
+        let call = call(&session, &root, "PIEGE-TOUR", &AtomicBool::new(false));
+        let keys: Vec<&str> = call.fields.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "turn",
+                "status",
+                "code",
+                "ttfe_ms",
+                "max_gap_ms",
+                "total_ms",
+                "input_chars"
+            ]
+        );
+        for (key, value) in &call.fields {
+            let allowed = match key.as_str() {
+                "turn" => value.len() == 16 && value.bytes().all(|c| c.is_ascii_hexdigit()),
+                "code" => value == "completed",
+                _ => value.bytes().all(|c| c.is_ascii_digit()),
+            };
+            assert!(allowed, "{key}={value}");
+        }
+        let log = std::fs::read_to_string(root.join("logs/engine.log")).unwrap();
+        for trap in TRAPS.iter().chain(&["e30.", "Bearer", "élevée", "fin."]) {
+            assert!(!log.contains(trap), "{trap} leaked: {log}");
+        }
     }
 }

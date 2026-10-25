@@ -195,9 +195,9 @@ fn add_usage(conn: &Connection, id: &str, input: u64, output: u64, cached: u64) 
         output_tokens: output,
         cached_input_tokens: cached,
     };
-    store::save_token_usage(&tx, id, 1, &usage).unwrap();
-    store::save_token_usage(&tx, id, 1, &usage).unwrap(); // duplicate telemetry
-    store::save_token_usage(&tx, id, 2, &usage).unwrap(); // second model response
+    store::save_token_usage(&tx, id, 1, &usage, None).unwrap();
+    store::save_token_usage(&tx, id, 1, &usage, None).unwrap(); // duplicate telemetry
+    store::save_token_usage(&tx, id, 2, &usage, None).unwrap(); // second model response
     tx.commit().unwrap();
 }
 

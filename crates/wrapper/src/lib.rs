@@ -1003,9 +1003,7 @@ impl App {
 
     fn conversation_response(&self, id: &str) -> Result<Value, ApiError> {
         let conversation = self
-            .conversations()?
-            .into_iter()
-            .find(|c| c.id == id)
+            .conversation(id)?
             .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?;
         Ok(json!({"conversation": conversation}))
     }

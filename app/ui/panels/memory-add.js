@@ -118,7 +118,7 @@
       panels.notify("Souvenir ajouté.");
     });
     refresh();
-    return { button, form };
+    return { button, form, busy: () => busy };
   }
   window.EzerbotMemoryAdd = { create };
 })();

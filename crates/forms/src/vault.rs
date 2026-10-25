@@ -102,7 +102,7 @@ pub struct Vault {
     signature_notice: Option<&'static str>,
     /// Test double of an active keychain that refuses mutations. Production
     /// hosts leave this false; macOS uses `keychain` instead.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     refuse_keychain: bool,
 }
 #[cfg(target_os = "macos")]
@@ -157,7 +157,7 @@ impl Vault {
             #[cfg(target_os = "macos")]
             keychain: None,
             signature_notice: None,
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, debug_assertions))]
             refuse_keychain: false,
         };
         let _file_guard = vault.lock_file(true)?;
@@ -198,9 +198,8 @@ impl Vault {
         let values = vault.known_values()?;
         Ok((vault, values))
     }
-    /// Active keychain that refuses writes and deletions. Debug tests only:
-    /// nothing is stored in the plaintext file.
-    #[cfg(debug_assertions)]
+    /// Simulates keychain refusal without falling back to plaintext storage.
+    #[cfg(any(test, debug_assertions))]
     #[doc(hidden)]
     pub fn open_refusing_keychain(path: &Path) -> Result<Self> {
         let mut vault = Self::open(path)?;
@@ -229,7 +228,7 @@ impl Vault {
             #[cfg(target_os = "macos")]
             keychain: self.keychain.clone(),
             signature_notice: self.signature_notice,
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, debug_assertions))]
             refuse_keychain: self.refuse_keychain,
         }
     }
@@ -441,7 +440,7 @@ impl Vault {
         self.persist(&secrets, &key)
     }
     fn persist(&self, secrets: &Secrets, key: &str) -> Result<()> {
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         if self.refuse_keychain {
             let mut file = self.read_file()?;
             commit_keychain_secret(&mut file, key, secrets.get(key).unwrap(), false)?;
@@ -452,7 +451,7 @@ impl Vault {
         if let Some(target) = &self.keychain {
             return keychain::set(self, target, key, secrets.get(key).unwrap());
         }
-        #[cfg(not(any(debug_assertions, target_os = "macos")))]
+        #[cfg(not(any(test, debug_assertions, target_os = "macos")))]
         let _ = key;
         self.write(secrets)
     }
@@ -462,7 +461,7 @@ impl Vault {
     fn remove_exact(&self, key: &str) -> Result<()> {
         let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         if self.refuse_keychain {
             return Err(invalid(
                 "Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez.",
@@ -566,7 +565,7 @@ impl Vault {
 
 /// Record a verified keychain write by dropping the plaintext copy. A refusal
 /// leaves the file untouched and returns an error: no plaintext fallback.
-#[cfg(any(debug_assertions, target_os = "macos"))]
+#[cfg(any(test, debug_assertions, target_os = "macos"))]
 fn commit_keychain_secret(
     file: &mut Secrets,
     name: &str,

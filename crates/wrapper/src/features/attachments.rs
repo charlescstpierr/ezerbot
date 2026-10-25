@@ -958,8 +958,6 @@ fn ensure_linked_captions(ctx: &Context<'_>) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub type DraftSelections = std::collections::HashMap<String, Vec<String>>;
-
 pub fn link_attachments(
     ctx: &Context<'_>,
     conversation: &str,
@@ -1019,41 +1017,14 @@ pub fn link_attachments(
             "INSERT INTO wrapper_attachment_order VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
             params![conversation, message, id, ordinal],
         )?;
-    }
-    Ok(())
-}
-
-pub(super) fn consume_draft(
-    conn: &Connection,
-    conversation: &str,
-    ids: &[String],
-    selections: Option<&DraftSelections>,
-) -> Result<(), ApiError> {
-    for id in ids {
-        if let Some(selections) = selections {
-            for token in selections.get(id).into_iter().flatten() {
-                conn.execute(
-                    "UPDATE wrapper_storage_uploads SET cancelled=1
-                     WHERE token=?1 AND draft_id=?2 AND attachment_id=?3",
-                    params![token, conversation, id],
-                )?;
-            }
-            conn.execute(
-                "DELETE FROM wrapper_storage_drafts WHERE draft_id=?1 AND attachment_id=?2
-                 AND NOT EXISTS(SELECT 1 FROM wrapper_storage_uploads
-                    WHERE draft_id=?1 AND attachment_id=?2 AND cancelled=0)",
-                params![conversation, id],
-            )?;
-        } else {
-            conn.execute(
-                "UPDATE wrapper_storage_uploads SET cancelled=1 WHERE draft_id=?1 AND attachment_id=?2",
-                params![conversation, id],
-            )?;
-            conn.execute(
-                "DELETE FROM wrapper_storage_drafts WHERE draft_id=?1 AND attachment_id=?2",
-                params![conversation, id],
-            )?;
-        }
+        ctx.connection.execute(
+            "DELETE FROM wrapper_storage_drafts WHERE draft_id=?1 AND attachment_id=?2",
+            params![conversation, id],
+        )?;
+        ctx.connection.execute(
+            "UPDATE wrapper_storage_uploads SET cancelled=1 WHERE draft_id=?1 AND attachment_id=?2",
+            params![conversation, id],
+        )?;
     }
     Ok(())
 }

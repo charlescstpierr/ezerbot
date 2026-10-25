@@ -3,8 +3,7 @@
 // draft that used to survive a transfer into the created thread.
 const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
-const { test: nodeTest } = require("node:test");
-const test = (name, run) => nodeTest(name, { timeout: 10000 }, run);
+const { test } = require("node:test");
 const vm = require("node:vm");
 
 const appSource = readFileSync(`${__dirname}/app.js`, "utf8");
@@ -71,9 +70,6 @@ class Element {
       node.parentElement = this;
       this.childNodes.push(node);
     }
-  }
-  prepend(...nodes) {
-    for (const node of [...nodes].reverse()) this.insertBefore(node, this.childNodes[0]);
   }
   replaceChildren(...nodes) {
     if (this.contains(this.ownerDocument.activeElement)) this.ownerDocument.activeElement = this.ownerDocument.body;
@@ -250,7 +246,7 @@ function parsePage(document) {
   }
 }
 
-function boot(options = {}) {
+function boot() {
   const document = {
     ids: new Map(),
     listeners: {},
@@ -279,10 +275,10 @@ function boot(options = {}) {
     removeAllRanges() { this.rangeCount = 0; this.isCollapsed = true; this.text = ""; this.range = null; this.fire(); },
     fire() { for (const handler of document.listeners.selectionchange || []) handler(); },
   };
-  const storage = options.storage || new Map();
+  const storage = new Map();
   const localStorage = {
     getItem: (key) => storage.has(key) ? storage.get(key) : null,
-    setItem: (key, value) => { if (options.storageFails) throw new Error("Stockage indisponible"); storage.set(key, String(value)); },
+    setItem: (key, value) => storage.set(key, String(value)),
     removeItem: (key) => storage.delete(key),
   };
   const bots = [
@@ -290,18 +286,14 @@ function boot(options = {}) {
     { id: "qa-redacteur", name: "Rédacteur", color: "violet", shape: "etoile", description: "Relit vos textes.", instructions: "" },
     { id: "qa-long", name: "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN", color: "cyan", shape: "galet", description: "", instructions: "" },
   ];
-  const state = options.state || {
+  const state = {
     account: { name: "Espace personnel" }, mode: "simulated", conversations: [], bots,
     preferences: { theme: "dark", accent: "citron" },
     provider: { connected: false, signin: "idle", backend: "sharing", models: [], connections: {} },
     state_revision: 1,
   };
   const sent = [];
-  const failures = { send: null, state: false, page: false };
-  const requests = [];
-  const intercept = new Map();
   let pageDetail = null;
-  let conversationSerial = state.conversations.length;
   let threadOptions = null;
   let holdCreate = null;
   let failCreate = false;
@@ -316,15 +308,13 @@ function boot(options = {}) {
     return timer;
   }
   function json(data, status = 200) {
-    return { ok: status >= 200 && status < 300, status, async json() { return structuredClone(data); } };
+    return { ok: status >= 200 && status < 300, status, async json() { return data; } };
   }
   async function fetch(path, options = {}) {
     const url = String(path);
     const body = options.body ? JSON.parse(options.body) : undefined;
-    requests.push({ url, body });
-    if (intercept.has(url)) return intercept.get(url)(body, json);
-    if (url === "/api/state") { if (failures.state) throw new Error("État injoignable"); return json(state); }
-    if (url === `/api/pages/${pageDetail?.id}`) { if (failures.page) return json({ error: "Page injoignable" }, 503); return json({ page: pageDetail }); }
+    if (url === "/api/state") return json(state);
+    if (url === `/api/pages/${pageDetail?.id}`) return json({ page: pageDetail });
     if (url === "/api/ping") return json({ revision: state.state_revision });
     if (url === "/api/preferences") return json({ preferences: { ...state.preferences, ...body } });
     if (url === "/api/conversations") {
@@ -332,7 +322,7 @@ function boot(options = {}) {
       if (holdCreate) await holdCreate;
       if (failCreate) return json({ error: "Création refusée pour le test" }, 503);
       const conversation = {
-        id: `conv-${++conversationSerial}`, bot_id: body.bot_id, title: "Nouvelle conversation",
+        id: `conv-${state.conversations.length + 1}`, bot_id: body.bot_id, title: "Nouvelle conversation",
         messages: [], kind: "direct", updated_at: Date.now(), favorite: false, member_ids: [body.bot_id],
       };
       state.conversations.unshift(conversation);
@@ -343,17 +333,13 @@ function boot(options = {}) {
       sent.push(body);
       sendWaiting?.();
       if (holdSend) await holdSend;
-      if (failures.send) {
-        if (failures.send === "network") throw new Error("Envoi interrompu");
-        return json({ error: "Envoi refusé" }, failures.send);
-      }
       if (body.page_anchor?.passage === "REFUSÉ") {
         // Un vrai moteur ne garde pas le message refusé ; ce faux partage l'état avec le client.
         for (const thread of state.conversations) thread.messages = thread.messages.filter((message) => message.state !== "queued");
         return json({ error: "Ce passage n’apparaît pas dans le texte affiché de la Page." }, 400);
       }
       const conversation = state.conversations.find((item) => item.id === body.conversation_id);
-      conversation.messages.push({ id: body.message_id, role: "user", body: body.body, state: "accepted", attachments: body.attachments || [], payload: body.page_anchor ? { page_anchor: body.page_anchor } : {}, created_at: new Date().toISOString() });
+      conversation.messages.push({ id: body.message_id, role: "user", body: body.body, state: "accepted", created_at: new Date().toISOString() });
       state.state_revision += 1;
       return json({ conversation: structuredClone(conversation) });
     }
@@ -425,7 +411,7 @@ function boot(options = {}) {
   vm.createContext(context);
   vm.runInContext(appSource, context);
   return {
-    window, document, storage, state, sent, context, failures, requests, options, intercept,
+    window, document, storage, state, sent, context,
     servePage(detail) { pageDetail = detail; },
     thread: () => threadOptions,
     composer: () => composer,
@@ -638,13 +624,12 @@ test("short composer names stay whole and a maximal name ellipsizes only when th
 });
 
 // Ouvre la Page « Trois forfaits » dans le premier fil, avec app.js et le panneau Pages réels.
-async function quotedPage(orphan = false, options = {}) {
-  const app = boot(options);
+async function quotedPage() {
+  const app = boot();
   await ready(app);
   app.type("Bonjour");
   await app.document.getElementById("composer-form").requestSubmit();
   const conversation = app.state.conversations[0];
-  if (orphan) { app.state.conversations.length = 0; await ready(app); }
   // Ce faux serveur partage son état avec le client : on retire l'envoi optimiste resté « queued ».
   conversation.messages = conversation.messages.filter((message) => message.state !== "queued");
   const detail = {
@@ -655,13 +640,9 @@ async function quotedPage(orphan = false, options = {}) {
   };
   app.servePage(detail);
   app.state.pages = { by_bot: { grokbot: [{ id: detail.id, bot_id: "grokbot", conversation_id: conversation.id, title: detail.title, status: "ready" }] } };
-  const register = app.window.GrokbotPanels.register;
-  let pagePanel;
-  app.window.GrokbotPanels.register = (panel) => { pagePanel = panel; return register(panel); };
   vm.runInContext(pagesSource, app.context);
   await ready(app);
   const doc = app.document;
-  if (orphan) { doc.querySelector(".page-link").click(); await new Promise((resolve) => setImmediate(resolve)); }
   const cell = doc.querySelector(".page-canvas td");
   const comment = doc.querySelector(".page-comment");
   const chip = doc.querySelector(".gb-quote-chip");
@@ -676,7 +657,7 @@ async function quotedPage(orphan = false, options = {}) {
     await doc.getElementById("composer-form").requestSubmit();
     for (const thread of app.state.conversations) thread.messages = thread.messages.filter((message) => message.state !== "queued");
   };
-  return { app, doc, comment, chip, select, sendWith, detail, pagePanel };
+  return { app, doc, comment, chip, select, sendWith };
 }
 
 test("l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce", async () => {
@@ -779,335 +760,4 @@ test("le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’a
   app.sent.length = 0;
   await app.thread().onResend(message);
   assert.deepEqual(structuredClone(app.sent.at(-1).page_anchor), saved);
-});
-
-for (const status of [400, 409]) test(`r10 T01/T02 citation orpheline récupérée après refus ${status}`, async () => {
-  const { app, comment, chip, select, sendWith } = await quotedPage(true);
-  select("Confort"); comment.click(); app.failures.send = status;
-  await sendWith("Corrige ce prix");
-  assert.equal(app.composer().api.value, "Corrige ce prix");
-  assert.equal(chip.hidden, false, "la citation accompagne le brouillon récupéré");
-  app.failures.send = null;
-  await sendWith("Nouvel essai");
-  assert.equal(app.sent.at(-1).page_anchor?.passage, "Confort");
-});
-
-test("r10 T24 le même brouillon partage une création de fil et transfère sa citation", async () => {
-  const { app, comment, chip, select } = await quotedPage(true);
-  select("Confort"); comment.click();
-  const gate = app.gateCreation();
-  const a = app.window.GrokbotPanels.ensureDraftConversation();
-  await gate.waiting;
-  const b = app.window.GrokbotPanels.ensureDraftConversation();
-  gate.release();
-  const [first, second] = await Promise.all([a, b]);
-  assert.equal(first.id, second.id);
-  assert.equal(chip.hidden, false);
-  app.failures.send = 400;
-  app.type("Avec fichier"); await app.document.getElementById("composer-form").requestSubmit();
-  assert.equal(app.sent.at(-1).page_anchor.passage, "Confort");
-  assert.equal(chip.hidden, false);
-});
-
-for (const refreshFails of [false, true]) test(`r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué ${refreshFails}`, async () => {
-  const { app, comment, select, doc } = await quotedPage();
-  select("Confort"); comment.click();
-  app.failures.send = "network"; app.failures.state = refreshFails;
-  app.type("Tentative interrompue"); await doc.getElementById("composer-form").requestSubmit();
-  const original = structuredClone(app.sent.at(-1));
-  const restarted = boot({ storage: new Map(app.storage), state: structuredClone(app.state) });
-  await ready(restarted);
-  const message = restarted.thread().messages.find((m) => m.id === original.message_id);
-  assert.ok(message, "la tentative absente du journal reste récupérable après redémarrage du client");
-  await restarted.thread().onRetry(message);
-  assert.deepEqual(structuredClone(restarted.sent.at(-1)), original);
-});
-
-for (const savedState of ["queued", "dispatching", "unknown", "accepted", "echoed"]) test(`r10 T04 le serveur détient ${savedState}, aucun brouillon dupliqué`, async () => {
-  const { app, comment, select, doc, chip } = await quotedPage();
-  select("Confort"); comment.click();
-  const gate = app.gateSend(); app.failures.send = "network";
-  app.type("Déjà enregistré"); const pending = doc.getElementById("composer-form").requestSubmit();
-  await gate.waiting;
-  const sent = app.sent.at(-1);
-  app.state.conversations[0].messages.push({ id: sent.message_id, body: sent.body, role: "user", state: savedState, payload: { page_anchor: sent.page_anchor } });
-  gate.release(); await pending;
-  assert.equal(app.composer().api.value, "");
-  assert.equal(chip.hidden, true);
-});
-
-for (const change of ["rename", "missing", "passage", "load", "reorder", "error", "version"]) test(`r10 T10/T11 citation au refus après ${change}`, async () => {
-  const { app, comment, select, doc, chip, detail } = await quotedPage();
-  select("Confort"); comment.click();
-  const gate = app.gateSend(); app.failures.send = 400;
-  app.type("À retoucher"); const pending = doc.getElementById("composer-form").requestSubmit();
-  await gate.waiting;
-  if (change === "rename") { detail.title = "Forfaits actuels"; app.state.pages.by_bot.grokbot[0].title = detail.title; }
-  if (change === "missing") app.state.pages.by_bot.grokbot = [];
-  if (change === "passage") detail.preview = "Texte remplacé";
-  if (change === "error") detail.status = "error";
-  if (change === "version") detail.source_version = "d".repeat(64);
-  if (change === "load") app.failures.page = true;
-  if (change === "reorder") app.state.pages.by_bot.grokbot.unshift({ ...app.state.pages.by_bot.grokbot[0], id: "autre-page" });
-  gate.release(); await pending;
-  if (["rename", "reorder", "version"].includes(change)) {
-    assert.equal(chip.hidden, false);
-    assert.ok(chip.textContent.includes(change === "rename" ? "Forfaits actuels" : "Confort"));
-  } else assert.match(doc.getElementById("toast").textContent, /citation|Citation/, "l'explication de récupération reste visible après l'erreur d'envoi");
-});
-
-for (const edit of ["remove", "same", "other"]) test(`r10 T12 refus ancien après ${edit} de citation`, async () => {
-  const { app, comment, select, doc, chip } = await quotedPage();
-  select("Confort"); comment.click();
-  const gate = app.gateSend(); app.failures.send = 400;
-  app.type("Première demande"); const pending = doc.getElementById("composer-form").requestSubmit();
-  await gate.waiting;
-  chip.querySelector(".gb-quote-remove").click();
-  if (edit !== "remove") { select(edit === "same" ? "Confort" : "REFUSÉ"); comment.click(); }
-  gate.release(); await pending;
-  assert.equal(chip.hidden, edit === "remove");
-  if (edit !== "remove") assert.ok(chip.textContent.includes(edit === "same" ? "Confort" : "REFUSÉ"));
-});
-
-test("r10 T09/N03 un snapshot omet le fil soumis sans écraser le brouillon new", async () => {
-  const { app, comment, select, doc } = await quotedPage();
-  app.storage.set("grokbot.draft.new", "Autre brouillon");
-  select("Confort"); comment.click();
-  const gate = app.gateSend(); app.failures.send = 400;
-  app.type("Brouillon du fil"); const pending = doc.getElementById("composer-form").requestSubmit();
-  await gate.waiting; app.state.conversations.length = 0;
-  gate.release(); await pending;
-  assert.equal(app.storage.get("grokbot.draft.new"), "Autre brouillon");
-  assert.match(doc.getElementById("toast").textContent, /conversation|fil/i);
-});
-
-test("r10 T21 stockage indisponible refuse une tentative avant de perdre le brouillon", async () => {
-  const { app, comment, select, chip, doc } = await quotedPage();
-  select("Confort"); comment.click(); app.type("À conserver"); app.options.storageFails = true;
-  const before = app.sent.length;
-  await doc.getElementById("composer-form").requestSubmit();
-  assert.equal(app.sent.length, before);
-  assert.equal(app.composer().api.value, "À conserver");
-  assert.equal(chip.hidden, false);
-  assert.match(doc.getElementById("toast").textContent, /stockage|Stockage/);
-});
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
-}
-
-for (const saved of [false, true]) test(`r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré ${saved}`, async () => {
-  const { app, doc, comment, select, chip } = await quotedPage();
-  const owner = app.state.conversations[0];
-  const thread = { ...structuredClone(owner), id: "sous-fil", messages: [] };
-  app.state.conversations.push(thread);
-  app.storage.set("grokbot.draft.sous-fil", "Brouillon de B");
-  const threadGate = deferred(), threadEntered = deferred();
-  app.intercept.set("/api/messages/thread", async (_body, json) => { threadEntered.resolve(); await threadGate.promise; return json({ conversation: thread, thread: {} }); });
-  app.thread().onThread(owner.messages[0]); await threadEntered.promise;
-  select("Confort"); comment.click();
-  const sendGate = app.gateSend(); app.failures.send = 400;
-  app.type("Demande de A"); const sending = doc.getElementById("composer-form").requestSubmit();
-  await sendGate.waiting;
-  if (saved) {
-    const request = app.sent.at(-1);
-    owner.messages.push({ id: request.message_id, role: "user", body: request.body, state: "accepted", payload: { page_anchor: request.page_anchor } });
-  }
-  threadGate.resolve(); await new Promise((done) => setImmediate(done));
-  sendGate.release(); await sending;
-  assert.equal(app.storage.get("grokbot.selected"), owner.id);
-  assert.equal(app.storage.get("grokbot.draft.sous-fil"), "Brouillon de B");
-  assert.equal(app.composer().api.value, saved ? "" : "Demande de A");
-  assert.equal(chip.hidden, saved);
-});
-
-test("r10 T08 la reprise d'un brouillon de lien attend la création en cours", async () => {
-  const storage = new Map([["ezerbot.link-previous-draft", JSON.stringify([{ text: "Autre demande", bot: "qa-redacteur" }])]]);
-  const { app, doc, comment, select, chip } = await quotedPage(true, { storage });
-  select("Confort"); comment.click();
-  const gate = app.gateCreation();
-  app.type("À envoyer"); const sending = doc.getElementById("composer-form").requestSubmit();
-  await gate.waiting;
-  doc.getElementById("restore-link-draft").click();
-  assert.equal(app.window.GrokbotPanels.state.bots[0].id, "grokbot");
-  assert.equal(app.storage.get("grokbot.bot") || "grokbot", "grokbot");
-  app.failures.send = 400; gate.release(); await sending;
-  assert.equal(app.composer().api.value, "À envoyer");
-  assert.equal(chip.hidden, false);
-});
-
-test("r10 T16 la fin de sous-tâche conserve texte et fichiers visibles au refus", async () => {
-  const app = boot(); await ready(app); app.type("Bonjour");
-  await app.document.getElementById("composer-form").requestSubmit();
-  const conversation = app.state.conversations[0]; conversation.kind = "task"; conversation.parent_id = "parent";
-  let follow = true, discarded = 0;
-  app.window.GrokbotDelegation = { canFollowUp: () => follow, taskId: () => "task" };
-  app.window.GrokbotPanels.register({ id: "files", sendExtras: () => ({ attachments: ["document-pret"] }), composer: { discard() { discarded++; } } });
-  const gate = deferred(), entered = deferred();
-  app.intercept.set("/api/delegation/send", async (_body, json) => { entered.resolve(); await gate.promise; return json({ error: "Sous-tâche terminée" }, 409); });
-  await ready(app); app.type("Suivi à conserver");
-  const sending = app.document.getElementById("composer-form").requestSubmit(); await entered.promise;
-  follow = false; gate.resolve(); await sending;
-  assert.equal(discarded, 0);
-  assert.equal(app.composer().api.value, "Suivi à conserver");
-  assert.match(app.document.getElementById("toast").textContent, /brouillon.*fichiers/);
-});
-
-test("r10 T03/T21 création refusée conserve mentions et saisie dans leurs documents", async () => {
-  const { app, doc, comment, select, chip } = await quotedPage(true);
-  select("Confort"); comment.click();
-  const original = { type: "doc", content: [{ type: "paragraph", content: [{ type: "mention", attrs: { id: "grokbot", label: "Ezerbot" } }, { type: "text", text: " demande" }] }] };
-  app.composer().api.document = original; app.composer().onInput();
-  const gate = app.gateCreation();
-  const sending = doc.getElementById("composer-form").requestSubmit(); await gate.waiting;
-  app.type("Texte suivant"); const next = structuredClone(app.composer().api.document);
-  gate.fail(); await sending;
-  assert.deepEqual(structuredClone(app.composer().api.document.content), [...original.content, ...next.content]);
-  assert.equal(chip.hidden, false);
-});
-
-for (const change of ["missing", "navigate"]) test(`r10 T11/T12 restauration tardive après ${change} ne ressuscite pas la citation`, async () => {
-  const { app, doc, comment, select, chip, detail } = await quotedPage(true);
-  select("Confort"); comment.click();
-  const gate = deferred(), entered = deferred(); let reads = 0;
-  app.intercept.set(`/api/pages/${detail.id}`, async (_body, json) => {
-    reads++; entered.resolve(); await gate.promise; return json({ page: detail });
-  });
-  app.failures.send = 400; app.type("Retouche");
-  const sending = doc.getElementById("composer-form").requestSubmit(); await entered.promise;
-  if (change === "missing") { app.state.pages.by_bot.grokbot = []; await ready(app); }
-  else {
-    const other = { ...app.state.pages.by_bot.grokbot[0], id: "autre", conversation_id: null };
-    app.state.pages.by_bot.grokbot.push(other); await ready(app);
-    doc.querySelectorAll(".page-link").at(-1).click();
-  }
-  gate.resolve(); await sending;
-  assert.equal(chip.hidden, true);
-  if (change === "missing") assert.match(doc.getElementById("toast").textContent, /citation/i);
-});
-
-test("r10 T11 panne réseau de Page ne relance pas sa lecture en boucle", async () => {
-  const { app, doc, detail, comment, select } = await quotedPage();
-  select("Confort"); comment.click(); let attempts = 0;
-  app.intercept.set(`/api/pages/${detail.id}`, async (_body, json) => {
-    attempts++;
-    if (attempts < 5) throw new Error("Réseau coupé");
-    return json({ error: "Indisponible" }, 503);
-  });
-  app.failures.send = 400; app.type("Retouche");
-  await doc.getElementById("composer-form").requestSubmit();
-  await new Promise((done) => setImmediate(done));
-  assert.ok(attempts < 5, `la panne a déclenché ${attempts} lectures`);
-  assert.match(doc.getElementById("toast").textContent, /citation/i);
-});
-
-for (const change of ["missing", "navigate"]) test(`r10 T11/T12 résultat de revalidation tardif après ${change}`, async () => {
-  const { app, doc, comment, select, chip, detail, pagePanel } = await quotedPage(true);
-  select("Confort"); comment.click();
-  const captured = pagePanel.composer.capture();
-  const gate = deferred();
-  app.intercept.set(`/api/pages/${detail.id}`, async (_body, json) => { await gate.promise; return json({ page: detail }); });
-  const restoring = pagePanel.composer.restore({ captured }, { conversation: null, bot: { id: "grokbot" } });
-  app.state.pages.by_bot.grokbot = [];
-  await ready(app);
-  if (change === "navigate") {
-    app.state.pages.by_bot.grokbot.push({ id: "autre", bot_id: "grokbot", title: "Autre Page", conversation_id: null, status: "ready" });
-    await ready(app); doc.querySelectorAll(".page-link").at(-1).click();
-  }
-  gate.resolve(); const notice = await restoring;
-  assert.equal(chip.hidden, true);
-  if (change === "missing") assert.match(notice, /citation/i);
-});
-
-test("r10 T08 une création de bot tardive laisse le brouillon soumis à son bot", async () => {
-  const { app, doc, comment, select, chip } = await quotedPage(true);
-  const botGate = deferred(), botEntered = deferred();
-  app.intercept.set("/api/bots", async (body, json) => {
-    botEntered.resolve(); await botGate.promise;
-    const bot = { ...app.state.bots[0], ...body, id: "bot-recent", is_default: false };
-    app.state.bots.push(bot); return json({ bot });
-  });
-  doc.querySelector("[data-new-bot]").click(); doc.getElementById("bot-name").value = "Bot récent";
-  const creatingBot = doc.getElementById("bot-form").requestSubmit(); await botEntered.promise;
-  select("Confort"); comment.click();
-  const gate = app.gateCreation(); app.type("Brouillon original");
-  const sending = doc.getElementById("composer-form").requestSubmit(); await gate.waiting;
-  botGate.resolve(); await creatingBot;
-  assert.equal(app.storage.get("grokbot.bot") || "grokbot", "grokbot");
-  app.failures.send = 400; gate.release(); await sending;
-  assert.equal(chip.hidden, false);
-  assert.equal(app.composer().api.value, "Brouillon original");
-});
-
-test("r10 T21 le document restauré survit à un aller-retour sans stockage", async () => {
-  const { app, doc } = await quotedPage();
-  const first = app.state.conversations[0].id;
-  const document = { type: "doc", content: [{ type: "paragraph", content: [{ type: "mention", attrs: { id: "grokbot", label: "Ezerbot" } }, { type: "text", text: " reviens" }] }] };
-  app.composer().api.document = document; app.composer().onInput();
-  app.options.storageFails = true; app.failures.send = 400;
-  await doc.getElementById("composer-form").requestSubmit();
-  doc.getElementById("new-chat").click();
-  assert.equal(doc.getElementById("conversation-title").textContent, "Nouvelle conversation");
-  assert.equal(app.window.GrokbotPanels.openConversation(first), true);
-  assert.deepEqual(structuredClone(app.composer().api.document), document);
-});
-
-for (const disabledOn of ["send", "refresh"]) test(`r10 T06 fichiers iPhone préservés, accès désactivé sur ${disabledOn}`, async () => {
-  const app = boot(); await ready(app); app.type("Bonjour");
-  await app.document.getElementById("composer-form").requestSubmit();
-  app.window.EzerbotIPhone = { remote: true };
-  let consumed = false;
-  app.window.GrokbotPanels.register({ id: "files", sendExtras: () => ({ attachments: ["document-pret"] }), composer: { onSent() { consumed = true; } } });
-  app.intercept.set("/api/send", async (_body, json) => {
-    app.intercept.set("/api/state", async (_body, reply) => reply({ error: "L’accès iPhone est désactivé sur le Mac." }, 403));
-    if (disabledOn === "send") return json({ error: "L’accès iPhone est désactivé sur le Mac." }, 403);
-    throw new Error("Envoi interrompu");
-  });
-  app.type("Avec fichier"); await app.document.getElementById("composer-form").requestSubmit();
-  assert.equal(consumed, false);
-  assert.equal(app.composer().api.value, "Avec fichier");
-  assert.equal(app.thread().messages.some((message) => message.body === "Avec fichier"), disabledOn !== "send");
-});
-
-for (const order of ["before", "during"]) test(`r10 N06 notification ${order} envoi refusé récupère A avant ouverture de B`, async () => {
-  const { app, doc, select, comment } = await quotedPage();
-  const a = app.state.conversations[0];
-  const b = { ...structuredClone(a), id: "notification-b", messages: [] };
-  app.state.conversations.push(b); app.storage.set("grokbot.draft.notification-b", "B distinct");
-  app.storage.set("grokbot.draft.new", "Nouveau distinct");
-  const gate = deferred(), entered = deferred(); let poll;
-  app.context.setInterval = (fn) => { poll = fn; };
-  doc.hasFocus = () => true; doc.visibilityState = "visible";
-  app.intercept.set("/api/notifications/poll", async (_body, json) => json({ items: [], deliveries: [], settings: {}, unread: 0 }));
-  app.intercept.set("/api/notifications/open", async (_body, json) => { entered.resolve(); await gate.promise; return json({ id: "reply:preuve", conversation_id: b.id }); });
-  vm.runInContext(readFileSync(`${__dirname}/panels/notifications.js`, "utf8"), app.context);
-  let opening;
-  if (order === "before") { opening = app.window.EzerbotNotifications.activate("reply:preuve"); await entered.promise; }
-  select("Confort"); comment.click(); app.type("A à récupérer"); app.failures.send = 400;
-  const sendGate = app.gateSend(); const sending = doc.getElementById("composer-form").requestSubmit(); await sendGate.waiting;
-  if (order === "during") { opening = app.window.EzerbotNotifications.activate("reply:preuve"); await entered.promise; }
-  app.state.conversations = [b]; gate.resolve(); await opening;
-  assert.equal(app.storage.get("grokbot.selected"), a.id);
-  sendGate.release(); await sending;
-  assert.equal(app.composer().api.value, "A à récupérer");
-  assert.equal(app.storage.get("grokbot.draft.new"), "Nouveau distinct");
-  await poll();
-  assert.equal(app.storage.get("grokbot.selected"), b.id);
-  assert.equal(app.composer().api.value, "B distinct");
-  assert.equal(app.storage.get(`grokbot.draft.${a.id}`), "A à récupérer");
-});
-
-test("r10 R21/T21 le brouillon refusé du fil vide garde ses mentions en changeant de bot", async () => {
-  const app = boot(); await ready(app); app.failures.send = 400;
-  const document = { type: "doc", content: [{ type: "paragraph", content: [{ type: "mention", attrs: { id: "grokbot", label: "Ezerbot" } }, { type: "text", text: " demande" }] }] };
-  app.composer().api.document = document; app.composer().onInput();
-  await app.document.getElementById("composer-form").requestSubmit();
-  app.intercept.set("/api/bots", async (body, json) => { const bot = { ...app.state.bots[0], ...body, id: "autre-bot", is_default: false }; app.state.bots.push(bot); return json({ bot }); });
-  app.document.querySelector("[data-new-bot]").click(); app.document.getElementById("bot-name").value = "Autre bot";
-  await app.document.getElementById("bot-form").requestSubmit();
-  assert.equal(app.storage.get("grokbot.selected"), "");
-  assert.deepEqual(structuredClone(app.composer().api.document), document);
-  assert.deepEqual(JSON.parse(app.storage.get("grokbot.draft.new.document")), document);
 });

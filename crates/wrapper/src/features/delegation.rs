@@ -61,8 +61,6 @@ struct TaskAction {
     body: String,
     #[serde(default)]
     attachments: Vec<String>,
-    #[serde(default)]
-    attachment_selections: Option<super::attachments::DraftSelections>,
 }
 
 fn task_action(
@@ -167,12 +165,6 @@ fn task_action(
                 conversation,
                 &input.message_id,
                 &input.attachments,
-            )?;
-            super::attachments::consume_draft(
-                &tx,
-                conversation,
-                &input.attachments,
-                input.attachment_selections.as_ref(),
             )?;
         }
         if previous.is_none() {

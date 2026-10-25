@@ -40,8 +40,6 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         CREATE TABLE IF NOT EXISTS wrapper_storage_uploads (
         token TEXT PRIMARY KEY, draft_id TEXT NOT NULL, attachment_id TEXT,
         cancelled INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
-        CREATE INDEX IF NOT EXISTS wrapper_storage_active_uploads
-        ON wrapper_storage_uploads(draft_id,attachment_id,token) WHERE cancelled=0;
         CREATE TABLE IF NOT EXISTS wrapper_storage_staged (
         id TEXT PRIMARY KEY, staged_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS wrapper_storage_previews (
@@ -544,32 +542,24 @@ pub(super) fn staged_document(conn: &Connection, id: &str) -> Result<(), ApiErro
     Ok(())
 }
 
-const DRAFTS_SQL: &str = "SELECT d.draft_id, d.attachment_id, d.name,
-    (SELECT json_group_array(token) FROM wrapper_storage_uploads u
-     WHERE u.draft_id=d.draft_id AND u.attachment_id=d.attachment_id AND u.cancelled=0)
-    FROM wrapper_storage_drafts d ORDER BY d.draft_id, d.attachment_id";
-
 fn drafts(conn: &Connection) -> Result<Value, ApiError> {
-    let mut statement = conn.prepare(DRAFTS_SQL)?;
+    let mut statement = conn.prepare("SELECT draft_id, attachment_id, name FROM wrapper_storage_drafts ORDER BY draft_id, attachment_id")?;
     let rows = statement.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, Option<String>>(2)?,
-            r.get::<_, String>(3)?,
         ))
     })?;
     let mut output = serde_json::Map::new();
     for row in rows {
-        let (draft, id, name, tokens) = row?;
+        let (draft, id, name) = row?;
         let item = if id.starts_with("document_") {
             documents::get(conn, &id)?.map(|d| super::attachments::document_dto(&d))
         } else {
             staging::get(conn, &id)?.map(|a| super::attachments::dto(&a))
         };
         if let Some(mut item) = item {
-            item["upload_tokens"] = serde_json::from_str(&tokens)
-                .map_err(|_| ApiError::new(500, "Les références du brouillon sont illisibles."))?;
             if id.starts_with("attachment_") {
                 if let Some(name) = name {
                     item["name"] = json!(name);
@@ -842,8 +832,6 @@ pub fn routes(
                     #[serde(default)]
                     removed: Vec<String>,
                     #[serde(default)]
-                    removed_selections: Option<super::attachments::DraftSelections>,
-                    #[serde(default)]
                     cancelled_uploads: Vec<String>,
                 }
                 let input: Input = parse(body)?;
@@ -865,21 +853,12 @@ pub fn routes(
                 for token in &input.cancelled_uploads {
                     cancel_upload(&tx, &input.draft_id, token)?;
                 }
-                if let Some(selections) = input.removed_selections.as_ref() {
-                    super::attachments::consume_draft(
-                        &tx,
-                        &input.draft_id,
-                        &input.removed,
-                        Some(selections),
+                for id in &input.removed {
+                    tx.execute("UPDATE wrapper_storage_uploads SET cancelled=1,created_at=?3 WHERE draft_id=?1 AND attachment_id=?2",params![input.draft_id,id,crate::now() as i64])?;
+                    tx.execute(
+                        "DELETE FROM wrapper_storage_drafts WHERE draft_id=?1 AND attachment_id=?2",
+                        params![input.draft_id, id],
                     )?;
-                } else {
-                    for id in &input.removed {
-                        tx.execute("UPDATE wrapper_storage_uploads SET cancelled=1,created_at=?3 WHERE draft_id=?1 AND attachment_id=?2",params![input.draft_id,id,crate::now() as i64])?;
-                        tx.execute(
-                            "DELETE FROM wrapper_storage_drafts WHERE draft_id=?1 AND attachment_id=?2",
-                            params![input.draft_id, id],
-                        )?;
-                    }
                 }
                 for id in &input.attachments {
                     retain_draft(&tx, &input.draft_id, id)?;
@@ -917,69 +896,4 @@ pub fn routes(
         };
         Ok(ApiResponse::Json(output))
     })())
-}
-
-#[cfg(test)]
-mod draft_selection_tests {
-    use super::*;
-    use rusqlite::StatementStatus;
-
-    #[test]
-    fn draft_tokens_do_not_scan_cancelled_upload_history() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE attachments_documents(id TEXT);")
-            .unwrap();
-        migrate(&conn).unwrap();
-        conn.execute(
-            "INSERT INTO wrapper_storage_drafts VALUES ('draft','attachment','sample')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO wrapper_storage_uploads VALUES ('current','draft','attachment',0,0)",
-            [],
-        )
-        .unwrap();
-        let measure = || {
-            let mut statement = conn.prepare(DRAFTS_SQL).unwrap();
-            let values = statement
-                .query_map([], |row| row.get::<_, String>(3))
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            assert_eq!(values, vec!["[\"current\"]"]);
-            statement.get_status(StatementStatus::VmStep)
-        };
-        let add_history = |from: i32, to: i32| {
-            for i in from..to {
-                conn.execute(
-                    "INSERT INTO wrapper_storage_uploads VALUES (?1,'draft','attachment',1,0)",
-                    [format!("old-{i}")],
-                )
-                .unwrap();
-            }
-        };
-        add_history(0, 1000);
-        let small = measure();
-        add_history(1000, 10000);
-        let large = measure();
-        let plan = conn
-            .prepare(&format!("EXPLAIN QUERY PLAN {DRAFTS_SQL}"))
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(3))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        let before = conn.prepare("EXPLAIN QUERY PLAN SELECT draft_id,attachment_id,name FROM wrapper_storage_drafts ORDER BY draft_id,attachment_id").unwrap().query_map([], |row| row.get::<_, String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        eprintln!(
-            "draft selection before {before:?}; after {plan:?}; VmStep 1000={small}, 10000={large}"
-        );
-        assert!(
-            large <= small + 100,
-            "cancelled history must add at most 100 VM steps: {small} -> {large}"
-        );
-        assert!(plan
-            .iter()
-            .any(|step| step.contains("wrapper_storage_active_uploads")));
-    }
 }

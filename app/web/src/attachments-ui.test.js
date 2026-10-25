@@ -28,22 +28,10 @@ function panel(response, welcome = false) {
   let registration;
   const requests = [], notifications = [];
   let uploadNonce = 0;
-  let timerNonce = 0;
-  const timers = new Map();
   const storage = new Map();
   const richDocument = {type:"doc",content:[{type:"paragraph",content:[{type:"botMention",attrs:{id:"grokbot",label:"Ezerbot"}},{type:"text",text:"Mon brouillon"}]}]};
   const panels = { register(value) { registration = value; }, composerChanged() {}, draft: () => welcome ? "Mon brouillon" : "", draftDocument: () => richDocument, notify: (text) => notifications.push(text),
     async api() {return {conversation:{id:"created-chat"}};}, async refresh() {},
-    async ensureDraftConversation() {
-      const conversation = {id: "created-chat", messages: []};
-      storage.set(`grokbot.draft.${conversation.id}`, "Mon brouillon");
-      storage.set(`grokbot.draft.${conversation.id}.document`, JSON.stringify(richDocument));
-      registration.composer.transfer({from: "new:bot", to: conversation.id}, {...ctx, conversation});
-      panels.openConversation(conversation.id);
-      storage.delete("grokbot.draft.new");
-      storage.delete("grokbot.draft.new.document");
-      return conversation;
-    },
     openConversation(id) {
       storage.set("grokbot.draft.new", "Mon brouillon");
       storage.set("grokbot.draft.new.document", JSON.stringify(richDocument));
@@ -57,7 +45,7 @@ function panel(response, welcome = false) {
     document, File, Uint8Array, btoa, AbortController, TypeError, SyntaxError, DOMException,
     localStorage: {setItem(key,value){storage.set(key,String(value));},removeItem(key){storage.delete(key);}},
     crypto: { randomUUID: () => `upload-${++uploadNonce}` },
-    setTimeout: (callback, delay) => { const id = ++timerNonce; timers.set(id, {callback, delay}); return id; }, clearTimeout: (id) => timers.delete(id), MutationObserver: class { observe() {} },
+    setTimeout: () => 1, clearTimeout() {}, MutationObserver: class { observe() {} },
     URL: { createObjectURL: () => "blob:test", revokeObjectURL() {} },
     fetch: async (url, options) => {
       requests.push({ url, options });
@@ -71,7 +59,7 @@ function panel(response, welcome = false) {
     },
   });
   registration.composer.mount(root, ctx);
-  return { root, ctx, requests, notifications, registration, storage, runTimer: (delay) => { const next = [...timers].find(([,timer]) => timer.delay === delay); assert.ok(next, `timer ${delay}`); timers.delete(next[0]); next[1].callback(); }, add: (files) => registration.composer.onFiles(files, null, ctx), blocked: () => registration.composer.blocked(ctx) };
+  return { root, ctx, requests, notifications, registration, storage, add: (files) => registration.composer.onFiles(files, null, ctx), blocked: () => registration.composer.blocked(ctx) };
 }
 
 test("welcome attachment handoff preserves rich text and clears both home draft keys", async () => {
@@ -215,156 +203,4 @@ test("discarding a finished task's attachment draft aborts pending uploads and c
   assert.equal(p.registration.sendExtras(p.ctx).attachments.length, 0);
   release({}); await flush();
   assert.equal(allByClass(p.root, "attachment-chip").length, 0);
-});
-
-for (const kind of ["image", "document"]) for (const acknowledgeBeforeUpload of [false, true]) {
-  test(`T13 ${kind} reselected during send survives old acknowledgement, upload first ${!acknowledgeBeforeUpload}`, async () => {
-    const id = `${kind === "image" ? "attachment" : "document"}_${"d".repeat(64)}`;
-    let complete;
-    let uploads = 0;
-    const p = panel((_n, url) => {
-      if (url === "/api/storage/drafts") return {};
-      uploads++;
-      if (uploads === 2 && acknowledgeBeforeUpload) return new Promise(resolve => { complete = resolve; });
-      return {metadata: {id}};
-    });
-    const file = () => new File(["sample"], kind === "image" ? "sample.png" : "sample.txt", {type: kind === "image" ? "image/png" : "text/plain"});
-    p.add([file()]); await flush();
-    const extras = p.registration.sendExtras(p.ctx);
-    byClass(p.root, "attachment-remove").click(); await flush();
-    p.add([file()]); await flush();
-    p.ctx.state.conversations[0].messages.push({id: "old-send"});
-    p.registration.composer.onSent({messageId: "old-send", extras}, p.ctx);
-    if (complete) { complete({metadata: {id}}); await flush(); }
-    assert.equal(allByClass(p.root, "attachment-chip").length, 1);
-    assert.deepEqual(Array.from(p.registration.sendExtras(p.ctx).attachments), [id]);
-    assert.deepEqual(JSON.parse(JSON.stringify(p.registration.sendExtras(p.ctx).attachment_selections)), {[id]: ["upload-2"]});
-  });
-}
-
-test("T14 acknowledgement from another thread consumes only captured attachment occurrences", async () => {
-  const p = panel();
-  p.add([new File(["first"], "first.txt")]); await flush();
-  const extras = p.registration.sendExtras(p.ctx);
-  p.add([new File(["next"], "next.txt")]); await flush();
-  const next = p.registration.sendExtras(p.ctx).attachments[1];
-  p.ctx.state.conversations[0].messages.push({id: "sent"});
-  p.ctx.conversation = {id: "other", messages: []};
-  p.registration.onState(p.ctx.state, p.ctx);
-  p.registration.composer.onSent({messageId: "sent", extras}, p.ctx);
-  p.ctx.conversation = p.ctx.state.conversations[0];
-  p.registration.onState(p.ctx.state, p.ctx);
-  assert.deepEqual(Array.from(p.registration.sendExtras(p.ctx).attachments), [next]);
-});
-
-test("T18 first delayed disk restore does not resurrect a removed file", async () => {
-  const id = `document_${"e".repeat(64)}`;
-  const p = panel(() => ({metadata: {id}}));
-  p.registration.onState(p.ctx.state, p.ctx);
-  p.add([new File(["sample"], "sample.txt")]); await flush();
-  byClass(p.root, "attachment-remove").click(); await flush();
-  p.ctx.state.storage = {drafts: {chat: [{id, kind: "document", name: "sample.txt", byte_length: 6, upload_tokens: ["upload-1"]}]}};
-  p.registration.onState(p.ctx.state, p.ctx);
-  assert.equal(allByClass(p.root, "attachment-chip").length, 0);
-});
-
-test("T18 delayed restore waits for a recent import and preserves its occurrence", async () => {
-  const id = `document_${"e".repeat(64)}`;
-  let complete;
-  const p = panel(() => new Promise(resolve => { complete = resolve; }));
-  p.registration.onState(p.ctx.state, p.ctx);
-  p.add([new File(["sample"], "sample.txt")]); await flush();
-  p.ctx.state.storage = {drafts: {chat: [{id, kind: "document", name: "sample.txt", byte_length: 6, upload_tokens: ["old-upload"]}]}};
-  p.registration.onState(p.ctx.state, p.ctx);
-  assert.equal(allByClass(p.root, "attachment-chip").length, 1);
-  complete({metadata: {id}}); await flush();
-  assert.equal(allByClass(p.root, "attachment-chip").length, 1);
-  assert.match(byClass(p.root, "attachment-chip").textContent, /sample.txt/);
-  assert.deepEqual(JSON.parse(JSON.stringify(p.registration.sendExtras(p.ctx).attachment_selections)), {[id]: ["upload-1"]});
-});
-
-for (const removed of [false, true]) test(`T15 preparation failure retains the image unless removed ${removed}`, async () => {
-  let complete;
-  const id = `attachment_${"f".repeat(64)}`;
-  const p = panel((_n, url) => url === "/api/attachments/precaption"
-    ? new Promise(resolve => {complete = resolve;}) : {metadata: {id}});
-  p.add([new File(["sample"], "sample.png", {type: "image/png"})]); await flush();
-  p.runTimer(1000); await flush();
-  const preparation = p.requests.find(request => request.url === "/api/attachments/precaption");
-  assert.ok(preparation);
-  if (removed) byClass(p.root, "attachment-remove").click();
-  complete({status: 500, message: "Préparation indisponible"}); await flush();
-  assert.equal(allByClass(p.root, "attachment-chip").length, removed ? 0 : 1);
-  assert.equal(p.registration.sendExtras(p.ctx).attachments.length, removed ? 0 : 1);
-  if (removed) assert.equal(preparation.options.signal.aborted, true);
-  else {
-    assert.equal(p.blocked(), false);
-    assert.equal(byClass(p.root, "attachment-retry").hidden, false);
-    assert.match(byClass(p.root, "attachment-status").textContent, /indisponible/);
-  }
-});
-
-test("T18 restored occurrence tokens are captured and released without removing a newer selection", async () => {
-  const p = panel();
-  const id = `document_${"f".repeat(64)}`;
-  p.ctx.state.storage = {drafts: {chat: [{id, kind: "document", name: "sample.txt", byte_length: 6, upload_tokens: ["persisted-upload"]}]}};
-  p.registration.onState(p.ctx.state, p.ctx);
-  assert.deepEqual(JSON.parse(JSON.stringify(p.registration.sendExtras(p.ctx).attachment_selections)), {[id]: ["persisted-upload"]});
-  byClass(p.root, "attachment-remove").click(); await flush();
-  const release = JSON.parse(p.requests[0].options.body);
-  assert.deepEqual(release.cancelled_uploads, ["persisted-upload"]);
-  assert.deepEqual(release.removed, []);
-});
-
-test("T18 retry after a delayed restore keeps the user's recent file and releases the older occurrence", async () => {
-  const id = `document_${"9".repeat(64)}`;
-  let uploads = 0;
-  const p = panel((_n, url) => {
-    if (url === "/api/storage/drafts") return {};
-    return ++uploads === 1 ? {error: new TypeError("offline")} : {metadata: {id}};
-  });
-  p.registration.onState(p.ctx.state, p.ctx);
-  p.add([new File(["sample"], "sample.txt")]); await flush();
-  p.ctx.state.storage = {drafts: {chat: [{id, kind: "document", name: "sample.txt", byte_length: 6, upload_tokens: ["old-upload"]}]}};
-  p.registration.onState(p.ctx.state, p.ctx);
-  byClass(allByClass(p.root, "attachment-chip")[0], "attachment-retry").click(); await flush();
-  assert.equal(allByClass(p.root, "attachment-chip").length, 1);
-  assert.match(byClass(p.root, "attachment-chip").textContent, /sample.txt/);
-  assert.deepEqual(JSON.parse(JSON.stringify(p.registration.sendExtras(p.ctx).attachment_selections)), {[id]: ["upload-1"]});
-  const release = p.requests.filter(request => request.url === "/api/storage/drafts").map(request => JSON.parse(request.options.body));
-  assert.ok(release.some(request => request.cancelled_uploads.includes("old-upload")));
-  assert.ok(release.every(request => !request.cancelled_uploads.includes("upload-1")));
-});
-
-test("T18 delayed disk restore preserves the file reselected after an explicit removal", async () => {
-  const id = `document_${"8".repeat(64)}`;
-  const p = panel(() => ({metadata: {id}}));
-  p.registration.onState(p.ctx.state, p.ctx);
-  p.add([new File(["sample"], "sample.txt")]); await flush();
-  byClass(p.root, "attachment-remove").click(); await flush();
-  p.add([new File(["sample"], "sample.txt")]); await flush();
-  p.ctx.state.storage = {drafts: {chat: [{id, kind: "document", name: "sample.txt", byte_length: 6, upload_tokens: ["upload-1"]}]}};
-  p.registration.onState(p.ctx.state, p.ctx);
-  assert.equal(allByClass(p.root, "attachment-chip").length, 1);
-  assert.match(byClass(p.root, "attachment-chip").textContent, /sample.txt/);
-  assert.deepEqual(JSON.parse(JSON.stringify(p.registration.sendExtras(p.ctx).attachment_selections)), {[id]: ["upload-2"]});
-});
-
-test("T15 a failed durable removal leaves a visible explanation", async () => {
-  const p = panel((_n, url) => url === "/api/storage/drafts" ? {error: new TypeError("offline")} : {});
-  p.add([new File(["sample"], "sample.txt")]); await flush();
-  byClass(p.root, "attachment-remove").click(); await flush();
-  assert.equal(allByClass(p.root, "attachment-chip").length, 0);
-  assert.match(p.notifications.at(-1), /brouillon reste conservé sur disque/);
-});
-
-test("T18 removing a restored legacy file captures its tokenless occurrence", async () => {
-  const p = panel();
-  const id = `document_${"7".repeat(64)}`;
-  p.ctx.state.storage = {drafts: {chat: [{id, kind: "document", name: "sample.txt", byte_length: 6, upload_tokens: []}]}};
-  p.registration.onState(p.ctx.state, p.ctx);
-  byClass(p.root, "attachment-remove").click(); await flush();
-  const removal = JSON.parse(p.requests[0].options.body);
-  assert.deepEqual(removal.removed, [id]);
-  assert.deepEqual(removal.removed_selections, {[id]: []});
 });

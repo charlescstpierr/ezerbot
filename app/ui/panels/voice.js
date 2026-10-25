@@ -107,7 +107,23 @@
     session = null; phase = "idle";
   }
   async function ensureConversation() {
-    return context.conversation || panels.ensureDraftConversation();
+    if (context.conversation) return;
+    const before = key(context);
+    const { conversation } = await panels.api("/api/conversations", { bot_id: context.bot?.id });
+    await panels.refresh();
+    if (key(context) !== before) throw new Error("La conversation a changé. Recommencez la dictée ici.");
+    const draft = panels.draft();
+    if (draft) {
+      localStorage.setItem(`grokbot.draft.${conversation.id}`, draft);
+      localStorage.setItem(`grokbot.draft.${conversation.id}.document`, JSON.stringify(panels.draftDocument()));
+    }
+    // The memo session follows its own new thread instead of being cancelled by it.
+    if (session) session.key = conversation.id;
+    if (!panels.openConversation(conversation.id)) throw new Error("Ouvrez la conversation créée pour joindre le mémo.");
+    try {
+      localStorage.removeItem("grokbot.draft.new");
+      localStorage.removeItem("grokbot.draft.new.document");
+    } catch { /* Draft is already handed off. */ }
   }
   async function start() {
     if (live() || window.EzerbotVoiceMode?.active() || window.EzerbotVoiceCall?.active()) return;
@@ -127,15 +143,15 @@
     try {
       // A thread is created only for a memo ready to keep, never for a refusal,
       // a cancellation or a failed transcription.
-      const conversation = await ensureConversation();
+      await ensureConversation();
       if (rev !== revision) return;
-      result.conversation_id = conversation.id;
-      const memo = await panels.api("/api/voice/memos", { conversation_id: conversation.id, upload_id: result.token, data: result.data, transcript: result.transcript, language: result.language || language(), words: Array.isArray(result.words) ? result.words : [] });
+      result.conversation_id = context.conversation.id;
+      const memo = await panels.api("/api/voice/memos", { conversation_id: context.conversation.id, upload_id: result.token, data: result.data, transcript: result.transcript, language: result.language || language(), words: Array.isArray(result.words) ? result.words : [] });
       if (rev !== revision) {
         await panels.api("/api/voice/remove", {id:memo.id,conversation_id:result.conversation_id}).catch(() => {});
         return;
       }
-      memo.conversation_id = conversation.id;
+      memo.conversation_id = context.conversation.id;
       localMemos.set(memo.id, memo);
       if (!memoItems.some((m) => m.id === memo.id)) memoItems.push(memo);
       pendingMemo = null;
@@ -290,22 +306,11 @@
         render();
       },
       blocked: () => live(),
-      transfer({ from, to }) { if (session?.key === from) session.key = to; },
-      discard() {
-        if (pendingMemo) panels.notifyDraft("Le mémo vocal n’a pas été conservé car ce brouillon n’est plus disponible. Enregistrez-le de nouveau dans une conversation active.");
-        else if (memoItems.length) panels.notifyDraft("Les mémos vocaux de ce brouillon sont indisponibles car cette conversation ne peut plus recevoir de message.");
-        reset(); memoItems = []; render();
-      },
+      discard() { reset(); memoItems = []; render(); },
       onSent({extras}) { for (const id of extras.attachments || []) { consumed.add(id); localMemos.delete(id); } memoItems = memoItems.filter((m) => !consumed.has(m.id)); if (!live() && !panels.draft().trim()) phase = "idle"; render(); },
     },
     onState(state, ctx) {
-      if (session && session.key !== key(ctx)) {
-        if (pendingMemo) panels.notifyDraft("Le mémo vocal n’a pas été conservé car la conversation a changé. Enregistrez-le de nouveau dans la conversation souhaitée.");
-        reset();
-      }
-      if (memoItems.length && context?.conversation?.id !== ctx.conversation?.id && !state.conversations?.some((item) => item.id === context?.conversation?.id)) {
-        panels.notifyDraft("Les mémos vocaux de ce brouillon sont indisponibles car leur conversation est introuvable. Ils seront récupérés si elle redevient accessible.");
-      }
+      if (session && session.key !== key(ctx)) reset();
       context = ctx;
       if (chosenOverride !== null && state.voice?.microphone === chosenOverride) chosenOverride = null;
       if (microphoneList && !microphonesLoaded) loadMicrophones(); else renderMicrophones();

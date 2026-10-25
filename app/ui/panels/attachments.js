@@ -19,17 +19,15 @@
   const buckets = new Map();
   const views = new WeakMap();
   let restored = false;
-  const selectionTokens = (item) => item.uploadToken ? [item.uploadToken] : item.uploadTokens || [];
   function release(group, items) {
     if (!group.conversation || !items.length) return;
-    const removed = items.filter((item) => !selectionTokens(item).length && item.id).map((item) => item.id);
-    const removed_selections = Object.fromEntries(removed.map((id) => [id, []]));
-    const cancelled_uploads = items.flatMap(selectionTokens);
+    const removed = items.filter((item) => !item.uploadToken && item.id).map((item) => item.id);
+    const cancelled_uploads = items.map((item) => item.uploadToken).filter(Boolean);
     // Keep a removal durable even when the user leaves during an upload. The
     // server cancellation token wins over a late upload completion.
     fetch("/api/storage/drafts", { method: "POST", keepalive: true,
       headers: { "Content-Type": "application/json", "X-Grokbot-Request": "local" },
-      body: JSON.stringify({ draft_id: group.conversation, attachments: [], removed, removed_selections, cancelled_uploads }) })
+      body: JSON.stringify({ draft_id: group.conversation, attachments: [], removed, cancelled_uploads }) })
       .then((response) => { if (!response.ok) throw new Error("Retrait interrompu"); })
       .catch(() => panels.notify("Le brouillon reste conservé sur disque. Réessayez de retirer le fichier."));
   }
@@ -51,7 +49,7 @@
   const key = (ctx) => ctx.conversation?.id || `new:${ctx.bot?.id || "grokbot"}`;
   function bucket(ctx = context) {
     const id = key(ctx);
-    if (!buckets.has(id)) buckets.set(id, { key: id, bot: ctx.bot?.id, conversation: ctx.conversation?.id, items: [], removedIds: new Set(), removedTokens: new Set(), uploads: new Set(), restorePending: [] });
+    if (!buckets.has(id)) buckets.set(id, { key: id, bot: ctx.bot?.id, conversation: ctx.conversation?.id, items: [] });
     const group = buckets.get(id);
     // Registration precedes the first /api/state response.
     group.bot ||= ctx.bot?.id;
@@ -67,8 +65,6 @@
     item.revision++;
   }
   function remove(group, item) {
-    if (item.id) group.removedIds.add(item.id);
-    selectionTokens(item).forEach((token) => group.removedTokens.add(token));
     discard(item);
     group.items = group.items.filter((entry) => entry !== item);
     release(group, [item]);
@@ -156,45 +152,41 @@
     return { chip, status, retry, metadata };
   }
 
+  // The API requires an existing conversation (wrapper review r1/r2). Create it
+  // on staging, not on send. Reuse the shell's saved-draft handoff when selecting
+  // it, so even edits made while creation/refresh is in flight are preserved.
   async function ensureConversation(group) {
-    if (group.conversation) return;
-    if (!group.creating) group.creating = panels.ensureDraftConversation();
-    try {
-      const conversation = await group.creating;
-      transfer({ from: group.key, to: conversation.id });
-    } finally { group.creating = null; changed(); }
-  }
-  function transfer({ from, to }) {
-    const group = buckets.get(from);
-    if (!group || from === to) return;
-    const destination = buckets.get(to);
-    if (destination && destination !== group) {
-      group.items.push(...destination.items);
-      destination.removedIds.forEach((id) => group.removedIds.add(id));
-      destination.removedTokens.forEach((token) => group.removedTokens.add(token));
-      group.restorePending.push(...destination.restorePending);
-    }
-    buckets.delete(from);
-    group.key = to;
-    group.conversation = to;
-    buckets.set(to, group);
-  }
-  function restoreFiles(group) {
-    if (group.uploads.size) return;
-    for (const file of group.restorePending.splice(0)) {
-      if (group.removedIds.has(file.id) || file.upload_tokens?.some((token) => group.removedTokens.has(token))) continue;
-      const current = group.items.find((item) => item.id === file.id);
-      if (current) {
-        const olderTokens = (file.upload_tokens || []).filter((token) => !selectionTokens(current).includes(token));
-        if (olderTokens.length) release(group, [{ id: file.id, uploadTokens: olderTokens }]);
-        continue;
+    if (group.conversation && group.key === group.conversation) return;
+    if (group.creating) return group.creating;
+    group.creating = (async () => {
+      if (!group.conversation) {
+        const { conversation } = await panels.api("/api/conversations", { bot_id: group.bot });
+        group.conversation = conversation.id;
+        buckets.set(conversation.id, group);
       }
-      const document = file.kind === "document";
-      group.items.push({ id: file.id, document, metadata: document ? file : null,
-        uploadTokens: file.upload_tokens || [],
-        file: { name: file.name || "Image jointe", size: file.byte_length },
-        preview: file.url || "", upload: "ready", caption: document ? "ready" : "waiting", revision: 0 });
-    }
+      await panels.refresh();
+      // Never pull someone back from a conversation/bot selected in the meantime.
+      if (active(group) && !context.conversation && context.bot?.id === group.bot) {
+        const draft = panels.draft();
+        // If storage is unavailable, do not switch and erase a nonempty draft.
+        if (draft) {
+          localStorage.setItem(`grokbot.draft.${group.conversation}`, draft);
+          localStorage.setItem(`grokbot.draft.${group.conversation}.document`, JSON.stringify(panels.draftDocument()));
+        }
+        if (!panels.openConversation(group.conversation)) throw new Error("Ouvrez la conversation créée pour préparer l’image.");
+        // The shell re-saved this handed-off draft under the new-chat key;
+        // ownership has moved to the conversation, so home must start empty.
+        try {
+          localStorage.removeItem("grokbot.draft.new");
+          localStorage.removeItem("grokbot.draft.new.document");
+        } catch { /* Already saved under the conversation key. */ }
+      }
+      if (buckets.get(group.key) === group) buckets.delete(group.key);
+      group.key = group.conversation;
+      buckets.set(group.key, group);
+    })();
+    try { await group.creating; }
+    finally { group.creating = null; changed(); }
   }
 
   function mime(file) {
@@ -229,7 +221,6 @@
   }
 
   async function upload(group, item) {
-    group.uploads.add(item);
     item.upload = "pending";
     item.retryable = true;
     item.error = null;
@@ -254,18 +245,11 @@
       const attachment = await response.json();
       if (!response.ok) throw new Error(attachment.error || "L’import du fichier a échoué.");
       if (!/^(?:attachment|document)_[0-9a-f]{64}$/.test(attachment.id)) throw new Error("Réponse d’import illisible.");
-      if (!present(group, item)) { group.removedIds.add(attachment.id); release(group, [{ ...item, id: attachment.id }]); return; }
-      const duplicate = group.items.find((other) => other !== item && other.id === attachment.id);
-      if (duplicate?.uploadToken) {
+      if (!present(group, item)) { release(group, [{ ...item, id: attachment.id }]); return; }
+      if (group.items.some((other) => other !== item && other.id === attachment.id)) {
         remove(group, item);
         panels.notify("Ce fichier est déjà joint.");
         return;
-      }
-      if (duplicate) {
-        discard(duplicate);
-        group.items = group.items.filter((other) => other !== duplicate);
-        const olderTokens = selectionTokens(duplicate).filter((token) => token !== item.uploadToken);
-        if (olderTokens.length) release(group, [{ id: attachment.id, uploadTokens: olderTokens }]);
       }
       item.id = attachment.id;
       if (item.document) item.metadata = attachment;
@@ -286,8 +270,6 @@
     } finally {
       clearTimeout(timeout);
       if (item.controller === controller) item.controller = null;
-      group.uploads.delete(item);
-      restoreFiles(group);
       changed();
     }
   }
@@ -430,17 +412,12 @@
         window.addEventListener("beforeunload", () => { for (const group of new Set(buckets.values())) group.items.forEach(discard); });
       },
       onFiles,
-      transfer,
       blocked: (ctx) => bucket(ctx).items.some((item) => item.upload !== "ready") || Boolean(documentBudgetError(bucket(ctx), ctx)),
       discard(ctx) {
         const group = buckets.get(key(ctx));
         if (!group?.items.length) return;
         release(group, group.items);
-        group.items.forEach((item) => {
-          if (item.id) group.removedIds.add(item.id);
-          selectionTokens(item).forEach((token) => group.removedTokens.add(token));
-          discard(item);
-        });
+        group.items.forEach(discard);
         group.items = [];
         render();
       },
@@ -452,13 +429,6 @@
         const sent = new Set(extras.attachments || []);
         group.items = group.items.filter((item) => {
           if (!sent.has(item.id)) return true;
-          if (extras.attachment_selections) {
-            const sentTokens = extras.attachment_selections[item.id];
-            const tokens = selectionTokens(item);
-            if (!sentTokens || sentTokens.length !== tokens.length || tokens.some((token) => !sentTokens.includes(token))) return true;
-          }
-          group.removedIds.add(item.id);
-          selectionTokens(item).forEach((token) => group.removedTokens.add(token));
           discard(item);
           return false;
         });
@@ -472,8 +442,13 @@
           const thread = state.conversations.find((entry) => entry.id === conversation);
           if (!thread) continue;
           const group = bucket({ conversation: thread, bot: { id: thread.bot_id } });
-          group.restorePending.push(...files);
-          restoreFiles(group);
+          for (const file of files) {
+            if (group.items.some((item) => item.id === file.id)) continue;
+            const document = file.kind === "document";
+            group.items.push({ id: file.id, document, metadata: document ? file : null,
+              file: { name: file.name || "Image jointe", size: file.byte_length },
+              preview: file.url || "", upload: "ready", caption: document ? "ready" : "waiting", revision: 0 });
+          }
         }
       }
       backoff(Number(state.attachments?.retry_after) || 0);
@@ -485,9 +460,6 @@
       }
     },
     wantsPolling: () => Boolean(context && bucket().items.some((item) => item.caption === "pending")),
-    sendExtras: (ctx) => {
-      const items = bucket(ctx).items.filter((item) => item.upload === "ready");
-      return { attachments: items.map((item) => item.id), attachment_selections: Object.fromEntries(items.map((item) => [item.id, selectionTokens(item).slice()])) };
-    },
+    sendExtras: (ctx) => ({ attachments: bucket(ctx).items.filter((item) => item.upload === "ready").map((item) => item.id) }),
   });
 })();

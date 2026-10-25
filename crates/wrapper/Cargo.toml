@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Application locale pour le moteur durable Grokbot"
 
+[features]
+test-support = []
+
 [[bin]]
 name = "grokbot-wrapper"
 path = "src/main.rs"
@@ -49,6 +52,8 @@ flate2 = "1"
 brotli = "8"
 
 [dev-dependencies]
+# Les intégrations compilent la bibliothèque sans cfg(test), même en release.
+grokbot-wrapper = { path = ".", features = ["test-support"] }
 # Décode les réponses Brotli servies, comme le ferait le navigateur.
 brotli = "8"
 grokbot-test-support = { workspace = true }

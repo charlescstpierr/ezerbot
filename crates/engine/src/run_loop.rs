@@ -141,7 +141,6 @@ pub trait RunServices {
 
 /// Final tool result of a call left waiting for a human decision. It must never
 /// let the model believe the action happened.
-const MAX_ECHOED_ARGUMENTS: usize = 1_000;
 pub const APPROVAL_PENDING_REASON: &str = "En attente d’approbation de Charles : rien n’a été exécuté et cette action n’est pas faite. Continuez tout ce qui ne dépend pas de cet appel, puis dites à la fin quelles actions attendent son accord. N’affirmez jamais qu’elle est faite.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1030,6 +1029,8 @@ fn execute_journaled_external(
         Ok(None)
     })
 }
+
+const MAX_ECHOED_ARGUMENTS: usize = 1_000;
 
 fn schema_failure_reason(errors: &[schema::SchemaError], arguments: &Value) -> String {
     let errors: Vec<_> = errors

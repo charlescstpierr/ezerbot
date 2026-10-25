@@ -415,8 +415,8 @@ mod tests {
             .set("COST_TEST", "Secret synthétique", "synthetic-ledger-281")
             .unwrap();
         read(&conn, |p| Ok(p.text("synthetic-ledger-281"))).unwrap();
-        conn.execute_batch("CREATE TABLE old_history(value TEXT)")
-            .unwrap();
+        grokbot_engine::store::migrate(&conn).unwrap();
+        conn.execute_batch("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) VALUES ('old','grokbot','old-thread','test','old',1,'finished','{}')").unwrap();
         let cost = || {
             let mut steps = 0;
             for sql in [READ_PATTERNS, COUNT_PATTERNS] {
@@ -429,11 +429,11 @@ mod tests {
             }
             steps
         };
-        conn.execute_batch("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<1000) INSERT INTO old_history SELECT 'noise' FROM n").unwrap();
+        conn.execute_batch("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<1000) INSERT INTO engine_run_events SELECT 'old',i,'text_delta','{}' FROM n").unwrap();
         let small = cost();
-        conn.execute_batch("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<9000) INSERT INTO old_history SELECT 'noise' FROM n").unwrap();
+        conn.execute_batch("WITH RECURSIVE n(i) AS (VALUES(1001) UNION ALL SELECT i+1 FROM n WHERE i<10000) INSERT INTO engine_run_events SELECT 'old',i,'text_delta','{}' FROM n").unwrap();
         let large = cost();
         assert_eq!(large, small, "the ledger queries must not scan run history");
-        eprintln!("VmStep disclosure ledger: 1000 old rows {small}; 10000 old rows {large}");
+        eprintln!("VmStep disclosure ledger: 1000 old events {small}; 10000 old events {large}");
     }
 }

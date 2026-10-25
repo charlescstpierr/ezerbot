@@ -271,9 +271,9 @@
         for (const item of states) viewState[item.name] = item.initial;
       }
     }
-    const previousTitle = detail && detail.title;
+    const titleChanged = !detail || detail.id !== page.id || detail.title !== page.title;
     detail = page;
-    if (document.activeElement !== shell.input || shell.input.value === previousTitle) shell.input.value = page.title || "";
+    if (titleChanged || document.activeElement !== shell.input) shell.input.value = page.title || "";
     // Un état identique (le fil se rafraîchit toutes les 200 ms pendant une réponse) ne reconstruit pas le DOM :
     // le focus clavier et la sélection de texte restent en place.
     if (changed || paintedSignature !== signature(page)) paintCanvas(page);

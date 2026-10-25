@@ -172,7 +172,7 @@ fn open(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
     let link = link(&app.connection, &id)?
         .ok_or_else(|| ApiError::new(500, "Le fil n’a pas pu être enregistré."))?;
     response["thread"] = link_json(&link);
-    Ok(response)
+    super::disclosure::state(&app.connection, &response)
 }
 
 fn link_json(link: &Link) -> Value {

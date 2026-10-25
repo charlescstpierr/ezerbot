@@ -1,0 +1,96 @@
+{
+  "head": "d7efa3577c1420931fbb6a057838253a1207b705",
+  "fixture": "Télémétrie synthétique 2000 tokens dans la seule base isolée, après preuve réelle 3 tokens.",
+  "captures": [
+    {
+      "file": "galet-reference-light-1140x780.png",
+      "head": "d7efa3577c1420931fbb6a057838253a1207b705",
+      "theme": "light",
+      "width": 1140,
+      "height": 780,
+      "view": "reference",
+      "action": "Paramètres Galet existants pour comparer couleurs, boutons et typographie"
+    },
+    {
+      "file": "liste-light-1140x780.png",
+      "head": "d7efa3577c1420931fbb6a057838253a1207b705",
+      "theme": "light",
+      "width": 1140,
+      "height": 780,
+      "view": "list",
+      "action": "Liste après sauvegarde, mesure de fixture et réouverture"
+    },
+    {
+      "file": "editeur-light-1140x780.png",
+      "head": "d7efa3577c1420931fbb6a057838253a1207b705",
+      "theme": "light",
+      "width": 1140,
+      "height": 780,
+      "view": "editor",
+      "action": "Éditeur rouvert sur 30 min, quota inconnu et moyenne de fixture 2000"
+    },
+    {
+      "file": "liste-light-820x560.png",
+      "head": "d7efa3577c1420931fbb6a057838253a1207b705",
+      "theme": "light",
+      "width": 820,
+      "height": 560,
+      "view": "list",
+      "action": "Liste après sauvegarde, mesure de fixture et réouverture"
+    },
+    {
+      "file": "editeur-light-820x560.png",
+      "head": "d7efa3577c1420931fbb6a057838253a1207b705",
+      "theme": "light",
+      "width": 820,
+      "height": 560,
+      "view": "editor",
+      "action": "Éditeur rouvert sur 30 min, quota inconnu et moyenne de fixture 2000"
+    },
+    {
+      "file": "galet-reference-dark-1140x780.png",
+      "head": "d7efa3577c1420931fbb6a057838253a1207b705",
+      "theme": "dark",
+      "width": 1140,
+      "height": 780,
+      "view": "reference",
+      "action": "Paramètres Galet existants pour comparer couleurs, boutons et typographie"
+    },
+    {
+      "file": "liste-dark-1140x780.png",
+      "head": "d7efa3577c1420931fbb6a057838253a1207b705",
+      "theme": "dark",
+      "width": 1140,
+      "height": 780,
+      "view": "list",
+      "action": "Liste après sauvegarde, mesure de fixture et réouverture"
+    },
+    {
+      "file": "editeur-dark-1140x780.png",
+      "head": "d7efa3577c1420931fbb6a057838253a1207b705",
+      "theme": "dark",
+      "width": 1140,
+      "height": 780,
+      "view": "editor",
+      "action": "Éditeur rouvert sur 30 min, quota inconnu et moyenne de fixture 2000"
+    },
+    {
+      "file": "liste-dark-820x560.png",
+      "head": "d7efa3577c1420931fbb6a057838253a1207b705",
+      "theme": "dark",
+      "width": 820,
+      "height": 560,
+      "view": "list",
+      "action": "Liste après sauvegarde, mesure de fixture et réouverture"
+    },
+    {
+      "file": "editeur-dark-820x560.png",
+      "head": "d7efa3577c1420931fbb6a057838253a1207b705",
+      "theme": "dark",
+      "width": 820,
+      "height": 560,
+      "view": "editor",
+      "action": "Éditeur rouvert sur 30 min, quota inconnu et moyenne de fixture 2000"
+    }
+  ]
+}

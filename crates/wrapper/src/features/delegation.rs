@@ -2009,15 +2009,20 @@ fn context_checked(ctx: &Context<'_>, request: &ContextRequest) -> Result<Vec<Co
 }
 
 pub fn state(ctx: &Context<'_>) -> Value {
+    let cards: Vec<_> = state_edges(ctx.connection)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|edge| Some((card_edge(ctx.connection, &edge).ok()?, edge)))
+        .collect();
+    // Read once all the cards are loaded: never older than the read per card it replaces (#328).
     let Ok(vault) = app_patterns(&super::forms::vault_path(ctx)) else {
         return json!({"error":"Delegation state is unavailable"});
     };
     let mut counts = serde_json::Map::new();
-    let delegations: Vec<_> = state_edges(ctx.connection)
-        .unwrap_or_default()
+    let delegations: Vec<_> = cards
         .into_iter()
-        .filter_map(|edge| {
-            let mut value = vault.value(&card_edge(ctx.connection, &edge).ok()?).ok()?;
+        .filter_map(|(card, edge)| {
+            let mut value = vault.value(&card).ok()?;
             attach_references(ctx.connection, &vault, &edge, &mut value);
             if matches!(
                 edge.status,
@@ -2107,8 +2112,9 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         return None;
     }
     let edge = graph::get(ctx.connection, id).ok()??;
+    let card = card_edge(ctx.connection, &edge).ok()?;
     let vault = app_patterns(&super::forms::vault_path(ctx)).ok()?;
-    let mut payload = vault.value(&card_edge(ctx.connection, &edge).ok()?).ok()?;
+    let mut payload = vault.value(&card).ok()?;
     attach_references(ctx.connection, &vault, &edge, &mut payload);
     if ctx.conversation_id != payload["parent_conversation_id"].as_str() {
         return None;

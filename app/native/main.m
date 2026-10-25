@@ -901,7 +901,7 @@ static void shell_task_reap(const ShellChild *child) {
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        if (argc == 2 && strcmp(argv[1], "--page-snapshot") == 0) return EZPageSnapshotMain();
+        if (argc > 1 && strcmp(argv[1], "--page-snapshot") == 0) return argc == 2 ? EZPageSnapshotMain() : 2;
         BOOL inspecting = argc > 1 && strcmp(argv[1], "--inspect-private") == 0;
         NSString *inspectionHome = inspecting ? EzerbotInspectionHome(argc) : nil;
         if (inspecting && !inspectionHome) return 2;

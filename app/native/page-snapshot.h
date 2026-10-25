@@ -112,7 +112,7 @@ typedef NS_ENUM(NSUInteger, EZPageSnapshotState) { EZPageInitial, EZPageLoading,
 static NSDictionary *EZPageSnapshotRender(NSDictionary *request, NSDate *deadline) {
     BOOL html = [request[@"html"] isKindOfClass:NSString.class];
     BOOL url = [request[@"url"] isKindOfClass:NSString.class];
-    if (![@[@"light", @"dark"] containsObject:request[@"theme"]] || ![request[@"width"] isEqual:@1280] || ![request[@"height"] isEqual:@800] || html == url)
+    if (![@[@"light", @"dark"] containsObject:request[@"theme"]] || ![request[@"width"] isEqual:@1280] || ![request[@"height"] isEqual:@800] || html == url || (request[@"html"] != nil && !html) || (request[@"url"] != nil && !url))
         return @{@"error":@"La photo attend un thème, 1280 par 800 et une seule Page ou adresse."};
     NSURL *target = url ? [NSURL URLWithString:request[@"url"]] : nil;
     if (url && !EZPageLocalURL(target)) return @{@"error":@"Seule une adresse locale sans identifiants peut être photographiée."};

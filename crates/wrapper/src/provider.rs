@@ -34,9 +34,11 @@ const APP_NAME: &str = "Ezerbot";
 const CALLBACK_PORTS: std::ops::RangeInclusive<u16> = 1455..=1465;
 const CALLBACK_PATH: &str = "/auth/callback";
 const SIGN_IN_WINDOW: Duration = Duration::from_secs(300);
-/// Borne de l'attente des fils de fond dans les tests (jamais compilée dans la version livrée).
+/// Borne de l'attente des fils de fond (jamais compilée dans la version livrée). Un tour en vol à
+/// la destruction de l'`App` peut légitimement finir une commande au premier plan, qui dure
+/// 120 s au plus : la borne laisse cette durée et une marge, puis l'attente échoue.
 #[cfg(debug_assertions)]
-const BACKGROUND_WAIT_LIMIT: Duration = Duration::from_secs(60);
+const BACKGROUND_WAIT_LIMIT: Duration = Duration::from_secs(150);
 const REFRESH_MARGIN: u64 = 300;
 /// Attente courte : un flock tenu par un processus vivant n’est jamais volé.
 const REFRESH_LOCK_WAIT: Duration = Duration::from_millis(400);

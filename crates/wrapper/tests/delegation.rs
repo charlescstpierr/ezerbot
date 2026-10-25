@@ -4208,6 +4208,52 @@ mod captures {
             .unwrap();
         assert!(!stored.contains(secret), "{stored}");
     }
+
+    #[test]
+    fn forgetting_a_fact_also_clears_it_from_the_summary_the_card_shows() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "oubli-resume", args("child"));
+        let secret = "Allergique aux kumquats mauves.";
+        f.events(vec![
+            call("learn", "remember", json!({"text":secret,"sensitive":true})),
+            call(
+                "finish-child",
+                "complete_task",
+                json!({"summary":format!("fini. Retenu : {secret}")}),
+            ),
+            completed(),
+        ]);
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        assert!(card(&mut f, &edge)["status"]["result"]
+            .as_str()
+            .unwrap()
+            .contains(secret));
+        let fact = grokbot_memory::facts::list_active(&f.db(), "child").unwrap()[0]
+            .fact_id
+            .clone();
+        f.post(
+            "/api/memory/forget",
+            json!({"bot_id":"child","fact_id":fact}),
+        );
+        let result = card(&mut f, &edge)["status"]["result"].clone();
+        assert!(result.as_str().unwrap().starts_with("fini."), "{result}");
+        assert!(!result.as_str().unwrap().contains(secret), "{result}");
+        let state = f.app.api("GET", "/api/state", b"").unwrap().to_string();
+        assert!(!state.contains(secret), "/api/state still shows the fact");
+        let stored: String = f
+            .db()
+            .query_row(
+                "SELECT status FROM delegation_graph WHERE id=?1",
+                [&edge.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains(secret), "{stored}");
+    }
 }
 
 /// What the provider received since `from`, in the instructions of every call.

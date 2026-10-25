@@ -606,6 +606,37 @@ fn obsolete_retry_rows_are_purged_for_deleted_conversations_and_unlinked_message
 }
 
 #[test]
+fn deleting_a_thread_erases_its_images_but_keeps_one_another_thread_shows() {
+    let mut fixture = Fixture::new();
+    fixture.conversation("deleted");
+    fixture.conversation("kept");
+    let own = fixture.upload(PNG);
+    let shared = fixture.upload(&[PNG, b" shared"].concat());
+    let id = |image: &Value| image["id"].as_str().unwrap().to_owned();
+    fixture.send("deleted", "image", "look", &[id(&own), id(&shared)]);
+    fixture.send("kept", "image", "look", &[id(&shared)]);
+    let blobs = fixture.directory.join("app.sqlite.attachments");
+    let blob = |image: &Value| blobs.join(id(image).strip_prefix("attachment_").unwrap());
+    assert!(blob(&own).exists());
+    fixture.post("/api/conversations/delete", json!({"id": "deleted"}));
+    let url = |image: &Value| image["url"].as_str().unwrap().to_owned();
+    assert_eq!(
+        fixture
+            .app
+            .api_response("GET", &url(&own), &[])
+            .unwrap_err()
+            .status,
+        404
+    );
+    assert!(!blob(&own).exists(), "the deleted thread's file is erased");
+    assert!(staging::for_message(&fixture.db(), "deleted", "image")
+        .unwrap()
+        .is_empty());
+    assert!(fixture.app.api_response("GET", &url(&shared), &[]).is_ok());
+    assert!(blob(&shared).exists(), "another thread still shows it");
+}
+
+#[test]
 fn legacy_retry_rows_gain_attempts_without_losing_existing_budgets() {
     let mut fixture = Fixture::new();
     fixture

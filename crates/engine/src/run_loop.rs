@@ -7,11 +7,12 @@
 //! main-conversation user decisions and persisted allow/auto-review (REA
 //! `goal-permissions-secrets.md` PS05–PS06). No routine-specific gate is added here.
 use self::with_run_events as commit;
+use crate::contracts::ToolCode;
 use crate::contracts::{
     ApprovalCheck, AuthorizedBy, CaptureRef, ContextEstimate, Error, HistoryItem, ModelEvent,
     ModelGateway, ModelRequest, Result, Role, RunEvent, RunEventKind, RunKind, SuspendCause,
-    TaskStatus, ToolCall, ToolCode, ToolItem, ToolOutcome, ToolSpec, TurnEnd,
-    MAX_CAPTION_CHARACTERS, MAX_CAPTURES,
+    TaskStatus, ToolCall, ToolItem, ToolOutcome, ToolSpec, TurnEnd, MAX_CAPTION_CHARACTERS,
+    MAX_CAPTURES,
 };
 use crate::model::{self, invalid, Run, RunStatus};
 use crate::store;
@@ -156,33 +157,14 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Départ d'un appel d'outil. Un appel repris après une approbation est chronométré
-/// à la reprise : la durée n'inclut jamais l'attente d'un humain.
-#[derive(Clone, Copy)]
-struct CallClock {
-    started_ms: i64,
-    at: Instant,
-}
-impl CallClock {
-    fn start() -> Self {
-        Self {
-            started_ms: now_ms(),
-            at: Instant::now(),
-        }
-    }
-}
-
-/// Payload d'un `ToolResult`. Un appel incertain n'a pas été exécuté cette fois : pas de durée.
-fn tool_result(
-    call_id: &str,
-    outcome: &ToolOutcome,
-    code: ToolCode,
-    clock: Option<CallClock>,
-) -> Value {
-    let mut payload = json!({"call_id": call_id, "outcome": outcome, "code": code});
-    if let Some(clock) = clock.filter(|_| code != ToolCode::Uncertain) {
-        payload["started_ms"] = json!(clock.started_ms);
-        payload["elapsed_ms"] = json!(clock.at.elapsed().as_millis() as u64);
+/// Code fixe et durée d'un `ToolResult`, pour le journal des tours. Sans `started`, ou pour un
+/// appel incertain, rien n'a été exécuté cette fois : pas de durée.
+fn stamp(mut payload: Value, code: ToolCode, started: Option<Instant>) -> Value {
+    payload["code"] = json!(code);
+    if let Some(started) = started.filter(|_| code != ToolCode::Uncertain) {
+        let elapsed = started.elapsed().as_millis() as u64;
+        payload["started_ms"] = json!(now_ms() - elapsed as i64);
+        payload["elapsed_ms"] = json!(elapsed);
     }
     payload
 }
@@ -431,25 +413,23 @@ fn settle_pending(conn: &Connection, run_id: &str, reason: &str) -> Result<()> {
             rusqlite::params![run_id, call.call_id],
             |r| r.get(0),
         )?;
-        let (code, outcome) = if let Some((Some(value), _)) = &stored {
-            let outcome = serde_json::from_str::<ToolOutcome>(value)?;
-            (ToolCode::of(&outcome), outcome)
+        let outcome = if let Some((Some(value), _)) = &stored {
+            serde_json::from_str::<ToolOutcome>(value)?
         } else if stored.is_some() || mcp_admitted {
-            (
-                ToolCode::Uncertain,
-                ToolOutcome::Failed {
-                    reason: "Appel externe interrompu ; son effet peut déjà avoir eu lieu.".into(),
-                },
-            )
+            ToolOutcome::Failed {
+                reason: "Appel externe interrompu ; son effet peut déjà avoir eu lieu.".into(),
+            }
         } else {
-            (
-                ToolCode::NotExecuted,
-                ToolOutcome::Failed {
-                    reason: format!("not executed: {reason}"),
-                },
-            )
+            ToolOutcome::Failed {
+                reason: format!("not executed: {reason}"),
+            }
         };
-        let mut payload = tool_result(&call.call_id, &outcome, code, None);
+        let code = match &stored {
+            Some((Some(_), _)) => ToolCode::of(&outcome),
+            _ if stored.is_some() || mcp_admitted => ToolCode::Uncertain,
+            _ => ToolCode::NotExecuted,
+        };
+        let mut payload = json!({"call_id": call.call_id, "outcome": outcome, "code": code});
         if let Some((_, Some(by))) = &stored {
             payload["authorized_by"] = serde_json::from_str(by)?;
         }
@@ -776,8 +756,8 @@ fn execute_external(
     run_id: &str,
     call: &ToolCall,
     protected: Option<bool>,
-    clock: CallClock,
 ) -> Result<Option<RunProgress>> {
+    let started = Some(Instant::now());
     enum Start {
         Complete(Option<RunProgress>),
         Admitted(Box<Run>, Option<AuthorizedBy>),
@@ -799,11 +779,12 @@ fn execute_external(
             |r| r.get(0),
         )?;
         if prior {
-            let outcome = ToolOutcome::Failed {reason:"L’appel externe a été interrompu après son autorisation. Son effet est incertain ; vérifiez-le avant de le relancer.".into()};
-            let mut payload = tool_result(&call.call_id, &outcome, ToolCode::Uncertain, None);
-            payload["authorized_by"] =
-                serde_json::to_value(external_authorization(conn, run_id, call)?)?;
-            store::append_event(conn, run_id, RunEventKind::ToolResult, &payload)?;
+            store::append_event(
+                conn,
+                run_id,
+                RunEventKind::ToolResult,
+                &json!({"call_id":call.call_id,"code":ToolCode::Uncertain,"authorized_by":external_authorization(conn,run_id,call)?,"outcome":ToolOutcome::Failed {reason:"L’appel externe a été interrompu après son autorisation. Son effet est incertain ; vérifiez-le avant de le relancer.".into()}}),
+            )?;
             return Ok(Start::Complete(None));
         }
         let Some(protected) = protected else {
@@ -815,9 +796,16 @@ fn execute_external(
             } else {
                 format!("unknown tool {}", call.name)
             };
-            let outcome = ToolOutcome::Failed { reason };
-            let payload = tool_result(&call.call_id, &outcome, ToolCode::UnknownTool, Some(clock));
-            store::append_event(conn, run_id, RunEventKind::ToolResult, &payload)?;
+            store::append_event(
+                conn,
+                run_id,
+                RunEventKind::ToolResult,
+                &stamp(
+                    json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason}}),
+                    ToolCode::UnknownTool,
+                    started,
+                ),
+            )?;
             return Ok(Start::Complete(None));
         };
         let by = if protected {
@@ -832,16 +820,16 @@ fn execute_external(
                         let mut usage = store::budget_usage(conn, run_id, now_ms())?;
                         usage.tool_calls += 1;
                         store::save_budget_usage(conn, run_id, &usage)?;
-                        let outcome = ToolOutcome::Failed {
-                            reason: APPROVAL_PENDING_REASON.into(),
-                        };
-                        let payload = tool_result(
-                            &call.call_id,
-                            &outcome,
-                            ToolCode::ApprovalPending,
-                            Some(clock),
-                        );
-                        store::append_event(conn, run_id, RunEventKind::ToolResult, &payload)?;
+                        store::append_event(
+                            conn,
+                            run_id,
+                            RunEventKind::ToolResult,
+                            &stamp(
+                                json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason:APPROVAL_PENDING_REASON.into()}}),
+                                ToolCode::ApprovalPending,
+                                started,
+                            ),
+                        )?;
                         return Ok(Start::Complete(None));
                     }
                     suspend(conn, &mut run, call, &cause, true)?;
@@ -851,14 +839,16 @@ fn execute_external(
                     let mut usage = store::budget_usage(conn, run_id, now_ms())?;
                     usage.tool_calls += 1;
                     store::save_budget_usage(conn, run_id, &usage)?;
-                    let outcome = ToolOutcome::Failed { reason };
-                    let payload = tool_result(
-                        &call.call_id,
-                        &outcome,
-                        ToolCode::ApprovalDenied,
-                        Some(clock),
-                    );
-                    store::append_event(conn, run_id, RunEventKind::ToolResult, &payload)?;
+                    store::append_event(
+                        conn,
+                        run_id,
+                        RunEventKind::ToolResult,
+                        &stamp(
+                            json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason}}),
+                            ToolCode::ApprovalDenied,
+                            started,
+                        ),
+                    )?;
                     return Ok(Start::Complete(None));
                 }
                 ApprovalCheck::Authorized { by } => Some(by),
@@ -912,10 +902,16 @@ fn execute_external(
             .iter()
             .any(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == call.call_id)
         {
-            let mut payload =
-                tool_result(&call.call_id, &outcome, ToolCode::of(&outcome), Some(clock));
-            payload["authorized_by"] = serde_json::to_value(&by)?;
-            store::append_event(conn, run_id, RunEventKind::ToolResult, &payload)?;
+            store::append_event(
+                conn,
+                run_id,
+                RunEventKind::ToolResult,
+                &stamp(
+                    json!({"call_id":call.call_id,"outcome":outcome,"authorized_by":by}),
+                    ToolCode::of(&outcome),
+                    started,
+                ),
+            )?;
         }
         Ok(None)
     })
@@ -929,17 +925,19 @@ fn execute_journaled_external(
     services: &mut dyn RunServices,
     run_id: &str,
     call: &ToolCall,
-    clock: CallClock,
 ) -> Result<Option<RunProgress>> {
+    let started = Some(Instant::now());
     enum Admission {
         Run,
-        Result(ToolCode, ToolOutcome),
-        /// Already settled before a restart: not run now, so no duration.
-        Recovered(ToolCode, ToolOutcome),
+        Result(ToolOutcome),
         Wait(RunProgress),
     }
     let specs = tool_specs(services, &store::required(conn, run_id)?);
+    // Code d'un refus décidé à l'admission (sinon il se déduit de l'issue de l'appel) ; un appel
+    // déjà réglé avant un redémarrage n'est pas exécuté cette fois, donc sans durée.
+    let (mut code, mut recovered) = (None, false);
     let admission = commit(conn, services, run_id, |conn, services| {
+        (code, recovered) = (None, false);
         let mut run = store::required(conn, run_id)?;
         if run.status != RunStatus::Running || services.is_cancelled(run_id) {
             return Err(invalid("run stopped before external admission"));
@@ -952,32 +950,23 @@ fn execute_journaled_external(
             )
             .optional()?;
         if let Some(outcome) = existing {
-            return Ok(match outcome {
-                Some(value) => {
-                    let outcome: ToolOutcome = serde_json::from_str(&value)?;
-                    Admission::Recovered(ToolCode::of(&outcome), outcome)
-                }
-                None => Admission::Result(ToolCode::Uncertain, ToolOutcome::Failed { reason: "Résultat inconnu après interruption. Action non relancée ; vérifiez son effet avant de réessayer.".into() }),
-            });
+            (code, recovered) = (outcome.is_none().then_some(ToolCode::Uncertain), true);
+            return Ok(Admission::Result(match outcome {
+                Some(value) => serde_json::from_str(&value)?,
+                None => ToolOutcome::Failed { reason: "Résultat inconnu après interruption. Action non relancée ; vérifiez son effet avant de réessayer.".into() },
+            }));
         }
         let spec = specs.iter().find(|s| s.name == call.name);
         if !call.arguments.is_object() || spec.is_none() {
-            let code = if spec.is_none() {
-                ToolCode::UnknownTool
-            } else {
-                ToolCode::InvalidArguments
-            };
-            return Ok(Admission::Result(
-                code,
-                ToolOutcome::Failed {
-                    reason: if spec.is_none() {
-                        services.external_unavailable_reason(&run, call)
-                    } else {
-                        None
-                    }
-                    .unwrap_or_else(|| "Outil ou arguments invalides.".into()),
-                },
-            ));
+            code = Some(spec.map_or(ToolCode::UnknownTool, |_| ToolCode::InvalidArguments));
+            return Ok(Admission::Result(ToolOutcome::Failed {
+                reason: if spec.is_none() {
+                    services.external_unavailable_reason(&run, call)
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| "Outil ou arguments invalides.".into()),
+            }));
         }
         let mut by = None;
         if spec.is_some_and(|s| s.requires_approval) {
@@ -1001,16 +990,15 @@ fn execute_journaled_external(
                             "INSERT INTO engine_external_tools(run_id,call_id,authorized_by,outcome) VALUES (?1,?2,NULL,?3)",
                             rusqlite::params![run_id, call.call_id, serde_json::to_string(&outcome)?],
                         )?;
-                        return Ok(Admission::Result(ToolCode::ApprovalPending, outcome));
+                        code = Some(ToolCode::ApprovalPending);
+                        return Ok(Admission::Result(outcome));
                     }
                     suspend(conn, &mut run, call, &cause, true)?;
                     return Ok(Admission::Wait(RunProgress::Suspended(cause)));
                 }
                 ApprovalCheck::Denied { reason } => {
-                    return Ok(Admission::Result(
-                        ToolCode::ApprovalDenied,
-                        ToolOutcome::Failed { reason },
-                    ))
+                    code = Some(ToolCode::ApprovalDenied);
+                    return Ok(Admission::Result(ToolOutcome::Failed { reason }));
                 }
                 ApprovalCheck::Authorized { by: authority } => by = Some(authority),
             }
@@ -1031,10 +1019,9 @@ fn execute_journaled_external(
         )?;
         Ok(Admission::Run)
     })?;
-    let (code, outcome, clock) = match admission {
+    let outcome = match admission {
         Admission::Wait(progress) => return Ok(Some(progress)),
-        Admission::Result(code, outcome) => (code, outcome, Some(clock)),
-        Admission::Recovered(code, outcome) => (code, outcome, None),
+        Admission::Result(outcome) => outcome,
         Admission::Run => {
             let run = store::required(conn, run_id)?;
             if services.is_cancelled(run_id)
@@ -1049,10 +1036,11 @@ fn execute_journaled_external(
                 })?;
                 return Ok(None);
             }
-            let outcome = services.call_journaled_external_tool(&run, call);
-            (ToolCode::of(&outcome), outcome, Some(clock))
+            services.call_journaled_external_tool(&run, call)
         }
     };
+    let code = code.unwrap_or_else(|| ToolCode::of(&outcome));
+    let started = started.filter(|_| !recovered);
     commit(conn, services, run_id, |conn, _| {
         conn.execute(
             "UPDATE engine_external_tools SET outcome=?3 WHERE run_id=?1 AND call_id=?2",
@@ -1079,7 +1067,8 @@ fn execute_journaled_external(
             usage.tool_calls += 1;
             store::save_budget_usage(conn, run_id, &usage)?;
         }
-        let mut payload = tool_result(&call.call_id, &outcome, code, clock);
+        let mut payload = json!({"call_id":call.call_id,"outcome":outcome});
+        payload = stamp(payload, code, started);
         if let Some(by) = by {
             payload["authorized_by"] = serde_json::from_str(&by)?;
         }
@@ -1094,9 +1083,8 @@ fn execute(
     run_id: &str,
     call: &ToolCall,
 ) -> Result<Option<RunProgress>> {
-    let clock = CallClock::start();
     if services.is_journaled_external_tool(call) {
-        return execute_journaled_external(conn, services, run_id, call, clock);
+        return execute_journaled_external(conn, services, run_id, call);
     }
     let specs = tool_specs(services, &store::required(conn, run_id)?);
     if call.arguments.is_object() && services.is_external_tool(call) {
@@ -1111,9 +1099,9 @@ fn execute(
                 .iter()
                 .find(|s| s.name == call.name)
                 .map(|s| s.requires_approval),
-            clock,
         );
     }
+    let started = Some(Instant::now());
     commit(conn, services, run_id, |conn, services| {
         let mut run = store::required(conn, run_id)?;
         if run.status != RunStatus::Running || services.is_cancelled(run_id) {
@@ -1164,60 +1152,40 @@ fn execute(
         let mut usage = store::budget_usage(conn, run_id, now_ms())?;
         usage.tool_calls += 1;
         store::save_budget_usage(conn, run_id, &usage)?;
-        let (code, outcome) = if !valid_arguments {
-            (
-                if spec.is_some() {
-                    ToolCode::InvalidArguments
+        let denied = approval.is_some();
+        let follow_up = call.name == "complete_task" && pending_input(conn, run_id)?;
+        let outcome = if !valid_arguments {
+            ToolOutcome::Failed {
+                reason: if call.name.starts_with("mcp_") {
+                    "Arguments MCP invalides : un objet JSON est requis.".into()
                 } else {
-                    ToolCode::UnknownTool
+                    "invalid arguments".into()
                 },
-                ToolOutcome::Failed {
-                    reason: if call.name.starts_with("mcp_") {
-                        "Arguments MCP invalides : un objet JSON est requis.".into()
-                    } else {
-                        "invalid arguments".into()
-                    },
-                },
-            )
+            }
         } else if waiting {
-            (
-                ToolCode::ApprovalPending,
-                ToolOutcome::Failed {
-                    reason: APPROVAL_PENDING_REASON.into(),
-                },
-            )
+            ToolOutcome::Failed {
+                reason: APPROVAL_PENDING_REASON.into(),
+            }
         } else if let Some(reason) = approval {
-            (
-                ToolCode::ApprovalDenied,
-                services.approval_denied(conn, &run, call, reason)?,
-            )
+            services.approval_denied(conn, &run, call, reason)?
         } else if spec.is_none() {
-            (
-                ToolCode::UnknownTool,
-                ToolOutcome::Failed {
-                    reason: if call.name.starts_with("mcp_") {
-                        "Outil MCP inconnu ou connecteur désactivé.".into()
-                    } else {
-                        format!("unknown tool {}", call.name)
-                    },
+            ToolOutcome::Failed {
+                reason: if call.name.starts_with("mcp_") {
+                    "Outil MCP inconnu ou connecteur désactivé.".into()
+                } else {
+                    format!("unknown tool {}", call.name)
                 },
-            )
-        } else if call.name == "complete_task" && pending_input(conn, run_id)? {
-            (
-                ToolCode::FollowUpPending,
-                ToolOutcome::Failed {
-                    reason:
-                        "Un suivi utilisateur vient d’arriver. Lisez-le avant de terminer la tâche."
-                            .into(),
-                },
-            )
+            }
+        } else if follow_up {
+            ToolOutcome::Failed {
+                reason:
+                    "Un suivi utilisateur vient d’arriver. Lisez-le avant de terminer la tâche."
+                        .into(),
+            }
+        } else if matches!(call.name.as_str(), "begin_task" | "complete_task") {
+            builtin(conn, &*services, &mut run, call)?
         } else {
-            let outcome = if matches!(call.name.as_str(), "begin_task" | "complete_task") {
-                builtin(conn, &*services, &mut run, call)?
-            } else {
-                services.call_tool(conn, &run, call)?
-            };
-            (ToolCode::of(&outcome), outcome)
+            services.call_tool(conn, &run, call)?
         };
         if services.is_cancelled(run_id)
             || store::required(conn, run_id)?.status != RunStatus::Running
@@ -1225,7 +1193,21 @@ fn execute(
             // Roll back internal effects, budget reservation and approval consumption.
             return Err(invalid("run stopped during tool execution"));
         }
-        let mut payload = tool_result(&call.call_id, &outcome, code, Some(clock));
+        let code = if spec.is_none() {
+            ToolCode::UnknownTool
+        } else if !valid_arguments {
+            ToolCode::InvalidArguments
+        } else if waiting {
+            ToolCode::ApprovalPending
+        } else if denied {
+            ToolCode::ApprovalDenied
+        } else if follow_up {
+            ToolCode::FollowUpPending
+        } else {
+            ToolCode::of(&outcome)
+        };
+        let mut payload = json!({"call_id": call.call_id, "outcome": outcome});
+        payload = stamp(payload, code, started);
         if let Some(by) = authorized_by {
             payload["authorized_by"] = serde_json::to_value(by)?;
         }

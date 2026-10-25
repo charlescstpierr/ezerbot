@@ -34,6 +34,9 @@ const APP_NAME: &str = "Ezerbot";
 const CALLBACK_PORTS: std::ops::RangeInclusive<u16> = 1455..=1465;
 const CALLBACK_PATH: &str = "/auth/callback";
 const SIGN_IN_WINDOW: Duration = Duration::from_secs(300);
+/// Borne de l'attente des fils de fond dans les tests (jamais compilée dans la version livrée).
+#[cfg(debug_assertions)]
+const BACKGROUND_WAIT_LIMIT: Duration = Duration::from_secs(60);
 const REFRESH_MARGIN: u64 = 300;
 /// Attente courte : un flock tenu par un processus vivant n’est jamais volé.
 const REFRESH_LOCK_WAIT: Duration = Duration::from_millis(400);
@@ -366,6 +369,11 @@ struct Inner {
     catalog: Mutex<Catalog>,
     quota: Mutex<codex::UsageCache>,
     mcp: crate::mcp::Manager,
+    /// Fils réseau de fond (sonde de connexion, catalogue, quota, lecture d'un tour), gardés
+    /// seulement pour qu'un test attende leur fin. Compilé dans les versions de développement et
+    /// de test uniquement : la version livrée n'a ni ce champ ni cette attente.
+    #[cfg(debug_assertions)]
+    background: Mutex<Vec<thread::JoinHandle<()>>>,
 }
 
 #[derive(Clone)]
@@ -853,7 +861,60 @@ impl Session {
                 catalog: Mutex::new(Catalog::default()),
                 quota: Mutex::new(codex::UsageCache::default()),
                 mcp: crate::mcp::Manager::default(),
+                #[cfg(debug_assertions)]
+                background: Mutex::new(Vec::new()),
             }),
+        }
+    }
+
+    /// Lance un fil réseau de fond détaché, comme `thread::spawn` : l'appelant n'attend jamais
+    /// sa fin. En développement et en test, la poignée est retenue pour `wait_background`.
+    fn spawn_background(&self, work: impl FnOnce() + Send + 'static) {
+        let handle = thread::spawn(work);
+        #[cfg(debug_assertions)]
+        {
+            let mut handles = lock(&self.inner.background);
+            handles.retain(|handle| !handle.is_finished());
+            handles.push(handle);
+        }
+        #[cfg(not(debug_assertions))]
+        drop(handle);
+    }
+
+    /// Attend la fin de tous les fils de fond lancés par cette session, y compris ceux que la fin
+    /// d'un autre fil vient de lancer (le fil OAuth de connexion relance un catalogue). Réservé
+    /// aux tests, qui veulent supprimer leur dossier seulement quand plus rien ne peut y écrire ;
+    /// jamais appelé par le produit. L'attente est bornée : un fil qui ne finit pas est une fuite,
+    /// elle échoue avec un message au lieu de bloquer le test.
+    #[cfg(debug_assertions)]
+    pub(crate) fn wait_background(&self) -> Result<(), String> {
+        self.wait_background_within(BACKGROUND_WAIT_LIMIT)
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn wait_background_within(&self, limit: Duration) -> Result<(), String> {
+        let current = thread::current().id();
+        let deadline = Instant::now() + limit;
+        loop {
+            let pending: Vec<_> = std::mem::take(&mut *lock(&self.inner.background))
+                .into_iter()
+                .filter(|handle| handle.thread().id() != current)
+                .collect();
+            if pending.is_empty() {
+                return Ok(());
+            }
+            for handle in pending {
+                while !handle.is_finished() {
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "un fil de fond du fournisseur n'a pas fini après {limit:?} : \
+                             il écrirait encore dans le dossier du test"
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                let _ = handle.join();
+            }
         }
     }
 
@@ -1187,7 +1248,8 @@ impl Session {
             signin.cancel = Some(cancel.clone());
         }
         let provider = self.clone();
-        thread::spawn(move || provider.await_callback(server, attempt, cancel));
+        // Suivi comme les autres fils de fond : à la fin il relance le catalogue des modèles.
+        self.spawn_background(move || provider.await_callback(server, attempt, cancel));
         if self.inner.open_browser {
             // L'adresse peut contenir `id_token_hint` : elle va au navigateur, jamais dans un journal.
             let _ = std::process::Command::new("/usr/bin/open")
@@ -1657,7 +1719,7 @@ impl Session {
         }
         let provider = self.clone();
         let generation = self.inner.probe_generation.load(Ordering::SeqCst);
-        thread::spawn(move || {
+        self.spawn_background(move || {
             let models = provider.fetch_models();
             let mut catalog = lock(&provider.inner.catalog);
             if provider.inner.probe_generation.load(Ordering::SeqCst) != generation {
@@ -2209,5 +2271,29 @@ mod tests {
         let passwd = passwd_home().unwrap_or_else(|| PathBuf::from(FALLBACK_HOME));
         assert_eq!(relative, passwd.join(suffix));
         assert!(!relative.to_string_lossy().contains("Grokbot Local"));
+    }
+
+    #[test]
+    fn waiting_for_background_work_fails_with_a_message_instead_of_blocking() {
+        let dir = grokbot_test_support::TestDir::new("ezerbot-background-limit");
+        let session = Session::with_endpoints(
+            &dir.join("workspace.sqlite"),
+            Endpoints::default(),
+            false,
+            false,
+        );
+        let (release, hold) = std::sync::mpsc::channel::<()>();
+        session.spawn_background(move || {
+            let _ = hold.recv();
+        });
+        let error = session
+            .wait_background_within(Duration::from_millis(100))
+            .unwrap_err();
+        assert!(error.contains("n'a pas fini"), "{error}");
+        // Le fil libéré termine : l'attente suivante n'a plus rien à attendre.
+        release.send(()).unwrap();
+        session
+            .wait_background_within(Duration::from_secs(10))
+            .unwrap();
     }
 }

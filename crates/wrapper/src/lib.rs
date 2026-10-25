@@ -373,33 +373,6 @@ pub struct Message {
     pub error_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
-    /// Les propositions de bot faites par cette réponse ; vide pour un message de l'utilisateur.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub proposals: Vec<Proposal>,
-}
-
-/// Une proposition de bot émise par le modèle. Rien ne change tant que l'utilisateur ne l'a pas
-/// acceptée. Son `id` est le `call_id` de l'appel de fonction : rejouer l'événement ne la duplique pas.
-#[derive(Debug, Clone, Serialize)]
-pub struct Proposal {
-    pub id: String,
-    pub conversation_id: String,
-    pub message_id: String,
-    /// `create` ou `update`.
-    pub kind: String,
-    /// Le bot visé par une modification.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bot_id: Option<String>,
-    /// Création : les cinq champs du bot. Modification : `changes` et `before`, les valeurs des
-    /// champs visés au moment de la proposition.
-    pub payload: Value,
-    pub reason: String,
-    /// `pending`, `accepted`, `dismissed` ou `stale`.
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_bot_id: Option<String>,
-    pub created_at: u64,
-    pub updated_at: u64,
 }
 
 /// Les champs modifiables d'un bot, tels qu'ils arrivent de l'API ou du modèle. `None` laisse
@@ -455,26 +428,6 @@ impl BotChanges {
             && self.description.is_none()
             && self.instructions.is_none()
     }
-
-    /// Les champs qui changeraient vraiment le bot, avec leur valeur actuelle en regard.
-    fn against(self, bot: &Bot) -> (Self, Value) {
-        let mut before = serde_json::Map::new();
-        let mut keep = |key: &str, value: Option<String>, current: &str| {
-            let value = value.filter(|value| value != current);
-            if value.is_some() {
-                before.insert(key.into(), json!(current));
-            }
-            value
-        };
-        let changes = Self {
-            name: keep("name", self.name, &bot.name),
-            color: keep("color", self.color, &bot.color),
-            shape: keep("shape", self.shape, &bot.shape),
-            description: keep("description", self.description, &bot.description),
-            instructions: keep("instructions", self.instructions, &bot.instructions),
-        };
-        (changes, Value::Object(before))
-    }
 }
 
 /// Un bot tel que l'interface et la génération le voient.
@@ -517,158 +470,6 @@ const DEFAULT_BOT: BotTemplate = BotTemplate {
     description: "Un petit compagnon curieux et chaleureux, prêt à faire grandir vos idées.",
     instructions: "Tu es chaleureux, curieux et direct. Va à l'essentiel, pose une question quand la demande est ambiguë, et propose un prochain pas concret quand c'est utile.",
 };
-
-/// L'identifiant du bot créé par une proposition, dérivé de son `call_id`.
-fn proposed_bot_id(proposal: &str) -> String {
-    let safe: String = proposal
-        .chars()
-        .take(100)
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    format!("proposition-{safe}")
-}
-
-/// Arguments de `propose_bot`, tels que le modèle les émet.
-#[derive(Deserialize)]
-struct ProposeBot {
-    name: String,
-    shape: String,
-    color: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    instructions: String,
-    #[serde(default)]
-    reason: String,
-}
-
-/// Arguments de `propose_bot_update`.
-#[derive(Deserialize)]
-struct ProposeBotUpdate {
-    bot_id: String,
-    changes: BotChanges,
-    #[serde(default)]
-    reason: String,
-}
-
-/// Ce que l'interface montre sous la réponse quand une proposition n'a pas pu être retenue.
-fn proposal_notice(detail: &str) -> String {
-    format!("Une proposition de bot n'a pas été retenue : {detail}")
-}
-
-/// Enregistre un appel de fonction du modèle comme proposition, après l'avoir validé avec les
-/// mêmes bornes que l'API. Des arguments invalides ne créent rien : la note explique pourquoi.
-/// Le `call_id` sert de clé : un événement rejoué ne crée pas de seconde proposition.
-pub(crate) fn record_proposal(
-    connection: &Connection,
-    conversation: &str,
-    message: &str,
-    call: &provider::ToolCall,
-) -> Result<Option<String>, ApiError> {
-    if validate_id(&call.call_id).is_err() {
-        return Ok(Some(proposal_notice(
-            "son identifiant d'appel est illisible.",
-        )));
-    }
-    let reason = |raw: &str| -> String { raw.trim().chars().take(280).collect() };
-    let (kind, bot_id, payload, reason): (&str, Option<String>, Value, String) = match call
-        .name
-        .as_str()
-    {
-        "propose_bot" => {
-            let Ok(arguments) = serde_json::from_str::<ProposeBot>(&call.arguments) else {
-                return Ok(Some(proposal_notice("ses arguments sont illisibles.")));
-            };
-            let fields = BotChanges {
-                name: Some(arguments.name),
-                color: Some(arguments.color),
-                shape: Some(arguments.shape),
-                description: Some(arguments.description),
-                instructions: Some(arguments.instructions),
-            };
-            let fields = match fields.validated() {
-                Ok(fields) => fields,
-                Err(error) => return Ok(Some(proposal_notice(&error.message))),
-            };
-            (
-                "create",
-                None,
-                serde_json::to_value(&fields).expect("champs sérialisables"),
-                reason(&arguments.reason),
-            )
-        }
-        "propose_bot_update" => {
-            let Ok(arguments) = serde_json::from_str::<ProposeBotUpdate>(&call.arguments) else {
-                return Ok(Some(proposal_notice("ses arguments sont illisibles.")));
-            };
-            if validate_id(&arguments.bot_id).is_err() {
-                return Ok(Some(proposal_notice("le bot visé est inconnu.")));
-            }
-            let bot = connection
-                .query_row(
-                    "SELECT id, name, color, description, instructions, template, customized, deleted, shape, created_at FROM wrapper_bots WHERE account_id = ?1 AND id = ?2",
-                    params![ACCOUNT, arguments.bot_id],
-                    bot_from_row,
-                )
-                .optional()?;
-            let Some(bot) = bot.filter(|bot| !bot.deleted) else {
-                return Ok(Some(proposal_notice("le bot visé est inconnu.")));
-            };
-            let changes = match arguments.changes.validated() {
-                Ok(changes) => changes,
-                Err(error) => return Ok(Some(proposal_notice(&error.message))),
-            };
-            let (changes, before) = changes.against(&bot);
-            if changes.is_empty() {
-                return Ok(Some(proposal_notice("elle ne changerait rien à ce bot.")));
-            }
-            (
-                "update",
-                Some(bot.id),
-                json!({"changes": changes, "before": before}),
-                reason(&arguments.reason),
-            )
-        }
-        other => {
-            return Ok(Some(proposal_notice(&format!(
-                "l'outil « {} » n'existe pas.",
-                other.chars().take(40).collect::<String>()
-            ))));
-        }
-    };
-    let timestamp = now();
-    connection.execute(
-        "INSERT OR IGNORE INTO wrapper_proposals (account_id, id, conversation_id, message_id, kind, bot_id, payload, reason, status, result_bot_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', NULL, ?9, ?9)",
-        params![ACCOUNT, call.call_id, conversation, message, kind, bot_id, payload.to_string(), reason, timestamp],
-    )?;
-    Ok(None)
-}
-
-fn proposal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Proposal> {
-    let payload: String = row.get(5)?;
-    Ok(Proposal {
-        id: row.get(0)?,
-        conversation_id: row.get(1)?,
-        message_id: row.get(2)?,
-        kind: row.get(3)?,
-        bot_id: row.get(4)?,
-        payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
-        reason: row.get(6)?,
-        status: row.get(7)?,
-        result_bot_id: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
-    })
-}
-
-const PROPOSAL_COLUMNS: &str = "id, conversation_id, message_id, kind, bot_id, payload, reason, status, result_bot_id, created_at, updated_at";
 
 /// Migration de nom indépendante du template : personnaliser la couleur ou la personnalité
 /// ne doit pas conserver l'ancien nom. Une marque durable laisse ensuite l'utilisateur libre
@@ -755,20 +556,6 @@ struct DeleteBot {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AcceptProposal {
-    id: String,
-    /// « Modifier avant » : les valeurs retenues par l'utilisateur à la place de celles proposées.
-    overrides: Option<BotChanges>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DismissProposal {
-    id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct UpdateConversation {
     id: String,
     title: Option<String>,
@@ -847,11 +634,8 @@ impl App {
         let account_id = AccountId::new(ACCOUNT).expect("constant account ID");
         let reader = SessionStore::open(path, &account_id)?;
         let generation = reader
-            .list_submissions()?
-            .iter()
-            .map(|item| item.generation.0)
-            .max()
-            .unwrap_or(0)
+            .latest_generation()?
+            .map_or(0, |generation| generation.0)
             .checked_add(1)
             .filter(|value| *value <= i64::MAX as u64)
             .ok_or_else(|| ApiError::new(500, "La génération locale est épuisée."))?;
@@ -865,6 +649,8 @@ impl App {
         )?;
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(3))?;
+        // A state read repeats about twenty queries for every message of the history
+        // (#377): all of them must stay prepared, the default 16 would evict each in turn.
         connection.set_prepared_statement_cache_capacity(64);
         let journal_mode: String =
             connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
@@ -1040,88 +826,6 @@ impl App {
         Ok(outcome)
     }
 
-    fn proposal(&self, id: &str) -> Result<Option<Proposal>, ApiError> {
-        let mut proposal = self
-            .connection
-            .query_row(
-                &format!("SELECT {PROPOSAL_COLUMNS} FROM wrapper_proposals WHERE account_id = ?1 AND id = ?2"),
-                params![ACCOUNT, id],
-                proposal_from_row,
-            )
-            .optional()?;
-        if let Some(proposal) = proposal.as_mut() {
-            self.settle_stale(proposal)?;
-        }
-        Ok(proposal)
-    }
-
-    /// Une modification en attente se périme si son bot a disparu, ou si l'un des champs qu'elle
-    /// vise a changé depuis la proposition. La comparaison se fait sur `before`, mémorisé avec elle.
-    fn settle_stale(&self, proposal: &mut Proposal) -> Result<(), ApiError> {
-        if proposal.status != "pending" || proposal.kind != "update" {
-            return Ok(());
-        }
-        let bot = proposal
-            .bot_id
-            .as_deref()
-            .map(|id| self.bot(id))
-            .transpose()?
-            .flatten()
-            .filter(|bot| !bot.deleted);
-        let current = bot.map(|bot| {
-            json!({
-                "name": bot.name, "color": bot.color, "shape": bot.shape,
-                "description": bot.description, "instructions": bot.instructions,
-            })
-        });
-        let unchanged = current.as_ref().is_some_and(|current| {
-            proposal.payload["before"]
-                .as_object()
-                .is_some_and(|before| before.iter().all(|(key, value)| current[key] == *value))
-        });
-        if unchanged {
-            return Ok(());
-        }
-        let timestamp = now();
-        self.connection.execute(
-            "UPDATE wrapper_proposals SET status = 'stale', updated_at = ?3 WHERE account_id = ?1 AND id = ?2 AND status = 'pending'",
-            params![ACCOUNT, proposal.id, timestamp],
-        )?;
-        proposal.status = "stale".into();
-        proposal.updated_at = timestamp;
-        Ok(())
-    }
-
-    /// Les propositions de chaque réponse, périmées au besoin, indexées par (conversation, message).
-    fn proposals_by_message(
-        &self,
-        only: Option<&str>,
-    ) -> Result<BTreeMap<(String, String), Vec<Proposal>>, ApiError> {
-        let mut statement = self.connection.prepare(&format!(
-            "SELECT {PROPOSAL_COLUMNS} FROM wrapper_proposals WHERE account_id = ?1{} ORDER BY created_at, id",
-            if only.is_some() { " AND conversation_id = ?2" } else { "" }
-        ))?;
-        let rows: Vec<Proposal> = statement
-            .query_map(
-                rusqlite::params_from_iter(std::iter::once(ACCOUNT).chain(only)),
-                proposal_from_row,
-            )?
-            .collect::<Result<_, _>>()?;
-        drop(statement);
-        let mut grouped: BTreeMap<(String, String), Vec<Proposal>> = BTreeMap::new();
-        for mut proposal in rows {
-            self.settle_stale(&mut proposal)?;
-            grouped
-                .entry((
-                    proposal.conversation_id.clone(),
-                    proposal.message_id.clone(),
-                ))
-                .or_default()
-                .push(proposal);
-        }
-        Ok(grouped)
-    }
-
     /// Crée un bot avec des valeurs déjà validées. Rejouer la même création rend le même bot.
     fn create_bot(&self, id: &str, fields: &BotChanges) -> Result<Value, ApiError> {
         let name = fields.name.as_deref().ok_or_else(|| {
@@ -1175,89 +879,6 @@ impl App {
             params![ACCOUNT, id, changes.name, changes.color, changes.description, changes.instructions, now(), changes.shape],
         )?;
         self.bot_response(id)
-    }
-
-    /// `pending → accepted`. Accepter de nouveau rend le même bot ; une proposition écartée ou
-    /// périmée répond 409. `overrides` remplace les valeurs proposées (« Modifier avant »).
-    fn accept_proposal(&self, id: &str, overrides: Option<BotChanges>) -> Result<Value, ApiError> {
-        let proposal = self
-            .proposal(id)?
-            .ok_or_else(|| ApiError::new(404, "Proposition introuvable."))?;
-        let conversation = proposal.conversation_id.clone();
-        match proposal.status.as_str() {
-            "accepted" => {
-                let bot = proposal
-                    .result_bot_id
-                    .as_deref()
-                    .map(|id| self.bot_response(id))
-                    .transpose()?
-                    .map_or(Value::Null, |response| response["bot"].clone());
-                return Ok(
-                    json!({"conversation": self.conversation_value(&conversation)?, "bot": bot}),
-                );
-            }
-            "dismissed" => {
-                return Err(ApiError::new(409, "Cette proposition a été écartée."));
-            }
-            "stale" => {
-                return Err(ApiError::new(409, "Ce bot a changé depuis la proposition."));
-            }
-            _ => {}
-        }
-        let overrides = overrides.map(BotChanges::validated).transpose()?;
-        let (bot_id, response) = if proposal.kind == "update" {
-            let target = proposal
-                .bot_id
-                .clone()
-                .ok_or_else(|| ApiError::new(500, "La proposition ne vise aucun bot."))?;
-            let proposed: BotChanges = serde_json::from_value(proposal.payload["changes"].clone())
-                .map_err(|_| ApiError::new(500, "La proposition est illisible."))?;
-            let changes = overrides.unwrap_or(proposed);
-            let response = self.update_bot(&target, &changes)?;
-            (target, response)
-        } else {
-            let proposed: BotChanges = serde_json::from_value(proposal.payload.clone())
-                .map_err(|_| ApiError::new(500, "La proposition est illisible."))?;
-            let overrides = overrides.unwrap_or_default();
-            let fields = BotChanges {
-                name: overrides.name.or(proposed.name),
-                color: overrides.color.or(proposed.color),
-                shape: overrides.shape.or(proposed.shape),
-                description: overrides.description.or(proposed.description),
-                instructions: overrides.instructions.or(proposed.instructions),
-            };
-            let bot_id = proposed_bot_id(&proposal.id);
-            let response = self.create_bot(&bot_id, &fields)?;
-            (bot_id, response)
-        };
-        self.connection.execute(
-            "UPDATE wrapper_proposals SET status = 'accepted', result_bot_id = ?3, updated_at = ?4 WHERE account_id = ?1 AND id = ?2",
-            params![ACCOUNT, proposal.id, bot_id, now()],
-        )?;
-        Ok(json!({"conversation": self.conversation_value(&conversation)?, "bot": response["bot"]}))
-    }
-
-    /// `pending → dismissed`. Écarter de nouveau ne fait rien ; une proposition acceptée répond 409.
-    fn dismiss_proposal(&self, id: &str) -> Result<Value, ApiError> {
-        let proposal = self
-            .proposal(id)?
-            .ok_or_else(|| ApiError::new(404, "Proposition introuvable."))?;
-        let conversation = proposal.conversation_id.clone();
-        if proposal.status == "accepted" {
-            return Err(ApiError::new(409, "Cette proposition a déjà été acceptée."));
-        }
-        self.connection.execute(
-            "UPDATE wrapper_proposals SET status = 'dismissed', updated_at = ?3 WHERE account_id = ?1 AND id = ?2 AND status = 'pending'",
-            params![ACCOUNT, proposal.id, now()],
-        )?;
-        Ok(json!({"conversation": self.conversation_value(&conversation)?}))
-    }
-
-    /// La conversation d'une proposition, même supprimée : la réponse reste cohérente.
-    fn conversation_value(&self, id: &str) -> Result<Value, ApiError> {
-        Ok(self
-            .conversation(id)?
-            .map_or(Value::Null, |conversation| json!(conversation)))
     }
 
     fn preferences(&self) -> Result<(String, String), ApiError> {

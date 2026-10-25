@@ -33,8 +33,6 @@ pub fn routes(
                     | "/api/bots"
                     | "/api/bots/update"
                     | "/api/bots/delete"
-                    | "/api/proposals/accept"
-                    | "/api/proposals/dismiss"
             )
     ) {
         return None;
@@ -293,16 +291,6 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             super::multibot::delete_bot(app, &input.id)?;
             Ok(json!({"ok": true}))
         }
-        "/api/proposals/accept" => {
-            let input: AcceptProposal = parse(body)?;
-            validate_id(&input.id)?;
-            app.accept_proposal(&input.id, input.overrides)
-        }
-        "/api/proposals/dismiss" => {
-            let input: DismissProposal = parse(body)?;
-            validate_id(&input.id)?;
-            app.dismiss_proposal(&input.id)
-        }
         _ => unreachable!("route filtered above"),
     }
 }
@@ -340,18 +328,56 @@ pub fn has_submission(
     )?)
 }
 
+/// Projections attempted before a state read gives up on a vault that keeps changing.
+const VAULT_SETTLE_ATTEMPTS: usize = 4;
+
 impl App {
     pub(crate) fn conversations(&self) -> Result<Vec<Conversation>, ApiError> {
-        self.project_conversations(None)
+        self.conversations_settled(None, &mut || {})
     }
 
     /// Projection d'une seule conversation, sans lire l'historique des autres.
     /// `None` si elle n'existe pas ou si elle est supprimée.
     pub(crate) fn conversation(&self, id: &str) -> Result<Option<Conversation>, ApiError> {
-        Ok(self.project_conversations(Some(id))?.into_iter().next())
+        Ok(self
+            .conversations_settled(Some(id), &mut || {})?
+            .into_iter()
+            .next())
     }
 
-    fn project_conversations(&self, only: Option<&str>) -> Result<Vec<Conversation>, ApiError> {
+    /// Every output of the projection is masked with one content of the vault (#377): a
+    /// `redact::hold` makes the first vault read the one used by every masking that follows on
+    /// this thread, whatever the entry (a direct reply, a routine or group reply, a meeting card,
+    /// a delegation or form card). A secret stored meanwhile (a tool renewing an OAuth token)
+    /// would escape that read: once the projection is done the vault is read again, and the
+    /// projection starts over if it changed. What is returned was masked with the vault as it
+    /// stands after the last output, never with an older one.
+    /// `only` limits the projection to one conversation.
+    /// `after_entry` runs after each projected reply or entry: a no-op, except in the tests
+    /// that write to the vault at that point.
+    pub(crate) fn conversations_settled(
+        &self,
+        only: Option<&str>,
+        after_entry: &mut dyn FnMut(),
+    ) -> Result<Vec<Conversation>, ApiError> {
+        for _ in 0..VAULT_SETTLE_ATTEMPTS {
+            let held = grokbot_forms::redact::hold();
+            let result = self.project_conversations(only, after_entry)?;
+            if held.settled()? {
+                return Ok(result);
+            }
+        }
+        Err(ApiError::new(
+            503,
+            "Le coffre des secrets change sans arrêt : la lecture des conversations est refusée, réessayez.",
+        ))
+    }
+
+    fn project_conversations(
+        &self,
+        only: Option<&str>,
+        after_entry: &mut dyn FnMut(),
+    ) -> Result<Vec<Conversation>, ApiError> {
         let mut conversations = BTreeMap::new();
         let mut hidden = HashSet::new();
         let mut created = BTreeMap::new();
@@ -411,7 +437,6 @@ impl App {
             );
         }
         let mut ordered: BTreeMap<String, Vec<(i64, Vec<Message>)>> = BTreeMap::new();
-        let mut proposals = self.proposals_by_message(only)?;
         let records = match only {
             Some(id) => self.reader.list_conversation_submissions(
                 &grokbot_domain::ConversationId::new(id)
@@ -424,7 +449,7 @@ impl App {
             if hidden.contains(id) {
                 continue;
             }
-            let metadata: Option<(i64, u64)> = self.connection.prepare_cached("SELECT ordinal, created_at FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND kind = 'submission'")?.query_row( params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let metadata: Option<(i64, u64)> = self.connection.prepare_cached("SELECT ordinal, created_at FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND kind = 'submission'")?.query_row(params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
             let (ordinal, created_at) =
                 metadata.unwrap_or((i64::MAX, *created.get(id).unwrap_or(&0)));
             let conversation = conversations
@@ -455,7 +480,6 @@ impl App {
                 error: None,
                 error_kind: None,
                 notice: None,
-                proposals: Vec::new(),
                 kind: "message".into(),
                 payload: json!({"mentions":super::multibot::mentions(&self.connection, id, record.message_id.as_str()), "demonstration_id":super::demonstrations::message_source(&ctx, record.message_id.as_str())}),
                 attachments: super::attachments::for_message(&ctx, id, record.message_id.as_str()),
@@ -464,15 +488,9 @@ impl App {
                 record.state,
                 SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. }
             ) {
-                if let Some(reply) = super::engine::reply(
-                    &ctx,
-                    id,
-                    record.message_id.as_str(),
-                    proposals
-                        .remove(&(id.to_owned(), record.message_id.as_str().to_owned()))
-                        .unwrap_or_default(),
-                )? {
+                if let Some(reply) = super::engine::reply(&ctx, id, record.message_id.as_str())? {
                     pair.push(reply);
+                    after_entry();
                 }
             }
             // Meeting summaries are projected inside their durable meeting card,
@@ -520,11 +538,11 @@ impl App {
                 error: None,
                 error_kind: None,
                 notice: None,
-                proposals: Vec::new(),
                 kind,
                 payload: Value::Null,
                 attachments: Vec::new(),
             });
+            after_entry();
             conversation.updated_at = conversation.updated_at.max(created_at);
             ordered
                 .entry(conversation_id)

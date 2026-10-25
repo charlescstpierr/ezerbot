@@ -1,12 +1,11 @@
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use grokbot_domain::{
     AccountGeneration, AccountId, AuthenticatedActor, ConversationId, DeliveryReceipt, MessageId,
     Refusal, SubmissionState, TranscriptEntryId,
 };
 use grokbot_store::SessionStore;
+use grokbot_test_support::TestDir;
 use rusqlite::Connection;
 
 use crate::{
@@ -14,16 +13,12 @@ use crate::{
     SubmissionSession, SubmissionTransport,
 };
 
-static DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-struct Database(PathBuf);
+/// Chemin de la base, puis le dossier unique qui la contient (supprimé en entier à la fin).
+struct Database(PathBuf, #[allow(dead_code)] TestDir);
 impl Database {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!(
-            "grokbot-session-{}-{}.sqlite",
-            std::process::id(),
-            DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed)
-        )))
+        let directory = TestDir::new("grokbot-session");
+        Self(directory.join("session.sqlite"), directory)
     }
     fn fail_writes(&self) {
         fail_writes(&self.0);
@@ -33,11 +28,6 @@ impl Database {
             .unwrap()
             .execute_batch("DROP TRIGGER fail_submission_save;")
             .unwrap();
-    }
-}
-impl Drop for Database {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
     }
 }
 

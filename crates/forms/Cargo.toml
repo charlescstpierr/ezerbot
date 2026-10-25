@@ -15,5 +15,8 @@ rusqlite.workspace = true
 sha2.workspace = true
 getrandom.workspace = true
 
+[dev-dependencies]
+grokbot-test-support = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "=3.7.0", default-features = false }

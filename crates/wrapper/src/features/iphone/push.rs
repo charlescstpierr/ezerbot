@@ -512,12 +512,7 @@ mod tests {
             .unwrap();
             body
         });
-        let root = std::env::temp_dir().join(format!(
-            "iphone-reply-push-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = grokbot_test_support::TestDir::new("iphone-reply-push");
         let mut app = App::open(&root.join("workspace.sqlite")).unwrap();
         app.api(
             "POST",
@@ -555,7 +550,6 @@ mod tests {
             json!({"title":"Atlas","kind":"reply","id":"reply:run-1","conversation_id":conversation,"card_id":"reply-run-1"})
         );
         drop(app);
-        std::fs::remove_dir_all(root).unwrap();
     }
     #[cfg(debug_assertions)]
     #[test]
@@ -632,12 +626,7 @@ mod tests {
                 tx.send(()).unwrap();
             }
         });
-        let root = std::env::temp_dir().join(format!(
-            "iphone-push-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = grokbot_test_support::TestDir::new("iphone-push");
         let path = root.join("workspace.sqlite");
         let mut app = App::open(&path).unwrap();
         let conversation = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]
@@ -726,6 +715,5 @@ mod tests {
         assert!(error.contains("410"));
         server.join().unwrap();
         drop(app);
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -714,7 +714,7 @@ pub fn settled(ctx: &Context<'_>, request: &str) -> Result<(), ApiError> {
     Ok(())
 }
 pub fn message_source(ctx: &Context<'_>, message: &str) -> Option<String> {
-    ctx.connection.prepare_cached("SELECT id FROM wrapper_demonstrations WHERE conversation_id=?1 AND bot_id=?2 AND message_id=?3").ok()?.query_row(params![ctx.conversation_id,ctx.bot_id,message], |r|r.get(0)).optional().ok().flatten()
+    ctx.connection.prepare_cached("SELECT id FROM wrapper_demonstrations WHERE conversation_id=?1 AND bot_id=?2 AND message_id=?3").and_then(|mut s|s.query_row(params![ctx.conversation_id,ctx.bot_id,message], |r|r.get(0)).optional()).ok().flatten()
 }
 pub fn hydrate(ctx: &Context<'_>, input: &mut [HistoryItem]) {
     let Some(run) = ctx.run_id else {

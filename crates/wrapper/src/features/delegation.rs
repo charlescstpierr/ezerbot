@@ -552,6 +552,10 @@ fn batch_outcome(
         &parent.run_id,
         ctx.now_ms.min(i64::MAX as u64) as i64,
     )?;
+    let schema = tools()
+        .into_iter()
+        .find(|spec| spec.name == "delegate")
+        .map_or(Value::Null, |spec| spec.schema);
     let mut pending = 0_u32;
     let later_delegate = events[index + 1..].iter().any(|event| {
         let Some(id) = event.payload["call_id"].as_str() else {
@@ -561,12 +565,14 @@ fn batch_outcome(
             return false;
         }
         pending = pending.saturating_add(1);
-        // Non-object calls fail in the engine before reaching this adapter, and
-        // over-budget calls never execute. Neither can own the eventual wait.
+        // Calls whose arguments are not an object or break the schema fail in the
+        // engine before reaching this adapter, and over-budget calls never
+        // execute. None of them can own the eventual wait.
         event.payload["name"] == "delegate"
             && &event.payload["response"] == response
             && !id.trim().is_empty()
             && event.payload["arguments"].is_object()
+            && grokbot_engine::schema::validate(&schema, &event.payload["arguments"]).is_empty()
             && usage.tool_calls.saturating_add(pending) <= parent.budgets.tool_calls
     });
     if later_delegate {

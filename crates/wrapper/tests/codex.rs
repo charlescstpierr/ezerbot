@@ -720,7 +720,7 @@ fn app_tools_memory_cache_quota_card_and_restart_are_durable() {
         .unwrap()
         .to_owned();
     f.reply(ScriptedResponse::events(&[
-        json!({"type":"response.output_item.done", "item":{"type":"function_call", "id":"fc-mem", "call_id":"mem", "name":"remember", "arguments":"{\"text\":\"Je préfère le thé\"}"}}),
+        json!({"type":"response.output_item.done", "item":{"type":"function_call", "id":"fc-mem", "call_id":"mem", "name":"remember", "arguments":"{\"text\":\"Je préfère le thé\",\"sensitive\":false,\"source\":\"user_stated\"}"}}),
         json!({"type":"response.completed"}),
     ]));
     f.reply(ScriptedResponse::events(&[

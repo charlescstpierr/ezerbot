@@ -22,7 +22,18 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(any(test, debug_assertions))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunEventPoint {
+    BeforeBegin,
+    BeforeCommit,
+}
+
 pub trait RunServices {
+    #[cfg(any(test, debug_assertions))]
+    fn transaction_checkpoint(&mut self, _run_id: &str, _point: RunEventPoint) -> Result<()> {
+        Ok(())
+    }
     /// Base context, excluding this run's events: the loop adds its committed
     /// text, function calls and outputs on EVERY request (`store:false`). Rebuild
     /// from storage on each call so redaction/forgetting cannot leave stale input.
@@ -178,6 +189,8 @@ pub fn with_run_events<T>(
     for attempt in 0..5 {
         let mut hook_failed = false;
         let result = (|| {
+            #[cfg(any(test, debug_assertions))]
+            services.transaction_checkpoint(run_id, RunEventPoint::BeforeBegin)?;
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let seq: u64 = tx.query_row(
                 "SELECT COALESCE(MAX(seq),0) FROM engine_run_events WHERE run_id=?1",
@@ -191,6 +204,8 @@ pub fn with_run_events<T>(
                     return Err(error);
                 }
             }
+            #[cfg(any(test, debug_assertions))]
+            services.transaction_checkpoint(run_id, RunEventPoint::BeforeCommit)?;
             tx.commit()?;
             Ok(value)
         })();
@@ -1483,8 +1498,10 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender},
         Arc, Mutex,
     };
+    use std::time::Instant;
 
     struct Scripted {
         rounds: Mutex<VecDeque<Vec<ModelEvent>>>,
@@ -1543,8 +1560,24 @@ mod tests {
         detach: bool,
         own_captures: Vec<String>,
         seen_arguments: Vec<Value>,
+        checkpoints: Option<TransactionCheckpoints>,
     }
     impl RunServices for Services {
+        fn transaction_checkpoint(&mut self, run_id: &str, point: RunEventPoint) -> Result<()> {
+            let Some(control) = self.checkpoints.as_mut() else {
+                return Ok(());
+            };
+            if run_id != control.run_id || control.points.front() != Some(&point) {
+                return Ok(());
+            }
+            control.points.pop_front();
+            checkpoint_remaining(control.deadline)?;
+            control
+                .arrived
+                .send(point)
+                .map_err(|_| invalid("transaction checkpoint disconnected"))?;
+            checkpoint_receive(&control.resume, control.deadline)
+        }
         fn is_own_capture(&self, _: &Connection, _: &Run, id: &str) -> Result<bool> {
             Ok(self.own_captures.iter().any(|own| own == id))
         }
@@ -1839,6 +1872,277 @@ mod tests {
             row.get(0)
         })
         .unwrap()
+    }
+
+    struct TransactionCheckpoints {
+        run_id: &'static str,
+        points: VecDeque<RunEventPoint>,
+        arrived: Sender<RunEventPoint>,
+        resume: Receiver<()>,
+        deadline: Instant,
+    }
+    struct CheckpointHandle {
+        arrived: Receiver<RunEventPoint>,
+        resume: Sender<()>,
+        deadline: Instant,
+    }
+    impl CheckpointHandle {
+        fn expect(&self, point: RunEventPoint) -> Result<()> {
+            assert_eq!(checkpoint_receive(&self.arrived, self.deadline)?, point);
+            Ok(())
+        }
+        fn resume(&self) {
+            self.resume.send(()).unwrap();
+        }
+    }
+    fn checkpoint_remaining(deadline: Instant) -> Result<Duration> {
+        deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| invalid("transaction checkpoint deadline expired"))
+    }
+    fn checkpoint_receive<T>(receiver: &Receiver<T>, deadline: Instant) -> Result<T> {
+        receiver
+            .recv_timeout(checkpoint_remaining(deadline)?)
+            .map_err(|error| invalid(format!("transaction checkpoint {error}")))
+    }
+    fn checkpoint_pair(
+        points: &[RunEventPoint],
+        deadline: Instant,
+    ) -> (TransactionCheckpoints, CheckpointHandle) {
+        let (arrived, arrivals) = mpsc::channel();
+        let (resume, resumes) = mpsc::channel();
+        (
+            TransactionCheckpoints {
+                run_id: "run",
+                points: points.iter().copied().collect(),
+                arrived,
+                resume: resumes,
+                deadline,
+            },
+            CheckpointHandle {
+                arrived: arrivals,
+                resume,
+                deadline,
+            },
+        )
+    }
+    struct CheckpointWorker {
+        control: Option<CheckpointHandle>,
+        finished: Receiver<std::thread::Result<Result<()>>>,
+        worker: Option<std::thread::JoinHandle<()>>,
+        deadline: Instant,
+    }
+    impl CheckpointWorker {
+        fn start(
+            conn: Connection,
+            points: &[RunEventPoint],
+            operation: impl FnOnce(&Connection, &mut Services) -> Result<()> + Send + 'static,
+        ) -> Self {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (checkpoints, control) = checkpoint_pair(points, deadline);
+            let (finished, completion) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut services = Services {
+                        checkpoints: Some(checkpoints),
+                        ..Default::default()
+                    };
+                    operation(&conn, &mut services)
+                }));
+                drop(conn);
+                let _ = finished.send(outcome);
+            });
+            Self {
+                control: Some(control),
+                finished: completion,
+                worker: Some(worker),
+                deadline,
+            }
+        }
+        fn finish(&mut self) -> Result<()> {
+            let outcome = checkpoint_receive(&self.finished, self.deadline)?;
+            self.worker.take().unwrap().join().unwrap();
+            outcome.unwrap()
+        }
+    }
+    impl Drop for CheckpointWorker {
+        fn drop(&mut self) {
+            self.control.take();
+            if let Some(worker) = self.worker.take() {
+                match checkpoint_receive(&self.finished, self.deadline) {
+                    Ok(_) => worker.join().unwrap(),
+                    Err(error) if std::thread::panicking() => {
+                        eprintln!("transaction checkpoint cleanup failed: {error}");
+                    }
+                    Err(error) => panic!("transaction checkpoint cleanup failed: {error}"),
+                }
+            }
+        }
+    }
+    fn checkpoint_effect(conn: &Connection, _: &mut dyn RunServices) -> Result<()> {
+        conn.execute("INSERT INTO effects VALUES ('checkpoint')", [])?;
+        store::append_event(
+            conn,
+            "run",
+            RunEventKind::TextDelta,
+            &json!({"text":"checkpoint"}),
+        )?;
+        Ok(())
+    }
+    fn writer_available(conn: &Connection) -> Result<()> {
+        Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?.rollback()?;
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_checkpoints_hold_the_writer_only_between_begin_and_commit() -> Result<()> {
+        let directory = grokbot_test_support::TestDir::new("engine-checkpoints");
+        let path = directory.join("engine.sqlite");
+        let conn = setup(Connection::open(&path)?, false, RunBudgets::default())?;
+        conn.busy_timeout(Duration::ZERO)?;
+        let observer = Connection::open(&path)?;
+        observer.busy_timeout(Duration::ZERO)?;
+        let mut worker = CheckpointWorker::start(
+            conn,
+            &[RunEventPoint::BeforeBegin, RunEventPoint::BeforeCommit],
+            |conn, services| {
+                commit(conn, services, "other-run", |conn, _| {
+                    conn.execute("INSERT INTO effects VALUES ('other-run')", [])?;
+                    Ok(())
+                })?;
+                commit(conn, services, "run", checkpoint_effect)?;
+                commit(conn, services, "run", |_, _| Ok(()))
+            },
+        );
+        let control = worker.control.as_ref().unwrap();
+        control.expect(RunEventPoint::BeforeBegin)?;
+        assert_eq!(count(&observer, "effects"), 1);
+        writer_available(&observer)?;
+        commit(&observer, &mut Services::default(), "run", |conn, _| {
+            conn.execute("INSERT INTO effects VALUES ('other-instance')", [])?;
+            Ok(())
+        })?;
+        control.resume();
+        control.expect(RunEventPoint::BeforeCommit)?;
+        let error = Transaction::new_unchecked(&observer, TransactionBehavior::Immediate)
+            .err()
+            .expect("writer must remain locked before COMMIT");
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert_eq!(count(&observer, "effects"), 2);
+        assert_eq!(count(&observer, "hook_effects"), 0);
+        control.resume();
+        worker.finish()?;
+        writer_available(&observer)?;
+        assert_eq!(count(&observer, "effects"), 3);
+        assert_eq!(count(&observer, "hook_effects"), 1);
+        assert_eq!(count(&Connection::open(path)?, "engine_run_events"), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_checkpoint_operation_error_discards_the_unreached_commit_point() -> Result<()> {
+        let directory = grokbot_test_support::TestDir::new("engine-checkpoint-error");
+        let path = directory.join("engine.sqlite");
+        let conn = setup(Connection::open(&path)?, false, RunBudgets::default())?;
+        conn.busy_timeout(Duration::ZERO)?;
+        let mut worker = CheckpointWorker::start(
+            conn,
+            &[RunEventPoint::BeforeBegin, RunEventPoint::BeforeCommit],
+            |conn, services| {
+                let error = commit(conn, services, "run", |conn, services| {
+                    checkpoint_effect(conn, services)?;
+                    Err::<(), _>(invalid("operation failed"))
+                })
+                .unwrap_err();
+                assert_eq!(count(conn, "effects"), 0);
+                assert_eq!(count(conn, "engine_run_events"), 1);
+                services.checkpoints.take();
+                commit(conn, services, "run", checkpoint_effect)?;
+                Err(error)
+            },
+        );
+        let control = worker.control.as_ref().unwrap();
+        control.expect(RunEventPoint::BeforeBegin)?;
+        control.resume();
+        assert!(
+            matches!(worker.finish(), Err(Error::InvalidInput(message)) if message == "operation failed")
+        );
+        assert!(matches!(
+            worker.control.as_ref().unwrap().arrived.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        let observer = Connection::open(path)?;
+        observer.busy_timeout(Duration::ZERO)?;
+        writer_available(&observer)?;
+        assert_eq!(count(&observer, "effects"), 1);
+        assert_eq!(count(&observer, "hook_effects"), 1);
+        assert_eq!(count(&observer, "engine_run_events"), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn dropping_transaction_checkpoint_handle_rolls_back_and_releases_the_writer() -> Result<()> {
+        let directory = grokbot_test_support::TestDir::new("engine-checkpoint-drop");
+        let path = directory.join("engine.sqlite");
+        let conn = setup(Connection::open(&path)?, false, RunBudgets::default())?;
+        conn.busy_timeout(Duration::ZERO)?;
+        let mut worker =
+            CheckpointWorker::start(conn, &[RunEventPoint::BeforeCommit], |conn, services| {
+                commit(conn, services, "run", checkpoint_effect)
+            });
+        worker
+            .control
+            .as_ref()
+            .unwrap()
+            .expect(RunEventPoint::BeforeCommit)?;
+        drop(worker.control.take());
+        assert!(matches!(worker.finish(), Err(Error::InvalidInput(_))));
+        let observer = Connection::open(path)?;
+        observer.busy_timeout(Duration::ZERO)?;
+        assert_eq!(count(&observer, "effects"), 0);
+        assert_eq!(count(&observer, "hook_effects"), 0);
+        assert_eq!(count(&observer, "engine_run_events"), 1);
+        commit(
+            &observer,
+            &mut Services::default(),
+            "run",
+            checkpoint_effect,
+        )?;
+        assert_eq!(count(&observer, "effects"), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn expired_transaction_checkpoint_fails_explicitly_without_starting_an_operation() -> Result<()>
+    {
+        let directory = grokbot_test_support::TestDir::new("engine-checkpoint-expired");
+        let conn = setup(
+            Connection::open(directory.join("engine.sqlite"))?,
+            false,
+            RunBudgets::default(),
+        )?;
+        conn.busy_timeout(Duration::ZERO)?;
+        let (checkpoints, control) = checkpoint_pair(&[RunEventPoint::BeforeBegin], Instant::now());
+        let mut services = Services {
+            checkpoints: Some(checkpoints),
+            ..Default::default()
+        };
+        let result = commit(&conn, &mut services, "run", checkpoint_effect);
+        assert!(
+            matches!(result, Err(Error::InvalidInput(message)) if message == "transaction checkpoint deadline expired")
+        );
+        assert!(matches!(
+            control.arrived.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(count(&conn, "effects"), 0);
+        assert_eq!(count(&conn, "engine_run_events"), 1);
+        commit(&conn, &mut services, "run", checkpoint_effect)?;
+        assert_eq!(count(&conn, "effects"), 1);
+        Ok(())
     }
 
     #[test]

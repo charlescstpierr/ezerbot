@@ -408,6 +408,54 @@ fn a_drawing_that_lands_after_its_thread_is_deleted_is_not_stored() {
 }
 
 #[test]
+fn deleting_a_thread_erases_the_drawing_it_holds() {
+    let mut fixture = Fixture::open();
+    fixture.script_image(
+        200,
+        json!({"output":[{"type":"image_generation_call","status":"completed","result":PNG_B64}]}),
+    );
+    fixture.ask(
+        "garde",
+        json!({"description":"un phare"}),
+        "Dessine un phare",
+    );
+    fixture.until("réponse non terminée", |fixture| {
+        fixture.provider.status()["titling"] == false
+            && fixture
+                .db()
+                .query_row(
+                    "SELECT COUNT(*) FROM engine_runs WHERE status NOT IN ('finished','failed','cancelled')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 0
+    });
+    let url = fixture.tool()["attachments"][0]["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(fixture.app.api_response("GET", &url, b"").is_ok());
+    let chat = fixture.chat.clone();
+    fixture
+        .app
+        .api(
+            "POST",
+            "/api/conversations/delete",
+            &serde_json::to_vec(&json!({"id": chat})).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .app
+            .api_response("GET", &url, b"")
+            .unwrap_err()
+            .status,
+        404
+    );
+}
+
+#[test]
 fn drawing_replaces_the_indicator_with_one_image() {
     let mut fixture = Fixture::open();
     let gate = fixture.hold_image();

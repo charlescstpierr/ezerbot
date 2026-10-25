@@ -4121,6 +4121,27 @@ mod captures {
     }
 
     #[test]
+    fn an_image_the_parent_card_result_links_outlives_the_deleted_thread() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "lien", args("child"));
+        let thread = edge.conversation_id.clone().unwrap();
+        let linked = attached(&mut f, &thread);
+        let url = format!("/api/attachments/{linked}");
+        complete(&f, &format!("fini, voir {url}"), json!([]));
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        f.post("/api/conversations/delete", json!({"id":thread}));
+        assert!(card(&mut f, &edge)["status"]["result"]
+            .as_str()
+            .unwrap()
+            .contains(&url));
+        assert!(image(&mut f, &url).starts_with(b"\x89PNG"));
+    }
+
+    #[test]
     fn masking_a_secret_hides_its_text_but_never_breaks_a_reference() {
         let mut f = Fixture::new(true);
         let c = f.conversation();

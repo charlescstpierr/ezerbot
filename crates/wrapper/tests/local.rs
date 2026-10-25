@@ -1782,6 +1782,41 @@ fn a_stopped_task_stays_stopped_when_no_process_can_start() {
 }
 
 #[test]
+fn a_stopped_task_that_left_its_group_is_killed_and_the_app_closes() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    // The program itself (exec) leaves its group, then waits on its input.
+    start_background(
+        &mut f,
+        "evade",
+        "exec perl -e 'setpgrp(0, 0); open(my $p, \">\", \"evade.pid\"); print $p $$; close $p; <STDIN>; open(my $f, \">\", \"apres.txt\"); print $f \"fin\"'",
+    );
+    let root = f.root();
+    let mut pid = None;
+    wait("le programme n’a pas quitté son groupe", || {
+        pid = std::fs::read_to_string(root.join("evade.pid"))
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok());
+        pid.is_some()
+    });
+    let pid = pid.unwrap();
+    // Destroying the App stops the task and joins its monitor: it must end,
+    // not wait for a program the group's kill does not reach.
+    let Fixture { app, _dir, .. } = f;
+    let closing = std::thread::spawn(move || drop(app));
+    wait("l’App ne se ferme pas", || closing.is_finished());
+    closing.join().unwrap();
+    assert!(
+        !process_alive(pid),
+        "le programme sorti de son groupe vit encore"
+    );
+    assert!(
+        !root.join("apres.txt").exists(),
+        "la tâche arrêtée a continué après la fin de son entrée"
+    );
+}
+
+#[test]
 fn a_task_whose_app_dies_is_killed_before_its_input_closes() {
     // The App dies for real (abort): the test runs again alone in a child
     // process, which says where its task lives before dying.
@@ -2224,7 +2259,12 @@ fn unreadable_vault_stops_the_background_process() {
         found.expect("pid absent")
     };
     assert!(process_alive(pid));
-    std::fs::write(f.path.with_extension("secrets.json"), b"coffre illisible").unwrap();
+    // Replaced in one step: `fs::write` truncates first, and the vault takes an
+    // empty file for a new one and installs an empty, readable vault in its
+    // place, which the bytes written next never reach.
+    let unreadable = f.root().join("coffre-illisible.json");
+    std::fs::write(&unreadable, b"coffre illisible").unwrap();
+    std::fs::rename(&unreadable, f.path.with_extension("secrets.json")).unwrap();
     let mut dead = false;
     for _ in 0..150 {
         if !process_alive(pid) {

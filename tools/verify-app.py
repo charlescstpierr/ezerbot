@@ -481,7 +481,7 @@ def verify_ui_regressions():
                     frame = chrome('eval', f'async () => {{ await window.__qaRunFrame({width}, {height}); return true; }}')
                     if not re.search(r'^result: ', frame, re.MULTILINE):
                         raise AssertionError(frame)
-                result = chrome('eval', 'async () => window.__qaFinish()')
+                result = chrome('eval', 'async () => window.__qaFinish()', '--full')
                 value = re.search(r'^result: (.+)$', result, re.MULTILINE)
                 if not value:
                     raise AssertionError(result)

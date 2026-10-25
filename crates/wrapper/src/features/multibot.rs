@@ -712,7 +712,11 @@ fn drive(ctx: &super::Context<'_>) -> Result<(), ApiError> {
         // The catalogue loads asynchronously after startup. A turn which has
         // never contacted the provider remains durable and queued until ready.
         if live && super::engine::resolve_model(conn, ctx.provider)?.is_none() {
-            if ctx.provider.status()["models_ready"] == true {
+            // The catalogue may arrive between that resolution and this readiness
+            // check: fail only a turn that no model of a ready catalogue can serve.
+            if ctx.provider.status()["models_ready"] == true
+                && super::engine::resolve_model(conn, ctx.provider)?.is_none()
+            {
                 conn.execute("UPDATE wrapper_group_turns SET status='failed',error=?2 WHERE id=?1", params![id,"Aucun modèle ChatGPT n’est disponible pour cette connexion. Vérifiez la connexion dans les paramètres puis envoyez un nouveau message."])?;
             }
             continue;

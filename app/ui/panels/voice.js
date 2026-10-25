@@ -87,7 +87,7 @@
       if (existing.has(item.id)) { existing.delete(item.id); continue; }
       const chip = node("div", "voice-memo-chip"); chip.dataset.id = item.id;
       const name = node("strong", "", `Mémo vocal · ${Math.ceil(item.duration_ms / 1000)} s`);
-      const audio = node("audio"); audio.controls = true; audio.preload = "metadata"; audio.src = `/api/voice/audio/${encodeURIComponent(item.id)}`; audio.setAttribute("aria-label", "Écouter le mémo avant l’envoi");
+      const audio = node("audio"); audio.controls = true; audio.preload = "metadata"; audio.src = window.EzerbotLocal?.resourceURL(`/api/voice/audio/${encodeURIComponent(item.id)}`) ?? `/api/voice/audio/${encodeURIComponent(item.id)}`; audio.setAttribute("aria-label", "Écouter le mémo avant l’envoi");
       const remove = node("button", "attachment-remove", "×"); remove.type = "button"; remove.setAttribute("aria-label", "Retirer le mémo vocal");
       remove.onclick = async () => {
         remove.disabled = true;

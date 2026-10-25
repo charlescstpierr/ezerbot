@@ -154,7 +154,7 @@
   document.getElementById("panels").append(preview);
   window.EzerbotScreen = { pane, preview(image) {
     if (typeof image !== "string" || !image.startsWith("/api/screen/shot?")) return;
-    const img = node("img"); img.src = image; img.alt = "Capture de l’écran après l’action";
+    const img = node("img"); img.src = window.EzerbotLocal?.resourceURL(image) ?? image; img.alt = "Capture de l’écran après l’action";
     const header = node("div", null, "dialog-header"); header.append(node("h2", "Capture de l’écran"), button("Fermer", () => preview.close()));
     preview.replaceChildren(header, img); preview.showModal(); showOverlay();
   } };

@@ -15,7 +15,6 @@ Les passes alternent AVANT, APRES, AVANT... pour neutraliser la dérive de la
 machine. Le script imprime, par côté : médiane, min, max, écart-type et n des
 suppressions en ms, et combien d'URL d'images supprimées répondent encore 200.
 """
-import http.client
 import json
 import os
 import shutil
@@ -25,33 +24,28 @@ import subprocess
 import sys
 import tempfile
 import time
+from local_api import LaunchIdentity, LocalEndpoint
 
 PNG = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01bench"
 BODY = "Peux-tu m'aider à préparer la réunion de demain ? " * 4
 
 
-def req(port, method, path, body=None, raw=None):
-    c = http.client.HTTPConnection("127.0.0.1", port, timeout=300)
-    h = {"Host": f"127.0.0.1:{port}"}
-    if method != "GET":
-        h.update({"X-Grokbot-Request": "local", "Origin": f"http://127.0.0.1:{port}"})
-        h["Content-Type"] = "image/png" if raw is not None else "application/json"
+def req(endpoint, method, path, body=None, raw=None):
+    headers = {"Content-Type": "image/png" if raw is not None else "application/json"}
     data = raw if raw is not None else (json.dumps(body) if body is not None else None)
-    c.request(method, path, body=data, headers=h)
-    r = c.getresponse()
-    d = r.read()
-    c.close()
-    return r.status, d
+    status, content, _ = endpoint.request(method, path, body=data, headers=headers, timeout=300)
+    return status, content
 
 
 def start(binary, db):
-    p = subprocess.Popen([binary, "--port", "0", "--db", db], stdout=subprocess.PIPE,
+    identity = LaunchIdentity()
+    p = identity.spawn([binary, "--port", "0", "--db", db], stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, text=True)
-    port = int(json.loads(p.stdout.readline())["url"].rsplit(":", 1)[1])
+    endpoint = LocalEndpoint(identity, json.loads(p.stdout.readline())["url"])
     while True:
         try:
-            if req(port, "GET", "/api/ping")[0] == 200:
-                return p, port
+            if req(endpoint, "GET", "/api/ping")[0] == 200:
+                return p, endpoint
         except OSError:
             time.sleep(0.02)
 
@@ -67,29 +61,29 @@ def stop(p):
 
 def one_pass(binary, threads, messages):
     directory = tempfile.mkdtemp(prefix="bench-330-")
-    p, port = start(binary, os.path.join(directory, "w.sqlite"))
+    p, endpoint = start(binary, os.path.join(directory, "w.sqlite"))
     try:
         seeded = []
         for c in range(threads):
-            s, b = req(port, "POST", "/api/conversations", {})
+            s, b = req(endpoint, "POST", "/api/conversations", {})
             assert s == 200, (s, b)
             cid = json.loads(b)["conversation"]["id"]
-            s, b = req(port, "POST", "/api/attachments", raw=PNG + c.to_bytes(4, "big"))
+            s, b = req(endpoint, "POST", "/api/attachments", raw=PNG + c.to_bytes(4, "big"))
             assert s == 200, (s, b)
             image = json.loads(b)
             for m in range(messages):
                 attachments = [image["id"]] if m == 0 else []
-                s, b = req(port, "POST", "/api/send", {"conversation_id": cid, "message_id": f"c{c}m{m}",
+                s, b = req(endpoint, "POST", "/api/send", {"conversation_id": cid, "message_id": f"c{c}m{m}",
                                                        "body": BODY, "attachments": attachments})
                 assert s == 200, (s, b)
             seeded.append((cid, image["url"]))
         times, still_served = [], 0
         for cid, url in seeded[::2]:
             t = time.perf_counter()
-            s, b = req(port, "POST", "/api/conversations/delete", {"id": cid})
+            s, b = req(endpoint, "POST", "/api/conversations/delete", {"id": cid})
             times.append((time.perf_counter() - t) * 1000)
             assert s == 200, (s, b)
-            still_served += req(port, "GET", url)[0] == 200
+            still_served += req(endpoint, "GET", url)[0] == 200
         size = os.path.getsize(os.path.join(directory, "w.sqlite"))
         return times, still_served, size
     finally:

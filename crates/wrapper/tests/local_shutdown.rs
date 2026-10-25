@@ -1,5 +1,8 @@
 //! Real host termination: watchdog cleanup must work when Rust Drop cannot run.
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
 mod support;
+use launch_identity::LaunchIdentity;
 use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader},
@@ -12,6 +15,7 @@ use support::{wait, FakeOpenAi, ScriptedResponse, Seen};
 
 struct Host {
     child: Child,
+    identity: LaunchIdentity,
     root: PathBuf,
     url: String,
     server: FakeOpenAi,
@@ -23,9 +27,10 @@ impl Host {
         let root = guard.to_path_buf();
         support::write_codex_session(&root.join("workspace.codex-auth.json"), "local-shutdown");
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
-        let (child, url) = Self::launch(&root, &server);
+        let (child, url, identity) = Self::launch(&root, &server);
         let host = Self {
             child,
+            identity,
             root,
             url,
             server,
@@ -35,27 +40,29 @@ impl Host {
         host.post("/api/yolo/mode", json!({"mode": "ask"}));
         host
     }
-    fn launch(root: &std::path::Path, server: &FakeOpenAi) -> (Child, String) {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
-            .args(["--port", "0", "--db"])
-            .arg(root.join("workspace.sqlite"))
-            .current_dir(root)
-            .env("HOME", root)
-            .env("CFFIXED_USER_HOME", root)
-            .env("GROKBOT_FAKE_OPENAI", &server.base)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
+    fn launch(root: &std::path::Path, server: &FakeOpenAi) -> (Child, String, LaunchIdentity) {
+        let identity = LaunchIdentity::new();
+        let mut child = identity.spawn(
+            Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
+                .args(["--port", "0", "--db"])
+                .arg(root.join("workspace.sqlite"))
+                .current_dir(root)
+                .env("HOME", root)
+                .env("CFFIXED_USER_HOME", root)
+                .env("GROKBOT_FAKE_OPENAI", &server.base)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit()),
+        );
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap())
             .read_line(&mut line)
             .unwrap();
         let value: Value = serde_json::from_str(&line).unwrap();
-        (child, value["url"].as_str().unwrap().into())
+        (child, value["url"].as_str().unwrap().into(), identity)
     }
     fn state(&self) -> Value {
         ureq::get(&format!("{}/api/state", self.url))
+            .set("X-Ezerbot-Launch", &self.identity.value())
             .call()
             .unwrap()
             .into_json()
@@ -70,6 +77,7 @@ impl Host {
         ureq::post(&format!("{}{path}", self.url))
             .set("Origin", &self.url)
             .set("X-Grokbot-Request", "local")
+            .set("X-Ezerbot-Launch", &self.identity.value())
             .send_json(body)
             .unwrap()
             .into_json()
@@ -134,9 +142,10 @@ fn host_sigterm_sigint_and_sigkill_leave_no_ordinary_process_group_running() {
             "descendant survived {signal}"
         );
         if signal == "-TERM" {
-            let (child, url) = Host::launch(&host.root, &host.server);
+            let (child, url, identity) = Host::launch(&host.root, &host.server);
             host.child = child;
             host.url = url;
+            host.identity = identity;
             host.ready();
             wait("unknown result after restart", || {
                 host.state()["conversations"]

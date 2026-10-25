@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
+#import "local-api.h"
 #if defined(EZERBOT_RELEASE)
 #import <Carbon/Carbon.h>
 #endif
@@ -18,6 +19,7 @@
 @property(nonatomic, weak) NSWindow *mainWindow;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) NSURL *backendURL;
+@property(nonatomic, strong) EzerbotLocalAPI *localAPI;
 @property(nonatomic, copy) NSString *geometryPath;
 @property(nonatomic, copy) NSString *shortcut;
 @property(nonatomic, copy) void (^openConversation)(NSString *, void (^)(BOOL, NSString *));
@@ -124,6 +126,7 @@ static OSStatus EZFloatingHotKey(EventHandlerCallRef next, EventRef event, void 
         panel.delegate = self;
         WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
         configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
+        [self.localAPI installInConfiguration:configuration];
         [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotFloating"];
         self.webView = [[WKWebView alloc] initWithFrame:panel.contentView.bounds configuration:configuration];
         self.webView.navigationDelegate = self;

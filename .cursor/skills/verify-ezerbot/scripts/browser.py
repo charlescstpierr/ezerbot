@@ -217,6 +217,22 @@ def http_json(url: str):
         return json.load(response)
 
 
+def initial_page(endpoint: str) -> dict:
+    targets = http_json(endpoint + "/json/list")
+    page = next((item for item in targets if item.get("type") == "page"), None)
+    if not page:
+        raise SystemExit("Chrome n'a aucune page")
+    if page.get("url", "").startswith("chrome://newtab"):
+        # AXI refuses ambiguous page dumps, including the localized private-tab title's newline.
+        cdp = Cdp(page["webSocketDebuggerUrl"])
+        try:
+            cdp.call("Page.navigate", {"url": "about:blank"})
+        finally:
+            cdp.close()
+        page["url"] = "about:blank"
+    return page
+
+
 def browser_state_path(run: dict) -> Path:
     return Path(run["run_root"]) / "browser.json"
 
@@ -225,7 +241,7 @@ def save_browser(run: dict, state: dict) -> None:
     save_json(browser_state_path(run), state)
 
 
-def ensure_headless(run: dict) -> dict:
+def ensure_headless(run: dict, *, headed: bool = False) -> dict:
     session = session_id()
     if not os.environ.get("CHROME_DEVTOOLS_AXI_SESSION"):
         raise SystemExit("CHROME_DEVTOOLS_AXI_SESSION est obligatoire, même pour le substitut headless")
@@ -245,13 +261,17 @@ def ensure_headless(run: dict) -> dict:
     # navigation happens afterwards through CDP.
     command = [
         binary,
-        "--headless=new",
+        *([] if headed else ["--headless=new"]),
         "--disable-gpu",
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-extensions",
+        "--force-device-scale-factor=1",
+        "--incognito",
+        "--use-mock-keychain",
+        "--password-store=basic",
         f"--user-data-dir={profile}",
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
@@ -279,23 +299,21 @@ def ensure_headless(run: dict) -> dict:
     port = int(port_file.read_text().splitlines()[0])
     identity = proc_identity(process.pid)
     state = {
-        "mode": "chrome-headless",
+        "mode": "chrome-devtools-axi" if headed else "chrome-headless",
         "session": session,
+        "session_signature": run.get("session_signature"),
         "chrome_pid": process.pid,
         "pgid": process.pid,
         "identity": identity,
         "debug_port": port,
         "profile": str(profile),
         "started_by": "verify-ezerbot",
-        "stand_in_flags": ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage"],
+        "stand_in_flags": [] if headed else ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage"],
         "width": 1140,
         "height": 780,
     }
     save_browser(run, state)
-    targets = http_json(f"http://127.0.0.1:{port}/json/list")
-    page = next((item for item in targets if item.get("type") == "page"), None)
-    if not page:
-        raise SystemExit("Chrome n'a aucune page")
+    page = initial_page(f"http://127.0.0.1:{port}")
     state["page_id"] = page["id"]
     state["page_url"] = page.get("url", "")
     save_browser(run, state)
@@ -432,11 +450,21 @@ def run_axi(run: dict, arguments: list[str]) -> None:
     if state is not None and not owns_axi_session(run, state):
         raise SystemExit("refus: le navigateur n'appartient pas à cette session du run")
     binary = axi_binary()
-    save_browser(run, {"mode": "chrome-devtools-axi", "session": session,
+    attributed = dict(state or {})
+    attributed.update({"mode": "chrome-devtools-axi", "session": session,
                        "session_signature": run["session_signature"], "started_by": "verify-ezerbot"})
+    if attributed.get("debug_port"):
+        if not identity_matches(int(attributed.get("chrome_pid") or 0), attributed.get("identity")):
+            raise SystemExit("Chrome de ce run n'est plus disponible")
+        if not identity_matches(int(run.get("auth_pid") or 0), run.get("auth_identity")):
+            raise SystemExit("le transport authentifié de ce run n'est plus disponible")
+    save_browser(run, attributed)
     env = os.environ.copy()
     env["CHROME_DEVTOOLS_AXI_SESSION"] = session
     env["HOME"] = run["axi_home"]
+    env.pop("CHROME_DEVTOOLS_AXI_AUTO_CONNECT", None)
+    if attributed.get("debug_port"):
+        env["CHROME_DEVTOOLS_AXI_BROWSER_URL"] = f"http://127.0.0.1:{attributed['debug_port']}"
     result = subprocess.run([binary, *arguments], env=env)
     raise SystemExit(result.returncode)
 

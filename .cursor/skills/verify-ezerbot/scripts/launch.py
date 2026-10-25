@@ -27,6 +27,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools"))
+from local_api import LaunchIdentity
+
 from verify_lib import (
     assert_not_under,
     assert_outside_repo,
@@ -142,10 +145,13 @@ def launch_run(args: argparse.Namespace, repo: Path, session: str, evidence: Pat
     if not cargo.is_file():
         raise SystemExit(f"cargo introuvable: {cargo}")
     print(f"build: {cargo} build --locked -p grokbot-wrapper", flush=True)
+    gate = os.environ.get("EZERBOT_VERIFY_CARGO_GATE")
+    compile_env = build_env()
+    compile_env["EZERBOT_GIT_COMMIT"] = resolve_commit(repo, "HEAD")
     subprocess.run(
-        [str(cargo), "build", "--locked", "-p", "grokbot-wrapper"],
+        ([gate] if gate else []) + [str(cargo), "build", "--locked", "-p", "grokbot-wrapper"],
         cwd=repo,
-        env=build_env(),
+        env=compile_env,
         check=True,
     )
     sha = resolve_commit(repo, "HEAD")
@@ -232,11 +238,11 @@ def launch_run(args: argparse.Namespace, repo: Path, session: str, evidence: Pat
             f"run: {binary} --port 0 --db {db}",
             flush=True,
         )
-        wrapper = subprocess.Popen(
+        identity = LaunchIdentity()
+        wrapper = identity.spawn(
             [str(binary), "--port", "0", "--db", str(db)],
             stdout=subprocess.PIPE,
             stderr=wrapper_log,
-            stdin=subprocess.DEVNULL,
             text=True,
             env=child_env,
             cwd=repo,
@@ -258,6 +264,19 @@ def launch_run(args: argparse.Namespace, repo: Path, session: str, evidence: Pat
         record["port"] = port
         record["wrapper_identity"] = proc_identity(wrapper.pid)
         save_run(evidence, record)
+        from browser import ensure_headless, http_json
+        state = ensure_headless(record, headed=sys.platform == "darwin" and os.environ.get("EZERBOT_VERIFY_BROWSER") != "chrome-headless")
+        version = http_json(f"http://127.0.0.1:{state['debug_port']}/json/version")
+        auth = identity.spawn(
+            [sys.executable, str(repo / "tools/local_api.py"), "--browser-auth", version["webSocketDebuggerUrl"], url],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            cwd=repo, start_new_session=True,
+        )
+        record["auth_pid"] = auth.pid
+        record["auth_identity"] = proc_identity(auth.pid)
+        save_run(evidence, record)
+        if read_line(auth, 20) != "ready":
+            raise SystemExit("le transport du navigateur n'est pas prêt")
     except Exception:
         save_run(evidence, record)
         raise

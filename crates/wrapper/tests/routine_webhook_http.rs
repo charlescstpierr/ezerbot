@@ -2,7 +2,10 @@
 //! Routine webhook, observed from outside: the real binary, its loopback webhook
 //! listener, the routine history and the routine thread. Tailscale is a fake CLI
 //! in a throwaway HOME; no test reaches a real tailnet or the Internet.
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
 mod support;
+use launch_identity::LaunchIdentity;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -19,6 +22,7 @@ const DNS: &str = "mac.qa.ts.net";
 
 struct Host {
     child: Option<Child>,
+    identity: LaunchIdentity,
     root: PathBuf,
     url: String,
     hook: String,
@@ -68,6 +72,7 @@ esac
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
         let mut host = Self {
             child: None,
+            identity: LaunchIdentity::new(),
             root,
             url: String::new(),
             hook: String::new(),
@@ -81,19 +86,20 @@ esac
         let reserved_hook = TcpListener::bind("127.0.0.1:0").unwrap();
         let hook_port = reserved_hook.local_addr().unwrap().port();
         fs::write(self.root.join("hook-port"), hook_port.to_string()).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
-            .args(["--port", "0", "--db"])
-            .arg(self.root.join("workspace.sqlite"))
-            .current_dir(&self.root)
-            .env("HOME", &self.root)
-            .env("CFFIXED_USER_HOME", &self.root)
-            .env("GROKBOT_FAKE_TAILSCALE", self.root.join("tailscale-fake"))
-            .env("GROKBOT_WEBHOOK_PORT", hook_port.to_string())
-            .env_remove("GROKBOT_FAKE_OPENAI")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
+        self.identity = LaunchIdentity::new();
+        let mut child = self.identity.spawn(
+            Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
+                .args(["--port", "0", "--db"])
+                .arg(self.root.join("workspace.sqlite"))
+                .current_dir(&self.root)
+                .env("HOME", &self.root)
+                .env("CFFIXED_USER_HOME", &self.root)
+                .env("GROKBOT_FAKE_TAILSCALE", self.root.join("tailscale-fake"))
+                .env("GROKBOT_WEBHOOK_PORT", hook_port.to_string())
+                .env_remove("GROKBOT_FAKE_OPENAI")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit()),
+        );
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap())
             .read_line(&mut line)
@@ -139,6 +145,7 @@ esac
     }
     fn state(&self) -> Value {
         ureq::get(&format!("{}/api/state", self.url))
+            .set("X-Ezerbot-Launch", &self.identity.value())
             .call()
             .unwrap()
             .into_json()
@@ -169,6 +176,7 @@ esac
     }
     fn get(&self, path: &str) -> Value {
         ureq::get(&format!("{}{path}", self.url))
+            .set("X-Ezerbot-Launch", &self.identity.value())
             .call()
             .unwrap()
             .into_json()
@@ -177,6 +185,7 @@ esac
     fn post(&self, path: &str, body: Value) -> Value {
         ureq::post(&format!("{}{path}", self.url))
             .set("X-Grokbot-Request", "local")
+            .set("X-Ezerbot-Launch", &self.identity.value())
             .send_json(body)
             .unwrap()
             .into_json()

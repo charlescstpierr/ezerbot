@@ -314,14 +314,20 @@ fn document_upload_keeps_local_request_gate_and_bounded_envelope() {
     assert!(grokbot_wrapper::too_large("/api/documents")
         .message
         .contains("20 Mo"));
+    let mut bytes = [0; 32];
+    getrandom::getrandom(&mut bytes).unwrap();
+    let secret = grokbot_wrapper::LaunchSecret::read(bytes.as_slice()).unwrap();
     let headers = vec![
         ("Host".into(), "127.0.0.1:9999".into()),
         ("Content-Type".into(), "application/json".into()),
         ("X-Grokbot-Request".into(), "local".into()),
+        ("X-Ezerbot-Launch".into(), secret.header_value().into()),
     ];
-    assert!(validate_headers_for_path(9999, "POST", "/api/documents", &headers).is_ok());
+    assert!(validate_headers_for_path(9999, "POST", "/api/documents", &headers, &secret).is_ok());
+    let mut missing_marker = headers.clone();
+    missing_marker.remove(2);
     assert_eq!(
-        validate_headers_for_path(9999, "POST", "/api/documents", &headers[..2])
+        validate_headers_for_path(9999, "POST", "/api/documents", &missing_marker, &secret)
             .unwrap_err()
             .status,
         403
@@ -329,7 +335,7 @@ fn document_upload_keeps_local_request_gate_and_bounded_envelope() {
     let mut cross_origin = headers;
     cross_origin.push(("Origin".into(), "https://example.invalid".into()));
     assert_eq!(
-        validate_headers_for_path(9999, "POST", "/api/documents", &cross_origin)
+        validate_headers_for_path(9999, "POST", "/api/documents", &cross_origin, &secret)
             .unwrap_err()
             .status,
         403

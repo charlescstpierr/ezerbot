@@ -43,10 +43,11 @@ fn build_panels() {
     }
 }
 
-/// Gzip variants of the served text files, keyed `ui/<name>` for app/ui and
-/// `public/<name>` for app/web/public.
-/// An empty `.gz` means gzip did not make the file smaller: the host then serves
-/// the identity bytes only.
+/// Gzip and Brotli variants of the served text files, keyed `ui/<name>` for
+/// app/ui and `public/<name>` for app/web/public.
+/// An empty `.gz` means gzip did not make the file smaller than the identity
+/// bytes. An empty `.br` means Brotli did not beat the smallest other variant.
+/// The host then serves what is left.
 fn compress_static_files() {
     let app = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"))
         .join("../../app");
@@ -66,7 +67,7 @@ fn compress_static_files() {
         for path in files {
             println!("cargo:rerun-if-changed={}", path.display());
             let name = path.file_name().expect("file name").to_string_lossy();
-            write_gzip(
+            write_variants(
                 &output,
                 &format!("{key}/{name}"),
                 &fs::read(&path).expect("static file"),
@@ -75,7 +76,7 @@ fn compress_static_files() {
     }
     for name in ["panels.js", "panels.css"] {
         let bundle = fs::read(output.join(name)).expect("panel bundle");
-        write_gzip(&output, name, &bundle);
+        write_variants(&output, name, &bundle);
     }
 }
 
@@ -86,17 +87,55 @@ fn is_text_asset(path: &std::path::Path) -> bool {
     )
 }
 
-fn write_gzip(output: &std::path::Path, relative: &str, bytes: &[u8]) {
+fn write_variants(output: &std::path::Path, relative: &str, bytes: &[u8]) {
+    let mut gzip = gzip(bytes);
+    let mut smallest = bytes.len();
+    if gzip.len() < smallest {
+        smallest = gzip.len();
+    } else {
+        gzip.clear();
+    }
+    let mut brotli = brotli(bytes);
+    if brotli.len() >= smallest {
+        brotli.clear();
+    }
+    write_variant(output, "gzip", "gz", relative, &gzip);
+    write_variant(output, "brotli", "br", relative, &brotli);
+}
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
     use std::io::Write;
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
     encoder.write_all(bytes).expect("gzip static file");
-    let mut compressed = encoder.finish().expect("finish gzip");
-    if compressed.len() >= bytes.len() {
-        compressed.clear();
-    }
-    let target = output.join("gzip").join(format!("{relative}.gz"));
-    fs::create_dir_all(target.parent().expect("gzip directory")).expect("create gzip directory");
-    fs::write(target, compressed).expect("write gzip file");
+    encoder.finish().expect("finish gzip")
+}
+
+fn brotli(bytes: &[u8]) -> Vec<u8> {
+    let params = brotli::enc::BrotliEncoderParams {
+        quality: 11,
+        lgwin: 24,
+        mode: brotli::enc::backward_references::BrotliEncoderMode::BROTLI_MODE_TEXT,
+        size_hint: bytes.len(),
+        ..Default::default()
+    };
+    let mut compressed = Vec::new();
+    brotli::BrotliCompress(&mut &bytes[..], &mut compressed, &params).expect("brotli static file");
+    compressed
+}
+
+fn write_variant(
+    output: &std::path::Path,
+    directory: &str,
+    extension: &str,
+    relative: &str,
+    bytes: &[u8],
+) {
+    let target = output
+        .join(directory)
+        .join(format!("{relative}.{extension}"));
+    fs::create_dir_all(target.parent().expect("variant directory"))
+        .expect("create variant directory");
+    fs::write(target, bytes).expect("write variant file");
 }
 
 fn embed_commit() {

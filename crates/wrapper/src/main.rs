@@ -17,13 +17,32 @@ const JS: &str = "text/javascript; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
 const WOFF2: &str = "font/woff2";
 
-/// A served static file. `gzip` is computed by build.rs and kept only when it is
-/// smaller than `identity`.
+/// A served static file. `gzip` and `brotli` are computed by build.rs. gzip is
+/// kept only when smaller than `identity`, Brotli only when smaller than the
+/// smallest other variant.
 struct Asset {
     path: &'static str,
     content_type: &'static str,
     identity: &'static [u8],
     gzip: Option<&'static [u8]>,
+    brotli: Option<&'static [u8]>,
+}
+
+impl Asset {
+    fn encodings(&self) -> Vec<Encoding> {
+        [(Encoding::Brotli, self.brotli), (Encoding::Gzip, self.gzip)]
+            .into_iter()
+            .filter_map(|(encoding, bytes)| bytes.map(|_| encoding))
+            .collect()
+    }
+
+    fn body(&self, encoding: Encoding) -> &'static [u8] {
+        match encoding {
+            Encoding::Identity => self.identity,
+            Encoding::Gzip => self.gzip.unwrap_or(self.identity),
+            Encoding::Brotli => self.brotli.unwrap_or(self.identity),
+        }
+    }
 }
 
 const fn variant(bytes: &'static [u8]) -> Option<&'static [u8]> {
@@ -54,6 +73,14 @@ macro_rules! asset {
                 $name,
                 ".gz"
             ))),
+            brotli: variant(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/brotli/",
+                $key,
+                "/",
+                $name,
+                ".br"
+            ))),
         }
     };
     ($path:literal, $type:expr, ui $name:literal) => {
@@ -73,6 +100,12 @@ macro_rules! asset {
                 $name,
                 ".gz"
             ))),
+            brotli: variant(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/brotli/",
+                $name,
+                ".br"
+            ))),
         }
     };
     ($path:literal, $type:expr, raw $folder:literal $name:literal) => {
@@ -87,6 +120,7 @@ macro_rules! asset {
                 $name
             )),
             gzip: None,
+            brotli: None,
         }
     };
 }
@@ -135,9 +169,31 @@ static ASSETS: &[Asset] = &[
     asset!("/katex/KaTeX_Typewriter-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Typewriter-Regular.woff2"),
 ];
 
-/// Whether an Accept-Encoding value allows gzip. An explicit gzip entry wins
-/// over `*`; q=0 refuses; an unreadable weight counts as a refusal.
-fn accepts_gzip(accept_encoding: Option<&str>) -> bool {
+/// How an asset body travels. Brotli ranks above gzip on a tie.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Encoding {
+    #[default]
+    Identity,
+    Gzip,
+    Brotli,
+}
+
+impl Encoding {
+    fn token(self) -> Option<&'static str> {
+        match self {
+            Encoding::Identity => None,
+            Encoding::Gzip => Some("gzip"),
+            Encoding::Brotli => Some("br"),
+        }
+    }
+}
+
+/// The coding an Accept-Encoding value picks among the variants an asset has:
+/// the highest weight wins, Brotli then gzip break a tie, and identity answers
+/// when no variant is acceptable. An explicit coding beats `*`; q=0 refuses; an
+/// unreadable weight counts as a refusal.
+fn negotiate(accept_encoding: Option<&str>, available: &[Encoding]) -> Encoding {
+    let mut explicit: [Option<f32>; 2] = [None, None];
     let mut wildcard = None;
     for item in accept_encoding.unwrap_or("").split(',') {
         let mut parts = item.split(';');
@@ -145,21 +201,36 @@ fn accepts_gzip(accept_encoding: Option<&str>) -> bool {
         let weight = parts
             .filter_map(|parameter| parameter.split_once('='))
             .find(|(name, _)| name.trim().eq_ignore_ascii_case("q"))
-            .map_or(1.0, |(_, value)| value.trim().parse::<f32>().unwrap_or(0.0));
-        if coding.eq_ignore_ascii_case("gzip") {
-            return weight > 0.0;
-        }
-        if coding == "*" {
-            wildcard = Some(weight > 0.0);
+            .map_or(1.0, |(_, value)| {
+                value
+                    .trim()
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|weight| (0.0..=1.0).contains(weight))
+                    .unwrap_or(0.0)
+            });
+        if coding.eq_ignore_ascii_case("br") {
+            explicit[0].get_or_insert(weight);
+        } else if coding.eq_ignore_ascii_case("gzip") {
+            explicit[1].get_or_insert(weight);
+        } else if coding == "*" {
+            wildcard.get_or_insert(weight);
         }
     }
-    wildcard.unwrap_or(false)
+    let mut chosen = (Encoding::Identity, 0.0);
+    for (encoding, explicit) in [Encoding::Brotli, Encoding::Gzip].into_iter().zip(explicit) {
+        let weight = explicit.or(wildcard).unwrap_or(0.0);
+        if available.contains(&encoding) && weight > chosen.1 {
+            chosen = (encoding, weight);
+        }
+    }
+    chosen.0
 }
 
 /// What an asset reply adds to the shared headers.
 #[derive(Clone, Copy, Default)]
 struct Negotiated {
-    gzip: bool,
+    encoding: Encoding,
     vary: bool,
 }
 
@@ -286,17 +357,16 @@ fn payload(
                 .map(|(_, value)| value.as_str())
                 .collect::<Vec<_>>()
                 .join(",");
-            let gzip = asset
-                .gzip
-                .filter(|_| accepts_gzip(Some(accept_encoding.as_str())));
+            let available = asset.encodings();
+            let encoding = negotiate(Some(accept_encoding.as_str()), &available);
             return Ok((
                 ApiResponse::Bytes {
                     content_type: asset.content_type.into(),
-                    body: gzip.unwrap_or(asset.identity).to_vec(),
+                    body: asset.body(encoding).to_vec(),
                 },
                 Negotiated {
-                    gzip: gzip.is_some(),
-                    vary: asset.gzip.is_some(),
+                    encoding,
+                    vary: !available.is_empty(),
                 },
             ));
         }
@@ -787,9 +857,9 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
                 Header::from_bytes("Vary", "Accept-Encoding").expect("validated response header"),
             );
         }
-        if negotiated.gzip {
+        if let Some(token) = negotiated.encoding.token() {
             response.add_header(
-                Header::from_bytes("Content-Encoding", "gzip").expect("validated response header"),
+                Header::from_bytes("Content-Encoding", token).expect("validated response header"),
             );
         }
         let result = if remote {
@@ -808,40 +878,82 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
 
 #[cfg(test)]
 mod asset_tests {
-    use super::{accepts_gzip, ASSETS};
+    use super::{negotiate, Encoding, ASSETS};
     use std::io::Read;
 
+    use Encoding::{Brotli, Gzip, Identity};
+
     #[test]
-    fn gzip_is_negotiated_from_accept_encoding() {
+    fn the_encoding_is_chosen_from_accept_encoding_among_the_variants_that_exist() {
+        let both = [Encoding::Brotli, Encoding::Gzip];
         for (value, expected) in [
-            (None, false),
-            (Some(""), false),
-            (Some("gzip"), true),
-            (Some("GZip"), true),
-            (Some("  gzip  "), true),
-            (Some("gzip, deflate, br"), true),
-            (Some("deflate, gzip;q=0.5"), true),
-            (Some("gzip ; q = 0.001"), true),
-            (Some("gzip;q=1"), true),
-            (Some("gzip;q=0"), false),
-            (Some("gzip;q=0.0"), false),
-            (Some("gzip;Q=0"), false),
-            (Some("gzip;q=oops"), false),
-            (Some("deflate, br"), false),
-            (Some("identity"), false),
-            (Some("*"), true),
-            (Some("*;q=0"), false),
-            (Some("*;q=0.1, deflate"), true),
-            (Some("gzip;q=0, *"), false),
-            (Some("*;q=0, gzip"), true),
-            (Some("gzipped"), false),
+            (None, Identity),
+            (Some(""), Identity),
+            (Some("gzip"), Gzip),
+            (Some("GZip"), Gzip),
+            (Some("  gzip  "), Gzip),
+            (Some("br"), Brotli),
+            (Some("BR"), Brotli),
+            (Some("gzip, deflate, br"), Brotli),
+            (Some("br, gzip"), Brotli),
+            (Some("gzip;q=1, br;q=0.5"), Gzip),
+            (Some("gzip;q=0.5, br"), Brotli),
+            (Some("gzip;q=0.5, br;q=0.5"), Brotli),
+            (Some("br;q=0, gzip"), Gzip),
+            (Some("br;q=0"), Identity),
+            (Some("gzip;q=0, br;q=0"), Identity),
+            (Some("deflate, gzip;q=0.5"), Gzip),
+            (Some("gzip ; q = 0.001"), Gzip),
+            (Some("gzip;q=1"), Gzip),
+            (Some("gzip;q=0"), Identity),
+            (Some("gzip;q=0.0"), Identity),
+            (Some("gzip;Q=0"), Identity),
+            (Some("gzip;q=oops"), Identity),
+            (Some("br;q=oops, gzip"), Gzip),
+            (Some("deflate"), Identity),
+            (Some("identity"), Identity),
+            (Some("*"), Brotli),
+            (Some("*;q=0"), Identity),
+            (Some("*;q=0.1, deflate"), Brotli),
+            (Some("gzip;q=0, *"), Brotli),
+            (Some("br;q=0, *"), Gzip),
+            (Some("*;q=0, gzip"), Gzip),
+            (Some("*;q=0, br"), Brotli),
+            (Some("gzip, *;q=0.5"), Gzip),
+            (Some("br;q=0.4, *;q=0.9"), Gzip),
+            (Some("gzipped"), Identity),
+            (Some("brotli"), Identity),
         ] {
-            assert_eq!(accepts_gzip(value), expected, "{value:?}");
+            assert_eq!(negotiate(value, &both), expected, "{value:?}");
         }
     }
 
     #[test]
-    fn served_paths_are_the_explicit_list_and_gzip_variants_decode_to_identity() {
+    fn a_coding_the_asset_lacks_is_never_chosen() {
+        for (available, value, expected) in [
+            (&[Gzip][..], Some("gzip, deflate, br"), Gzip),
+            (&[Gzip], Some("br"), Identity),
+            (&[Gzip], Some("*"), Gzip),
+            (&[Gzip], Some("br;q=0, gzip"), Gzip),
+            (&[Gzip], Some("br, gzip;q=0.1"), Gzip),
+            (&[Brotli], Some("gzip"), Identity),
+            (&[Brotli], Some("gzip, br"), Brotli),
+            (&[Brotli], Some("*"), Brotli),
+            (&[Brotli], Some("br;q=0, *"), Identity),
+            (&[], Some("gzip, deflate, br"), Identity),
+            (&[], Some("*"), Identity),
+            (&[], None, Identity),
+        ] {
+            assert_eq!(
+                negotiate(value, available),
+                expected,
+                "{available:?} {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn served_paths_are_the_explicit_list_and_compressed_variants_decode_to_identity() {
         let mut paths: Vec<_> = ASSETS.iter().map(|asset| asset.path).collect();
         paths.sort_unstable();
         assert_eq!(
@@ -890,11 +1002,22 @@ mod asset_tests {
         );
         for asset in ASSETS {
             assert!(!asset.identity.is_empty(), "{}", asset.path);
-            assert!(!asset.path.ends_with(".png") || asset.gzip.is_none());
+            assert!(
+                !asset.path.ends_with(".png") || (asset.gzip.is_none() && asset.brotli.is_none())
+            );
             if let Some(gzip) = asset.gzip {
                 assert!(gzip.len() < asset.identity.len(), "{}", asset.path);
                 let mut decoded = Vec::new();
                 flate2::read::GzDecoder::new(gzip)
+                    .read_to_end(&mut decoded)
+                    .unwrap();
+                assert_eq!(decoded, asset.identity, "{}", asset.path);
+            }
+            if let Some(brotli) = asset.brotli {
+                let smallest = asset.gzip.map_or(asset.identity.len(), <[u8]>::len);
+                assert!(brotli.len() < smallest, "{}", asset.path);
+                let mut decoded = Vec::new();
+                brotli::Decompressor::new(brotli, 4096)
                     .read_to_end(&mut decoded)
                     .unwrap();
                 assert_eq!(decoded, asset.identity, "{}", asset.path);

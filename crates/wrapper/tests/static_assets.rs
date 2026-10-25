@@ -140,6 +140,13 @@ impl Reply {
                     .unwrap();
                 bytes
             }
+            Some("br") => {
+                let mut bytes = Vec::new();
+                brotli::Decompressor::new(self.body.as_slice(), 4096)
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                bytes
+            }
             Some(other) => panic!("unexpected Content-Encoding {other}"),
         }
     }
@@ -155,7 +162,7 @@ const COMPRESSIBLE: [(&str, &str); 6] = [
 ];
 
 #[test]
-fn gzip_is_sent_only_when_accepted_and_decodes_to_the_identity_body() {
+fn the_best_accepted_encoding_is_sent_and_decodes_to_the_identity_body() {
     let host = Host::new();
     for (path, content_type) in COMPRESSIBLE {
         let plain = host.get(path, None);
@@ -164,38 +171,55 @@ fn gzip_is_sent_only_when_accepted_and_decodes_to_the_identity_body() {
         assert_eq!(plain.header("vary"), Some("Accept-Encoding"), "{path}");
         assert!(!plain.body.is_empty(), "{path}");
 
-        let gzip = host.get(path, Some("gzip, deflate, br"));
-        assert_eq!(gzip.status, 200, "{path}");
+        let gzip = host.get(path, Some("gzip"));
         assert_eq!(gzip.header("content-encoding"), Some("gzip"), "{path}");
-        assert_eq!(gzip.header("vary"), Some("Accept-Encoding"), "{path}");
-        assert_eq!(gzip.header("content-type"), Some(content_type), "{path}");
-        assert_eq!(gzip.header("cache-control"), Some("no-cache"), "{path}");
-        assert_eq!(gzip.header("content-security-policy"), Some(CSP), "{path}");
-        assert_eq!(gzip.header("x-frame-options"), Some("DENY"), "{path}");
-        assert_eq!(gzip.header("x-content-type-options"), Some("nosniff"));
-        if gzip.header("transfer-encoding").is_none() {
+        assert!(gzip.body.len() < plain.body.len(), "{path}");
+
+        let brotli = host.get(path, Some("gzip, deflate, br"));
+        assert_eq!(brotli.status, 200, "{path}");
+        assert_eq!(brotli.header("content-encoding"), Some("br"), "{path}");
+        assert_eq!(brotli.header("vary"), Some("Accept-Encoding"), "{path}");
+        assert_eq!(brotli.header("content-type"), Some(content_type), "{path}");
+        assert_eq!(brotli.header("cache-control"), Some("no-cache"), "{path}");
+        assert_eq!(
+            brotli.header("content-security-policy"),
+            Some(CSP),
+            "{path}"
+        );
+        assert_eq!(brotli.header("x-frame-options"), Some("DENY"), "{path}");
+        assert_eq!(brotli.header("x-content-type-options"), Some("nosniff"));
+        if brotli.header("transfer-encoding").is_none() {
             assert_eq!(
-                gzip.header("content-length"),
-                Some(gzip.body.len().to_string().as_str()),
+                brotli.header("content-length"),
+                Some(brotli.body.len().to_string().as_str()),
                 "{path}"
             );
         }
-        assert!(gzip.body.len() < plain.body.len(), "{path}");
-        let decoded = gzip.decoded();
-        assert_eq!(decoded, plain.body, "{path}");
+        assert!(brotli.body.len() < gzip.body.len(), "{path}");
+        assert_eq!(brotli.decoded(), plain.body, "{path}");
+        assert_eq!(gzip.decoded(), plain.body, "{path}");
 
-        for refusal in ["gzip;q=0", "deflate, br", "identity", "*;q=0"] {
+        for refusal in ["gzip;q=0, br;q=0", "deflate", "identity", "*;q=0", "br;q=0"] {
             let reply = host.get(path, Some(refusal));
             assert_eq!(reply.header("content-encoding"), None, "{path} {refusal}");
             assert_eq!(reply.header("vary"), Some("Accept-Encoding"));
             assert_eq!(reply.body, plain.body, "{path} {refusal}");
         }
-        for acceptance in ["GZIP", "deflate,  gzip;q=0.5", "*"] {
+        for (acceptance, expected) in [
+            ("br;q=0, gzip", "gzip"),
+            ("gzip;q=1, br;q=0.5", "gzip"),
+            ("GZIP", "gzip"),
+            ("deflate,  gzip;q=0.5", "gzip"),
+            ("br", "br"),
+            ("BR, gzip;q=0.5", "br"),
+            ("gzip;q=0, *", "br"),
+            ("*", "br"),
+        ] {
             let reply = host.get(path, Some(acceptance));
             assert_eq!(
                 reply.header("content-encoding"),
-                Some("gzip"),
-                "{acceptance}"
+                Some(expected),
+                "{path} {acceptance}"
             );
             assert_eq!(reply.decoded(), plain.body, "{path} {acceptance}");
         }

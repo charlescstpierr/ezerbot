@@ -44,3 +44,36 @@ grokbot-submission-journal = { path = "crates/submission-journal" }
 grokbot-replica = { path = "crates/replica" }
 grokbot-store = { path = "crates/store" }
 grokbot-session = { path = "crates/session" }
+
+# build.rs compresses every UI file at Brotli quality 11. Unoptimized that takes
+# about a minute on each rerun, so the crates that do the work are optimized in
+# dev too. The decoder is only used by tests and costs nothing to leave alone.
+[profile.dev.package.brotli]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.alloc-stdlib]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.alloc-no-stdlib]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.release.package.brotli]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.release.package.alloc-stdlib]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.release.package.alloc-no-stdlib]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false

@@ -16,7 +16,7 @@
   let latest = null; // { state } du dernier onState
   let facts = null; // null tant que la liste n’est pas arrivée
   let failed = false, open = false, view = "list", generation = 0;
-  let mark = null, painted = null, entry = null, screen = null, detail = null, review = null, found = null; // found : ids trouvés (Set), null sans filtre
+  let mark = null, painted = null, entry = null, screen = null, detail = null, review = null, add = null, found = null; // found : ids trouvés (Set), null sans filtre
   // Ouvert depuis « N souvenirs utilisés » sous une réponse : `recalled` attend la liste relue, `used` garde la demande
   // ({ origin, ask, all }) ; ce qui existe encore s'en déduit à chaque affichage (`scopeOf`), car un souvenir peut être oublié écran ouvert.
   let recalled = null, used = null, usedBar = null;
@@ -37,9 +37,9 @@
       if (token !== generation) return loading;
       failed = true;
     }
-    paint();
     if (failed) recalled = null; // une liste qui n'a pas pu être lue ne dit pas quels souvenirs existent
     else settle();
+    paint();
   }
   // Les souvenirs de la réponse qui existent encore, d'après la liste qui vient d'être relue : le premier s'ouvre, les disparus sont dits.
   function settle() {
@@ -47,11 +47,10 @@
     const { ids, origin } = recalled;
     recalled = null;
     used = { origin, ask: ids, all: false };
-    view = "list";
     paint();
     const first = scopeOf(used).present[0];
     if (first) detail?.open(first);
-    else { detail?.close(); screen.querySelector(".is-list").focus?.(); } // la Liste vient de remplacer le Graphe : le focus suit l'onglet affiché
+    else { detail?.close(); screen.querySelector(`.is-${view}`).focus?.(); } // rien à ouvrir : le focus reste sur l'onglet affiché
   }
   // Ce que la demande vaut d'après la liste lue : les souvenirs qui existent encore (`present`, dans l'ordre du rappel), ceux qui manquent,
   // et `ids` (Set) quand la Liste ne doit montrer qu'eux : plusieurs souvenirs demandés, au moins un présent, « Tout afficher » pas encore pressé.
@@ -60,13 +59,19 @@
     const present = ask.filter((id) => live.has(id));
     return { origin, total: ask.length, present, missing: ask.length - present.length, ids: !all && ask.length > 1 && present.length ? new Set(present) : null };
   }
+  // Une action de l'écran Mémoire encore en vol (Enregistrer ou Oublier du détail, Oui de « À revoir », Valider d'« Ajouter ») se terminerait
+  // sur l'écran ouvert depuis la réponse : elle y refermerait le détail, y poserait sa note ou y déplacerait le focus. Comme pour l'application, on attend.
+  const acting = () => Boolean(panels.busy || detail?.busy?.() || review?.busy?.() || add?.busy?.());
   function openWith(ids, origin = null) {
-    if (panels.busy) return { ok: false, message: "Une action est en cours : réessayez dans un instant." };
+    if (acting()) return { ok: false, message: "Une action est en cours : réessayez dans un instant." };
     if (!Array.isArray(ids) || !ids.length) return { ok: false, message: "Cette réponse n’a pas de souvenir à montrer." };
+    // Ce que la visite précédente a laissé ne contredit pas la réponse : la Liste (pas le Graphe), sans recherche ni filtre, sans note de « À revoir ».
+    view = "list";
+    filter?.reset();
+    review?.reset();
     show(); // quitter le fil passe par la navigation, qui ferme cet écran : on retient la demande ensuite
     recalled = { ids: ids.map(String), origin };
     used = null;
-    filter?.reset(); // les filtres d'une visite précédente cacheraient les souvenirs demandés
     paint();
     return { ok: true };
   }
@@ -117,7 +122,7 @@
       switcher.append(tab);
     }
     // Le bouton « Ajouter un souvenir » (memory-add.js) rejoint les onglets ; son formulaire s’ouvre dessous.
-    const add = window.EzerbotMemoryAdd?.create(load);
+    add = window.EzerbotMemoryAdd?.create(load);
     // Le panneau de détail (memory-detail.js) s'ouvre à droite de la vue ; il fait relire la liste après chaque action.
     detail = window.EzerbotMemoryDetail?.create({ facts: () => facts, reload: load, label: { bot: botLabel, scope: scopeLabel, date: factDate } });
     // Le panneau « À revoir » (memory-review.js) : les souvenirs que le moteur marque à revoir, avec « Encore vrai ? ».
@@ -164,6 +169,7 @@
         if (panels.openConversation?.(origin.conversationId, origin.messageId)) return;
         const problem = node("p", "memory-space-used-problem", "Cette conversation n’existe plus, ou une autre action est en cours.");
         problem.setAttribute("role", "alert");
+        usedBar.querySelector(".memory-space-used-problem")?.remove(); // un second clic ne répète pas l'alerte
         usedBar.append(problem);
       }));
     }
@@ -172,6 +178,7 @@
   }
   function body(shown) {
     const empty = (text) => [node("p", "memory-space-empty", text)];
+    if (recalled) return empty("Chargement…"); // ouvert depuis une réponse : rien d'autre ne s'affiche avant la liste relue qui dit quels souvenirs existent
     const note = failed ? [node("p", "memory-space-help", "La mémoire n’a pas pu être actualisée : voici le dernier état connu.")] : [];
     // Graphe : sans souvenir (ou pas encore chargé), les messages de la Liste s'appliquent.
     if (found && !found.size && shown?.length) return [...note, ...empty("Aucun souvenir ne correspond à ces filtres.")];
@@ -215,15 +222,15 @@
     for (const tab of screen.querySelectorAll(".memory-space-tab")) tab.setAttribute("aria-pressed", String(tab.dataset.view === view));
     const scope = used && scopeOf(used);
     paintUsed(scope);
-    // Plusieurs souvenirs utilisés : la Liste ne montre qu'eux, le temps de « Tout afficher ».
-    const shown = scope?.ids ? (facts || []).filter((fact) => scope.ids.has(String(fact.fact_id))) : facts;
+    // Plusieurs souvenirs utilisés : la Liste ne montre qu'eux, le temps de « Tout afficher ». En attendant la liste relue, rien.
+    const shown = recalled ? [] : scope?.ids ? (facts || []).filter((fact) => scope.ids.has(String(fact.fact_id))) : facts;
     found = filter ? filter.sync(shown, latest?.state?.bots || [], botLabel) : null;
-    const signature = JSON.stringify([view, failed, facts, (latest?.state?.bots || []).map((bot) => [bot.id, bot.name]), filter?.state, scope?.ids ? [...scope.ids] : null]);
+    const signature = JSON.stringify([view, failed, facts, (latest?.state?.bots || []).map((bot) => [bot.id, bot.name]), filter?.state, scope?.ids ? [...scope.ids] : null, Boolean(recalled)]);
     if (signature === painted) return;
     painted = signature;
     screen.querySelector(".memory-space-body").replaceChildren(...body(shown));
     detail?.refresh();
-    review?.sync((facts || []).filter((fact) => !found || found.has(String(fact.fact_id))));
+    review?.sync((shown || []).filter((fact) => !found || found.has(String(fact.fact_id)))); // « À revoir » suit ce que la Liste montre : les souvenirs de la réponse tant que « Tout afficher » n’est pas pressé
   }
   const registered = panels.register({
     id: "memory-space",

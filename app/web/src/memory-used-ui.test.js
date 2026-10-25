@@ -130,3 +130,13 @@ test("la pastille s’habille de jetons Galet, sans couleur codée en dur ni tex
   }
   assert.match(css, /\.gb-provenance:empty\s*\{\s*display:\s*none/);
 });
+
+test("une raison dite à un clic précédent s’efface quand le clic suivant ouvre l’écran Mémoire", async () => {
+  let busy = true;
+  const pill = mountPill({ message: answer({ recalled_fact_ids: ["f1"] }), onOpenMemory: () => (busy ? { ok: false, message: "Une action est en cours : réessayez dans un instant." } : { ok: true }) });
+  await pill.button().props.onClick();
+  assert.equal(pill.status().props.children, "Une action est en cours : réessayez dans un instant.");
+  busy = false;
+  await pill.button().props.onClick();
+  assert.equal(pill.status(), undefined);
+});

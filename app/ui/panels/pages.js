@@ -271,8 +271,9 @@
         for (const item of states) viewState[item.name] = item.initial;
       }
     }
+    const previousTitle = detail && detail.title;
     detail = page;
-    if (document.activeElement !== shell.input) shell.input.value = page.title || "";
+    if (document.activeElement !== shell.input || shell.input.value === previousTitle) shell.input.value = page.title || "";
     // Un état identique (le fil se rafraîchit toutes les 200 ms pendant une réponse) ne reconstruit pas le DOM :
     // le focus clavier et la sélection de texte restent en place.
     if (changed || paintedSignature !== signature(page)) paintCanvas(page);
@@ -304,13 +305,15 @@
     if (!title || title.length > 80 || pendingTitle === title) return;
     if (detail && detail.id === selectedId && detail.title === title) return;
     const id = selectedId;
+    const token = ++generation;
     pendingTitle = title;
     try {
       const result = await host.api("/api/pages/rename", { id, title });
+      if (token !== generation || selectedId !== id) return;
       const next = result && result.page && result.page.title ? result.page.title : title;
       if (detail && detail.id === id && result && result.page) {
-        generation++;
         remember(result.page);
+        if (shell.input.value === title) shell.input.value = next;
       }
       const link = [...shell.list.children].find((item) => item.dataset && item.dataset.pageId === id);
       if (link) link.textContent = next;

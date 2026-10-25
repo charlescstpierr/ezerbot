@@ -2,9 +2,9 @@
 //! vault rotation; raw credentials are never copied into this ledger.
 use crate::ApiError;
 use grokbot_forms::vault::Vault;
+use ring::digest::{digest, SHA256};
 use rusqlite::Connection;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
@@ -13,6 +13,28 @@ use std::{
 use unicode_normalization::UnicodeNormalization;
 
 const MASK: &str = "[...]";
+const READ_PATTERNS: &str = "SELECT length,digest,filter FROM wrapper_disclosure_patterns";
+const COUNT_PATTERNS: &str = "SELECT count(*) FROM wrapper_disclosure_patterns";
+const BASES: [u64; 2] = [257, 263];
+fn fingerprint(bytes: &[u8]) -> Vec<u8> {
+    digest(&SHA256, bytes).as_ref().to_vec()
+}
+fn rolling(bytes: &[u8]) -> [u64; 2] {
+    bytes.iter().fold([0u64; 2], |mut hashes, byte| {
+        for index in 0..2 {
+            hashes[index] = hashes[index]
+                .wrapping_mul(BASES[index])
+                .wrapping_add(u64::from(*byte) + 1);
+        }
+        hashes
+    })
+}
+fn window_fingerprint(hashes: [u64; 2]) -> ring::digest::Digest {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&hashes[0].to_le_bytes());
+    bytes[8..].copy_from_slice(&hashes[1].to_le_bytes());
+    digest(&SHA256, &bytes)
+}
 #[cfg(test)]
 thread_local! { static VERIFIED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 pub(super) fn refused() -> ApiError {
@@ -20,12 +42,12 @@ pub(super) fn refused() -> ApiError {
 }
 
 pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_disclosure_patterns (length INTEGER NOT NULL, digest BLOB NOT NULL, PRIMARY KEY(length,digest)) WITHOUT ROWID")?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_disclosure_patterns (length INTEGER NOT NULL, digest BLOB NOT NULL, filter BLOB NOT NULL, PRIMARY KEY(length,digest)) WITHOUT ROWID")?;
     Ok(())
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
-pub(super) struct Patterns(BTreeMap<usize, BTreeSet<Vec<u8>>>);
+pub(super) struct Patterns(BTreeMap<usize, BTreeMap<Vec<u8>, BTreeSet<Vec<u8>>>>);
 impl Patterns {
     fn current(conn: &Connection) -> Result<Self, ApiError> {
         let path = conn.path().ok_or_else(refused)?;
@@ -41,7 +63,13 @@ impl Patterns {
                         .0
                         .entry(normalized.len())
                         .or_default()
-                        .insert(Sha256::digest(normalized.as_bytes()).to_vec());
+                        .entry(
+                            window_fingerprint(rolling(normalized.as_bytes()))
+                                .as_ref()
+                                .to_vec(),
+                        )
+                        .or_default()
+                        .insert(fingerprint(normalized.as_bytes()));
                 }
             }
         }
@@ -49,33 +77,48 @@ impl Patterns {
     }
     fn remember(&self, conn: &Connection) -> Result<Self, ApiError> {
         let mut all = Self::default();
-        let mut query =
-            conn.prepare_cached("SELECT length,digest FROM wrapper_disclosure_patterns")?;
+        let mut query = conn.prepare_cached(READ_PATTERNS)?;
         for pair in query.query_map([], |row| {
-            Ok((row.get::<_, usize>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok((
+                row.get::<_, usize>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
         })? {
-            let (length, digest) = pair?;
-            all.0.entry(length).or_default().insert(digest);
+            let (length, digest, filter) = pair?;
+            all.0
+                .entry(length)
+                .or_default()
+                .entry(filter)
+                .or_default()
+                .insert(digest);
         }
         drop(query);
-        let missing: Vec<_> = self
-            .0
-            .iter()
-            .flat_map(|(length, digests)| {
-                digests.iter().filter_map(|digest| {
-                    (!all
+        let mut missing = Vec::new();
+        for (length, filters) in &self.0 {
+            for (filter, digests) in filters {
+                for digest in digests {
+                    if !all
                         .0
                         .get(length)
-                        .is_some_and(|known| known.contains(digest)))
-                    .then_some((*length, digest))
-                })
-            })
-            .collect();
+                        .and_then(|known| known.get(filter))
+                        .is_some_and(|known| known.contains(digest))
+                    {
+                        missing.push((*length, filter, digest));
+                    }
+                }
+            }
+        }
         if !missing.is_empty() {
             let tx = conn.unchecked_transaction()?;
-            for (length, digest) in missing {
-                tx.execute("INSERT OR IGNORE INTO wrapper_disclosure_patterns(length,digest) VALUES (?1,?2)", rusqlite::params![length,digest])?;
-                all.0.entry(length).or_default().insert(digest.clone());
+            for (length, filter, digest) in missing {
+                tx.execute("INSERT OR IGNORE INTO wrapper_disclosure_patterns(length,digest,filter) VALUES (?1,?2,?3)", rusqlite::params![length,digest,filter])?;
+                all.0
+                    .entry(length)
+                    .or_default()
+                    .entry(filter.clone())
+                    .or_default()
+                    .insert(digest.clone());
             }
             tx.commit()?;
         }
@@ -86,19 +129,33 @@ impl Patterns {
     }
     pub(super) fn ranges(&self, normalized_nfd: &str) -> Vec<Range<usize>> {
         let mut ranges: Vec<Range<usize>> = Vec::new();
-        for (start, _) in normalized_nfd.char_indices() {
-            for (length, digests) in &self.0 {
-                let Some(end) = start.checked_add(*length).filter(|end| {
-                    *end <= normalized_nfd.len() && normalized_nfd.is_char_boundary(*end)
-                }) else {
-                    continue;
-                };
-                #[cfg(test)]
-                VERIFIED_BYTES.with(|count| count.set(count.get() + end - start));
-                if digests
-                    .contains(Sha256::digest(&normalized_nfd.as_bytes()[start..end]).as_slice())
-                {
-                    ranges.push(start..end);
+        let bytes = normalized_nfd.as_bytes();
+        for (length, filters) in &self.0 {
+            if *length > bytes.len() {
+                continue;
+            }
+            let powers = BASES.map(|base| base.wrapping_pow((*length - 1) as u32));
+            let mut window = rolling(&bytes[..*length]);
+            for start in 0..=bytes.len() - length {
+                let end = start + length;
+                if normalized_nfd.is_char_boundary(start) && normalized_nfd.is_char_boundary(end) {
+                    // Persist only a cryptographic digest of the rolling pair. A
+                    // candidate is still confirmed against its full SHA-256.
+                    if let Some(digests) = filters.get(window_fingerprint(window).as_ref()) {
+                        #[cfg(test)]
+                        VERIFIED_BYTES.with(|count| count.set(count.get() + length));
+                        if digests.contains(&fingerprint(&bytes[start..end])) {
+                            ranges.push(start..end);
+                        }
+                    }
+                }
+                if end < bytes.len() {
+                    for index in 0..2 {
+                        window[index] = window[index]
+                            .wrapping_sub((u64::from(bytes[start]) + 1).wrapping_mul(powers[index]))
+                            .wrapping_mul(BASES[index])
+                            .wrapping_add(u64::from(bytes[end]) + 1);
+                    }
                 }
             }
         }
@@ -185,12 +242,13 @@ pub(super) fn read<T>(
         let all = current.remember(conn)?;
         let output =
             render(&all).map_err(|error| ApiError::new(error.status, all.text(&error.message)));
-        let remembered: usize = conn.query_row(
-            "SELECT count(*) FROM wrapper_disclosure_patterns",
-            [],
-            |r| r.get(0),
-        )?;
-        let captured: usize = all.0.values().map(BTreeSet::len).sum();
+        let remembered: usize = conn.query_row(COUNT_PATTERNS, [], |r| r.get(0))?;
+        let captured: usize = all
+            .0
+            .values()
+            .flat_map(BTreeMap::values)
+            .map(BTreeSet::len)
+            .sum();
         if Patterns::current(conn)? == current && remembered == captured {
             return output;
         }
@@ -297,14 +355,23 @@ mod tests {
     #[test]
     fn long_private_values_do_not_hash_every_full_candidate_window() {
         let (_dir, conn, vault) = fixture();
-        vault.set("HASH_COST_TEST", "Secret synthétique", &"a".repeat(1280)).unwrap();
+        vault
+            .set("HASH_COST_TEST", "Secret synthétique", &"a".repeat(1280))
+            .unwrap();
         let patterns = Patterns::current(&conn).unwrap();
         let text = "b".repeat(8192);
         VERIFIED_BYTES.with(|count| count.set(0));
         assert_eq!(patterns.text(&text), text);
         let checked = VERIFIED_BYTES.with(std::cell::Cell::get);
-        assert!(checked <= 2 * text.len(), "verified {checked} candidate bytes for {} input bytes", text.len());
-        assert_eq!(patterns.text(&format!("avant{}après", "a".repeat(1280))), "avant[...]après");
+        assert!(
+            checked <= 2 * text.len(),
+            "verified {checked} candidate bytes for {} input bytes",
+            text.len()
+        );
+        assert_eq!(
+            patterns.text(&format!("avant{}après", "a".repeat(1280))),
+            "avant[...]près".nfd().collect::<String>()
+        );
     }
 
     #[test]
@@ -318,10 +385,7 @@ mod tests {
             .unwrap();
         let cost = || {
             let mut steps = 0;
-            for sql in [
-                "SELECT length,digest FROM wrapper_disclosure_patterns",
-                "SELECT count(*) FROM wrapper_disclosure_patterns",
-            ] {
+            for sql in [READ_PATTERNS, COUNT_PATTERNS] {
                 let mut statement = conn.prepare(sql).unwrap();
                 {
                     let mut rows = statement.query([]).unwrap();

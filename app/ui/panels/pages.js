@@ -475,6 +475,11 @@
     const botId = ctx && ctx.bot && ctx.bot.id;
     const byBot = state && state.pages && state.pages.by_bot ? state.pages.by_bot : {};
     const conversationId = ctx && ctx.conversation ? ctx.conversation.id : null;
+    if (host.busy && !currentConversationId && conversationId && orphan?.anchor === null
+        && quote?.page_id === orphan.id && ctx.conversation.kind !== "task"
+        && ctx.conversation.bot_id === botId && detail?.bot_id === botId) {
+      orphan.anchor = conversationId;
+    }
     currentConversationId = conversationId;
     const pages = Array.isArray(byBot[botId]) ? [...byBot[botId]] : [];
     // Dans un groupe, chaque participant écrit sous son propre identifiant : les Pages du fil comptent, quel que soit l’auteur.

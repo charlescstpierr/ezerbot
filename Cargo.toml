@@ -25,6 +25,12 @@ license = "MIT OR Apache-2.0"
 version = "0.1.0"
 publish = false
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -46,9 +52,3 @@ grokbot-submission-journal = { path = "crates/submission-journal" }
 grokbot-replica = { path = "crates/replica" }
 grokbot-store = { path = "crates/store" }
 grokbot-session = { path = "crates/session" }
-
-[profile.dev]
-debug = "line-tables-only"
-
-[profile.dev.package."*"]
-debug = false

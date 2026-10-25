@@ -118,7 +118,8 @@ struct PageKey<'a> {
     conversation: &'a str,
     title: &'a str,
     filename: &'a str,
-    /// The thread card of the write that made this version; none for a revert.
+    /// The thread card of the write that made this version; none for a revert or a broken
+    /// write. The old card is kept only while the Page stays in the same conversation.
     entry: Option<&'a str>,
 }
 
@@ -233,7 +234,10 @@ fn store(
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12)
          ON CONFLICT(id) DO UPDATE SET
             conversation_id = excluded.conversation_id,
-            entry_id = COALESCE(excluded.entry_id, bot_pages.entry_id),
+            entry_id = CASE
+                WHEN excluded.entry_id IS NOT NULL THEN excluded.entry_id
+                WHEN bot_pages.conversation_id = excluded.conversation_id THEN bot_pages.entry_id
+                END,
             title = excluded.title,
             previous_source = CASE
                 WHEN bot_pages.status = 'ready' AND bot_pages.source <> excluded.source

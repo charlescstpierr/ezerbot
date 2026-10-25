@@ -5,8 +5,8 @@
 //! identical creations share one file and stay two livrables. A new kind (a kept answer)
 //! inserts its own row with its own `open_url`; this read does not change.
 //! A deleted bot or conversation hides its livrables, as for skills and tasks; no row is
-//! erased, so nothing is lost if the bot is restored. Only the Storage screen removes a row,
-//! together with the file it points to.
+//! erased, so nothing is lost if the bot is restored. The table is a root for the Storage
+//! screen: a file that is a livrable, even of unknown origin, is never cleaned as an orphan.
 use super::Context;
 use crate::{ApiError, ApiResponse, App, ACCOUNT};
 use rusqlite::{params, Connection};
@@ -77,6 +77,25 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             [tool],
         )?;
     }
+    // A Page keeps the card of its last good write, if that write is in its conversation.
+    conn.execute(
+        "UPDATE bot_pages SET entry_id=h.entry FROM (
+            SELECT page, entry, conversation FROM (
+                SELECT json_extract(e.payload,'$.outcome.output.id') AS page, e.run_id||':'||c.seq AS entry,
+                       r.conversation_id AS conversation,
+                       ROW_NUMBER() OVER (PARTITION BY json_extract(e.payload,'$.outcome.output.id')
+                           ORDER BY COALESCE(json_extract(r.record,'$.started_at'), 0) DESC, c.seq DESC) AS rank
+                FROM engine_run_events e
+                JOIN engine_runs r ON r.run_id=e.run_id
+                JOIN engine_run_events c ON c.run_id=e.run_id AND c.kind='tool_call'
+                     AND json_extract(c.payload,'$.call_id')=json_extract(e.payload,'$.call_id')
+                WHERE e.kind='tool_result' AND json_extract(e.payload,'$.outcome.status')='done'
+                  AND json_extract(c.payload,'$.name') IN ('write_page','edit_page')
+            ) WHERE rank=1
+         ) h WHERE h.page=bot_pages.id AND h.conversation=bot_pages.conversation_id
+           AND bot_pages.entry_id IS NULL",
+        [],
+    )?;
     conn.execute(
         "INSERT OR IGNORE INTO wrapper_livrables
          SELECT 'inconnu:'||g.id, NULL, 'document', g.id, COALESCE(json_extract(g.record,'$.name'), g.id),

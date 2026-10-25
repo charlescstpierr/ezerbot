@@ -13,9 +13,9 @@ use serde_json::{json, Value};
 use support::{form, wait, FakeOpenAi, Seen, CLIENT};
 
 fn scratch(label: &str) -> grokbot_test_support::TestDir {
-    // Un test qui appelle `status()` lance la sonde de connexion et le rafraîchissement du
-    // catalogue, deux fils détachés qui écrivent le journal et le verrou du dossier : il termine
-    // par `wait_for_background_work()`, avant que le dossier soit supprimé.
+    // Les fils de fond du fournisseur (sonde de connexion, catalogue, quota, retour OAuth)
+    // écrivent le journal et le verrou du dossier : `Guarded` les attend avant que le dossier
+    // soit supprimé, test échoué compris.
     grokbot_test_support::TestDir::new(&format!("ezerbot-session-{label}"))
 }
 
@@ -50,12 +50,45 @@ fn saved(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
-fn provider(db: &Path, server: &FakeOpenAi) -> Provider {
-    Provider::with_endpoints(db, server.endpoints(), false)
+/// Un fournisseur de test qui attend ses fils de fond quand il est détruit. `Drop` s'exécute aussi
+/// pendant l'unwinding d'une assertion qui échoue : l'attente a donc lieu avant la destruction de
+/// ce qui a été déclaré avant lui (le faux serveur, puis le dossier). Il se déclare après eux.
+struct Guarded(Provider);
+
+impl Guarded {
+    /// Attend maintenant les fils de fond (point de synchronisation au milieu d'un test).
+    fn settle(&self) {
+        if let Err(message) = self.0.wait_for_background_work() {
+            panic!("{message}");
+        }
+    }
 }
 
-fn codex_provider(db: &Path, server: &FakeOpenAi) -> Provider {
-    Provider::with_backends(
+impl std::ops::Deref for Guarded {
+    type Target = Provider;
+    fn deref(&self) -> &Provider {
+        &self.0
+    }
+}
+
+impl Drop for Guarded {
+    fn drop(&mut self) {
+        match self.0.wait_for_background_work() {
+            Ok(()) => {}
+            // Une seconde panique pendant l'unwinding abattrait tout le binaire : l'échec du test
+            // est déjà en cours, on dit seulement que la fuite existe aussi.
+            Err(message) if std::thread::panicking() => eprintln!("{message}"),
+            Err(message) => panic!("{message}"),
+        }
+    }
+}
+
+fn provider(db: &Path, server: &FakeOpenAi) -> Guarded {
+    Guarded(Provider::with_endpoints(db, server.endpoints(), false))
+}
+
+fn codex_provider(db: &Path, server: &FakeOpenAi) -> Guarded {
+    Guarded(Provider::with_backends(
         db,
         server.endpoints(),
         Endpoints {
@@ -63,7 +96,7 @@ fn codex_provider(db: &Path, server: &FakeOpenAi) -> Provider {
             ..server.endpoints()
         },
         false,
-    )
+    ))
 }
 
 /// Flock tenu par ce processus, distinct du descripteur de la bibliothèque.
@@ -138,14 +171,12 @@ fn expired_token_refreshes_silently_and_survives_restart() {
 
     let refresh = file["refresh_token"].clone();
     let forms = seen.lock().unwrap().forms.len();
-    session.wait_for_background_work();
     drop(session);
     let restarted = provider(&db, &server);
     assert!(restarted.connected());
     assert_eq!(saved(&auth_path)["refresh_token"], refresh);
     assert_eq!(seen.lock().unwrap().forms.len(), forms);
     assert_eq!(restarted.status()["signin"], "idle");
-    restarted.wait_for_background_work();
 }
 
 #[test]
@@ -236,7 +267,6 @@ fn a_refused_refresh_does_not_delete_a_token_saved_by_the_other_process() {
     assert_eq!(saved(&auth_path)["refresh_token"], "winner-refresh");
     assert!(session.connected());
     assert_ne!(session.status()["signin"], "pending");
-    session.wait_for_background_work();
 }
 
 #[test]
@@ -315,7 +345,7 @@ fn charles_codex_file_in_application_support_is_found_without_reconnect() {
     );
     let seen = Arc::new(Mutex::new(Seen::default()));
     let server = FakeOpenAi::new(seen.clone());
-    let session = Provider::with_backends(
+    let session = Guarded(Provider::with_backends(
         &db,
         server.endpoints(),
         grokbot_wrapper::Endpoints {
@@ -323,14 +353,13 @@ fn charles_codex_file_in_application_support_is_found_without_reconnect() {
             ..server.endpoints()
         },
         false,
-    );
+    ));
     assert!(session.connected());
     assert_eq!(session.status()["signin"], "idle");
     assert_eq!(session.status()["backend"], "codex");
     assert!(seen.lock().unwrap().forms.is_empty());
     assert_eq!(saved(&auth_path)["refresh_token"], "refresh-charles");
     assert!(session.status()["error"].is_null());
-    session.wait_for_background_work();
 }
 
 #[test]
@@ -361,7 +390,6 @@ fn a_single_invalid_grant_retries_the_stored_token_before_clearing() {
         .filter(|form| form.get("grant_type").map(String::as_str) == Some("refresh_token"))
         .count();
     assert_eq!(refreshes, 2);
-    session.wait_for_background_work();
 }
 
 #[test]
@@ -475,7 +503,6 @@ fn refresh_success_does_not_overwrite_a_newer_pair() {
     assert_eq!(saved(&auth_path)["refresh_token"], "winner-refresh");
     assert!(session.connected());
     assert_eq!(session.status()["signin"], "idle");
-    session.wait_for_background_work();
 }
 
 #[test]
@@ -561,7 +588,6 @@ fn sign_in_write_requires_the_lock_and_keeps_a_newer_pair() {
     assert_eq!(saved(&auth_path)["refresh_token"], "signin-winner");
     assert!(session.connected());
     assert_ne!(session.status()["signin"], "failed");
-    session.wait_for_background_work();
 }
 
 #[test]
@@ -653,7 +679,6 @@ fn a_newer_source_refresh_replaces_the_older_destination() {
     assert_eq!(saved(&imported)["refresh_token"], "new-refresh");
     assert!(saved(&legacy)["refresh_token"].is_null());
     assert_ne!(again.status()["signin"], "failed");
-    again.wait_for_background_work();
 }
 
 #[test]
@@ -710,7 +735,7 @@ fn a_newer_temporary_is_adopted_on_the_next_startup() {
     assert_ne!(outcome.kind, "signin");
     assert!(seen.lock().unwrap().forms.is_empty());
     assert_eq!(session.status()["signin"], "idle");
-    session.wait_for_background_work();
+    session.settle();
 
     let stale_tmp = auth_path.with_extension("json.tmp");
     write_auth(
@@ -777,9 +802,6 @@ fn codex_rotation_is_kept_when_the_profile_update_fails() {
     assert!(seen.lock().unwrap().forms.is_empty());
     assert_eq!(saved(&auth_path)["refresh_token"], refresh);
     assert_eq!(restarted.status()["signin"], "idle");
-    // `status()` a lancé la sonde de connexion et le rafraîchissement du catalogue : on attend leur
-    // fin avant que le faux serveur et le dossier disparaissent.
-    restarted.wait_for_background_work();
 }
 
 fn flock_child() {
@@ -935,5 +957,4 @@ fn several_threads_share_a_single_refresh() {
     assert_ne!(saved(&auth_path)["refresh_token"], "stale-refresh");
     assert!(session.connected());
     assert_eq!(session.status()["signin"], "idle");
-    session.wait_for_background_work();
 }

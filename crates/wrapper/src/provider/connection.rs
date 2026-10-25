@@ -231,12 +231,22 @@ impl Provider {
         });
     }
     /// Pour les tests : attend la fin des fils réseau de fond de cette connexion (sonde de
-    /// connexion, catalogue de modèles, quota), pour que le dossier de la fixture ne soit plus
-    /// écrit quand le test le supprime. Absent de la version livrée.
+    /// connexion, catalogue de modèles, quota, lecteur d'un tour, attente du retour OAuth), pour
+    /// que le dossier de la fixture ne soit plus écrit quand le test le supprime. L'attente est
+    /// bornée : `Err` nomme alors le fil qui ne finit pas. Absent de la version livrée.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
-    pub fn wait_for_background_work(&self) {
-        self.primary.wait_background();
+    pub fn wait_for_background_work(&self) -> Result<(), String> {
+        self.primary.wait_background()
+    }
+    /// Comme `wait_for_background_work`, avec une borne choisie (essai de la borne elle-même).
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn wait_for_background_work_within(
+        &self,
+        limit: std::time::Duration,
+    ) -> Result<(), String> {
+        self.primary.wait_background_within(limit)
     }
     pub fn start_signin(&self) -> Result<String, Failure> {
         self.session().start_signin()

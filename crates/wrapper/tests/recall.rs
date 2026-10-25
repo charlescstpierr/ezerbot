@@ -544,7 +544,6 @@ fn a_clean_close_removes_the_bot_and_a_crash_never_leaves_in_progress() {
     assert_eq!(f.item()["meeting"]["label"], "Terminée");
     // Arrêt brutal : rien ne ferme la réunion, la réouverture ne dit plus En cours.
     f.joined();
-    // Le suivi de fond peut passer dès l'accord : le nouveau bot se connecte encore.
     f.sync();
     assert_eq!(f.meeting_state(), "joining");
     f.recall.code("in_call_recording");

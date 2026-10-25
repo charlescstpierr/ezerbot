@@ -180,7 +180,7 @@ def yolo_turn(items: list) -> bytes | None:
         return _sse([{"type": "response.output_text.delta", "delta": said}, {"type": "response.completed"}])
     text = _last_user_text(items)
     if "liste mon dossier documents" in text:
-        name, arguments, call_id = "run_shell", {"command": "ls -1", "cwd": work, "timeout_ms": 5000, "output_limit": 4096}, "verify-shell"
+        name, arguments, call_id = "run_shell", {"description": "Lister le dossier Documents", "command": "ls -1", "cwd": work, "timeout_ms": 5000, "output_limit": 4096}, "verify-shell"
     elif "écris mes notes du jour" in text:
         name, call_id = "write_file", "verify-write"
         arguments = {
@@ -425,7 +425,7 @@ def response_body(raw: bytes) -> bytes:
                 "status": "completed",
                 "call_id": call_id,
                 "name": "run_shell",
-                "arguments": json.dumps({"command": command, "cwd": "/tmp", "timeout_ms": 30000, "output_limit": 131072, "background": True}),
+                "arguments": json.dumps({"description": "Vérifier la tâche en arrière-plan", "command": command, "cwd": "/tmp", "timeout_ms": 30000, "output_limit": 131072, "background": True}),
             }
             return _sse(
                 [
@@ -440,7 +440,7 @@ def response_body(raw: bytes) -> bytes:
             "status": "completed",
             "call_id": "verify-late",
             "name": "run_shell",
-            "arguments": json.dumps({"command": "printf 'Résumé envoyé'", "cwd": "/tmp", "timeout_ms": 30000, "output_limit": 4096}),
+            "arguments": json.dumps({"description": "Afficher le résumé de la tâche", "command": "printf 'Résumé envoyé'", "cwd": "/tmp", "timeout_ms": 30000, "output_limit": 4096}),
         }
         return _sse(
             [

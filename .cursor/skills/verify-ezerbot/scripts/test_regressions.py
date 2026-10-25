@@ -325,6 +325,7 @@ class FakeYoloTests(unittest.TestCase):
     def test_each_request_asks_for_its_own_tool_even_after_an_earlier_turn(self) -> None:
         shell = self.events([{"role": "user", "content": "Liste mon dossier Documents"}])[0]["item"]
         self.assertEqual((shell["name"], json.loads(shell["arguments"])["cwd"]), ("run_shell", "/tmp/verify-work/Documents"))
+        self.assertEqual(json.loads(shell["arguments"])["description"], "Lister le dossier Documents")
         history = [
             {"role": "user", "content": "Liste mon dossier Documents"},
             {"type": "function_call_output", "call_id": "verify-shell", "output": "ok"},

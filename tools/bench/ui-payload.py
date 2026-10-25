@@ -5,7 +5,8 @@ Lance le binaire sur une base temporaire, lit la liste ASSETS de /sw.js servi pa
 même binaire, puis demande chaque fichier comme WKWebView/Safari
 (`Accept-Encoding: gzip, deflate, br`). Chaque réponse est décodée et comparée octet
 pour octet à la même ressource demandée sans compression : un écart compte comme une
-erreur. Les fichiers chargés seulement quand un message en a besoin (liste ON_DEMAND de
+erreur (le Brotli est décodé par le zlib de Node, que le build de app/web demande
+déjà). Les fichiers chargés seulement quand un message en a besoin (liste ON_DEMAND de
 sw.js, polices référencées par les feuilles de style) sont mesurés à part.
 
     cargo build --release --locked -p grokbot-wrapper
@@ -62,6 +63,9 @@ def decode(body, encoding):
         return body
     if encoding == "gzip":
         return gzip.decompress(body)
+    if encoding == "br":
+        script = "process.stdout.write(require('zlib').brotliDecompressSync(require('fs').readFileSync(0)))"
+        return subprocess.run(["node", "-e", script], input=body, capture_output=True, check=True).stdout
     raise ValueError(f"Content-Encoding non décodable ici : {encoding}")
 
 
@@ -135,9 +139,9 @@ def kib(n):
 
 def table(title, items):
     print(f"\n{title}")
-    print(f"{'chemin':<28}{'type':<26}{'encodage':<10}{'transféré':>12}{'décodé':>12}  erreur")
+    print(f"{'chemin':<42}{'type':<26}{'encodage':<10}{'transféré':>12}{'décodé':>12}  erreur")
     for item in sorted(items, key=lambda item: -item["transferred"]):
-        print(f"{item['path']:<28}{item['type']:<26}{item['encoding']:<10}{item['transferred']:>12}{item['decoded']:>12}  {item['error'] or ''}")
+        print(f"{item['path']:<42}{item['type']:<26}{item['encoding']:<10}{item['transferred']:>12}{item['decoded']:>12}  {item['error'] or ''}")
 
 
 def spread(values):

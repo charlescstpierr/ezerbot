@@ -10,7 +10,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
 };
@@ -22,16 +22,12 @@ struct Fixture {
     db: PathBuf,
     server: FakeOpenAi,
     provider: Provider,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "ezerbot-codex-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-codex");
+        let dir = guard.to_path_buf();
         let db = dir.join("app.sqlite");
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let provider = Self::provider(&db, &server);
@@ -39,6 +35,7 @@ impl Fixture {
             db,
             server,
             provider,
+            _dir: guard,
         }
     }
     fn provider(db: &std::path::Path, server: &FakeOpenAi) -> Provider {
@@ -88,7 +85,6 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.provider.cancel_signin();
-        let _ = std::fs::remove_dir_all(self.db.parent().unwrap());
     }
 }
 fn post(app: &mut App, path: &str, value: Value) -> Value {

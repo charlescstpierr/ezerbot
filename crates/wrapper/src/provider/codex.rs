@@ -475,7 +475,7 @@ impl Session {
             cache.attempted = Some(Instant::now());
             let session = self.clone();
             let generation = cache.generation;
-            thread::spawn(move || {
+            self.spawn_background(move || {
                 let result = session.read_quota();
                 let mut cache = lock(&session.inner.quota);
                 // A late read must not restore a signed-out/replaced session.

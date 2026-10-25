@@ -18,4 +18,5 @@ grokbot-submission-journal = { workspace = true }
 grokbot-session = { workspace = true }
 
 [dev-dependencies]
+grokbot-test-support = { workspace = true }
 serde_json = { workspace = true }

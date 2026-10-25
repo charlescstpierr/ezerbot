@@ -1214,7 +1214,6 @@ impl CommandRunner for SystemRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn hex_sha(fill: char) -> String {
         fill.to_string().repeat(40)
@@ -1230,18 +1229,12 @@ mod tests {
     struct Layout {
         root: PathBuf,
         paths: UpdatePaths,
+        _dir: grokbot_test_support::TestDir,
     }
 
     fn layout(name: &str, bundle_in_dev: bool) -> Layout {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-maj-{}-{}-{}",
-            name,
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new(&format!("ezerbot-maj-{name}"));
+        let root = guard.to_path_buf();
         let dev = root.join("dev");
         fs::create_dir_all(dev.join(".git")).unwrap();
         fs::write(dev.join("canary.txt"), "ne-pas-toucher").unwrap();
@@ -1272,12 +1265,10 @@ mod tests {
             dev_root: dev,
             user_data: user,
         };
-        Layout { root, paths }
-    }
-
-    impl Drop for Layout {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
+        Layout {
+            root,
+            paths,
+            _dir: guard,
         }
     }
 

@@ -12,10 +12,7 @@ use serde_json::{json, Value};
 use std::{
     os::unix::process::CommandExt,
     path::PathBuf,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
@@ -25,16 +22,12 @@ struct Fixture {
     server: FakeOpenAi,
     path: PathBuf,
     chat: String,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-local-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-local");
+        let root = guard.to_path_buf();
         // Match production layout: app-private data and ordinary working files
         // are distinct, even when a broad grant contains both directories.
         std::fs::create_dir_all(root.join("data")).unwrap();
@@ -65,6 +58,7 @@ impl Fixture {
             server,
             path,
             chat,
+            _dir: guard,
         }
     }
     fn root(&self) -> PathBuf {
@@ -193,11 +187,6 @@ fn process_alive(pid: u32) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.root());
-    }
 }
 fn now() -> u64 {
     SystemTime::now()

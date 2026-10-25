@@ -1,33 +1,16 @@
 // Run with: node --test app/ui/composer-bar.test.cjs
 // Optional: CHROME_BIN=/path/to/chrome node --test app/ui/composer-bar.test.cjs
 const assert = require("node:assert/strict");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { after, test } = require("node:test");
+const { chromeBinary, chromeOnPath } = require("./chrome-binary.cjs");
 
 const UI = __dirname;
 const FRAMES = [[1140, 780], [820, 560]];
-const CHROME_CANDIDATES = [
-  "google-chrome",
-  "google-chrome-stable",
-  "chromium",
-  "chromium-browser",
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-];
-
-function chromeOnPath(command) {
-  if (command.includes("/")) return existsSync(command);
-  return spawnSync("which", [command], { stdio: "ignore" }).status === 0;
-}
-
-function chromeBinary() {
-  if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
-  return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
-}
-
 function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "", workspace = "", welcome = false, title = "Nouvelle conversation", header = "bench", unread = "" } = {}) {
   const speedPill = speed
     ? `<button class="tool-pill" type="button" data-picker="speed"><small>Vitesse</small><b>${speed}</b><svg class="icon"><use href="#i-chevron"/></svg></button>`

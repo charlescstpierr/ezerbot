@@ -145,18 +145,14 @@ impl SubmissionTransport for RestartTransport {
     }
 }
 
-struct CrashCase(PathBuf);
+struct CrashCase(grokbot_test_support::TestDir);
 
 impl CrashCase {
     fn run(point: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "grokbot-orchestrated-{point}-{}",
-            std::process::id()
-        ));
-        fs::create_dir(&path).unwrap();
+        let path = grokbot_test_support::TestDir::new(&format!("grokbot-orchestrated-{point}"));
         let child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "orchestrated_child", "--nocapture"])
-            .env("GROKBOT_ORCHESTRATED_CRASH", &path)
+            .env("GROKBOT_ORCHESTRATED_CRASH", path.path())
             .env("GROKBOT_ORCHESTRATED_POINT", point)
             .output()
             .unwrap();
@@ -191,12 +187,6 @@ impl CrashCase {
             self.session(3).state(&conversation(), &message()).unwrap(),
             Some(SubmissionState::AcceptedAwaitingEcho { .. })
         ));
-    }
-}
-
-impl Drop for CrashCase {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
     }
 }
 

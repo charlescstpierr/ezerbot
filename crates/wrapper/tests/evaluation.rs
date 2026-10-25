@@ -1,4 +1,4 @@
-//! Opt-in, fake-only evaluation launcher and subprocess safety regressions.
+//! Fake-only evaluation launcher (hermetic, loopback) and subprocess safety regressions.
 //! See docs/evaluation.md. No production entry point or account is used.
 mod support;
 
@@ -114,7 +114,9 @@ fn wait_for(mut condition: impl FnMut() -> EvalResult<bool>) -> EvalResult<()> {
     Ok(())
 }
 
-fn replay() -> EvalResult<(PathBuf, Scores)> {
+/// Entry of the subprocess regressions only: inputs come from the environment their launcher sets.
+/// The sentinel is set by `launch` alone; the hermetic run below never reads the environment.
+fn replay_from_environment() -> EvalResult<(PathBuf, Scores)> {
     // Validate the mandatory budget before touching a space or starting a server.
     let max_calls: usize = std::env::var("EZERBOT_EVAL_MAX_CALLS")
         .ok()
@@ -125,11 +127,22 @@ fn replay() -> EvalResult<(PathBuf, Scores)> {
         .ok_or("EZERBOT_EVAL_SPACE obligatoire : espace d’évaluation marqué requis.")?;
     let source =
         std::env::var_os("EZERBOT_EVAL_SCENARIO").ok_or("EZERBOT_EVAL_SCENARIO obligatoire.")?;
-    let messages = scenario(Path::new(&source))?;
-    let run = claim_space(Path::new(&space))?;
     // This entry runs alone in a subprocess, before any app/provider threads exist.
-    std::env::set_var("HOME", run.join("home"));
-    std::env::set_var("CFFIXED_USER_HOME", run.join("home"));
+    replay(Path::new(&space), Path::new(&source), max_calls, true)
+}
+
+fn replay(
+    space: &Path,
+    source: &Path,
+    max_calls: usize,
+    isolate_home: bool,
+) -> EvalResult<(PathBuf, Scores)> {
+    let messages = scenario(source)?;
+    let run = claim_space(space)?;
+    if isolate_home {
+        std::env::set_var("HOME", run.join("home"));
+        std::env::set_var("CFFIXED_USER_HOME", run.join("home"));
+    }
     let db = run.join("app.sqlite");
     let expires = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -152,7 +165,22 @@ fn replay() -> EvalResult<(PathBuf, Scores)> {
     }));
     let server = FakeOpenAi::new(seen.clone());
     // Endpoints come ONLY from this in-process loopback fixture, never the environment.
-    let provider = Provider::with_endpoints(&db, server.endpoints(), false);
+    let endpoints = server.endpoints();
+    let loopback = "http://127.0.0.1:";
+    if ![
+        &endpoints.authorize,
+        &endpoints.token,
+        &endpoints.revoke,
+        &endpoints.jwks,
+        &endpoints.issuer,
+        &endpoints.api,
+    ]
+    .iter()
+    .all(|endpoint| endpoint.starts_with(loopback))
+    {
+        return Err("Point d’accès hors boucle locale : évaluation arrêtée.");
+    }
+    let provider = Provider::with_endpoints(&db, endpoints, false);
     let mut app = App::open_with(&db, provider.clone())
         .map_err(|_| "Impossible d’ouvrir la base dédiée d’évaluation.")?;
     // status() would start an auxiliary connection probe; load only the catalogue.
@@ -250,12 +278,25 @@ fn replay() -> EvalResult<(PathBuf, Scores)> {
     Ok((output, scores))
 }
 
+/// Set by `launch` only, to run the subprocess regressions through this same test.
+const SUBPROCESS: &str = "EZERBOT_EVAL_SUBPROCESS";
+
+/// Hermetic by default: a fresh marked space, the repository scenario and a fixed call cap are
+/// prepared here, against the in-process loopback fake server. Under the subprocess sentinel the
+/// same test runs the launcher on the inputs its parent regression prepared.
 #[test]
-#[ignore = "opt-in fake evaluation; requires a marked fresh space, scenario and explicit call cap"]
 fn replay_fake_scenario() {
-    match replay() {
+    let subprocess = std::env::var_os(SUBPROCESS).is_some();
+    let space = (!subprocess).then(|| test_space(true));
+    let outcome = match &space {
+        Some(space) => replay(space, &fixture(), HERMETIC_MAX_CALLS, false),
+        None => replay_from_environment(),
+    };
+    match outcome {
         Ok((path, scores)) => {
             println!("EVAL_RESULT={}", path.display());
+            // The hermetic run owns its numeric result file; a subprocess one is read by its parent.
+            let _result = space.as_ref().map(|_| TestFile(path));
             assert_eq!(
                 scores.limit_reached, 0,
                 "Plafond atteint : évaluation arrêtée."
@@ -265,8 +306,21 @@ fn replay_fake_scenario() {
     }
 }
 
-/// A synthetic space owned by one regression; removed with its sibling fixtures.
-struct TestSpace(PathBuf);
+/// Call cap fixed by the hermetic run: exactly the three messages of the repository scenario.
+const HERMETIC_MAX_CALLS: usize = 3;
+
+/// A result file removed on drop, even when an assertion fails first.
+struct TestFile(PathBuf);
+
+impl Drop for TestFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// A synthetic space owned by one regression. It lives in its own unique directory, which also
+/// holds its sibling fixtures (`.link`, `.marker`, `.json`) and goes away with it.
+struct TestSpace(PathBuf, #[allow(dead_code)] grokbot_test_support::TestDir);
 
 impl std::ops::Deref for TestSpace {
     type Target = Path;
@@ -275,39 +329,21 @@ impl std::ops::Deref for TestSpace {
     }
 }
 
-impl Drop for TestSpace {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-        for sidecar in ["link", "marker", "json"] {
-            let _ = fs::remove_file(self.0.with_extension(sidecar));
-        }
-    }
-}
-
 fn test_space(marked: bool) -> TestSpace {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "ezerbot-eval-test-{}-{}-{}",
-        std::process::id(),
-        timestamp(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
+    let directory = grokbot_test_support::TestDir::new("ezerbot-eval-test");
+    let path = directory.join("space");
     private_dir(&path).unwrap();
     if marked {
         fs::write(path.join(MARKER), MARKER_CONTENT).unwrap();
     }
-    TestSpace(path)
+    TestSpace(path, directory)
 }
 
 fn launch(space: &Path, cap: Option<&str>, source: &Path) -> Output {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
-        .args([
-            "--ignored",
-            "--exact",
-            "replay_fake_scenario",
-            "--nocapture",
-        ])
+        .args(["--exact", "replay_fake_scenario", "--nocapture"])
+        .env(SUBPROCESS, "1")
         .env("EZERBOT_EVAL_SPACE", space)
         .env("EZERBOT_EVAL_SCENARIO", source)
         // A runtime fake-server override cannot redirect this launcher.

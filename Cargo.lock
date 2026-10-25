@@ -358,6 +358,7 @@ dependencies = [
  "getrandom",
  "grokbot-domain",
  "grokbot-engine",
+ "grokbot-test-support",
  "quick-xml",
  "rusqlite",
  "serde",
@@ -374,6 +375,7 @@ dependencies = [
  "getrandom",
  "grokbot-domain",
  "grokbot-engine",
+ "grokbot-test-support",
  "rusqlite",
  "serde",
  "serde_json",
@@ -389,6 +391,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom",
  "grokbot-domain",
+ "grokbot-test-support",
  "rusqlite",
  "serde",
  "serde_json",
@@ -402,6 +405,7 @@ dependencies = [
  "getrandom",
  "grokbot-domain",
  "grokbot-engine",
+ "grokbot-test-support",
  "rusqlite",
  "security-framework",
  "serde",
@@ -416,6 +420,7 @@ dependencies = [
  "getrandom",
  "grokbot-domain",
  "grokbot-engine",
+ "grokbot-test-support",
  "rusqlite",
  "serde",
  "serde_json",
@@ -436,6 +441,7 @@ dependencies = [
  "getrandom",
  "grokbot-domain",
  "grokbot-engine",
+ "grokbot-test-support",
  "jiff",
  "rusqlite",
  "serde",
@@ -450,6 +456,7 @@ dependencies = [
  "grokbot-replica",
  "grokbot-store",
  "grokbot-submission-journal",
+ "grokbot-test-support",
  "rusqlite",
 ]
 
@@ -460,6 +467,7 @@ dependencies = [
  "getrandom",
  "grokbot-domain",
  "grokbot-engine",
+ "grokbot-test-support",
  "rusqlite",
  "serde",
  "serde_json",
@@ -473,6 +481,7 @@ dependencies = [
  "grokbot-domain",
  "grokbot-replica",
  "grokbot-submission-journal",
+ "grokbot-test-support",
  "grokbot-wire",
  "rusqlite",
  "serde",
@@ -487,6 +496,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "grokbot-test-support"
+version = "0.1.0"
+
+[[package]]
 name = "grokbot-try"
 version = "0.1.0"
 dependencies = [
@@ -495,6 +508,7 @@ dependencies = [
  "grokbot-session",
  "grokbot-store",
  "grokbot-submission-journal",
+ "grokbot-test-support",
  "serde_json",
 ]
 
@@ -526,6 +540,7 @@ dependencies = [
  "grokbot-skills",
  "grokbot-store",
  "grokbot-submission-journal",
+ "grokbot-test-support",
  "jiff",
  "jsonwebtoken",
  "nix",

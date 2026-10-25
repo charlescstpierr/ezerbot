@@ -4,33 +4,15 @@ use grokbot_engine::contracts::{
 };
 use grokbot_wrapper::{ApiError, App};
 use serde_json::{json, Value};
-use std::{
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Barrier,
-    },
-};
+use std::sync::{Arc, Barrier};
 
-struct Database(PathBuf);
+struct Database(grokbot_test_support::TestDir);
 impl Database {
     fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "grokbot-skills-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
-        Self(directory)
+        Self(grokbot_test_support::TestDir::new("grokbot-skills"))
     }
     fn open(&self) -> App {
         App::open(&self.0.join("app.sqlite")).unwrap()
-    }
-}
-impl Drop for Database {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 fn post(app: &mut App, path: &str, body: Value) -> Value {
@@ -2228,19 +2210,11 @@ fn imported_long_fields_can_be_resubmitted_unchanged_by_full_editor_form() {
 
 #[test]
 fn importing_a_granted_folder_skips_a_real_symlink_and_rejects_an_open_path() {
-    let stamp = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let scratch = std::env::temp_dir().join(format!("grokbot-folder-import-{stamp}"));
+    let guard = grokbot_test_support::TestDir::new("grokbot-folder-import");
+    let scratch = guard.to_path_buf();
     let chosen = scratch.join("choisi");
     let outside = scratch.join("dehors");
     let folder = chosen.join("dossier");
-    let _guard = scopeguard(&scratch);
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::create_dir_all(&outside).unwrap();
     let secret = outside.join("secret.md");
@@ -2323,7 +2297,11 @@ fn importing_a_granted_folder_skips_a_real_symlink_and_rejects_an_open_path() {
     .unwrap_err();
     assert_eq!(sibling.status, 403);
 
-    let app_data = post(&mut app, "/api/local/folders/add", json!({"path": &db.0}));
+    let app_data = post(
+        &mut app,
+        "/api/local/folders/add",
+        json!({"path": db.0.path()}),
+    );
     let data_dir = db.0.canonicalize().unwrap();
     let data = app_data["folders"]
         .as_array()
@@ -2351,18 +2329,10 @@ fn importing_a_granted_folder_skips_a_real_symlink_and_rejects_an_open_path() {
 
 #[test]
 fn a_granted_folder_that_contains_app_data_does_not_import_it() {
-    let stamp = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let parent = std::env::temp_dir().join(format!("grokbot-contains-data-{stamp}"));
+    let guard = grokbot_test_support::TestDir::new("grokbot-contains-data");
+    let parent = guard.to_path_buf();
     let data = parent.join("donnees");
     let folder = parent.join("dossier");
-    let _guard = scopeguard(&parent);
     std::fs::create_dir_all(&data).unwrap();
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(
@@ -2398,18 +2368,10 @@ fn a_granted_folder_that_contains_app_data_does_not_import_it() {
 
 #[test]
 fn a_hard_link_to_a_protected_file_is_not_imported() {
-    let stamp = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let scratch = std::env::temp_dir().join(format!("grokbot-hardlink-import-{stamp}"));
+    let guard = grokbot_test_support::TestDir::new("grokbot-hardlink-import");
+    let scratch = guard.to_path_buf();
     let chosen = scratch.join("choisi");
     let folder = chosen.join("dossier");
-    let _guard = scopeguard(&scratch);
     std::fs::create_dir_all(&folder).unwrap();
     let db = Database::new();
     let mut app = db.open();
@@ -2444,17 +2406,9 @@ fn a_hard_link_to_a_protected_file_is_not_imported() {
 
 #[test]
 fn a_granted_skill_folder_keeps_its_annexes_when_chosen_directly() {
-    let stamp = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let scratch = std::env::temp_dir().join(format!("grokbot-root-bundle-{stamp}"));
+    let guard = grokbot_test_support::TestDir::new("grokbot-root-bundle");
+    let scratch = guard.to_path_buf();
     let folder = scratch.join("dossier");
-    let _guard = scopeguard(&scratch);
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
     std::fs::write(folder.join("modele.md"), "annexe interne").unwrap();
@@ -2484,17 +2438,9 @@ fn a_granted_skill_folder_keeps_its_annexes_when_chosen_directly() {
 
 #[test]
 fn a_granted_folder_does_not_read_unsupported_files_or_exceed_its_byte_budget() {
-    let stamp = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let scratch = std::env::temp_dir().join(format!("grokbot-byte-budget-{stamp}"));
+    let guard = grokbot_test_support::TestDir::new("grokbot-byte-budget");
+    let scratch = guard.to_path_buf();
     let folder = scratch.join("dossier");
-    let _guard = scopeguard(&scratch);
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
     std::fs::write(folder.join("video.mp4"), vec![0u8; 1024]).unwrap();
@@ -2535,17 +2481,9 @@ fn a_granted_folder_does_not_read_unsupported_files_or_exceed_its_byte_budget() 
 
 #[test]
 fn a_granted_folder_with_an_oversized_primary_does_not_turn_its_annexes_into_skills() {
-    let stamp = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let scratch = std::env::temp_dir().join(format!("grokbot-big-primary-{stamp}"));
+    let guard = grokbot_test_support::TestDir::new("grokbot-big-primary");
+    let scratch = guard.to_path_buf();
     let folder = scratch.join("dossier");
-    let _guard = scopeguard(&scratch);
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(
         folder.join("SKILL.md"),
@@ -2573,14 +2511,4 @@ fn a_granted_folder_with_an_oversized_primary_does_not_turn_its_annexes_into_ski
         assert_eq!(item["status"]["reason"], "too-large");
     }
     assert!(listing(&mut app, "grokbot").is_empty());
-}
-
-fn scopeguard(path: &std::path::Path) -> impl Drop {
-    struct Guard(std::path::PathBuf);
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    Guard(path.to_path_buf())
 }

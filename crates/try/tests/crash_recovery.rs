@@ -1,4 +1,3 @@
-use std::fs;
 use std::process::Command;
 
 use grokbot_domain::{
@@ -61,9 +60,7 @@ fn abrupt_child() {
 }
 
 fn after_abrupt_exit(name: &str, accepted: bool) -> (SubmissionState, RetryDecision) {
-    let directory =
-        std::env::temp_dir().join(format!("grokbot-crash-{name}-{}", std::process::id()));
-    fs::create_dir(&directory).unwrap();
+    let directory = grokbot_test_support::TestDir::new(&format!("grokbot-crash-{name}"));
     let path = directory.join("session.sqlite");
     let result = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "abrupt_child", "--nocapture"])
@@ -92,7 +89,6 @@ fn after_abrupt_exit(name: &str, accepted: bool) -> (SubmissionState, RetryDecis
         .reconcile_before_retry(&actor, &conversation, &message)
         .unwrap();
     drop(store);
-    fs::remove_dir_all(directory).unwrap();
     (state, decision)
 }
 

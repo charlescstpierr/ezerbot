@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { createElement as h, Fragment } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -16,17 +15,10 @@ import {
   reactionRowBox,
   readMessageMenuBounds,
 } from "./message-actions.js";
-import { createServer } from "vite";
+import { createTestServer } from "./vite-test-server.js";
 import react from "@vitejs/plugin-react";
 
-const vite = await createServer({
-  root: fileURLToPath(new URL("..", import.meta.url)),
-  configFile: false,
-  plugins: [react()],
-  server: { middlewareMode: true },
-  logLevel: "error",
-  optimizeDeps: { noDiscovery: true },
-});
+const vite = await createTestServer({ plugins: [react()] });
 after(() => vite.close());
 const { MessageMenu } = await vite.ssrLoadModule("/src/message-menu.jsx");
 

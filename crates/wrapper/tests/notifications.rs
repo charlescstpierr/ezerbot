@@ -6,10 +6,7 @@ use grokbot_engine::{
 use grokbot_wrapper::App;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
-use std::{
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::path::PathBuf;
 
 const MINUTE: u64 = 60_000;
 const HOUR: u64 = 60 * MINUTE;
@@ -20,21 +17,17 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Fixture {
     app: App,
     conn: Connection,
     dir: PathBuf,
     conversation: String,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "notifications-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("notifications");
+        let dir = guard.to_path_buf();
         let path = dir.join("workspace.sqlite");
         let mut app = App::open(&path).unwrap();
         let conversation = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]
@@ -50,6 +43,7 @@ impl Fixture {
             conn,
             dir,
             conversation,
+            _dir: guard,
         }
     }
     fn post(&mut self, path: &str, value: Value) -> Value {
@@ -142,12 +136,6 @@ impl Fixture {
         self.app = App::open(&self.dir.join("workspace.sqlite")).unwrap();
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
 #[test]
 fn finished_reply_focus_click_and_replay() {
     let mut f = Fixture::new();

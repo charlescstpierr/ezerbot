@@ -1059,7 +1059,7 @@ fn message_attachments(
         conversation,
         message,
     )?);
-    let mut query = ctx.connection.prepare("SELECT attachment_id, ordinal FROM wrapper_attachment_order WHERE conversation_id=?1 AND message_id=?2")?;
+    let mut query = ctx.connection.prepare_cached("SELECT attachment_id, ordinal FROM wrapper_attachment_order WHERE conversation_id=?1 AND message_id=?2")?;
     let order = query
         .query_map(params![conversation, message], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?))

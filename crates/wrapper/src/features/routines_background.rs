@@ -628,11 +628,8 @@ mod tests {
     use super::*;
     #[test]
     fn lock_is_exclusive_and_recovers_without_unlinking() {
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-owner-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
+        let guard = grokbot_test_support::TestDir::new("ezerbot-owner");
+        let root = guard.to_path_buf();
         let db = root.join("workspace.sqlite");
         let one = Owner::try_acquire(&db).unwrap().unwrap();
         assert!(Owner::try_acquire(&db).unwrap().is_none());
@@ -654,12 +651,8 @@ mod tests {
             model::{Run, RunStatus},
         };
         use grokbot_scheduler::occurrences;
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-probe-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-probe");
+        let root = guard.to_path_buf();
         let db = root.join("workspace.sqlite");
         {
             let mut app = App::open(&db).unwrap();

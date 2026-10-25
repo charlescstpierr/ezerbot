@@ -14,3 +14,6 @@ grokbot-wire = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+grokbot-test-support = { workspace = true }

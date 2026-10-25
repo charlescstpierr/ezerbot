@@ -4,10 +4,10 @@ import { runInNewContext } from "node:vm";
 import { test } from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createServer } from "vite";
+import { createTestServer } from "./vite-test-server.js";
 
 test("la carte de site affiche l’origine confirmée et la promesse exacte", async () => {
-  const vite = await createServer({ configFile: false, cacheDir: "app/web/node_modules/.vite", server: { middlewareMode: true }, esbuild: { jsx: "automatic" } });
+  const vite = await createTestServer({ root: process.cwd(), esbuild: { jsx: "automatic" } });
   try {
     const { Card } = await vite.ssrLoadModule("/app/web/src/cards/form.jsx");
     globalThis.window = {};
@@ -44,7 +44,7 @@ test("un refus du serveur garde les valeurs et affiche son message, un succès l
   await submit({ preventDefault() {}, currentTarget: form });
   assert.equal(form.value, "mot de passe privé");
   assert.equal(window.GrokbotForms.view("site").error, error);
-  const vite = await createServer({ configFile: false, cacheDir: "app/web/node_modules/.vite", server: { middlewareMode: true }, esbuild: { jsx: "automatic" } });
+  const vite = await createTestServer({ root: process.cwd(), esbuild: { jsx: "automatic" } });
   try {
     const { Card } = await vite.ssrLoadModule("/app/web/src/cards/form.jsx");
     globalThis.window = window;

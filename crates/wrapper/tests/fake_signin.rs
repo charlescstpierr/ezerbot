@@ -69,14 +69,8 @@ fn state(address: &str) -> Value {
 
 #[test]
 fn la_connexion_factice_ouvre_chatgpt_sans_oauth() {
-    let directory = std::env::temp_dir().join(format!(
-        "ezerbot-fake-signin-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let guard = grokbot_test_support::TestDir::new("ezerbot-fake-signin");
+    let directory = guard.to_path_buf();
     let (_running, address) = launch(&directory, true);
     let ready = |provider: &Value| {
         provider["connected"] == true
@@ -119,14 +113,8 @@ fn la_connexion_factice_ouvre_chatgpt_sans_oauth() {
 
 #[test]
 fn sans_le_drapeau_la_session_reste_locale() {
-    let directory = std::env::temp_dir().join(format!(
-        "ezerbot-fake-signin-off-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let guard = grokbot_test_support::TestDir::new("ezerbot-fake-signin-off");
+    let directory = guard.to_path_buf();
     let (_running, address) = launch(&directory, false);
     let provider = state(&address)["provider"].clone();
     assert_eq!(provider["connected"], false, "{provider}");

@@ -25,18 +25,21 @@ fn speech_fixtures_are_valid_pcm() {
     }
 }
 
-/// Mac only, opt-in: requires Speech permission and installed en-US/fr-CA locales.
-///
-/// Run it explicitly on a Mac with:
-/// `cargo test -p grokbot-wrapper --test voice_ui -- --ignored french_audio_recognized_on_device_after_english`
+/// Mac only: needs installed en-US/fr-CA locales and the Speech permission, granted once to the
+/// test binary that tools/test-dictation-fixture.sh installs (the first run shows the macOS prompt).
+/// `tools/test-dictation-fixture.sh --status` prints the permission without asking for it.
+/// Apple frameworks only exist on macOS, where it always runs (no ignore, no skip).
+#[cfg(target_os = "macos")]
 #[test]
-#[ignore = "opt-in Mac : permission Speech + locales en-US/fr-CA; lancer avec `cargo test -p grokbot-wrapper --test voice_ui -- --ignored`"]
 fn french_audio_recognized_on_device_after_english() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    assert!(std::process::Command::new("bash")
-        .current_dir(root)
-        .arg("tools/test-dictation-fixture.sh")
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        std::process::Command::new("bash")
+            .current_dir(root)
+            .arg("tools/test-dictation-fixture.sh")
+            .status()
+            .unwrap()
+            .success(),
+        "tools/test-dictation-fixture.sh a échoué : voir son message ci-dessus"
+    );
 }

@@ -9,10 +9,7 @@ use std::{
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen};
@@ -24,16 +21,12 @@ struct Fixture {
     fake: FakeOpenAi,
     binary: PathBuf,
     database: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-routines-bg-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-routines-bg");
+        let root = guard.to_path_buf();
         support::write_codex_session(&root.join("workspace.codex-auth.json"), "routines-bg");
         let fake = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let mut f = Self {
@@ -43,6 +36,7 @@ impl Fixture {
             url: String::new(),
             fake,
             binary: env!("CARGO_BIN_EXE_grokbot-wrapper").into(),
+            _dir: guard,
         };
         f.open();
         f.post("/api/yolo/mode", json!({"mode": "ask"}));
@@ -115,6 +109,13 @@ impl Fixture {
     fn decide(&self, request: &Value, decision: Value) {
         self.post("/api/approvals/resolve",json!({"entry_id":request["entry_id"],"submission_id":format!("decision-{}",now()),"conversation_id":request["route"]["target_conversation_id"],"decision":decision}));
     }
+    /// « Continuer sans attendre mes approbations » désactivé : un appel protégé suspend le tour.
+    fn block_on_approvals(&self) {
+        self.post(
+            "/api/approvals/waiting",
+            json!({"task":false,"chat":false,"validity":"24h","reminder":"1h"}),
+        );
+    }
     fn configure(&self, enabled: bool) {
         let request = self.request(enabled);
         self.decide(&request, json!("allow_once"));
@@ -147,7 +148,6 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.stop();
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 fn now() -> i64 {
@@ -278,6 +278,10 @@ fn due_run_finishes_persists_notifies_once_and_skips_idle_and_foreground_owner()
 fn failed_run_notifies_and_protected_action_waits_for_app_without_execution() {
     let mut f = Fixture::new();
     f.configure(true);
+    // Ce test décrit la suspension du tour : l'occurrence reste `running` tant que la carte
+    // attend. Par défaut une routine continue sans attendre (#215), son tour finit et,
+    // sans `complete_task`, l'occurrence est `failed` (`docs/taches.md`).
+    f.block_on_approvals();
     f.post("/api/notifications/settings",json!({"enabled":true,"dnd":false,"reply":false,"approval":false,"form":false,"secret":false,"routine":true,"delegation":false}));
     let id = f.routine(now() + 700);
     f.fake
@@ -321,6 +325,36 @@ fn failed_run_notifies_and_protected_action_waits_for_app_without_execution() {
         f.history(&id2)["occurrences"][0]["status"]["status"],
         "running"
     );
+    assert!(f.state()["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["kind"]["tool"] == "run_shell" && r["status"]["status"] == "pending"));
+}
+
+#[test]
+fn protected_action_does_not_block_a_routine_by_default_and_runs_nothing() {
+    let mut f = Fixture::new();
+    f.configure(true);
+    f.post(
+        "/api/local/bot",
+        json!({"bot_id":"grokbot","shell":true,"files":false}),
+    );
+    let id = f.routine(now() + 700);
+    {
+        let mut seen = f.fake.seen.lock().unwrap();
+        seen.responses.push_back(tool("run_shell",json!({"command":"touch forbidden-sentinel","cwd":f.root,"timeout_ms":5000,"output_limit":4096})));
+        seen.responses.push_back(tool(
+            "complete_task",
+            json!({"summary":"Commande en attente de l'accord de Charles."}),
+        ));
+    }
+    f.stop();
+    std::thread::sleep(Duration::from_millis(750));
+    assert!(f.wake().status.success());
+    assert!(!f.root.join("forbidden-sentinel").exists());
+    f.open();
+    assert_eq!(f.history(&id)["occurrences"][0]["status"]["status"], "done");
     assert!(f.state()["forms"]["requests"]
         .as_array()
         .unwrap()

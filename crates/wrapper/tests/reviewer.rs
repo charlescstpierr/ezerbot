@@ -18,10 +18,7 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
@@ -32,17 +29,12 @@ struct Fixture {
     server: FakeOpenAi,
     path: PathBuf,
     conversation: String,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir()
-            .join(format!(
-                "ezerbot-reviewer-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ))
-            .join("workspace.sqlite");
+        let guard = grokbot_test_support::TestDir::new("ezerbot-reviewer");
+        let path = guard.to_path_buf().join("workspace.sqlite");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path.with_extension("chatgpt-auth.json"), json!({"host_id":"test","client_id":CLIENT,"access_token":"fake-access","refresh_token":"fake-refresh","expires_at":now()/1000+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
@@ -62,6 +54,7 @@ impl Fixture {
             server,
             path,
             conversation,
+            _dir: guard,
         };
         fixture.config(
             true,
@@ -157,11 +150,6 @@ impl Fixture {
     }
     fn status(&self, id: &str) -> RequestStatus {
         requests::get(&self.db(), id).unwrap().unwrap().status
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 fn now() -> u64 {

@@ -20,16 +20,12 @@ struct Fixture {
     provider: Provider,
     server: FakeOpenAi,
     directory: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "grokbot-attachment-wrapper-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::SeqCst),
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
+        let guard = grokbot_test_support::TestDir::new("grokbot-attachment-wrapper");
+        let directory = guard.to_path_buf();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let provider =
             Provider::with_endpoints(&directory.join("app.sqlite"), server.endpoints(), false);
@@ -39,6 +35,7 @@ impl Fixture {
             provider,
             server,
             directory,
+            _dir: guard,
         }
     }
     fn db(&self) -> Connection {
@@ -137,7 +134,6 @@ impl Drop for Fixture {
                 == 0
                 && attachments::state(&self.app.feature_context())["network_workers"] == 0
         });
-        std::fs::remove_dir_all(&self.directory).unwrap();
     }
 }
 fn ready(text: &str) -> ScriptedResponse {

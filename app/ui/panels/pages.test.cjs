@@ -328,6 +328,16 @@ for (const [levels, text] of [[14, "x"], [14, ""], [8, "é".repeat(3000)], [40, 
   });
 }
 
+test("1 000 000 octets de texte répartis en 100 paragraphes se peignent, un de plus non (même borne que compile.rs)", async () => {
+  for (const [size, painted] of [[10000, true], [10001, false]]) {
+    const view = { type: "element", tag: "div", children: [{ type: "map", items: Array.from({ length: 100 }, (_, n) => [n]), node: { type: "element", tag: "p", children: [{ type: "text", text: "x".repeat(size) }] } }] };
+    const { panels, main } = harness({ id: "budget", title: "Budget", status: "ready", document: { states: [], view } });
+    await panels.panel.onState(panels.state, { bot: { id: "grokbot" }, conversation: { id: "fil" } });
+    assert.equal(/la Page dépasse le budget de rendu/.test(main.textContent), !painted, String(size));
+    assert.equal(canvasOf(main).children.length > 0, painted, String(size));
+  }
+});
+
 const ctxOf = (conversation, bot = "grokbot") => ({ bot: { id: bot }, conversation: conversation ? { id: conversation } : null });
 
 test("un rafraîchissement identique ne reconstruit pas la Page et garde le focus", async () => {
@@ -707,7 +717,9 @@ test("« Commenter » gardé au clavier ne cite pas un passage que la Page modif
   assert.deepEqual(h.anchor(), {});
   assert.equal(h.comment.hidden, true);
   // Un passage encore affiché après la modification se cite avec la version lue maintenant.
+  h.editor.focus(); // le bouton caché perd le focus, ce que le faux document ne fait pas seul
   h.select("19 €", textNode(canvasOf(h.main), "19 €"));
+  assert.equal(h.comment.hidden, false);
   h.comment.focus();
   h.use({ ...edited, source_version: "c".repeat(64) });
   await h.panels.panel.onState(h.panels.state, ctxOf("fil"));

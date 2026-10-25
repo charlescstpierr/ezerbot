@@ -106,8 +106,8 @@
   }
 
   function openPage(page, pages) {
-    if (quote && quote.page_id !== page.id) clearQuote();
     if (page.conversation_id && conversationExists(page.conversation_id)) {
+      // Refusée, la navigation laisse la Page affichée et sa citation telles quelles.
       if (!host.openConversation(page.conversation_id)) {
         host.notify("Impossible d’ouvrir la conversation de cette Page pendant qu’une réponse est en cours.");
         return;
@@ -119,6 +119,7 @@
       pinnedId = null;
       orphan = { id: page.id, anchor: currentConversationId };
     }
+    if (quote && quote.page_id !== page.id) clearQuote();
     selectedId = page.id;
     paintList(pages);
     load(page);
@@ -152,17 +153,27 @@
   // absent entre deux cellules (l'aperçu en met un à chaque frontière de bloc), ne passe pas.
   const collapsed = (text) => String(text).split(/\p{White_Space}+/u).filter(Boolean).join(" ");
 
-  // Le passage est le texte sélectionné, rogné comme le moteur le rogne ; la sélection doit tenir toute dans le canevas.
-  function selectedPassage() {
-    const selection = document.getSelection();
-    if (inTask() || !detail || foreignPage() || detail.id !== selectedId || shell.stage.hidden || !selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
-    const range = selection.getRangeAt(0);
-    if (!shell.canvas.contains(range.startContainer) || !shell.canvas.contains(range.endContainer)) return null;
+  // Ce que le moteur accepterait pour la Page affichée maintenant : rien dans une sous-tâche ni pour la Page d'un autre
+  // bot, et un passage rogné comme le moteur le rogne, de 1 à 500 caractères, présent dans l'aperçu. Rejoué au clic, car
+  // la Page peut changer (modification par le bot, autre Page) pendant que « Commenter » garde le focus clavier.
+  function quotable(text) {
+    if (inTask() || !detail || foreignPage() || detail.id !== selectedId || shell.stage.hidden) return null;
     // Même rognage que `str::trim` de Rust (propriété Unicode White_Space), pas `String.trim`.
-    const passage = selection.toString().replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+    const passage = String(text).replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
     if (!passage || [...passage].length > passageLimit) return null;
     // Un texte changé par l'état interactif de la Page (« Offre choisie : Confort ») n'est pas dans l'aperçu que le moteur contrôle.
     if (!collapsed(detail.preview || "").includes(collapsed(passage))) return null;
+    return passage;
+  }
+
+  // Le passage est le texte sélectionné ; la sélection doit tenir toute dans le canevas.
+  function selectedPassage() {
+    const selection = document.getSelection();
+    if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
+    const range = selection.getRangeAt(0);
+    if (!shell.canvas.contains(range.startContainer) || !shell.canvas.contains(range.endContainer)) return null;
+    const passage = quotable(selection.toString());
+    if (!passage) return null;
     const target = range.getBoundingClientRect();
     const view = shell.canvas.getBoundingClientRect();
     if (target.bottom < view.top || target.top > view.bottom) return null;
@@ -173,7 +184,7 @@
     // Tab vers « Commenter » peut défaire la sélection dans certains navigateurs : le bouton reste tant qu’il a le focus.
     if (!shell || document.activeElement === shell.comment) return;
     const found = selectedPassage();
-    candidate = found && found.passage;
+    candidate = found && { passage: found.passage, page_id: detail.id };
     shell.comment.hidden = !found;
     if (!found) return;
     const stage = shell.stage.getBoundingClientRect();
@@ -203,11 +214,19 @@
     paintQuote();
   }
 
+  // La puce nomme la Page par son titre actuel : un renommage (ici ou ailleurs) la repeint.
+  function retitleQuote(id, title) {
+    if (!quote || quote.page_id !== id || !title || quote.title === title) return;
+    quote.title = title;
+    paintQuote();
+  }
+
   function startQuote() {
-    if (!candidate || !detail) return;
-    quote = { serial: ++quoteSerial, page_id: detail.id, title: detail.title, source_version: detail.source_version, passage: candidate };
+    const passage = candidate && detail && candidate.page_id === detail.id ? quotable(candidate.passage) : null;
     candidate = null;
     shell.comment.hidden = true;
+    if (!passage) return;
+    quote = { serial: ++quoteSerial, page_id: detail.id, title: detail.title, source_version: detail.source_version, passage };
     document.getSelection().removeAllRanges();
     // La boîte de message est cachée en pleine page : on revient au fil pour écrire la demande.
     if (full) {
@@ -383,6 +402,7 @@
       }
     }
     detail = page;
+    retitleQuote(page.id, page.title);
     if (document.activeElement !== shell.input) shell.input.value = page.title || "";
     // Un état identique (le fil se rafraîchit toutes les 200 ms pendant une réponse) ne reconstruit pas le DOM :
     // le focus clavier et la sélection de texte restent en place.
@@ -420,6 +440,7 @@
       const result = await host.api("/api/pages/rename", { id, title });
       const next = result && result.page && result.page.title ? result.page.title : title;
       if (detail && detail.id === id) detail.title = next;
+      retitleQuote(id, next);
       const link = [...shell.list.children].find((item) => item.dataset && item.dataset.pageId === id);
       if (link) link.textContent = next;
     } catch (error) {

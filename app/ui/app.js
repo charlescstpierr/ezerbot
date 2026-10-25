@@ -74,8 +74,9 @@
   // onState(state, context), onConnection(connected, context), onCardAction(message, action, detail, context); only true claims an action.
   // wantsPolling(context) and sendExtras(context) are synchronous; sendExtras returns extra /api/send fields.
   // composer: mount(container, context), onFiles(files, event, context), blocked(context), capture(context),
-  // onSent({messageId, extras, captured}, context). capture runs with sendExtras when a message is submitted; its value
+  // restore({messageId, extras, captured}, context), onSent({messageId, extras, captured}, context). capture runs with sendExtras when a message is submitted; its value
   // comes back to the same panel as `captured`, so a panel tells what left with this message from what was staged since.
+  // restore runs after a refused draft returns and may return a warning to display.
   // onSent runs once the server holds the message, including unknown/queued states, not on confirmation.
   // onFiles returns false to preserve normal paste/drop. Async uploads call composerChanged() when ready.
   const panelContext = () => ({ state, connected, conversation: currentConversation(), bot: currentBot(), draft: ui.input?.value || "" });
@@ -1407,7 +1408,7 @@
     let messageId;
     let delivered = false;
     const previousDraftKey = draftKey();
-    const restoreDraft = () => {
+    const restoreDraft = async () => {
       const remainder = ui.input.value;
       const remainderDocument = ui.input.document;
       setComposerText(submittedDraft && remainder ? `${submittedDraft}\n${remainder}` : submittedDraft || remainder);
@@ -1415,6 +1416,14 @@
         ? { type: "doc", content: [...submittedDocument.content, ...remainderDocument.content] }
         : submittedDraft ? submittedDocument : remainderDocument;
       saveDraft();
+      for (const panel of panels.values()) {
+        try {
+          const warning = await panel.composer?.restore?.({ messageId, extras, captured: captured.get(panel.id) }, panelContext());
+          if (warning) notify(warning);
+        } catch {
+          notify("La citation n’a pas pu être restaurée. Vérifiez-la avant de réessayer.");
+        }
+      }
     };
     try {
       // Consume only the submitted text, before creation can yield to another edit.
@@ -1448,8 +1457,8 @@
         try {
           await refresh();
           const savedMessage = currentConversation()?.messages.find((message) => message.id === messageId);
-          if (!savedMessage) { pendingSends.delete(messageId); restoreDraft(); }
           notify(error.message);
+          if (!savedMessage) { pendingSends.delete(messageId); await restoreDraft(); }
         } catch {
           const optimisticMessage = currentConversation()?.messages.find((message) => message.id === messageId);
           const confirmed = optimisticMessage && ["accepted", "echoed"].includes(optimisticMessage.state);
@@ -1459,12 +1468,12 @@
               if (owner) owner.messages = owner.messages.filter((message) => message.id !== messageId);
               pendingSends.delete(messageId);
             } else if (optimisticMessage) optimisticMessage.state = "unknown";
-            restoreDraft();
+            await restoreDraft();
           }
           render();
           showConnectionError(error);
         }
-      } else { restoreDraft(); notify(error.message); }
+      } else { notify(error.message); await restoreDraft(); }
     } finally {
       busy = false;
       submissionActivity = null;

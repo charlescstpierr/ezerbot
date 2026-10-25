@@ -119,7 +119,7 @@
       pinnedId = null;
       orphan = { id: page.id, anchor: currentConversationId };
     }
-    if (quote && quote.page_id !== page.id) clearQuote();
+    if (selectedId !== page.id) { quoteSerial++; clearQuote(); }
     selectedId = page.id;
     paintList(pages);
     load(page);
@@ -205,7 +205,7 @@
     remove.type = "button";
     remove.setAttribute("aria-label", "Retirer la citation");
     remove.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>';
-    remove.addEventListener("click", () => clearQuote());
+    remove.addEventListener("click", () => { quoteSerial++; clearQuote(); });
     shell.quoteBar.append(text, remove);
   }
 
@@ -264,7 +264,7 @@
       pinnedId = null;
       return null;
     }
-    const pinned = pages.find((page) => page.id === pinnedId);
+    const pinned = pages.find((page) => page.id === (quote?.page_id || pinnedId));
     if (pinned && pinned.conversation_id === conversationId) return pinned;
     pinnedId = null;
     return pages.find((page) => page.conversation_id === conversationId) || null;
@@ -453,6 +453,7 @@
   }
 
   function hideStage() {
+    generation++;
     selectedId = null;
     detail = null;
     loadedKey = null;
@@ -494,7 +495,7 @@
       hideStage();
       return;
     }
-    await load(chosen);
+    if (host.connected !== false) await load(chosen);
   }
 
   host.register({
@@ -504,9 +505,35 @@
     sendExtras: () => quote ? { page_anchor: { page_id: quote.page_id, source_version: quote.source_version, passage: quote.passage } } : {},
     composer: {
       // L'accusé ne retire que la citation partie avec ce message, jamais une citation posée depuis, même passage compris.
-      capture: () => quote ? quote.serial : null,
+      capture: () => quote ? { ...quote } : null,
+      async restore({ captured }, ctx) {
+        if (!captured || captured.serial !== quoteSerial) return;
+        const contextId = ctx.conversation?.id || null;
+        const botId = ctx.bot?.id;
+        const page = knownPages.find((item) => item.id === captured.page_id);
+        const unavailable = (reason) => { clearQuote(); return `La citation n’a pas pu être reprise : ${reason}`; };
+        if (!page) return unavailable("la Page n’est plus disponible dans cette conversation.");
+        let restored;
+        try { restored = (await host.api(`/api/pages/${page.id}`)).page; }
+        catch {
+          if (captured.serial !== quoteSerial || currentConversationId !== contextId) return;
+          return "La citation reste à vérifier : la Page n’a pas pu être relue. Réessayez quand elle sera disponible.";
+        }
+        if (captured.serial !== quoteSerial || currentConversationId !== contextId) return;
+        if (!knownPages.some((item) => item.id === captured.page_id)) return unavailable("la Page n’est plus disponible dans cette conversation.");
+        if (inTask() || restored?.bot_id !== botId) return unavailable("son bot ne correspond plus au brouillon.");
+        if (restored.status !== "ready" || !collapsed(restored.preview || "").includes(collapsed(captured.passage))) {
+          return unavailable("le passage n’apparaît plus dans la Page actuelle. Sélectionnez un nouveau passage.");
+        }
+        orphan = { id: page.id, anchor: contextId };
+        selectedId = page.id;
+        shell.stage.hidden = false;
+        remember(restored);
+        quote = { ...captured, title: restored.title };
+        paintQuote();
+      },
       onSent({ captured }) {
-        if (quote && captured === quote.serial) clearQuote();
+        if (quote && captured?.serial === quote.serial) clearQuote();
       },
     },
   });

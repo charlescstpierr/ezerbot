@@ -300,6 +300,8 @@ function boot() {
   let createWaiting = null;
   let holdSend = null;
   let sendWaiting = null;
+  let sendStatus = null;
+  let conversationSerial = 0;
   const realSetTimeout = setTimeout;
   const realClearTimeout = clearTimeout;
   function relaxedTimeout(handler, delay, ...args) {
@@ -322,7 +324,7 @@ function boot() {
       if (holdCreate) await holdCreate;
       if (failCreate) return json({ error: "Création refusée pour le test" }, 503);
       const conversation = {
-        id: `conv-${state.conversations.length + 1}`, bot_id: body.bot_id, title: "Nouvelle conversation",
+        id: `conv-${++conversationSerial}`, bot_id: body.bot_id, title: "Nouvelle conversation",
         messages: [], kind: "direct", updated_at: Date.now(), favorite: false, member_ids: [body.bot_id],
       };
       state.conversations.unshift(conversation);
@@ -333,10 +335,10 @@ function boot() {
       sent.push(body);
       sendWaiting?.();
       if (holdSend) await holdSend;
-      if (body.page_anchor?.passage === "REFUSÉ") {
+      if (sendStatus || body.page_anchor?.passage === "REFUSÉ") {
         // Un vrai moteur ne garde pas le message refusé ; ce faux partage l'état avec le client.
         for (const thread of state.conversations) thread.messages = thread.messages.filter((message) => message.state !== "queued");
-        return json({ error: "Ce passage n’apparaît pas dans le texte affiché de la Page." }, 400);
+        return json({ error: "Ce passage n’apparaît pas dans le texte affiché de la Page." }, sendStatus || 400);
       }
       const conversation = state.conversations.find((item) => item.id === body.conversation_id);
       conversation.messages.push({ id: body.message_id, role: "user", body: body.body, state: "accepted", created_at: new Date().toISOString() });
@@ -413,6 +415,7 @@ function boot() {
   return {
     window, document, storage, state, sent, context,
     servePage(detail) { pageDetail = detail; },
+    refuseSend(status) { sendStatus = status; },
     thread: () => threadOptions,
     composer: () => composer,
     type(text) { composer.api.value = text; composer.onInput(); },
@@ -624,12 +627,13 @@ test("short composer names stay whole and a maximal name ellipsizes only when th
 });
 
 // Ouvre la Page « Trois forfaits » dans le premier fil, avec app.js et le panneau Pages réels.
-async function quotedPage() {
+async function quotedPage(orphan = false) {
   const app = boot();
   await ready(app);
   app.type("Bonjour");
   await app.document.getElementById("composer-form").requestSubmit();
   const conversation = app.state.conversations[0];
+  if (orphan) { app.state.conversations.length = 0; await ready(app); }
   // Ce faux serveur partage son état avec le client : on retire l'envoi optimiste resté « queued ».
   conversation.messages = conversation.messages.filter((message) => message.state !== "queued");
   const detail = {
@@ -643,6 +647,7 @@ async function quotedPage() {
   vm.runInContext(pagesSource, app.context);
   await ready(app);
   const doc = app.document;
+  if (orphan) { doc.querySelector(".page-link").click(); await new Promise((resolve) => setImmediate(resolve)); }
   const cell = doc.querySelector(".page-canvas td");
   const comment = doc.querySelector(".page-comment");
   const chip = doc.querySelector(".gb-quote-chip");
@@ -657,7 +662,7 @@ async function quotedPage() {
     await doc.getElementById("composer-form").requestSubmit();
     for (const thread of app.state.conversations) thread.messages = thread.messages.filter((message) => message.state !== "queued");
   };
-  return { app, doc, comment, chip, select, sendWith };
+  return { app, doc, comment, chip, select, sendWith, detail };
 }
 
 test("l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce", async () => {
@@ -760,4 +765,50 @@ test("le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’a
   app.sent.length = 0;
   await app.thread().onResend(message);
   assert.deepEqual(structuredClone(app.sent.at(-1).page_anchor), saved);
+});
+
+
+test("r11 une citation orpheline revient après création puis refus 400 et repart avec son ancre", async () => {
+  const { app, comment, chip, select, sendWith } = await quotedPage(true);
+  select("Confort"); comment.click();
+  app.refuseSend(400);
+  await sendWith("Corrige ce prix");
+  assert.equal(app.sent.at(-1).conversation_id, "conv-2", "le fil créé diffère du fil d’origine supprimé");
+  assert.equal(app.composer().api.value, "Corrige ce prix");
+  assert.equal(chip.hidden, false, "la citation accompagne le brouillon récupéré");
+  const anchor = structuredClone(app.sent.at(-1).page_anchor);
+  app.refuseSend(null);
+  await sendWith("Nouvel essai");
+  assert.deepEqual(structuredClone(app.sent.at(-1).page_anchor), anchor);
+  assert.equal(chip.hidden, true);
+});
+
+for (const edit of ["remove", "same", "other"]) test(`r11 refus ancien après ${edit} de citation`, async () => {
+  const { app, comment, select, doc, chip, sendWith } = await quotedPage();
+  select("Confort"); comment.click();
+  const gate = app.gateSend(); app.refuseSend(400);
+  app.type("Première demande");
+  const pending = doc.getElementById("composer-form").requestSubmit();
+  await gate.waiting;
+  chip.querySelector(".gb-quote-remove").click();
+  if (edit !== "remove") { select(edit === "same" ? "Confort" : "REFUSÉ"); comment.click(); }
+  gate.release(); await pending;
+  assert.equal(chip.hidden, edit === "remove");
+  if (edit !== "remove") assert.ok(chip.textContent.includes(edit === "same" ? "Confort" : "REFUSÉ"));
+  app.refuseSend(null);
+  await sendWith("Nouvel essai");
+  assert.equal(app.sent.at(-1).page_anchor?.passage, edit === "remove" ? undefined : edit === "same" ? "Confort" : "REFUSÉ");
+});
+
+test("r11 un passage disparu ne revient pas et son avertissement reste visible après le refus", async () => {
+  const { app, comment, select, doc, chip, detail } = await quotedPage();
+  select("Confort"); comment.click();
+  const gate = app.gateSend(); app.refuseSend(400);
+  app.type("À retoucher");
+  const pending = doc.getElementById("composer-form").requestSubmit();
+  await gate.waiting;
+  detail.preview = "Texte remplacé";
+  gate.release(); await pending;
+  assert.equal(chip.hidden, true);
+  assert.match(doc.getElementById("toast").textContent, /citation.*passage n’apparaît plus/);
 });

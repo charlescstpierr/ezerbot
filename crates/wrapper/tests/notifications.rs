@@ -739,3 +739,67 @@ fn an_approval_decided_or_expired_before_the_delay_sends_no_reminder() {
         .unwrap();
     assert_eq!(f.poll(false, false)["deliveries"], json!([]));
 }
+
+/// A sub-task tree under a routine pass (#286): `root` is the run of the occurrence, the
+/// chain below it is `depth` levels deep, every sub-task done.
+fn subtasks(f: &Fixture, root: &str, depth: usize) {
+    let mut parent = root.to_owned();
+    for level in 1..=depth {
+        let child = format!("{root}-sub{level}");
+        f.reply(&child);
+        f.conn.execute("INSERT INTO delegation_graph VALUES (?1,?2,?3,'grokbot','other',?4,NULL,NULL,'{}',?5)", params![child, parent, root, level, json!({"status":"done"}).to_string()]).unwrap();
+        parent = child;
+    }
+}
+/// The routine and sub-task notifications; the runs standing in for them make replies of no interest here.
+fn ids(f: &mut Fixture) -> Vec<String> {
+    let mut ids: Vec<String> = f.get()["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap().to_owned())
+        .filter(|id| !id.starts_with("reply:"))
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn a_quiet_pass_silences_its_sub_tasks_at_every_level_and_a_loud_one_does_not() {
+    let mut f = Fixture::new();
+    f.reply("quiet-run");
+    f.reply("loud-run");
+    f.routine("quiet", "done", Some("quiet-run"));
+    f.routine("loud", "done", Some("loud-run"));
+    f.conn
+        .execute(
+            "UPDATE scheduler_occurrences SET quiet=1 WHERE occurrence_id='quiet'",
+            [],
+        )
+        .unwrap();
+    subtasks(&f, "quiet-run", 2);
+    subtasks(&f, "loud-run", 2);
+    assert_eq!(
+        ids(&mut f),
+        [
+            "delegation:loud-run-sub1",
+            "delegation:loud-run-sub2",
+            "routine:loud"
+        ]
+    );
+}
+
+#[test]
+fn a_failure_still_notifies_under_a_quiet_pass() {
+    let mut f = Fixture::new();
+    f.reply("run");
+    f.routine("failed-after-quiet", "failed", Some("run"));
+    f.conn
+        .execute("UPDATE scheduler_occurrences SET quiet=1", [])
+        .unwrap();
+    subtasks(&f, "run", 1);
+    assert_eq!(
+        ids(&mut f),
+        ["delegation:run-sub1", "routine:failed-after-quiet"]
+    );
+}

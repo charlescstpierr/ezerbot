@@ -425,3 +425,16 @@ test("renommer applique immédiatement le document masqué reçu, sans attendre 
   assert.equal(main.textContent.includes(privateValue),false);
   assert.equal(canvasOf(main).textContent,"[...]");
 });
+
+
+test("un titre nouvellement masqué remplace aussi la valeur du champ focalisé", async () => {
+  const page = { id: "page_title_mask", title: "CANARI_TITRE_CACHE_281", status: "ready", source_version: "v1", document: readyDocument };
+  const { panels, main, use } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  const input = descendants(main).find((element) => element.tagName === "input");
+  input.ownerDocument.activeElement = input;
+  use({ ...page, title: "[...]" });
+  panels.state.pages.by_bot.grokbot[0].title = "[...]";
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(input.value,"[...]");
+});

@@ -13,6 +13,8 @@ use std::{
 use unicode_normalization::UnicodeNormalization;
 
 const MASK: &str = "[...]";
+#[cfg(test)]
+thread_local! { static VERIFIED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 pub(super) fn refused() -> ApiError {
     ApiError::new(409, "Lecture indisponible.")
 }
@@ -91,6 +93,8 @@ impl Patterns {
                 }) else {
                     continue;
                 };
+                #[cfg(test)]
+                VERIFIED_BYTES.with(|count| count.set(count.get() + end - start));
                 if digests
                     .contains(Sha256::digest(&normalized_nfd.as_bytes()[start..end]).as_slice())
                 {
@@ -290,6 +294,19 @@ mod tests {
         });
         assert!(result.is_err());
     }
+    #[test]
+    fn long_private_values_do_not_hash_every_full_candidate_window() {
+        let (_dir, conn, vault) = fixture();
+        vault.set("HASH_COST_TEST", "Secret synthétique", &"a".repeat(1280)).unwrap();
+        let patterns = Patterns::current(&conn).unwrap();
+        let text = "b".repeat(8192);
+        VERIFIED_BYTES.with(|count| count.set(0));
+        assert_eq!(patterns.text(&text), text);
+        let checked = VERIFIED_BYTES.with(std::cell::Cell::get);
+        assert!(checked <= 2 * text.len(), "verified {checked} candidate bytes for {} input bytes", text.len());
+        assert_eq!(patterns.text(&format!("avant{}après", "a".repeat(1280))), "avant[...]après");
+    }
+
     #[test]
     fn ledger_lookup_cost_is_independent_of_old_run_history() {
         let (_dir, conn, vault) = fixture();

@@ -72,3 +72,10 @@ test("un souvenir plus lié est un peu plus gros", () => {
   assert.ok(radius.a > radius.e && radius.e > radius.d, "trois souvenirs d'une conversation > deux > isolé");
   assert.equal(radius.a, radius.b);
 });
+test("une conversation de 600 souvenirs se dessine : un trait par souvenir de plus, pas une paire", () => {
+  const many = Array.from({ length: 600 }, (_, i) => linked(`g${i}`, "gros"));
+  const graph = JSON.parse(JSON.stringify(withLinks().buildGraph(many)));
+  assert.equal(graph.links.length, 599);
+  assert.doesNotThrow(() => withLinks().view(many, {}));
+  assert.equal(graph.nodes[0].links, 599, "mais chaque souvenir compte tous ses liens");
+});

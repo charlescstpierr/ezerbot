@@ -1,7 +1,7 @@
 /* Mémoire : les liens entre souvenirs. Deux souvenirs sont liés s'ils viennent de la même conversation (`provenance.conversation_id`).
  * Le lien se dérive à chaque lecture de la liste de `GET /api/memory/all` : aucun lien ni thème n'est stocké, et un souvenir sans
  * conversation n'est lié à rien. Les souvenirs de sujet portent la conversation où ils ont été appris : ils suivent la même règle.
- * Utilisé par memory-graph.js (traits, taille des points) et memory-detail.js (« Lié à »). */
+ * Utilisé par memory-graph.js (traits, taille des points, survol) et memory-detail.js (« Lié à »). */
 (() => {
   "use strict";
   const conversationOf = (fact) => String(fact?.provenance?.conversation_id ?? "").trim();
@@ -14,13 +14,17 @@
     }
     return [...found.values()].filter((ids) => ids.length > 1);
   }
-  // id → identifiants des souvenirs liés ; absent de la table : isolé.
-  const neighbors = (facts) => new Map(conversations(facts).flatMap((ids) => ids.map((id) => [id, ids.filter((other) => other !== id)])));
-  // Chaque lien une seule fois : [id, id].
-  const pairs = (facts) => conversations(facts).flatMap((ids) => ids.flatMap((id, i) => ids.slice(i + 1).map((other) => [id, other])));
+  // id → nombre de souvenirs liés (tous ceux de sa conversation, lui exclu) ; absent de la table : isolé. Coût linéaire.
+  const counts = (facts) => new Map(conversations(facts).flatMap((ids) => ids.map((id) => [id, ids.length - 1])));
+  // Les traits à dessiner : une chaîne par conversation, dans l'ordre de la liste (n − 1 traits pour n souvenirs). Ils relient tous les
+  // souvenirs d'une conversation sans tracer les n(n−1)/2 paires : une conversation de 500 souvenirs resterait lisible et dessinable.
+  const pairs = (facts) => conversations(facts).flatMap((ids) => ids.slice(1).map((id, i) => [ids[i], id]));
+  // Les souvenirs liés à `fact` (même conversation, lui exclu), dans l'ordre de la liste. Ne parcourt la liste qu'une fois.
+  function of(facts, fact) {
+    const key = conversationOf(fact), self = String(fact?.fact_id);
+    return key ? (facts || []).filter((item) => String(item.fact_id) !== self && conversationOf(item) === key) : [];
+  }
   // Un point de 6 grandit d'un demi-point par lien, jusqu'à 9 : plus lié, un peu plus gros.
-  // Les souvenirs liés à `fact`, dans l'ordre de la liste.
-  const of = (facts, fact) => { const ids = new Set(neighbors(facts).get(String(fact?.fact_id)) || []); return (facts || []).filter((item) => ids.has(String(item.fact_id))); };
   const radius = (count) => 6 + Math.min(count || 0, 6) / 2;
   const text = (fact) => { const chars = [...String(fact?.text ?? "").replace(/\s+/g, " ").trim()]; return chars.length > 80 ? `${chars.slice(0, 79).join("")}…` : chars.join(""); };
   // La section « Lié à » du détail : un bouton par souvenir lié, `open(id)` l'ouvre. Le texte passe par textContent.
@@ -37,5 +41,5 @@
     root.append(make("h3", "memory-detail-links-title", "Lié à"), list);
     return root;
   }
-  window.EzerbotMemoryLinks = { neighbors, pairs, of, radius, section };
+  window.EzerbotMemoryLinks = { counts, conversationOf, pairs, of, radius, section };
 })();

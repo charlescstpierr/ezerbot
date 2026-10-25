@@ -475,10 +475,20 @@ test("le graphe dessine un trait fin par lien, et un souvenir plus lié a un poi
   const h = await harness({ start: CHAIN });
   h.tab("graph");
   const lines = h.main.querySelectorAll(".memory-graph-edge");
-  assert.equal(lines.filter((line) => line.classes.includes("is-link")).length, 3, "trois souvenirs d'une même conversation : trois liens");
-  assert.equal(lines.length, 3 + (3 + 5), "trois liens, plus les traits vous → groupe (3) et groupe → souvenir (5)");
+  assert.equal(lines.filter((line) => line.classes.includes("is-link")).length, 2, "trois souvenirs d'une même conversation : une chaîne de deux traits qui les relie tous");
+  assert.equal(lines.length, 2 + (3 + 5), "deux traits de lien, plus les traits vous → groupe (3) et groupe → souvenir (5)");
   const r = (id) => Number(h.point(id).querySelector("circle").attributes.r);
   assert.ok(r("l1") > r("l4") && r("l4") === r("l5"), "lié deux fois > isolés");
+});
+test("au survol d'un point, tous les souvenirs de sa conversation s'allument, les autres s'estompent", async () => {
+  const h = await harness({ start: CHAIN });
+  h.tab("graph");
+  h.point("l1").fire("mouseenter");
+  const dim = (id) => h.point(id).classes.includes("is-dim");
+  assert.deepEqual(["l2", "l3"].map(dim), [false, false], "l3 n'est pas voisin de l1 dans la chaîne tracée, mais il est lié");
+  assert.deepEqual(["l4", "l5"].map(dim), [true, true]);
+  h.point("l1").fire("mouseleave");
+  assert.deepEqual(["l2", "l3", "l4", "l5"].map(dim), [false, false, false, false]);
 });
 test("un clic sur un souvenir lié ouvre ce souvenir dans le panneau", async () => {
   const h = await harness({ start: CHAIN });

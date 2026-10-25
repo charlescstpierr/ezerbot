@@ -9,7 +9,7 @@
   const scopeOf = (fact) => (fact.scope === "team" || fact.scope === "topic" ? fact.scope : "private");
   function buildGraph(facts, { user = "", bots = [] } = {}) {
     const first = String(user || "").trim().split(/\s+/)[0] || "Vous";
-    const found = new Map(), related = window.EzerbotMemoryLinks?.neighbors(facts) ?? new Map();
+    const found = new Map(), related = window.EzerbotMemoryLinks?.counts(facts) ?? new Map();
     for (const fact of facts || []) {
       const scope = scopeOf(fact);
       const id = scope === "topic" ? `topic:${fact.topic_id ?? fact.topic_name ?? ""}` : scope;
@@ -28,8 +28,8 @@
       group.facts.forEach((fact, j) => {
         // Les souvenirs s'ouvrent en éventail vers l'extérieur, sept par rang.
         const rank = Math.floor(j / 7), size = Math.min(7, group.facts.length - rank * 7), theta = angle + 0.42 * ((j % 7) - (size - 1) / 2), reach = 72 + 20 * rank;
-        const bot = (bots || []).find((item) => item.id === fact.bot_id), links = related.get(String(fact.fact_id))?.length ?? 0;
-        graph.nodes.push({ id: String(fact.fact_id), group: group.id, scope: group.scope, bot: bot?.name || "Bot", label: String(fact.text ?? ""), links, r: window.EzerbotMemoryLinks?.radius(links) ?? 6, x: round(gx + reach * Math.cos(theta)), y: round(gy + reach * Math.sin(theta)) });
+        const bot = (bots || []).find((item) => item.id === fact.bot_id), links = related.get(String(fact.fact_id)) ?? 0;
+        graph.nodes.push({ id: String(fact.fact_id), group: group.id, scope: group.scope, bot: bot?.name || "Bot", label: String(fact.text ?? ""), links, conversation: window.EzerbotMemoryLinks?.conversationOf(fact) ?? "", r: window.EzerbotMemoryLinks?.radius(links) ?? 6, x: round(gx + reach * Math.cos(theta)), y: round(gy + reach * Math.sin(theta)) });
         graph.edges.push({ from: group.id, to: String(fact.fact_id) });
       });
     });
@@ -81,7 +81,8 @@
       for (const key of [...graph.groups, ...graph.nodes].map((item) => item.id)) if (!keep.has(key)) base.add(key);
     }
     const highlight = (id) => {
-      const lit = new Set(id ? [id, ...(links.get(id) || [])] : []);
+      const talk = id ? at.get(id).conversation : ""; // les souvenirs d'une même conversation s'allument ensemble, même si le trait de leur chaîne ne les relie pas deux à deux
+      const lit = new Set(id ? [id, ...(links.get(id) || []), ...(talk ? graph.nodes.filter((item) => item.conversation === talk).map((item) => item.id) : [])] : []);
       for (const [key, el] of drawn) { el.classList.toggle("is-active", key === id); el.classList.toggle("is-dim", id ? !lit.has(key) : base.has(key)); }
       for (const [edge, line] of lines) line.classList.toggle("is-dim", id ? edge.from !== id && edge.to !== id : base.has(edge.from) || base.has(edge.to));
     };

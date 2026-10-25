@@ -1,0 +1,57 @@
+name: Diagnostic ARM 557
+
+on:
+  push:
+    branches:
+      - pm/ez-mv-i557
+    paths:
+      - .github/workflows/i557-arm-diagnostic.yml
+      - .diagnostics/i557/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: diagnostic-arm-557
+  cancel-in-progress: false
+
+jobs:
+  exact:
+    name: i557-exact-6aca
+    runs-on: macos-latest
+    timeout-minutes: 65
+    steps:
+      - name: Lire le véhicule
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: vehicle
+          persist-credentials: false
+      - name: Lire le sujet 6aca
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 6aca5529b049d04b3534c97414b329143fbf7a1e
+          path: subject
+          persist-credentials: false
+      - name: Installer le scanner épinglé
+        run: python3 vehicle/.diagnostics/i557/install-scanner.py "$RUNNER_TEMP/i557-scanner/gitleaks"
+      - name: Collecter le cas exact et préparer l’export sûr
+        env:
+          I557_ROOT: ${{ github.workspace }}/subject
+          I557_EVIDENCE: ${{ runner.temp }}/i557
+          I557_WORKFLOW_SHA: ${{ github.sha }}
+          I557_RUN_ID: ${{ github.run_id }}
+          I557_ATTEMPT: ${{ github.run_attempt }}
+          I557_GITLEAKS: ${{ runner.temp }}/i557-scanner/gitleaks
+        run: python3 vehicle/.diagnostics/i557/ci.py
+      - name: Publier uniquement les octets validés
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: i557-arm-exact-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/i557/export/
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false
+      - name: Conserver tout rouge produit ou préparation
+        if: ${{ always() }}
+        run: python3 vehicle/.diagnostics/i557/finalize.py "$RUNNER_TEMP/i557"

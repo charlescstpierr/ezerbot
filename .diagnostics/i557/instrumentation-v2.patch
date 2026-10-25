@@ -1,0 +1,610 @@
+diff --git a/crates/domain/src/lib.rs b/crates/domain/src/lib.rs
+index e8c99afd..4eb35750 100644
+--- a/crates/domain/src/lib.rs
++++ b/crates/domain/src/lib.rs
+@@ -29,3 +29,6 @@ pub use transcript::{
+ 
+ #[cfg(test)]
+ mod tests;
++
++/// Temporary local diagnostic collector for issue 557.
++pub mod i557;
+diff --git a/crates/engine/src/run_loop.rs b/crates/engine/src/run_loop.rs
+index 5a9253af..f349914e 100644
+--- a/crates/engine/src/run_loop.rs
++++ b/crates/engine/src/run_loop.rs
+@@ -6,6 +6,7 @@
+ //! motivates durable wakes. Approval policy/routing belongs to the services, including
+ //! main-conversation user decisions and persisted allow/auto-review (REA
+ //! `goal-permissions-secrets.md` PS05–PS06). No routine-specific gate is added here.
++use grokbot_domain::i557;
+ use self::with_run_events as commit;
+ use crate::contracts::ToolCode;
+ use crate::contracts::{
+@@ -199,19 +200,26 @@ pub fn with_run_events<T>(
+     run_id: &str,
+     mut operation: impl FnMut(&Connection, &mut dyn RunServices) -> Result<T>,
+ ) -> Result<T> {
++    i557::fixture(std::path::Path::new(conn.path().unwrap_or("")));
+     for attempt in 0..5 {
++        i557::mark_run(run_id, "tx_enter", attempt, 0, true);
+         let mut hook_failed = false;
+         let result = (|| {
+             #[cfg(any(test, debug_assertions))]
+             services.transaction_checkpoint(run_id, RunEventPoint::BeforeBegin)?;
++            i557::mark_run(run_id, "begin_enter", attempt, 0, true);
+             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
++            i557::mark_run(run_id, "begin_return", attempt, 0, true);
+             let seq: u64 = tx.query_row(
+                 "SELECT COALESCE(MAX(seq),0) FROM engine_run_events WHERE run_id=?1",
+                 [run_id],
+                 |row| row.get(0),
+             )?;
+             let value = operation(&tx, services)?;
++            i557::mark_run(run_id, "operation_return", attempt, seq, true);
++            let mut committed_seq = seq;
+             for event in store::events(&tx, run_id, seq)? {
++                committed_seq = committed_seq.max(event.seq);
+                 if let Err(error) = services.on_run_event(&tx, &event) {
+                     hook_failed = true;
+                     return Err(error);
+@@ -219,9 +227,12 @@ pub fn with_run_events<T>(
+             }
+             #[cfg(any(test, debug_assertions))]
+             services.transaction_checkpoint(run_id, RunEventPoint::BeforeCommit)?;
++            i557::mark_run(run_id, "commit_enter", committed_seq, attempt, true);
+             tx.commit()?;
++            i557::mark_run(run_id, "tx_committed", committed_seq, attempt, true);
+             Ok(value)
+         })();
++        if result.is_err() { i557::mark_run(run_id, "tx_error", attempt, 0, false); }
+         match result {
+             Err(error) if attempt < 4 && (hook_failed || busy(&error)) => {
+                 std::thread::sleep(Duration::from_millis(5 << attempt));
+@@ -1416,6 +1427,9 @@ fn drive(
+         let mut completed = false;
+         let mut persistence_error = false;
+         let result = gateway.stream(&request, &mut |event| {
++            if let ModelEvent::TextDelta { text } = &event {
++                i557::mark_run(run_id, "engine_input", text.len() as u64, 0, true);
++            }
+             if checkpoint(conn, services, run_id)
+                 .inspect_err(|_| persistence_error = true)?
+                 .is_some()
+diff --git a/crates/engine/src/store.rs b/crates/engine/src/store.rs
+index 2b8745ee..f6065029 100644
+--- a/crates/engine/src/store.rs
++++ b/crates/engine/src/store.rs
+@@ -6,6 +6,7 @@
+ //! Privacy redaction is the sole exception to append-only event payloads.
+ //! On SQLITE_BUSY or a uniqueness race, callers must roll back and retry the
+ //! whole transaction, never reuse a stale WAL snapshot (see model::start).
++use grokbot_domain::i557;
+ use crate::contracts::{
+     ContextEstimate, Result, RunEvent, RunEventKind, SuspendCause, TaskStatus, TokenUsage, Trigger,
+     TurnEnd, WakeCause, WakeStatus,
+@@ -359,6 +360,7 @@ pub fn append_event(
+         params![run_id, tag(&kind)?, serde_json::to_string(payload)?],
+         |row| row.get(0),
+     )?;
++    i557::mark_run(run_id, "inserted", seq, if kind == RunEventKind::TextDelta { payload["text"].as_str().map_or(0, str::len) as u64 } else { 0 }, true);
+     Ok(RunEvent {
+         run_id: run_id.into(),
+         seq,
+diff --git a/crates/wrapper/src/features/engine.rs b/crates/wrapper/src/features/engine.rs
+index 4b6a824a..32b37d53 100644
+--- a/crates/wrapper/src/features/engine.rs
++++ b/crates/wrapper/src/features/engine.rs
+@@ -3,6 +3,7 @@
+ //! separate from forgetting. Budgets/recovery policy are local reconstruction.
+ //! Summary bounds follow RC06, with the 70% fallback from `compaction-runtimes.md`.
+ 
++use grokbot_domain::i557;
+ use crate::*;
+ use grokbot_domain::{ConversationId, DeliveryReceipt, MessageId, Refusal, TranscriptEntryId};
+ use grokbot_engine::contracts::{
+@@ -2547,10 +2548,15 @@ impl RunGatewayCall<'_> {
+             estimate: estimate.clone(),
+         })?;
+         let mut deltas = RedactedDeltas::new(&vault)?;
++        let mut delta_ordinal = 0u64;
+         let mut forward = |event| {
+             if let ModelEvent::TextDelta { text } = event {
++                delta_ordinal += 1;
++                i557::mark_run(self.run_id, "filter_input", delta_ordinal, text.len() as u64, true);
+                 deltas.pending.push_str(&text);
+-                return deltas.flush(false, emit);
++                let result = deltas.flush(false, emit);
++                i557::mark_run(self.run_id, "filter_return", delta_ordinal, deltas.pending.len() as u64, result.is_ok());
++                return result;
+             }
+             if matches!(
+                 event,
+@@ -2669,7 +2675,9 @@ impl<'a> RedactedDeltas<'a> {
+         finished: bool,
+         emit: &mut dyn FnMut(ModelEvent) -> grokbot_engine::contracts::Result<()>,
+     ) -> grokbot_engine::contracts::Result<()> {
++        i557::mark("filter_refresh_enter", self.pending.len() as u64, 0, true);
+         self.refresh()?;
++        i557::mark("filter_refresh_return", self.pending.len() as u64, 0, true);
+         self.pending = redact::redact(self.vault, &self.pending)?;
+         loop {
+             let old = self.pending.clone();
+@@ -2689,8 +2697,12 @@ impl<'a> RedactedDeltas<'a> {
+             .map_or(self.pending.len(), |(n, _)| n);
+         let text = self.pending[..boundary].to_owned();
+         self.pending.drain(..boundary);
++        i557::mark("filter_ready", text.len() as u64, self.pending.len() as u64, true);
+         if !text.is_empty() {
+-            emit(ModelEvent::TextDelta { text })?;
++            i557::mark("filtered_emit", text.len() as u64, 0, true);
++            let result = emit(ModelEvent::TextDelta { text });
++            i557::mark("filtered_emit_return", 0, 0, result.is_ok());
++            result?;
+         }
+         Ok(())
+     }
+@@ -2829,12 +2841,14 @@ fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiErr
+         Some(events) => events,
+         None => std::rc::Rc::new(store::events(conn, &run.run_id, 0)?),
+     };
++    i557::mark_run(&run.run_id, "events_used", events.iter().map(|e| e.seq).max().unwrap_or(0), events.iter().filter(|e| e.kind == RunEventKind::TextDelta).map(|e| e.seq).max().unwrap_or(0), true);
+     let sources = super::sources::registry(conn, &run.run_id)?;
+     // One vault read for the whole reply, after what it masks. Under the hold of a state
+     // read, the one read of the whole projection (#377).
+     let secrets = redaction_patterns(conn)?;
+     let parts = projected_parts_with(run, &events, &secrets)?;
+     let body: String = parts.iter().map(|part| part.body.as_str()).collect();
++    i557::mark_run(&run.run_id, "projected", body.len() as u64, parts.len() as u64, true);
+     let citations = super::sources::citations_in(&sources, &body);
+     let mut metadata: (Option<String>, Option<String>, Option<String>) =
+         match crate::projection_hints::run_metadata(&run.run_id) {
+diff --git a/crates/wrapper/src/gateway.rs b/crates/wrapper/src/gateway.rs
+index 47468e78..f5485ef6 100644
+--- a/crates/wrapper/src/gateway.rs
++++ b/crates/wrapper/src/gateway.rs
+@@ -12,6 +12,7 @@
+ //! checkpoint cancellation. Encrypted reasoning is requested and replayed as opaque
+ //! structured provider state, never as text or executable calls.
+ 
++use grokbot_domain::i557;
+ use std::collections::{HashMap, HashSet};
+ use std::io::BufRead;
+ 
+@@ -483,6 +484,7 @@ pub(crate) fn stream_response_observed(
+     emit: &mut dyn FnMut(ModelEvent) -> Result<()>,
+ ) -> Result<()> {
+     let mut events = Events::default();
++    let mut ordinal = 0u64;
+     let mut data = Vec::new();
+     let mut bytes = 0usize;
+     for line in reader.lines() {
+@@ -496,6 +498,8 @@ pub(crate) fn stream_response_observed(
+         }
+         if line.is_empty() {
+             if !data.is_empty() {
++                ordinal += 1;
++                i557::mark("gateway_received", ordinal, bytes as u64, true);
+                 observed(&data.join("\n"))?;
+                 if events.dispatch(&data.join("\n"), diagnostics, emit)? {
+                     return Ok(());
+diff --git a/crates/wrapper/src/lib.rs b/crates/wrapper/src/lib.rs
+index 39c614ce..db22f3b2 100644
+--- a/crates/wrapper/src/lib.rs
++++ b/crates/wrapper/src/lib.rs
+@@ -28,6 +28,7 @@ pub(crate) use features::engine::demo_reply;
+ 
+ pub use provider::{database_path_from_home, default_database_path, Endpoints, Provider, ToolCall};
+ 
++use grokbot_domain::i557;
+ use std::collections::{BTreeMap, HashSet};
+ use std::fmt;
+ use std::path::{Path, PathBuf};
+@@ -932,13 +933,22 @@ impl App {
+ 
+     /// JSON-only compatibility entry point; binary consumers use `api_response`.
+     pub fn api(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiError> {
++        i557::fixture(&self.db_path);
++        i557::run(None);
++        if (method, path) == ("GET", "/api/state") { i557::mark("api_begin", 0, 0, true); }
+         let started = std::time::Instant::now();
+-        match self.api_response(method, path, body)? {
++        let response = self.api_response(method, path, body);
++        if (method, path) == ("GET", "/api/state") { i557::mark("api_dispatch_return", 0, 0, response.is_ok()); }
++        match response? {
+             ApiResponse::Json(value) => {
+                 // In process, nothing is encoded: the HTTP host times its own encoding.
+                 if (method, path) == ("GET", "/api/state") {
+-                    self.log_state_served(started.elapsed());
++                    let elapsed = started.elapsed();
++                    i557::mark("log_enter", elapsed.as_nanos() as u64, 0, true);
++                    self.log_state_served(elapsed);
++                    i557::mark("log_return", 0, 0, true);
+                 }
++                if (method, path) == ("GET", "/api/state") { i557::mark("api_return", 0, 0, true); }
+                 Ok(value)
+             }
+             ApiResponse::Bytes { .. } => Err(ApiError::new(
+diff --git a/crates/wrapper/src/projection_hints.rs b/crates/wrapper/src/projection_hints.rs
+index 43984769..dec9ca26 100644
+--- a/crates/wrapper/src/projection_hints.rs
++++ b/crates/wrapper/src/projection_hints.rs
+@@ -20,6 +20,7 @@
+ //!
+ //! The maps are read after the state revision is captured, like the projection itself: a row
+ //! stored meanwhile is missing from both and changes the revision, so the next poll shows it.
++use grokbot_domain::i557;
+ use std::cell::RefCell;
+ use std::collections::{HashMap, HashSet};
+ use std::hash::Hash;
+@@ -231,6 +232,7 @@ const SQL_USAGE: &str =
+ /// The events of the projected runs. `None` if one cannot be decoded: `store::events` then
+ /// reports it for the run it belongs to.
+ fn events(connection: &Connection, run_ids: &str) -> Option<HashMap<String, Rc<Vec<RunEvent>>>> {
++    i557::mark("hints_begin", 0, 0, true);
+     let all = rows(
+         connection,
+         SQL_EVENTS,
+@@ -244,6 +246,7 @@ fn events(connection: &Connection, run_ids: &str) -> Option<HashMap<String, Rc<V
+             ))
+         },
+     )?;
++    i557::mark("hints_loaded", all.len() as u64, 0, true);
+     let mut runs: HashMap<String, Vec<RunEvent>> = HashMap::new();
+     for (run_id, (seq, kind, payload)) in all {
+         runs.entry(run_id.clone()).or_default().push(RunEvent {
+diff --git a/crates/wrapper/src/provider/reliable.rs b/crates/wrapper/src/provider/reliable.rs
+index a2323dd4..f7c2cde2 100644
+--- a/crates/wrapper/src/provider/reliable.rs
++++ b/crates/wrapper/src/provider/reliable.rs
+@@ -2,6 +2,7 @@
+ //! UI callback. Dropping its receiver fences all late results, including a late
+ //! refresh: no new Responses request is dispatched after abandonment. ureq closes
+ //! the socket on its next read/deadline (it has no socket-abort API).
++use grokbot_domain::i557;
+ use super::*;
+ use crate::upstream::Timing;
+ use grokbot_engine::contracts::{Error, ModelEvent, Result};
+@@ -185,6 +186,9 @@ impl Session {
+         metadata: &mut MetadataSink<'_>,
+         emit: &mut dyn FnMut(ModelEvent) -> Result<()>,
+     ) -> Result<()> {
++        i557::fixture(&self.inner.file);
++        i557::run(turn);
++        i557::mark("reliable_begin", 0, 0, true);
+         let directory = self.inner.file.parent().unwrap_or(Path::new("."));
+         let log = |status, code, timing: Option<&Timing>| {
+             crate::upstream::turn(directory, turn.unwrap_or("internal"), status, code, timing)
+@@ -232,7 +236,9 @@ impl Session {
+         // ureq cuts a blocked read at this instant; the session loop below only
+         // reports the timeout, it cannot close a socket the worker is reading.
+         let deadline = Instant::now() + limits.total;
++        let trace_context = i557::context();
+         self.spawn_background(move || {
++            i557::set(trace_context);
+             let worker = Worker {
+                 inner: session.inner.clone(),
+                 settled: worker_settled,
+@@ -268,6 +274,9 @@ impl Session {
+                 for notice in notices {
+                     send(&tx, Wire::Notice(notice))?;
+                 }
++                let request = response.header("x-i557-request").and_then(|v| v.parse::<u64>().ok());
++                i557::request(request.unwrap_or(0));
++                i557::mark("request_link", request.unwrap_or(0), 0, request.is_some());
+                 let diagnostics = session.diagnostics(&response);
+                 let reader = Cancellable {
+                     reader: BufReader::new(std::io::Read::take(
+@@ -276,6 +285,7 @@ impl Session {
+                     )),
+                     cancel: &abandoned,
+                 };
++                let mut wire_ordinal = 0u64;
+                 crate::gateway::stream_response_observed(
+                     reader,
+                     &diagnostics,
+@@ -317,7 +327,12 @@ impl Session {
+                         ) {
+                             worker.finish();
+                         }
+-                        send(&tx, Wire::Event(event))
++                        let size = if let ModelEvent::TextDelta { text } = &event { text.len() as u64 } else { 0 };
++                        wire_ordinal += 1;
++                        i557::mark("wire_send_enter", wire_ordinal, size, true);
++                        let result = send(&tx, Wire::Event(event));
++                        i557::mark("wire_send_return", wire_ordinal, size, result.is_ok());
++                        result
+                     },
+                 )
+             })();
+@@ -337,6 +352,7 @@ impl Session {
+         let mut http = 0;
+         let mut tool_notice = false;
+         let mut previous_notice = String::new();
++        let mut received_ordinal = 0u64;
+         loop {
+             #[cfg(test)]
+             if turn.is_some_and(|id| lock(&self.inner.paused_turns).contains(id)) {
+@@ -431,6 +447,9 @@ impl Session {
+                     if Instant::now() >= deadline => {}
+                 Ok(Wire::Failure(failure)) => metadata(None, Some(&failure))?,
+                 Ok(Wire::Event(event)) => {
++                    received_ordinal += 1;
++                    let size = if let ModelEvent::TextDelta { text } = &event { text.len() as u64 } else { 0 };
++                    i557::mark("wire_receive", received_ordinal, size, true);
+                     let terminal = match &event {
+                         ModelEvent::Completed => Some("completed"),
+                         ModelEvent::Failed { .. } => Some("failed"),
+@@ -443,7 +462,10 @@ impl Session {
+                             metadata(Some(&previous_notice), None)?;
+                         }
+                     }
+-                    emit(event)?;
++                    i557::mark("emit_enter", received_ordinal, size, true);
++                    let result = emit(event);
++                    i557::mark("emit_return", received_ordinal, size, result.is_ok());
++                    result?;
+                     if terminal.is_some() {
+                         return Ok(());
+                     }
+diff --git a/crates/wrapper/tests/chat_reliability.rs b/crates/wrapper/tests/chat_reliability.rs
+index 1225f375..d2ef515e 100644
+--- a/crates/wrapper/tests/chat_reliability.rs
++++ b/crates/wrapper/tests/chat_reliability.rs
+@@ -1,4 +1,5 @@
+ //! End-to-end fault injection against fake Codex only. No OAuth/account/network outside loopback.
++use grokbot_domain::i557;
+ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+ use grokbot_wrapper::{App, Endpoints, Provider};
+ use serde_json::{json, Value};
+@@ -50,8 +51,11 @@ struct Fake {
+     thread: Option<std::thread::JoinHandle<()>>,
+ }
+ fn event(stream: &mut TcpStream, value: Value) {
+-    let _ = write!(stream, "data: {value}\n\n");
+-    let _ = stream.flush();
++    i557::mark("write_enter", 0, 0, true);
++    let written = write!(stream, "data: {value}\n\n");
++    i557::mark("write_return", 0, 0, written.is_ok());
++    let flushed = stream.flush();
++    i557::mark("flush_return", 0, 0, flushed.is_ok());
+ }
+ fn hold(stream: &mut TcpStream, stop: &AtomicBool, keepalive: bool) {
+     while !stop.load(Ordering::SeqCst) {
+@@ -125,7 +129,10 @@ impl Fake {
+             partial_released.clone(),
+             partial_finished.clone(),
+         );
++        let trace_context = i557::context();
+         let thread = std::thread::spawn(move || {
++            i557::set(trace_context);
++            let mut request_ordinal = 0u64;
+             let mut workers = vec![];
+             while !s.load(Ordering::SeqCst) {
+                 let Ok((mut socket, _)) = listener.accept() else {
+@@ -143,7 +150,12 @@ impl Fake {
+                 );
+                 let (summary_slow, summary_count) = (summary_slow.clone(), summary_count.clone());
+                 let drip_closed = drip_seen.clone();
++                request_ordinal += 1;
++                let request = request_ordinal;
+                 workers.push(std::thread::spawn(move || {
++                    i557::set(trace_context);
++                    i557::request(request);
++                    i557::mark("fake_request", request, 0, true);
+                     // Accepted sockets can inherit O_NONBLOCK on BSD/macOS.
+                     // Only the listener is polled; request parsing must block.
+                     socket.set_nonblocking(false).expect("fake accepted socket blocking mode");
+@@ -179,7 +191,7 @@ impl Fake {
+                     let fault=if internal { if side.load(Ordering::SeqCst) { Fault::Headers } else { Fault::Happy } } else { q.lock().unwrap().pop_front().unwrap_or(Fault::Happy) };
+                     if matches!(fault,Fault::Headers) { hold(&mut socket,&s,false); return; }
+                     if let Fault::Http(code)=fault { let body=json!({"error":{"code":"fake_error","message":"Erreur factice précise"}}).to_string(); let _=write!(socket,"HTTP/1.1 {code} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",body.len(),body); return; }
+-                    let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"); let _=socket.flush();
++                    let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nx-i557-request: {request}\r\n\r\n"); let _=socket.flush();
+                     if instructions.starts_with("Summarize the supplied conversation") {
+                         summary_count.fetch_add(1, Ordering::SeqCst);
+                         if summary_slow.swap(false, Ordering::SeqCst) {
+@@ -212,7 +224,14 @@ impl Fake {
+                             event(&mut socket,json!({"type":"response.completed"}));
+                         },
+                         Fault::Words => {
+-                            for word in 0..40 { event(&mut socket,json!({"type":"response.output_text.delta","delta":format!("mot{word} ")})); std::thread::sleep(Duration::from_millis(50)); }
++                            i557::mark("words_begin", request, 0, true);
++                            for word in 0..40 {
++                                i557::mark("word_enter", word + 1, 0, true);
++                                event(&mut socket,json!({"type":"response.output_text.delta","delta":format!("mot{word} ")}));
++                                i557::mark("word_return", word + 1, 0, true);
++                                std::thread::sleep(Duration::from_millis(50));
++                                i557::mark("word_wake", word + 1, 0, true);
++                            }
+                             event(&mut socket,json!({"type":"response.completed"}));
+                         },
+                         Fault::EndlessEvents => { while !s.load(Ordering::SeqCst) { event(&mut socket,json!({"type":"response.in_progress"})); std::thread::sleep(Duration::from_millis(25)); } },
+@@ -281,6 +300,9 @@ impl Fixture {
+     fn with_deadline(signed: bool, deadline: Duration) -> Self {
+         let guard = grokbot_test_support::TestDir::new("ezerbot-reliable");
+         let db = guard.join("app.sqlite");
++        i557::fixture(&db);
++        i557::run(None);
++        i557::poll(0);
+         let fake = Fake::new();
+         if signed {
+             save_token(&db, false);
+@@ -320,7 +342,7 @@ impl Fixture {
+     }
+     fn reply(&mut self) -> Value {
+         let state = self.app.api("GET", "/api/state", b"").unwrap();
+-        state["conversations"]
++        let reply = state["conversations"]
+             .as_array()
+             .unwrap()
+             .iter()
+@@ -331,7 +353,9 @@ impl Fixture {
+             .iter()
+             .find(|m| m["id"] == "reply-question")
+             .cloned()
+-            .unwrap_or(Value::Null)
++            .unwrap_or(Value::Null);
++        i557::mark_run(reply["payload"]["run_id"].as_str().unwrap_or(""), "reply_return", reply["body"].as_str().map_or(0, str::len) as u64, 0, true);
++        reply
+     }
+     fn settled(&mut self) -> Value {
+         until(|| !self.reply().is_null() && self.reply()["state"] != "streaming");
+@@ -1235,13 +1259,22 @@ fn watch_words(f: &mut Fixture) -> Vec<(Instant, String)> {
+     let mut seen: Vec<(Instant, String)> = Vec::new();
+     let start = Instant::now();
+     let mut next = start;
++    let mut poll = 0u64;
++    i557::mark("watch_begin", 0, 0, true);
+     loop {
++        poll += 1;
++        i557::poll(poll);
++        i557::mark("poll_wake", 0, 0, true);
+         let reply = f.reply();
+         let body = reply["body"].as_str().unwrap_or_default().to_owned();
++        i557::mark_run(reply["payload"]["run_id"].as_str().unwrap_or(""), "visible", body.len() as u64, body.split_whitespace().count() as u64, true);
+         if !body.is_empty() && seen.last().is_none_or(|(_, last)| *last != body) {
+-            seen.push((Instant::now(), body));
++            let now = Instant::now();
++            i557::deadline("visible_stamp", now, body.split_whitespace().count() as u64);
++            seen.push((now, body));
+         }
+         if !reply.is_null() && reply["state"] != "streaming" {
++            i557::mark("watch_end", seen.len() as u64, 0, true);
+             return seen;
+         }
+         assert!(
+@@ -1249,6 +1282,7 @@ fn watch_words(f: &mut Fixture) -> Vec<(Instant, String)> {
+             "fake chat did not settle"
+         );
+         next += Duration::from_millis(100);
++        i557::deadline("sleep_enter", next, poll);
+         std::thread::sleep(next.saturating_duration_since(Instant::now()));
+     }
+ }
+diff --git a/crates/domain/src/i557.rs b/crates/domain/src/i557.rs
+new file mode 100644
+index 00000000..dddb5cb4
+--- /dev/null
++++ b/crates/domain/src/i557.rs
+@@ -0,0 +1,120 @@
++use std::cell::{Cell, RefCell};
++use std::io::Write;
++use std::path::{Path, PathBuf};
++use std::sync::{OnceLock, atomic::{AtomicU64, Ordering}};
++use std::time::Instant;
++
++/// Identifies the temporary diagnostic collector.
++pub const SENSOR: &str = "i557-tls-v1";
++static ORIGIN: OnceLock<Instant> = OnceLock::new();
++static DIRECTORY: OnceLock<Option<PathBuf>> = OnceLock::new();
++static THREAD: AtomicU64 = AtomicU64::new(1);
++
++#[derive(Clone, Copy, Default)]
++/// Numeric correlation context, with no user data.
++pub struct Context {
++    /// Pseudonym of the fixture directory.
++    pub fixture: u64,
++    /// Pseudonym of the durable run.
++    pub run: u64,
++    /// Fake server request ordinal.
++    pub request: u64,
++    /// Observer poll ordinal.
++    pub poll: u64,
++}
++struct Row {
++    t: u128,
++    context: Context,
++    phase: &'static str,
++    a: u64,
++    b: u64,
++    ok: bool,
++}
++struct Buffer {
++    thread: u64,
++    rows: Vec<Row>,
++    overhead: u128,
++}
++thread_local! {
++    static CONTEXT: Cell<Context> = Cell::new(Context::default());
++    static BUFFER: RefCell<Buffer> = RefCell::new(Buffer {
++        thread: THREAD.fetch_add(1, Ordering::Relaxed),
++        rows: Vec::with_capacity(1024),
++        overhead: 0,
++    });
++}
++fn directory() -> Option<&'static PathBuf> {
++    DIRECTORY.get_or_init(|| std::env::var_os("I557_TRACE_DIR").map(PathBuf::from)).as_ref()
++}
++/// Copies this thread's context.
++pub fn context() -> Context { CONTEXT.with(Cell::get) }
++/// Attaches a copied context to a thread.
++pub fn set(context: Context) { CONTEXT.with(|c| c.set(context)); }
++/// Produces a stable opaque identifier.
++pub fn hash(value: &str) -> u64 {
++    value.bytes().fold(14695981039346656037, |n, b| (n ^ u64::from(b)).wrapping_mul(1099511628211))
++}
++/// Attaches the database directory's pseudonym.
++pub fn fixture(path: &Path) {
++    let mut c = context();
++    c.fixture = hash(&path.parent().unwrap_or(path).to_string_lossy());
++    set(c);
++}
++/// Attaches the current run's pseudonym.
++pub fn run(value: Option<&str>) {
++    let mut c = context();
++    c.run = value.map_or(0, hash);
++    set(c);
++}
++/// Attaches the fake server request ordinal.
++pub fn request(value: u64) {
++    let mut c = context(); c.request = value; set(c);
++}
++/// Attaches the observer poll ordinal.
++pub fn poll(value: u64) {
++    let mut c = context(); c.poll = value; set(c);
++}
++/// Records a closed phase with numeric counters.
++pub fn mark(phase: &'static str, a: u64, b: u64, ok: bool) {
++    row(context(), phase, a, b, ok);
++}
++/// Records a phase for an explicit run without changing the context.
++pub fn mark_run(run: &str, phase: &'static str, a: u64, b: u64, ok: bool) {
++    let mut c = context(); c.run = hash(run); row(c, phase, a, b, ok);
++}
++/// Records the exact observer instant or sleep deadline on the shared clock.
++pub fn deadline(phase: &'static str, instant: Instant, a: u64) {
++    let origin = *ORIGIN.get_or_init(Instant::now);
++    mark(phase, instant.saturating_duration_since(origin).as_nanos() as u64, a, true);
++}
++fn row(context: Context, phase: &'static str, a: u64, b: u64, ok: bool) {
++    if directory().is_none() { return; }
++    let start = Instant::now();
++    let origin = ORIGIN.get_or_init(Instant::now);
++    let t = origin.elapsed().as_nanos();
++    BUFFER.with(|buffer| {
++        let mut buffer = buffer.borrow_mut();
++        buffer.rows.push(Row { t, context, phase, a, b, ok });
++        buffer.overhead += start.elapsed().as_nanos();
++    });
++}
++impl Drop for Buffer {
++    fn drop(&mut self) {
++        if self.rows.is_empty() { return; }
++        let Some(directory) = directory() else { return; };
++        let result = (|| -> std::io::Result<()> {
++            std::fs::create_dir_all(directory)?;
++            let mut output = std::io::BufWriter::new(std::fs::File::create(directory.join(format!("thread-{}.tsv", self.thread)))?);
++            writeln!(output, "sensor\t{SENSOR}\tthread\t{}", self.thread)?;
++            writeln!(output, "ns\tfixture\trun\trequest\tpoll\tphase\ta\tb\tok")?;
++            for row in &self.rows {
++                let c = row.context;
++                writeln!(output, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", row.t, c.fixture, c.run, c.request, c.poll, row.phase, row.a, row.b, u8::from(row.ok))?;
++            }
++            writeln!(output, "END\t{}\t{}", self.rows.len(), self.overhead)?;
++            output.flush()?;
++            Ok(())
++        })();
++        eprintln!("I557_FLUSH sensor={SENSOR} thread={} rows={} ok={}", self.thread, self.rows.len(), result.is_ok());
++    }
++}

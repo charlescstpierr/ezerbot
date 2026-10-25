@@ -36,7 +36,7 @@ test('PWA installs only public shell and never intercepts private API or media',
   const fromPush = await w.fire('fetch', { request: { method: 'GET', url: 'https://mac.qa.ts.net/?notification=reply%3Aa' } });
   assert.equal(fromPush.offline, '/');
 });
-test('install also caches every piece chat.js loads on demand, served network-first like the shell', async () => {
+test('install caches only the shell; each piece chat.js loads on demand is cached when fetched, network-first', async () => {
   const ui = path.resolve(__dirname);
   const pieces = [
     ...fs.readdirSync(ui).filter(file => /^chat-.+\.js$/.test(file)).map(file => `/${file}`),
@@ -44,11 +44,13 @@ test('install also caches every piece chat.js loads on demand, served network-fi
   ];
   assert.equal(pieces.length, 23);
   const w = worker(); await w.fire('install');
-  for (const piece of pieces) assert.ok(w.writes.includes(piece), piece);
   assert.ok(w.writes.includes('/chat.js'));
-  const writes = w.writes.length;
-  await w.fire('fetch', { request: { method: 'GET', url: 'https://mac.qa.ts.net/katex/KaTeX_Main-Regular.woff2' } });
-  assert.equal(w.writes[writes], '/katex/KaTeX_Main-Regular.woff2');
+  for (const piece of pieces) assert.ok(!w.writes.includes(piece), piece);
+  for (const piece of pieces) {
+    const writes = w.writes.length;
+    await w.fire('fetch', { request: { method: 'GET', url: `https://mac.qa.ts.net${piece}` } });
+    assert.equal(w.writes[writes], piece);
+  }
   w.offline();
   const cached = await w.fire('fetch', { request: { method: 'GET', url: 'https://mac.qa.ts.net/chat-math.js' } });
   assert.equal(cached.offline, '/chat-math.js');

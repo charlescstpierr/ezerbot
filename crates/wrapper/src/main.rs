@@ -189,11 +189,12 @@ impl Encoding {
 }
 
 /// The coding an Accept-Encoding value picks among the variants an asset has:
-/// the highest weight wins, Brotli then gzip break a tie, and identity answers
-/// when no variant is acceptable. An explicit coding beats `*`; q=0 refuses; an
-/// unreadable weight counts as a refusal.
+/// the highest weight wins, Brotli then gzip break a tie, and a variant must weigh at
+/// least as much as an explicit `identity` weight. When every coding is refused the
+/// body still goes out as identity. An explicit coding
+/// beats `*`; q=0 refuses; an unreadable weight counts as a refusal.
 fn negotiate(accept_encoding: Option<&str>, available: &[Encoding]) -> Encoding {
-    let mut explicit: [Option<f32>; 2] = [None, None];
+    let mut explicit: [Option<f32>; 3] = [None, None, None];
     let mut wildcard = None;
     for item in accept_encoding.unwrap_or("").split(',') {
         let mut parts = item.split(';');
@@ -213,10 +214,13 @@ fn negotiate(accept_encoding: Option<&str>, available: &[Encoding]) -> Encoding 
             explicit[0].get_or_insert(weight);
         } else if coding.eq_ignore_ascii_case("gzip") {
             explicit[1].get_or_insert(weight);
+        } else if coding.eq_ignore_ascii_case("identity") {
+            explicit[2].get_or_insert(weight);
         } else if coding == "*" {
             wildcard.get_or_insert(weight);
         }
     }
+    let identity = explicit[2].unwrap_or(0.0);
     let mut chosen = (Encoding::Identity, 0.0);
     for (encoding, explicit) in [Encoding::Brotli, Encoding::Gzip].into_iter().zip(explicit) {
         let weight = explicit.or(wildcard).unwrap_or(0.0);
@@ -224,7 +228,11 @@ fn negotiate(accept_encoding: Option<&str>, available: &[Encoding]) -> Encoding 
             chosen = (encoding, weight);
         }
     }
-    chosen.0
+    if chosen.1 >= identity {
+        chosen.0
+    } else {
+        Encoding::Identity
+    }
 }
 
 /// What an asset reply adds to the shared headers.
@@ -914,6 +922,12 @@ mod asset_tests {
             (Some("identity"), Identity),
             (Some("*"), Brotli),
             (Some("*;q=0"), Identity),
+            (Some("identity;q=1, br;q=0.1"), Identity),
+            (Some("identity;q=0.5, gzip;q=0.8, br;q=0.2"), Gzip),
+            (Some("br;q=0.5, identity;q=0.5"), Brotli),
+            (Some("*;q=0.5, br;q=0.4"), Gzip),
+            (Some("identity;q=0, gzip;q=0, br;q=0"), Identity),
+            (Some("identity;q=0, br;q=0.1"), Brotli),
             (Some("*;q=0.1, deflate"), Brotli),
             (Some("gzip;q=0, *"), Brotli),
             (Some("br;q=0, *"), Gzip),

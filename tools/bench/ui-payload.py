@@ -7,7 +7,8 @@ même binaire, puis demande chaque fichier comme WKWebView/Safari
 pour octet à la même ressource demandée sans compression : un écart compte comme une
 erreur (le Brotli est décodé par le zlib de Node, que le build de app/web demande
 déjà). Les fichiers chargés seulement quand un message en a besoin (liste ON_DEMAND de
-sw.js, polices référencées par les feuilles de style) sont mesurés à part.
+sw.js, polices référencées par les feuilles de style) sont mesurés à part ; le
+service worker ne les met en cache qu'au moment où la page les demande.
 
     cargo build --release --locked -p grokbot-wrapper
     python3 tools/bench/ui-payload.py target/release/grokbot-wrapper --runs 3
@@ -110,7 +111,8 @@ def measure(binary):
             worker = get(port, "/sw.js")[1].decode()
             shell = [fetch(port, path) for path in listed(worker, "ASSETS")]
             index = next(item for item in shell if item["path"] == "/")["body"].decode()
-            loaded = set(local_references(index, r'(?:src|href)="([^"?#]+)"'))
+            # iphone.js registers /sw.js, so the browser fetches it at every opening too.
+            loaded = set(local_references(index, r'(?:src|href)="([^"?#]+)"')) | {"/sw.js"}
             extra = [fetch(port, path) for path in sorted(loaded - {item["path"] for item in shell})]
             later = set(listed(worker, "ON_DEMAND"))
             for item in shell:

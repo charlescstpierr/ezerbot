@@ -89,12 +89,19 @@ fn is_text_asset(path: &std::path::Path) -> bool {
 
 /// Brotli 11 takes seconds on the large bundles and every edit under app/ui reruns this
 /// script, so a file whose bytes match the copy kept from the last run is not recompressed.
-/// The copy is written last: an interrupted run never leaves stale variants behind it.
+/// The copy is removed first and written last, so variants a run did not finish never
+/// pass for the copy of an earlier run.
 /// New compression settings reach unchanged files only after `cargo clean -p grokbot-wrapper`.
 fn write_variants(output: &std::path::Path, relative: &str, bytes: &[u8]) {
     let source = output.join("source").join(relative);
     if fs::read(&source).is_ok_and(|previous| previous == bytes) {
         return;
+    }
+    match fs::remove_file(&source) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            panic!("cannot remove {}: {error}", source.display())
+        }
+        _ => {}
     }
     let mut gzip = gzip(bytes);
     let mut smallest = bytes.len();

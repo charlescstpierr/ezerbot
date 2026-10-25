@@ -64,7 +64,12 @@ spec = importlib.util.spec_from_file_location('runner', 'tools/run-complete-suit
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 free = 19 if os.environ.get('SUITE_CASE') == 'low-disk' else 40
-with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free=free * 1024**3)):
+actual_run = runner.subprocess.run
+def run(command, *args, **kwargs):
+    if os.environ.get('SUITE_CASE') == 'interrupt' and command[0] == 'cargo':
+        raise KeyboardInterrupt
+    return actual_run(command, *args, **kwargs)
+with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free=free * 1024**3)), patch.object(runner.subprocess, 'run', side_effect=run):
     sys.exit(runner.main())
 """)
             for name in ("run-complete-suite.py", "suite-platform-inventory.py"):
@@ -85,7 +90,7 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
                 (root / "bin" / tool).chmod(0o755)
             for args in (("init", "--quiet"), ("add", "."), ("-c", "user.name=Suite fixture", "-c", "user.email=suite@example.invalid", "commit", "--quiet", "-m", "fixture")):
                 subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
-            for case in ("green", "rust-error", "node-error", "compile-error", "npm-error", "unexpected-skip", "low-disk", "bad-metadata", "dirty-lock"):
+            for case in ("green", "rust-error", "node-error", "compile-error", "npm-error", "unexpected-skip", "low-disk", "bad-metadata", "interrupt", "dirty-lock"):
                 with self.subTest(case=case):
                     output = root / "reports" / case / "result.json"
                     env = {**os.environ, "PATH": str(root / "bin") + os.pathsep + os.environ["PATH"], "SUITE_CASE": case,
@@ -95,7 +100,7 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
                     shutil.copy(output, LOGS / (case + ".json"))
                     self.assertEqual(report["status"], "vert" if case == "green" else "rouge")
                     self.assertEqual(process.returncode, 0 if case == "green" else 1)
-                    self.assertEqual(set(report["phases"]), {"npm", "rust", "web", "ui"})
+                    self.assertEqual(set(report["phases"]), {"npm", "rust"} if case == "interrupt" else {"npm", "rust", "web", "ui"})
                     self.assertEqual(report["counts"]["excluded"], 1)
                     self.assertEqual(report["counts"]["absent_linux"], 1)
                     self.assertNotIn("PRIVATE_SENTINEL", output.read_text() + process.stdout + process.stderr)
@@ -109,6 +114,8 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
                     if case == "low-disk":
                         self.assertIn("rust:insufficient-disk", report["failures"])
                         self.assertIsNone(report["phases"]["rust"]["exit_code"])
+                    if case == "interrupt":
+                        self.assertIn("runner:incomplete", report["failures"])
 
     def test_inventory_tracks_ancestry_and_ignores_literals(self):
         spec = importlib.util.spec_from_file_location("inventory", TOOLS / "suite-platform-inventory.py")

@@ -174,9 +174,11 @@ def main():
             except Exception:
                 report["failures"].append(phase + ":runner-error")
             save(output, report)
-    except Exception:
+    except (Exception, KeyboardInterrupt):
         report["failures"].append("runner:preflight-failed")
     finally:
+        if set(report["phases"]) != {"npm", "rust", "web", "ui"} or any(phase["exit_code"] != 0 for phase in report["phases"].values()):
+            report["failures"].append("runner:incomplete")
         try:
             if git("rev-parse", "HEAD") != report["sha"]:
                 report["failures"].append("runner:sha-changed")

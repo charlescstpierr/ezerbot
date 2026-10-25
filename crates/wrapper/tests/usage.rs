@@ -186,9 +186,9 @@ fn seed_run(
             output_tokens: 20,
             cached_input_tokens: 30,
         };
-        store::save_token_usage(&tx, id, 1, &usage).unwrap();
-        store::save_token_usage(&tx, id, 1, &usage).unwrap(); // duplicate telemetry
-        store::save_token_usage(&tx, id, 2, &usage).unwrap(); // second model response
+        store::save_token_usage(&tx, id, 1, &usage, None).unwrap();
+        store::save_token_usage(&tx, id, 1, &usage, None).unwrap(); // duplicate telemetry
+        store::save_token_usage(&tx, id, 2, &usage, None).unwrap(); // second model response
         tx.commit().unwrap();
     }
 }

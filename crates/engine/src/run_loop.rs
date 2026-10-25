@@ -8,9 +8,10 @@
 //! `goal-permissions-secrets.md` PS05–PS06). No routine-specific gate is added here.
 use self::with_run_events as commit;
 use crate::contracts::{
-    ApprovalCheck, AuthorizedBy, CaptureRef, Error, HistoryItem, ModelEvent, ModelGateway,
-    ModelRequest, Result, Role, RunEvent, RunEventKind, RunKind, SuspendCause, TaskStatus,
-    ToolCall, ToolItem, ToolOutcome, ToolSpec, TurnEnd, MAX_CAPTION_CHARACTERS, MAX_CAPTURES,
+    ApprovalCheck, AuthorizedBy, CaptureRef, ContextEstimate, Error, HistoryItem, ModelEvent,
+    ModelGateway, ModelRequest, Result, Role, RunEvent, RunEventKind, RunKind, SuspendCause,
+    TaskStatus, ToolCall, ToolItem, ToolOutcome, ToolSpec, TurnEnd, MAX_CAPTION_CHARACTERS,
+    MAX_CAPTURES,
 };
 use crate::model::{self, invalid, Run, RunStatus};
 use crate::store;
@@ -1298,6 +1299,7 @@ fn drive(
             Ok(usage.model_calls)
         })?;
         let mut calls: Vec<ToolCall> = vec![];
+        let mut estimate: Option<ContextEstimate> = None;
         let mut reasoning = Vec::new();
         let mut reasoning_ids = HashSet::new();
         let mut call_reasoning: HashMap<String, Vec<ToolItem>> = HashMap::new();
@@ -1329,8 +1331,12 @@ fn drive(
                     .map(|_| ())
                 })
                 .inspect_err(|_| persistence_error = true),
+                ModelEvent::ContextEstimate { estimate: sent } => {
+                    estimate = Some(sent);
+                    Ok(())
+                }
                 ModelEvent::Usage { usage } => commit(conn, services, run_id, |conn, _| {
-                    store::save_token_usage(conn, run_id, response, &usage)
+                    store::save_token_usage(conn, run_id, response, &usage, estimate.as_ref())
                 })
                 .inspect_err(|_| persistence_error = true),
                 ModelEvent::Reasoning {
@@ -1969,6 +1975,63 @@ mod tests {
         assert!(!serde_json::to_string(&replay)?.contains("cached_input_tokens"));
         run(&conn, &gateway, &mut services, "run")?;
         assert_eq!(count(&conn, "engine_response_usage"), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn context_estimate_is_stored_with_the_usage_of_its_own_response() -> Result<()> {
+        use crate::contracts::TokenUsage;
+        let conn = database(false, RunBudgets::default())?;
+        let estimate = |characters, tool_characters| ModelEvent::ContextEstimate {
+            estimate: ContextEstimate {
+                characters,
+                characters_per_token: 4,
+                tool_characters,
+            },
+        };
+        let usage = |input_tokens| ModelEvent::Usage {
+            usage: TokenUsage {
+                input_tokens,
+                output_tokens: 1,
+                cached_input_tokens: 0,
+            },
+        };
+        let gateway = Scripted::new(vec![
+            response(vec![
+                call("lookup", "read_skill", json!({})),
+                estimate(1, 2),
+                estimate(4_000, 900),
+                usage(1_200),
+            ]),
+            response(vec![
+                ModelEvent::TextDelta {
+                    text: "Done".into(),
+                },
+                usage(1_500),
+            ]),
+        ]);
+        let mut services = Services {
+            specs: vec![spec("read_skill", false)],
+            ..Services::default()
+        };
+        run(&conn, &gateway, &mut services, "run")?;
+        type Row = (u32, Option<i64>, Option<i64>, Option<i64>);
+        let rows = |conn: &Connection| -> Result<Vec<Row>> {
+            let mut statement = conn.prepare(
+                "SELECT response,context_characters,characters_per_token,tool_characters
+                FROM engine_response_usage ORDER BY response",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        };
+        assert_eq!(
+            rows(&conn)?,
+            vec![(1, Some(4_000), Some(4), Some(900)), (2, None, None, None)]
+        );
         Ok(())
     }
 

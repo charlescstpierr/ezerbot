@@ -264,7 +264,9 @@ pub fn summarize_with_options(
             }
             // This independent text-only summary call has no function calls to
             // replay. Never turn opaque provider state into summary evidence.
-            ModelEvent::Reasoning { .. } | ModelEvent::Usage { .. } => {}
+            ModelEvent::Reasoning { .. }
+            | ModelEvent::ContextEstimate { .. }
+            | ModelEvent::Usage { .. } => {}
             ModelEvent::Completed => completed = true,
             _ => {
                 return Err(invalid(

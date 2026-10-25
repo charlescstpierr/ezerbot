@@ -6,7 +6,8 @@
 //! inserts its own row with its own `open_url`; this read does not change.
 //! A deleted bot or conversation hides its livrables, as for skills and tasks; no row is
 //! erased, so nothing is lost if the bot is restored. The table is a root for the Storage
-//! screen: a file that is a livrable, even of unknown origin, is never cleaned as an orphan.
+//! screen: a file that is a livrable, even of unknown origin, is never cleaned as an orphan,
+//! unless its conversation is deleted: nothing restores a thread, its files leave with it.
 use super::Context;
 use crate::{ApiError, ApiResponse, App, ACCOUNT};
 use rusqlite::{params, Connection};

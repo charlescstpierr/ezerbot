@@ -21,14 +21,7 @@ use grokbot_wrapper::{
 };
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
-use std::{
-    collections::VecDeque,
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Mutex,
-    },
-};
+use std::{collections::VecDeque, path::PathBuf, sync::Mutex};
 
 #[path = "support/skill_proposals_cases.rs"]
 mod skill_proposals_cases;
@@ -36,21 +29,17 @@ mod skill_proposals_cases;
 // This SQL-only fake must not collide with the real filesystem tool/preview.
 const GUARDED_TOOL: &str = "test_protected_write";
 const FREE_TOOL: &str = "test_free_write";
-static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Fixture {
     app: App,
     conn: Connection,
     directory: PathBuf,
     conversation: String,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        let directory = std::env::temp_dir().join(format!(
-            "grokbot-forms-wrapper-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
+        let guard = grokbot_test_support::TestDir::new("grokbot-forms-wrapper");
+        let directory = guard.to_path_buf();
         let path = directory.join("app.sqlite");
         let mut app = App::open(&path).unwrap();
         app.api("POST", "/api/yolo/mode", br#"{"mode":"ask"}"#)
@@ -69,6 +58,7 @@ impl Fixture {
             conn,
             directory,
             conversation,
+            _dir: guard,
         };
         fixture.start("run", "grokbot", &fixture.conversation);
         fixture
@@ -203,11 +193,6 @@ impl Fixture {
                 row.get(0)
             })
             .unwrap()
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
 fn form_args() -> Value {

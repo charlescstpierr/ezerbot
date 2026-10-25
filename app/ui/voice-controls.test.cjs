@@ -6,7 +6,7 @@ const { mkdtempSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
-const { chromeBinary } = require("./chrome-binary.cjs");
+const { chromeBinary, freezeHint } = require("./chrome-binary.cjs");
 
 const UI = __dirname;
 const WIDTHS = [500, 820, 901, 1140];
@@ -74,7 +74,8 @@ function measure(width, height) {
   const directory = mkdtempSync(join(tmpdir(), "voice-controls-"));
   const file = join(directory, "voice.html");
   writeFileSync(file, page());
-  const chrome = spawn(chromeBinary(), [
+  const binary = chromeBinary({ dumpDom: true });
+  const chrome = spawn(binary, [
     "--headless=new",
     "--no-sandbox",
     "--disable-gpu",
@@ -90,7 +91,7 @@ function measure(width, height) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       chrome.kill("SIGKILL");
-      reject(new Error(`chrome did not report layout at ${width}×${height}`));
+      reject(new Error(`chrome did not report layout at ${width}×${height}${freezeHint(binary)}`));
     }, 20000);
     chrome.stdout.on("data", (chunk) => {
       dom += chunk;

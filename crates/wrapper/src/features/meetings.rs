@@ -152,7 +152,7 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
             let turn: Option<String> = ctx.connection.query_row("SELECT id FROM wrapper_group_turns WHERE conversation_id=?1 AND root_id=?2 AND parent_id IS NULL ORDER BY ordinal LIMIT 1",params![conversation,message],|r|r.get(0)).optional().ok()?;
             super::multibot::entry(ctx, "group_reply", turn.as_deref()?)
         } else {
-            super::engine::reply(ctx, conversation, message, vec![]).ok().flatten()
+            super::engine::reply(ctx, conversation, message).ok().flatten()
         }
     });
     meeting["summary_group"] = json!(group);
@@ -167,7 +167,6 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         error: None,
         error_kind: None,
         notice: None,
-        proposals: vec![],
         kind: "meeting".into(),
         payload: meeting,
         attachments: vec![],

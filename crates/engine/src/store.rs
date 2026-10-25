@@ -1422,12 +1422,8 @@ mod tests {
 
     #[test]
     fn store_concurrent_start_requires_whole_transaction_retry() -> Result<()> {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("engine-wal-{}-{nonce}.sqlite", std::process::id()));
+        let directory = grokbot_test_support::TestDir::new("engine-wal");
+        let path = directory.join("engine.sqlite");
         let first = Connection::open(&path)?;
         first.pragma_update(None, "journal_mode", "WAL")?;
         first.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -1454,7 +1450,6 @@ mod tests {
         assert_eq!(runs_for_conversation(&second, "conversation")?.len(), 1);
         drop(second);
         drop(first);
-        std::fs::remove_file(path)?;
         Ok(())
     }
 

@@ -19,7 +19,8 @@ impl Drop for Stopped {
 
 #[test]
 fn debug_build_cannot_install_without_explicit_throwaway_override() {
-    let root = std::env::temp_dir().join(format!("ezerbot-routines-guard-{}", std::process::id()));
+    let guard = grokbot_test_support::TestDir::new("ezerbot-routines-guard");
+    let root = guard.to_path_buf();
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("unsafe-override")).unwrap();
     let plist = root.join("Library/LaunchAgents/local.ezerbot.routines.plist");

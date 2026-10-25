@@ -13,4 +13,5 @@ grokbot-store = { workspace = true }
 grokbot-replica = { workspace = true }
 
 [dev-dependencies]
+grokbot-test-support = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -838,7 +838,6 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         error: None,
         error_kind: None,
         notice: None,
-        proposals: vec![],
         kind: "memory_auto".into(),
         payload: json!({"memory_run_id":run_id,"memory_root_id":root,"restored_active":restored_active,"scope_changed":scope_changed,"fact_id":fact.fact_id,"bot_id":fact.bot_id,"text":if active {fact.text.as_str()} else {""},"active":active,"cancelled":cancelled,"updated":updated,"can_undo":active,"replaced":replaced}),
         attachments: vec![],

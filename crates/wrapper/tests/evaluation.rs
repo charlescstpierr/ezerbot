@@ -318,8 +318,9 @@ impl Drop for TestFile {
     }
 }
 
-/// A synthetic space owned by one regression; removed with its sibling fixtures.
-struct TestSpace(PathBuf);
+/// A synthetic space owned by one regression. It lives in its own unique directory, which also
+/// holds its sibling fixtures (`.link`, `.marker`, `.json`) and goes away with it.
+struct TestSpace(PathBuf, #[allow(dead_code)] grokbot_test_support::TestDir);
 
 impl std::ops::Deref for TestSpace {
     type Target = Path;
@@ -328,28 +329,14 @@ impl std::ops::Deref for TestSpace {
     }
 }
 
-impl Drop for TestSpace {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-        for sidecar in ["link", "marker", "json"] {
-            let _ = fs::remove_file(self.0.with_extension(sidecar));
-        }
-    }
-}
-
 fn test_space(marked: bool) -> TestSpace {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "ezerbot-eval-test-{}-{}-{}",
-        std::process::id(),
-        timestamp(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
+    let directory = grokbot_test_support::TestDir::new("ezerbot-eval-test");
+    let path = directory.join("space");
     private_dir(&path).unwrap();
     if marked {
         fs::write(path.join(MARKER), MARKER_CONTENT).unwrap();
     }
-    TestSpace(path)
+    TestSpace(path, directory)
 }
 
 fn launch(space: &Path, cap: Option<&str>, source: &Path) -> Output {

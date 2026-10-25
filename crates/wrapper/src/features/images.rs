@@ -578,23 +578,16 @@ mod tests {
     }
 
     struct Outside {
-        root: PathBuf,
         db: PathBuf,
         provider: Provider,
         connection: Connection,
+        _dir: grokbot_test_support::TestDir,
     }
 
     impl Outside {
         fn open(with_session: bool) -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "ezerbot-image-key-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&root).unwrap();
+            let guard = grokbot_test_support::TestDir::new("ezerbot-image-key");
+            let root = guard.to_path_buf();
             let db = root.join("workspace.sqlite");
             let expires = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -636,10 +629,10 @@ mod tests {
             let provider = Provider::with_endpoints(&db, Endpoints::default(), false);
             provider.select_backend("codex").unwrap();
             Self {
-                root,
                 db,
                 provider,
                 connection: Connection::open_in_memory().unwrap(),
+                _dir: guard,
             }
         }
 
@@ -653,12 +646,6 @@ mod tests {
                 conversation_id: None,
                 run_id: None,
             }
-        }
-    }
-
-    impl Drop for Outside {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
         }
     }
 

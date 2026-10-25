@@ -112,31 +112,6 @@ pub(crate) fn demo_reply(body: &str) -> &'static str {
         DEMO_REPLY
     }
 }
-// Proposal tools remain disabled, as before this cutover.
-#[cfg(test)]
-pub(crate) fn tools_for(_: &Bot) -> Vec<Value> {
-    Vec::new()
-}
-#[cfg(test)]
-pub(crate) fn compose_instructions(bot: &Bot, _: &[Bot]) -> String {
-    let mut parts = vec![
-        BASE_INSTRUCTIONS.to_owned(),
-        format!("Tu t'appelles {}.", bot.name),
-    ];
-    if !bot.description.is_empty() {
-        parts.push(format!(
-            "Ton rôle, tel que les autres le voient : {}",
-            bot.description
-        ));
-    }
-    if !bot.instructions.is_empty() {
-        parts.push(format!(
-            "Consignes privées sur ta façon de te comporter :\n{}",
-            bot.instructions
-        ));
-    }
-    parts.join("\n\n")
-}
 fn item(id: &str, role: Role, text: String) -> HistoryItem {
     HistoryItem {
         entry_id: id.into(),
@@ -809,33 +784,6 @@ fn random_id(conn: &Connection) -> rusqlite::Result<String> {
 }
 type ResolvedModel = (String, Option<String>, Option<String>);
 impl App {
-    #[cfg(test)]
-    pub(crate) fn history(
-        &self,
-        conversation: &str,
-        message: &str,
-    ) -> Result<Vec<(&'static str, String)>, ApiError> {
-        let mut history = Vec::new();
-        if let Some(found) = self
-            .conversations()?
-            .into_iter()
-            .find(|c| c.id == conversation)
-        {
-            for item in found.messages {
-                if item.role == "user" {
-                    if matches!(item.state, "accepted" | "echoed") {
-                        history.push(("user", item.body));
-                    }
-                    if item.id == message {
-                        break;
-                    }
-                } else if item.state != "failed" && !item.body.is_empty() {
-                    history.push(("assistant", item.body));
-                }
-            }
-        }
-        Ok(history)
-    }
     pub(crate) fn model_preferences(
         &self,
     ) -> Result<(Option<String>, Option<String>, bool), ApiError> {
@@ -1694,29 +1642,10 @@ impl RunServices for Services<'_> {
         run: &Run,
         call: &grokbot_engine::contracts::ToolCall,
     ) -> grokbot_engine::contracts::Result<ToolOutcome> {
-        let outcome = if matches!(call.name.as_str(), "propose_bot" | "propose_bot_update") {
-            // Proposal tools are not advertised; retain their existing recording
-            // adapter for a future explicit enable, without a second generator.
-            let input = run_input(conn, &run.run_id)?;
-            let proposal = crate::provider::ToolCall {
-                item_id: String::new(),
-                call_id: call.call_id.clone(),
-                name: call.name.clone(),
-                arguments: serde_json::to_string(&call.arguments)?,
-            };
-            match crate::record_proposal(conn, &run.conversation_id, &input.entry_id, &proposal)
-                .map_err(engine_error)?
-            {
-                Some(notice) => ToolOutcome::Failed { reason: notice },
-                None => ToolOutcome::Done {
-                    output: json!({"proposed":true}),
-                },
-            }
-        } else {
+        let outcome =
             super::call_tool(&self.ctx(conn, run), call).unwrap_or_else(|| ToolOutcome::Failed {
                 reason: "unknown tool".into(),
-            })
-        };
+            });
         let value = redact::redact_value(&vault(self.path)?, &serde_json::to_value(outcome)?)?;
         Ok(serde_json::from_value(value)?)
     }
@@ -2846,12 +2775,7 @@ fn projected_parts_with(
     }
     Ok(parts)
 }
-fn run_reply(
-    conn: &Connection,
-    run: &Run,
-    id: String,
-    proposals: Vec<Proposal>,
-) -> Result<Message, ApiError> {
+fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiError> {
     let events = store::events(conn, &run.run_id, 0)?;
     let sources = super::sources::registry(conn, &run.run_id)?;
     // One vault read for the whole reply, after what it masks. Under the hold of a state
@@ -2884,7 +2808,6 @@ fn run_reply(
         error,
         error_kind: metadata.1,
         notice: metadata.2,
-        proposals,
         kind: "message".into(),
         payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":store::token_usage(conn, &run.run_id)?,
             "sources":secrets.value(&json!(sources))?,"citations":citations,
@@ -2902,13 +2825,12 @@ fn redaction_patterns(conn: &Connection) -> grokbot_engine::contracts::Result<re
 }
 pub(crate) fn group_reply(ctx: &super::Context<'_>, id: &str) -> Result<Message, ApiError> {
     let run = store::required(ctx.connection, id)?;
-    run_reply(ctx.connection, &run, format!("reply-{id}"), vec![])
+    run_reply(ctx.connection, &run, format!("reply-{id}"))
 }
 pub fn reply(
     ctx: &super::Context<'_>,
     conversation: &str,
     message: &str,
-    proposals: Vec<Proposal>,
 ) -> Result<Option<Message>, ApiError> {
     let Some(run) =
         store::latest_run_for_trigger(ctx.connection, &user_trigger(conversation, message, 0))?
@@ -2920,13 +2842,12 @@ pub fn reply(
         ctx.connection,
         &run,
         format!("reply-{message}"),
-        proposals,
     )?))
 }
 pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> {
     if kind == "engine_reply" {
         let run = store::get(ctx.connection, id).ok()??;
-        return run_reply(ctx.connection, &run, format!("reply-{id}"), vec![]).ok();
+        return run_reply(ctx.connection, &run, format!("reply-{id}")).ok();
     }
     if matches!(kind, "reset" | "engine_reset") {
         return Some(Message {
@@ -2938,7 +2859,6 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
             error: None,
             error_kind: None,
             notice: None,
-            proposals: vec![],
             kind: "reset".into(),
             payload: json!({"reset":true}),
             attachments: vec![],
@@ -3081,7 +3001,6 @@ fn card(id: &str, kind: &str, body: String, payload: Value, created_at: u64) -> 
         error: None,
         error_kind: None,
         notice: None,
-        proposals: vec![],
         kind: kind.into(),
         payload,
         attachments: vec![],
@@ -3738,19 +3657,12 @@ mod projection_tests {
         app: App,
         dir: PathBuf,
         run: Run,
+        _dir: grokbot_test_support::TestDir,
     }
     impl Fixture {
         fn new(trigger: Trigger) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "grokbot-card-projection-{}-{:?}-{}",
-                std::process::id(),
-                std::thread::current().id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
+            let guard = grokbot_test_support::TestDir::new("grokbot-card-projection");
+            let dir = guard.to_path_buf();
             let app = App::open(&dir.join("workspace.sqlite")).unwrap();
             app.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
             let mut run = Run {
@@ -3768,7 +3680,12 @@ mod projection_tests {
             model::start(&app.connection, &run).unwrap();
             run = model::set_running_at(&app.connection, &run.run_id, 2).unwrap();
             app.connection.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES ('projection','{}',0,'simulated')", []).unwrap();
-            Self { app, dir, run }
+            Self {
+                app,
+                dir,
+                run,
+                _dir: guard,
+            }
         }
         fn event(&mut self, kind: RunEventKind, payload: Value) -> u64 {
             match kind {
@@ -3791,21 +3708,13 @@ mod projection_tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = self.app.connection.execute_batch("ROLLBACK");
-            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
     #[test]
     fn host_failure_reports_the_journaled_outcome_instead_of_a_down_service() {
-        let dir = std::env::temp_dir().join(format!(
-            "grokbot-host-fail-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("grokbot-host-fail");
+        let dir = guard.to_path_buf();
         let app = App::open(&dir.join("workspace.sqlite")).unwrap();
         let reason = "Action non exécutée : arrêt ou limite de temps avant le démarrage.";
         grokbot_engine::contracts::with_tx(&app.connection, |conn| -> grokbot_engine::contracts::Result<()> {
@@ -3878,7 +3787,6 @@ mod projection_tests {
             store::required(&app.connection, "known").unwrap().status,
             RunStatus::Failed
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3908,7 +3816,7 @@ mod projection_tests {
         );
         f.run.status = RunStatus::Finished;
         f.run.turn_end = Some(TurnEnd::Finished);
-        let reply = run_reply(&f.app.connection, &f.run, "reply-question".into(), vec![]).unwrap();
+        let reply = run_reply(&f.app.connection, &f.run, "reply-question".into()).unwrap();
         assert_eq!(reply.body, "Avant. Entre. Après.");
         assert_eq!(
             reply.payload["parts"],
@@ -3959,7 +3867,7 @@ mod projection_tests {
             .unwrap()
             .set("QA_SECRET", "test", "sensitive-value-123")
             .unwrap();
-        let reply = run_reply(&f.app.connection, &f.run, "reply-question".into(), vec![]).unwrap();
+        let reply = run_reply(&f.app.connection, &f.run, "reply-question".into()).unwrap();
         assert_eq!(reply.body, "[...]");
         assert_eq!(reply.payload["parts"].as_array().unwrap().len(), 1);
         assert_eq!(reply.payload["parts"][0]["body"], "[...]");
@@ -3980,7 +3888,7 @@ mod projection_tests {
         assert_eq!(card.payload["routine"], true);
         assert_eq!(card.payload["task_status"]["status"], "working");
         assert_eq!(card.payload["event_kind"], "turn_ended");
-        let reply = run_reply(&f.app.connection, &f.run, "reply-question".into(), vec![]).unwrap();
+        let reply = run_reply(&f.app.connection, &f.run, "reply-question".into()).unwrap();
         assert_eq!(reply.body, "");
         assert_eq!(reply.payload["parts"], json!([]));
     }

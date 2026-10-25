@@ -29,17 +29,12 @@ struct Fixture {
     server: FakeOpenAi,
     path: PathBuf,
     now_ms: u64,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new(live: bool) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir()
-            .join(format!(
-                "grokbot-delegation-wrapper-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ))
-            .join("app.sqlite");
+        let guard = grokbot_test_support::TestDir::new("grokbot-delegation-wrapper");
+        let path = guard.to_path_buf().join("app.sqlite");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         if live {
@@ -61,6 +56,7 @@ impl Fixture {
             server,
             path,
             now_ms: 100,
+            _dir: guard,
         };
         for id in ["child", "grandchild", "other"] {
             f.post("/api/bots",json!({"id":id,"name":id,"color":"citron","description":"Worker","instructions":""}));
@@ -317,11 +313,6 @@ impl Fixture {
         ]);
         self.tick();
         self.wait_parent(c, m, RunStatus::Finished);
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 fn completed() -> Value {

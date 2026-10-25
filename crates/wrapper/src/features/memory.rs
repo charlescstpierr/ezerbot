@@ -407,7 +407,6 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<crate::Message> 
         error: None,
         error_kind: None,
         notice: None,
-        proposals: vec![],
         kind: kind.into(),
         payload: json!({"bot_id":bot,"facts":facts,"memory_run_id":run_id}),
         attachments: vec![],

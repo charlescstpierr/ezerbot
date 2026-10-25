@@ -1,24 +1,20 @@
 //! The panel forwards to the real durable send path; no Cocoa or global input.
 use grokbot_wrapper::App;
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Fixture {
     app: App,
     root: std::path::PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "floating-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("floating");
+        let root = guard.to_path_buf();
         Self {
             app: App::open(&root.join("workspace.sqlite")).unwrap(),
             root,
+            _dir: guard,
         }
     }
     fn post(&mut self, path: &str, value: Value) -> Value {
@@ -42,12 +38,6 @@ impl Fixture {
             .status
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
 #[test]
 fn settings_and_default_scope_survive_restart_and_invalid_settings_do_not_mutate() {
     let mut f = Fixture::new();

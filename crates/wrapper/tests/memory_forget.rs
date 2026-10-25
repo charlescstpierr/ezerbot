@@ -14,10 +14,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
@@ -26,17 +23,12 @@ struct Fixture {
     app: App,
     server: FakeOpenAi,
     path: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir()
-            .join(format!(
-                "grokbot-memory-forget-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ))
-            .join("app.sqlite");
+        let guard = grokbot_test_support::TestDir::new("grokbot-memory-forget");
+        let path = guard.to_path_buf().join("app.sqlite");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let now = SystemTime::now()
@@ -50,7 +42,12 @@ impl Fixture {
         let provider = Provider::with_endpoints(&path, server.endpoints(), false);
         let app = App::open_with(&path, provider.clone()).unwrap();
         wait("catalog", || provider.status()["models_ready"] == true);
-        Self { app, server, path }
+        Self {
+            app,
+            server,
+            path,
+            _dir: guard,
+        }
     }
     fn db(&self) -> Connection {
         let conn = Connection::open(&self.path).unwrap();
@@ -132,11 +129,6 @@ impl Fixture {
     }
     fn add_bot(&mut self) {
         self.post("/api/bots", json!({"id":"other", "name":"Other", "color":"cyan", "description":"", "instructions":""}));
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 fn call(id: &str, name: &str, arguments: Value) -> Value {

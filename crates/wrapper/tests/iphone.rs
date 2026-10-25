@@ -1,27 +1,21 @@
 //! Private iPhone boundary: real App dispatcher, no Tailscale, account or push.
 use grokbot_wrapper::{features::iphone, ApiResponse, App};
 use serde_json::{json, Value};
-use std::{
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-};
-static NEXT: AtomicUsize = AtomicUsize::new(0);
+use std::path::PathBuf;
 struct Fixture {
     app: App,
     path: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "iphone-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("iphone");
+        let root = guard.to_path_buf();
         let path = root.join("app.sqlite");
         Self {
             app: App::open(&path).unwrap(),
             path,
+            _dir: guard,
         }
     }
     fn post(&mut self, path: &str, value: Value) -> Value {
@@ -85,11 +79,6 @@ impl Fixture {
             .unwrap()
             .to_owned();
         (id, token)
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 #[test]

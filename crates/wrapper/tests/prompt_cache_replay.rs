@@ -10,24 +10,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use support::{wait, FakeOpenAi, Seen, CLIENT};
 
-struct ReplayDir(PathBuf);
+struct ReplayDir(grokbot_test_support::TestDir);
 impl ReplayDir {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "ezerbot-cache-replay-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&dir).unwrap();
-        Self(dir)
-    }
-}
-impl Drop for ReplayDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        Self(grokbot_test_support::TestDir::new("ezerbot-cache-replay"))
     }
 }
 

@@ -1950,6 +1950,37 @@ mod occurrences_tests {
         assert_eq!(pending(&conn).unwrap().len(), 0);
     }
 
+    #[test]
+    fn a_quiet_occurrence_stays_done_and_a_database_from_before_upgrades() {
+        let (conn, routine) = setup();
+        let id = run_now(&conn, &routine.routine_id, "click", 1_000)
+            .unwrap()
+            .occurrence_id;
+        assert!(mark_quiet(&conn, &id, "run").is_err(), "not attached yet");
+        attach_run(&conn, &id, "run").unwrap();
+        assert!(mark_quiet(&conn, &id, "other").is_err(), "another run");
+        assert!(!get(&conn, &id).unwrap().unwrap().quiet);
+        mark_quiet(&conn, &id, "run").unwrap();
+        mark_quiet(&conn, &id, "run").unwrap();
+        mark_done(&conn, &id, "run").unwrap();
+        let quiet = get(&conn, &id).unwrap().unwrap();
+        assert!(quiet.quiet);
+        assert_eq!(
+            quiet.status,
+            OccurrenceStatus::Done {
+                run_id: "run".into()
+            }
+        );
+        assert!(mark_quiet(&conn, &id, "run").is_err(), "too late once done");
+        conn.execute_batch("ALTER TABLE scheduler_occurrences DROP COLUMN quiet")
+            .unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        let old = get(&conn, &id).unwrap().unwrap();
+        assert!(!old.quiet);
+        assert_eq!(old.status, quiet.status);
+    }
+
     fn group_of(members: Vec<(&str, cron::Schedule)>) -> cron::Schedule {
         cron::Schedule::Group {
             members: members

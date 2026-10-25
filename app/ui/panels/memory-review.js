@@ -40,7 +40,7 @@
         const actions = node("div", "memory-review-actions");
         actions.append(node("span", "memory-review-ask", "Encore vrai ?"), button("Oui", "primary-button", () => confirm(fact), "Oui, ce souvenir est encore vrai"));
         if (detail && fact.scope !== "topic") actions.append(button("Modifier", "secondary-button", (from) => detail.open(fact.fact_id, "edit", from)));
-        if (detail) actions.append(button("Oublier…", "secondary-button", (from) => detail.open(fact.fact_id, "confirm", from)));
+        if (detail) actions.append(button("Oublier…", "secondary-button", (from) => detail.open(fact.fact_id, "forget", from)));
         item.append(text, actions);
         list.append(item);
       }

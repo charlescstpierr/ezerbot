@@ -11,7 +11,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -605,26 +605,6 @@ pub fn exists_in_thread(
 ) -> rusqlite::Result<bool> {
     Ok(produced_in(conn, conversation, id)?
         || super::attachments::linked_in(conn, conversation, id)?)
-}
-/// Of these (thread, image) pairs, those whose thread is not deleted and holds the image as
-/// `exists_in_thread` says, in one query however many pairs (#328).
-pub fn in_live_threads(
-    conn: &rusqlite::Connection,
-    pairs: &[(&str, &str)],
-) -> rusqlite::Result<HashSet<(String, String)>> {
-    if pairs.is_empty() {
-        return Ok(HashSet::new());
-    }
-    let mut statement = conn.prepare_cached(
-        "SELECT p.value->>0, p.value->>1 FROM json_each(?1) p
-        WHERE EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id=?2 AND id=p.value->>0 AND deleted=0)
-        AND (EXISTS(SELECT 1 FROM wrapper_screen_shots WHERE id=p.value->>1 AND conversation_id=p.value->>0)
-        OR EXISTS(SELECT 1 FROM attachments_message_links WHERE conversation_id=p.value->>0 AND attachment_id=p.value->>1))",
-    )?;
-    let rows = statement.query_map(params![json!(pairs).to_string(), ACCOUNT], |r| {
-        Ok((r.get(0)?, r.get(1)?))
-    })?;
-    rows.collect()
 }
 fn shot(app: &App, path: &str) -> Result<ApiResponse, ApiError> {
     use base64::Engine;

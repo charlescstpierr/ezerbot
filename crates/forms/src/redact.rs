@@ -7,7 +7,7 @@
 //! a general decoder for arbitrary encodings or repeated serialization.
 //! PS11 (`reports/goal-permissions-secrets.md`) only establishes targeted Grok
 //! sanitizers; this broader boundary is the plan's defense-in-depth choice.
-use crate::vault::{Stamp, Vault};
+use crate::vault::Vault;
 use grokbot_engine::contracts::{Error, Result};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -60,21 +60,16 @@ pub struct Hold {
 }
 
 impl Hold {
-    /// Ends the hold: true when every vault it kept still holds exactly what was used to mask.
-    /// False means a secret was stored or removed meanwhile, and what was masked during the
-    /// hold must be rendered again. Nothing read means nothing masked. A vault whose `Stamp`
-    /// did not move is not read again, so a stable rendering reads each vault once (#328).
+    /// Ends the hold and reads every vault it kept again: true when each still holds exactly
+    /// what was used to mask. False means a secret was stored or removed meanwhile, and what
+    /// was masked during the hold must be rendered again. Nothing read means nothing masked.
     pub fn settled(self) -> Result<bool> {
         if !self.outermost {
             return Ok(true);
         }
         let kept = HELD.take().unwrap_or_default();
         for held in &kept {
-            let moved = match &held.stamp {
-                Some(stamp) => held.vault.stamp_locked()? != *stamp,
-                None => true,
-            };
-            if moved && read_patterns(&held.vault)?.0 != held.patterns {
+            if read_patterns(&held.vault)? != held.patterns {
                 return Ok(false);
             }
         }
@@ -93,14 +88,13 @@ impl Drop for Hold {
 struct Held {
     vault: Vault,
     patterns: Vec<String>,
-    stamp: Option<Stamp>,
     /// The `app_patterns` paths that opened this vault during the hold.
     opened_as: Vec<PathBuf>,
 }
 
-/// `Patterns::of(&Vault::open_app(path)?)`, with the one read that opening does. Under a hold,
-/// a vault already read through this path is not opened again: opening locks the file and
-/// lists its directory, which a state read would otherwise do once per reply of the history.
+/// `Patterns::of(&Vault::open_app(path)?)`. Under a hold, a vault already read through this
+/// path is not opened again: opening locks the file and lists its directory, which a state
+/// read would otherwise do once per reply of the history.
 pub fn app_patterns(path: &Path) -> Result<Patterns> {
     let kept = HELD.with_borrow(|held| {
         held.as_ref()?
@@ -111,7 +105,7 @@ pub fn app_patterns(path: &Path) -> Result<Patterns> {
     if let Some(patterns) = kept {
         return Ok(Patterns(patterns));
     }
-    let (vault, values, stamp) = Vault::open_app_known(path)?;
+    let (vault, values) = Vault::open_app_known(path)?;
     let mut patterns = patterns_of(values)?;
     HELD.with_borrow_mut(|held| {
         let Some(kept) = held else {
@@ -125,7 +119,6 @@ pub fn app_patterns(path: &Path) -> Result<Patterns> {
             None => kept.push(Held {
                 vault,
                 patterns: patterns.clone(),
-                stamp,
                 opened_as: vec![path.to_owned()],
             }),
         }
@@ -193,25 +186,23 @@ pub fn redact_value(vault: &Vault, value: &Value) -> Result<Value> {
 fn known_patterns(vault: &Vault) -> Result<Vec<String>> {
     HELD.with_borrow_mut(|held| {
         let Some(kept) = held else {
-            return Ok(read_patterns(vault)?.0);
+            return read_patterns(vault);
         };
         if let Some(read) = kept.iter().find(|read| read.vault.same_store(vault)) {
             return Ok(read.patterns.clone());
         }
-        let (patterns, stamp) = read_patterns(vault)?;
+        let patterns = read_patterns(vault)?;
         kept.push(Held {
             vault: vault.handle(),
             patterns: patterns.clone(),
-            stamp,
             opened_as: Vec::new(),
         });
         Ok(patterns)
     })
 }
 
-fn read_patterns(vault: &Vault) -> Result<(Vec<String>, Option<Stamp>)> {
-    let (values, stamp) = vault.known_values_stamped()?;
-    Ok((patterns_of(values)?, stamp))
+fn read_patterns(vault: &Vault) -> Result<Vec<String>> {
+    patterns_of(vault.known_values()?)
 }
 
 fn patterns_of(values: Vec<String>) -> Result<Vec<String>> {
@@ -564,45 +555,5 @@ mod tests {
         redact(&test.vault, "").unwrap();
         std::fs::write(test.vault.path(), b"broken").unwrap();
         assert!(held.settled().is_err());
-    }
-
-    #[test]
-    fn a_stable_hold_reads_its_vault_once_and_still_sees_another_handle_write() {
-        let test = TestVault::new();
-        test.vault.set("TOKEN", "", "private-value").unwrap();
-        let reads = crate::vault::reads_on_this_thread();
-        let held = hold();
-        let patterns = app_patterns(test.vault.path()).unwrap();
-        assert_eq!(patterns.text("private-value").unwrap(), MASK);
-        assert_eq!(redact(&test.vault, "private-value").unwrap(), MASK);
-        assert!(held.settled().unwrap());
-        assert_eq!(crate::vault::reads_on_this_thread() - reads, 1);
-        let held = hold();
-        app_patterns(test.vault.path()).unwrap();
-        crate::vault::Vault::open(test.vault.path())
-            .unwrap()
-            .set("TOKEN", "", "private-valuf")
-            .unwrap();
-        assert!(
-            !held.settled().unwrap(),
-            "a secret replaced by one of the same length"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_hold_whose_vault_lost_its_permissions_refuses_the_rendering() {
-        use std::os::unix::fs::PermissionsExt;
-        let test = TestVault::new();
-        test.vault.set("TOKEN", "", "private-value").unwrap();
-        let held = hold();
-        app_patterns(test.vault.path()).unwrap();
-        let mode = |bits| std::fs::Permissions::from_mode(bits);
-        std::fs::set_permissions(test.vault.path(), mode(0o000)).unwrap();
-        let unreadable = std::fs::File::open(test.vault.path()).is_err();
-        let settled = held.settled();
-        std::fs::set_permissions(test.vault.path(), mode(0o600)).unwrap();
-        // Root opens any file: there the check reads the vault again and finds it unchanged.
-        assert_eq!(settled.is_err(), unreadable);
     }
 }

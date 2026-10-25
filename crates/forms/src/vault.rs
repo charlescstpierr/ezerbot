@@ -115,14 +115,6 @@ std::thread_local! {
 pub fn reads_on_this_thread() -> u64 {
     READS.get()
 }
-/// The vault file as it is on disk, without a read of the secrets. Every write renames a new
-/// file over it (`Vault::write`), and a keychain write renames it before it touches the keychain
-/// (`keychain::set`, `keychain::remove`): any write of this process or of another wrapper
-/// process, even one the keychain took only in part, changes the stamp. So does a change of
-/// owner or permissions, after which reading the vault again fails closed. A writer changes it
-/// under the vault's locks: taken under them too (`stamp_locked`), it waits for that writer.
-#[derive(PartialEq)]
-pub(crate) struct Stamp([i64; 9]);
 // 0: explicit file-only library fixture; 1: host lacks a stable signer; 2: admitted.
 static OS_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -193,7 +185,7 @@ impl Vault {
     }
     /// `open_app` and what its one read found, keychain migration included: redaction masks with
     /// it instead of reading the vault again (`redact::app_patterns`, #328).
-    pub(crate) fn open_app_known(path: &Path) -> Result<(Self, Vec<String>, Option<Stamp>)> {
+    pub(crate) fn open_app_known(path: &Path) -> Result<(Self, Vec<String>)> {
         let vault = Self::create(path)?;
         #[cfg(target_os = "macos")]
         let mut vault = vault;
@@ -203,8 +195,8 @@ impl Vault {
             2 => vault.keychain = keychain::Target::for_app(),
             _ => (),
         }
-        let (values, stamp) = vault.known_values_stamped()?;
-        Ok((vault, values, stamp))
+        let values = vault.known_values()?;
+        Ok((vault, values))
     }
     /// Active keychain that refuses writes and deletions. Debug tests only:
     /// nothing is stored in the plaintext file.
@@ -240,32 +232,6 @@ impl Vault {
             #[cfg(debug_assertions)]
             refuse_keychain: self.refuse_keychain,
         }
-    }
-    /// See `Stamp`. Reads no secret.
-    pub(crate) fn stamp_locked(&self) -> Result<Stamp> {
-        let _guard = access(&self.path);
-        let _file_guard = self.lock_file(false)?;
-        self.stamp()
-    }
-    fn stamp(&self) -> Result<Stamp> {
-        let metadata = fs::symlink_metadata(&self.path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            Ok(Stamp([
-                metadata.ino() as i64,
-                metadata.size() as i64,
-                metadata.mtime(),
-                metadata.mtime_nsec(),
-                metadata.ctime(),
-                metadata.ctime_nsec(),
-                metadata.mode().into(),
-                metadata.uid().into(),
-                metadata.gid().into(),
-            ]))
-        }
-        #[cfg(not(unix))]
-        Err(invalid("secret vault requires Unix file metadata"))
     }
     /// Whether both handles read the same secrets: same file, same backend.
     pub(crate) fn same_store(&self, other: &Self) -> bool {
@@ -392,11 +358,6 @@ impl Vault {
     }
     /// Restricted to redaction, not model context construction.
     pub(crate) fn known_values(&self) -> Result<Vec<String>> {
-        Ok(self.known_values_stamped()?.0)
-    }
-    /// `known_values`, and the stamp of the content they were read from: none when the stamp
-    /// cannot tell whether that content is still current (`keychain::degraded`).
-    pub(crate) fn known_values_stamped(&self) -> Result<(Vec<String>, Option<Stamp>)> {
         let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
         let mut values = Vec::new();
@@ -441,12 +402,7 @@ impl Vault {
             }
             values.push(secret.value);
         }
-        let stamp = self.stamp()?;
-        #[cfg(target_os = "macos")]
-        if self.keychain.is_some() && keychain::degraded(&self.path) {
-            return Ok((values, None));
-        }
-        Ok((values, Some(stamp)))
+        Ok(values)
     }
 
     // Call only while holding this vault's VAULT_ACCESS entry and its companion-file lock. Parse
@@ -595,9 +551,6 @@ impl Vault {
         let result = (|| -> Result<()> {
             owner_only(&file)?;
             serde_json::to_writer(&mut file, secrets)?;
-            // The file system clock is too coarse to tell two quick writes apart, and a freed
-            // inode comes back: without this, a `Stamp` could see no change after two writes.
-            file.set_modified(std::time::SystemTime::now())?;
             file.sync_all()?;
             fs::rename(&temporary, &self.path)?;
             File::open(self.path.parent().unwrap())?.sync_all()?;
@@ -1137,36 +1090,6 @@ mod tests {
             crate::redact::redact(&reopened, "test-value").unwrap(),
             "[...]"
         );
-    }
-
-    #[test]
-    fn a_hold_check_waits_for_a_writer_that_holds_the_vault() {
-        let test = TestVault::new();
-        test.vault.set("TOKEN", "", "private-value").unwrap();
-        let held = crate::redact::hold();
-        crate::redact::app_patterns(test.vault.path()).unwrap();
-        let other = TestVault::new();
-        other.vault.set("TOKEN", "", "private-value").unwrap();
-        other.vault.set("RENEWED", "", "renewed-value").unwrap();
-        let (locked, wait) = std::sync::mpsc::channel();
-        let writer = std::thread::spawn({
-            let (path, renewed) = (test.vault.path().to_owned(), other.vault.path().to_owned());
-            move || {
-                let vault = Vault::open(&path).unwrap();
-                let _lock = vault.lock_file(true).unwrap();
-                locked.send(()).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let staged = path.with_extension("staged");
-                fs::copy(renewed, &staged).unwrap();
-                fs::rename(staged, path).unwrap();
-            }
-        });
-        wait.recv().unwrap();
-        assert!(
-            !held.settled().unwrap(),
-            "the check ran before the writer renamed the vault"
-        );
-        writer.join().unwrap();
     }
 
     #[test]

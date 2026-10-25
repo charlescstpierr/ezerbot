@@ -84,13 +84,8 @@ fn states() -> MutexGuard<'static, BTreeMap<PathBuf, State>> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
-/// The last snapshot could not reach the keychain and fell back to the file and this process's
-/// cache: the keychain may hold what neither shows, and no `Stamp` sees it become readable.
-pub(super) fn degraded(path: &Path) -> bool {
-    states().get(path).is_some_and(|s| s.failed)
-}
 pub(super) fn status(path: &Path) -> StorageStatus {
-    if degraded(path) {
+    if states().get(path).is_some_and(|s| s.failed) {
         StorageStatus { backend: "file_fallback", label: "Trousseau macOS indisponible", notice_kind: Some("warning"), notice: Some("Le trousseau macOS est indisponible ou son accès a été refusé. Les nouveaux secrets ne sont pas enregistrés. Les secrets déjà présents dans le trousseau restent en place. Déverrouillez-le ou vérifiez les autorisations d’Ezerbot dans Trousseaux d’accès, puis vérifiez le stockage.") }
     } else {
         StorageStatus {
@@ -260,7 +255,6 @@ pub(super) fn set(vault: &Vault, target: &Target, name: &str, secret: &StoredSec
     let mut states = states();
     let state = states.entry(vault.path.clone()).or_default();
     let mut file = vault.read_file()?;
-    vault.write(&file)?; // Moves the `Stamp` even if the keychain takes only part of the write.
     let accepted = target
         .connect(&vault.path)
         .and_then(|backend| backend.put_verified(name, secret))
@@ -277,9 +271,7 @@ pub(super) fn set(vault: &Vault, target: &Target, name: &str, secret: &StoredSec
 pub(super) fn remove(vault: &Vault, target: &Target, name: &str) -> Result<()> {
     let mut states = states();
     let state = states.entry(vault.path.clone()).or_default();
-    let mut file = vault.read_file()?;
-    vault.write(&file)?; // Moves the `Stamp` even if the keychain takes only part of the deletion.
-                         // Never report a deletion that might reappear when the trousseau unlocks.
+    // Never report a deletion that might reappear when the trousseau unlocks.
     if target
         .connect(&vault.path)
         .and_then(|backend| backend.delete(name))
@@ -290,6 +282,7 @@ pub(super) fn remove(vault: &Vault, target: &Target, name: &str) -> Result<()> {
             "Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez.",
         ));
     }
+    let mut file = vault.read_file()?;
     file.remove(name);
     vault.write(&file)?;
     state.cached.remove(name);

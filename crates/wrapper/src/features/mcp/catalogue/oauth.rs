@@ -1,9 +1,9 @@
 //! Authorization-code + PKCE broker. Callback listener is loopback-only,
 //! single-use, state-bound, bounded in time and invalidated by disconnect/restart.
 use super::*;
+use crate::provider::loopback;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use std::{io::Read, time::Duration};
-use tiny_http::{Header, Response, Server as HttpServer, StatusCode};
 
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
@@ -326,8 +326,15 @@ pub(super) fn begin(
         "jira" => jira::REDIRECT_PORT,
         _ => 0,
     };
-    let listener = HttpServer::http(("127.0.0.1",if fake_base().is_none() {fixed_port} else {0})).map_err(|_|invalid("Le port de retour OAuth est occupé. Fermez l’autre connexion en cours, puis réessayez."))?;
-    let port = listener.server_addr().to_ip().ok_or_else(fail)?.port();
+    // A return that comes once this sign-in no longer waits for it gets this answer, then the
+    // connection closes: none is left waiting.
+    let ended = reply(
+        409,
+        m.name,
+        "Cette demande de connexion n’est plus en cours. Revenez dans Ezerbot pour voir son état.",
+    );
+    let listener = loopback::Listener::bind(("127.0.0.1",if fake_base().is_none() {fixed_port} else {0}),ended).map_err(|_|invalid("Le port de retour OAuth est occupé. Fermez l’autre connexion en cours, puis réessayez."))?;
+    let port = listener.port();
     let redirect = format!("http://127.0.0.1:{port}/oauth/{}/callback", m.id);
     let state = random()?;
     let verifier = random()?;
@@ -421,7 +428,10 @@ pub(super) fn begin(
     let server = server.clone();
     #[cfg(target_os = "macos")]
     let authorization_url = url.to_string();
-    std::thread::spawn(move || {
+    // Détruire l'App lève `stop` : l'attente finit sans rien écrire, puis le fil est joint (#463).
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopping = stop.clone();
+    ctx.provider.spawn_background_stoppable(stop, move || {
         let result = (|| -> Result<(), ApiError> {
             let conn = Connection::open(&path)?;
             conn.busy_timeout(Duration::from_secs(4))?;
@@ -434,15 +444,15 @@ pub(super) fn begin(
                 conversation_id: None,
                 run_id: None,
             };
+            // Une fois l'arrêt demandé, la demande n'est plus courante : la boucle sort, aucun
+            // retour n'est traité et l'expiration n'écrit rien.
             let current = || -> bool {
+                !stopping.load(std::sync::atomic::Ordering::SeqCst) &&
                 conn.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_connector_catalogue WHERE server_id=?1 AND generation=?2 AND phase='authorizing')",params![server.id,generation],|r|r.get(0)).unwrap_or(false)
             };
             let deadline = std::time::Instant::now() + Duration::from_secs(300);
             while std::time::Instant::now() < deadline && current() {
-                let Some(request) = listener
-                    .recv_timeout(Duration::from_millis(250))
-                    .map_err(|_| fail())?
-                else {
+                let Some(request) = listener.recv_timeout(Duration::from_millis(250)) else {
                     continue;
                 };
                 let parsed = url::Url::parse(&format!("http://127.0.0.1:{port}{}", request.url()));
@@ -464,12 +474,8 @@ pub(super) fn begin(
                         first
                     }
                 };
-                let host = request
-                    .headers()
-                    .iter()
-                    .find(|h| h.field.equiv("Host"))
-                    .map(|h| h.value.as_str());
-                if request.method().as_str() != "GET"
+                let host = request.host();
+                if request.method() != "GET"
                     || request.url().len() > 8192
                     || host != Some(format!("127.0.0.1:{port}").as_str())
                     || value("state") != Some(state.as_str())
@@ -598,22 +604,18 @@ fn callback_html(status: u16, service: &str, text: &str) -> String {
         .replace("{{service}}", &escaped(service))
         .replace("{{message}}", &escaped(text))
 }
-fn respond(request: tiny_http::Request, status: u16, service: &str, text: &str) {
-    let html = callback_html(status, service, text);
-    let _ = request.respond(
-        Response::from_string(html)
-            .with_status_code(StatusCode(status))
-            .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
-            .with_header(
-                Header::from_bytes(
-                    "Content-Security-Policy",
-                    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-                )
-                .unwrap(),
-            )
-            .with_header(Header::from_bytes("Referrer-Policy", "no-referrer").unwrap())
-            .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
-    );
+fn reply(status: u16, service: &str, text: &str) -> loopback::Reply {
+    loopback::Reply::new(status, callback_html(status, service, text))
+        .header("Content-Type", "text/html; charset=utf-8")
+        .header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        )
+        .header("Referrer-Policy", "no-referrer")
+        .header("Cache-Control", "no-store")
+}
+fn respond(request: loopback::Request, status: u16, service: &str, text: &str) {
+    request.respond(&reply(status, service, text));
 }
 pub(super) fn revoke(m: Manifest, env: &HashMap<String, String>) -> bool {
     let token = if m.id == "slack" {

@@ -4094,11 +4094,10 @@ mod captures {
         assert!(image(&mut f, &urls[0]).starts_with(b"\x89PNG"));
         f.post("/api/conversations/delete", json!({"id":thread}));
         f.tick();
-        // The screen pixels are purged with the thread and the card shows no reference at all.
-        assert_eq!(
-            f.app.api_response("GET", &urls[0], &[]).unwrap_err().status,
-            404
-        );
+        // The screen pixels and the attached image are purged with the thread and the card shows no reference at all.
+        for url in &urls {
+            assert_eq!(f.app.api_response("GET", url, &[]).unwrap_err().status, 404);
+        }
         let left: i64 = f
             .db()
             .query_row(
@@ -4110,6 +4109,27 @@ mod captures {
         assert_eq!(left, 0);
         assert!(card(&mut f, &edge)["status"].get("captures").is_none());
         assert_eq!(card(&mut f, &edge)["status"]["result"], "fini");
+    }
+
+    #[test]
+    fn an_image_the_parent_card_result_links_outlives_the_deleted_thread() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "lien", args("child"));
+        let thread = edge.conversation_id.clone().unwrap();
+        let linked = attached(&mut f, &thread);
+        let url = format!("/api/attachments/{linked}");
+        complete(&f, &format!("fini, voir {url}"), json!([]));
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        f.post("/api/conversations/delete", json!({"id":thread}));
+        assert!(card(&mut f, &edge)["status"]["result"]
+            .as_str()
+            .unwrap()
+            .contains(&url));
+        assert!(image(&mut f, &url).starts_with(b"\x89PNG"));
     }
 
     #[test]
@@ -4401,6 +4421,82 @@ mod captures {
                 assert!(!text.contains(hidden), "{name} donne « {hidden} »");
             }
         }
+    }
+
+    #[test]
+    fn forgetting_a_fact_also_clears_it_from_the_summary_the_card_shows() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "oubli-resume", args("child"));
+        let secret = "Allergique aux kumquats mauves.";
+        f.events(vec![
+            call("learn", "remember", json!({"text":secret,"sensitive":true})),
+            call(
+                "finish-child",
+                "complete_task",
+                json!({"summary":format!("fini. Retenu : {secret}")}),
+            ),
+            completed(),
+        ]);
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        assert!(card(&mut f, &edge)["status"]["result"]
+            .as_str()
+            .unwrap()
+            .contains(secret));
+        let fact = grokbot_memory::facts::list_active(&f.db(), "child").unwrap()[0]
+            .fact_id
+            .clone();
+        f.post(
+            "/api/memory/forget",
+            json!({"bot_id":"child","fact_id":fact}),
+        );
+        let result = card(&mut f, &edge)["status"]["result"].clone();
+        assert!(result.as_str().unwrap().starts_with("fini."), "{result}");
+        assert!(!result.as_str().unwrap().contains(secret), "{result}");
+        let state = f.app.api("GET", "/api/state", b"").unwrap().to_string();
+        assert!(!state.contains(secret), "/api/state still shows the fact");
+        let stored: String = f
+            .db()
+            .query_row(
+                "SELECT status FROM delegation_graph WHERE id=?1",
+                [&edge.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains(secret), "{stored}");
+    }
+
+    #[test]
+    fn forgetting_the_parent_fact_a_child_echoed_clears_it_from_the_parent_card() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let secret = "Allergique aux kumquats mauves.";
+        let fact = match f
+            .app
+            .invoke_tool("grokbot", "remember", json!({"text":secret}))
+            .unwrap()
+        {
+            ToolOutcome::Done { output } => output["fact"]["fact_id"].clone(),
+            _ => panic!(),
+        };
+        let mut a = args("child");
+        a["selected_context"]["fact_ids"] = json!([fact]);
+        let (_, edge) = f.begin(&c, "oubli-parent", a);
+        complete(&f, &format!("fini. Retenu : {secret}"), json!([]));
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        wait("child released", || f.provider.status()["titling"] == false);
+        f.post(
+            "/api/memory/forget",
+            json!({"bot_id":"grokbot","fact_id":fact}),
+        );
+        let result = card(&mut f, &edge)["status"]["result"].clone();
+        assert!(!result.as_str().unwrap().contains(secret), "{result}");
     }
 }
 

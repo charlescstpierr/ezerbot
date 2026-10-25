@@ -334,7 +334,7 @@ mod tests {
             fail_at: 2,
         };
         let mut state = State::default();
-        let _guard = access();
+        let _guard = access(test.vault.path());
         let _lock = test.vault.lock_file(true).unwrap();
         assert!(migrate(&test.vault, &fake, &mut state).is_err());
         assert!(!test.vault.read_file().unwrap().contains_key("FIRST"));

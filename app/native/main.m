@@ -21,6 +21,8 @@
 @property(nonatomic, strong) NSFileHandle *logHandle;
 @property(nonatomic, strong) NSURL *backendURL;
 @property(nonatomic, copy) NSString *supportPath;
+@property(nonatomic, copy) NSString *inspectionHome;
+@property(nonatomic, copy) BOOL (^inspectionJournalsSafe)(void);
 @property(nonatomic) NSUInteger startupGeneration;
 @property(nonatomic) BOOL terminating;
 @property(nonatomic, strong) EzerbotNotifier *notifier;
@@ -251,6 +253,11 @@ static void shell_task_reap(const ShellChild *child) {
     // HOME alone does not redirect Cocoa's Application Support lookup. A test
     // copy must opt in before any file is created in the owner's real space.
     NSString *testHome = NSProcessInfo.processInfo.environment[@"EZERBOT_TEST_HOME"];
+#endif
+    if (self.inspectionHome) {
+        applicationSupport = [NSURL fileURLWithPath:[self.inspectionHome stringByAppendingPathComponent:@"Library/Application Support"] isDirectory:YES];
+    } else
+#if !defined(EZERBOT_RELEASE)
     if (testHome.length) {
         if (![testHome isAbsolutePath] || ![testHome isEqual:NSProcessInfo.processInfo.environment[@"HOME"]]) {
             [self failStartup:@"Le HOME jetable du test est invalide." generation:generation];
@@ -882,13 +889,20 @@ static void shell_task_reap(const ShellChild *child) {
     (void)notification;
     self.terminating = YES;
     ++self.startupGeneration;
+    BOOL journalsSafe = !self.inspectionJournalsSafe || self.inspectionJournalsSafe();
     [self stopBackend];
+    if (self.inspectionJournalsSafe && (!self.inspectionJournalsSafe() || !journalsSafe)) exit(1);
 }
 
 @end
 
+#import "inspection.h"
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        BOOL inspecting = argc > 1 && strcmp(argv[1], "--inspect-private") == 0;
+        NSString *inspectionHome = inspecting ? EzerbotInspectionHome(argc) : nil;
+        if (inspecting && !inspectionHome) return 2;
         if (argc > 1 && strcmp(argv[1], "--demonstration-helper") == 0) return EZDemoMain(argc, argv);
         if (argc > 1 && (strcmp(argv[1], "--screen-helper") == 0 || strcmp(argv[1], "--screen-permissions") == 0)) return EZScreenMain(argc, argv);
         if (argc == 3 && strcmp(argv[1], "--notify-background") == 0) {
@@ -920,6 +934,7 @@ int main(int argc, const char *argv[]) {
         NSApplication *application = [NSApplication sharedApplication];
         [application setActivationPolicy:NSApplicationActivationPolicyRegular];
         GrokbotApplication *delegate = [[GrokbotApplication alloc] init];
+        delegate.inspectionHome = inspectionHome;
         application.delegate = delegate;
         int quit_fd = -1;
         if (shell_stop_arm(&quit_fd) != 0) return 1;
@@ -930,6 +945,8 @@ int main(int argc, const char *argv[]) {
             if (shell_stop_take_quit(quit_fd) && !delegate.terminating) [NSApp terminate:nil];
         });
         dispatch_resume(quit_source);
+        __attribute__((objc_precise_lifetime)) EzerbotPrivateInspection *inspection = inspecting ? [[EzerbotPrivateInspection alloc] initWithShell:delegate] : nil;
+        [inspection start];
         [application run];
     }
     return 0;

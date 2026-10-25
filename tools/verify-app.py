@@ -16,6 +16,7 @@ import urllib.request
 import urllib.error
 import uuid
 from local_api import BrowserAuthentication, LaunchIdentity, launch_isolated_chrome
+from bundle_inspection import BundleInspection, BundleInspectionError
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / 'app/build/Ezerbot.app'
@@ -531,7 +532,7 @@ if '--ui-regressions' in sys.argv:
 
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--app', type=Path, default=APP, help='Running bundle to inspect (may be an isolated copy)')
+parser.add_argument('--app', type=Path, default=APP, help='Bundle to launch and inspect in a private HOME')
 parser.add_argument('--report', type=Path, default=ROOT / 'evidence/wrapper-native-verification.json')
 args = parser.parse_args()
 APP = args.app.resolve()
@@ -549,6 +550,29 @@ def require(name, condition):
     report['checks'].append({'name': name, 'passed': bool(condition)})
     if not condition:
         raise AssertionError(name)
+
+
+def runtime_snapshot(inspected):
+    owner = inspected.pid
+    host = str(APP / 'Contents/MacOS/Ezerbot')
+    engine = str(APP / 'Contents/MacOS/grokbot-wrapper')
+    require('inspected bundle process remains alive', inspected.process.poll() is None)
+    require('launched process runs this bundle inspection command',
+            process_command(owner) == host + ' --inspect-private')
+    require('running process is named Ezerbot', run(['/bin/ps', '-p', str(owner), '-o', 'ucomm=']) == 'Ezerbot')
+    children = run(['/usr/bin/pgrep', '-P', str(owner)]).splitlines()
+    owned = [int(pid) for pid in children if process_command(pid).startswith(engine + ' ')]
+    require('native host owns one Rust engine', len(owned) == 1)
+    engine_pid = owned[0]
+    require('inspected engine is the direct native child',
+            run(['/bin/ps', '-p', str(engine_pid), '-o', 'ppid=']) == str(owner))
+    sockets = run(['/usr/sbin/lsof', '-nP', '-a', '-p', str(engine_pid), '-iTCP', '-sTCP:LISTEN', '-Fn'])
+    listeners = [line[1:] for line in sockets.splitlines() if line.startswith('n')]
+    require('engine listens only on IPv4 loopback', len(listeners) == 1
+            and re.fullmatch(r'127\.0\.0\.1:[1-9][0-9]{0,4}', listeners[0]))
+    runtime = {'host_pid': owner, 'engine_pid': engine_pid, 'url': 'http://' + listeners[0]}
+    require('private readiness matches the OS engine and listener', inspected.ready == {'ready': True, **runtime})
+    return runtime
 
 
 report = {
@@ -569,57 +593,43 @@ try:
     require('minimum macOS version supports dialog and UUID', info['LSMinimumSystemVersion'] == '12.3')
     run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(APP)])
     require('bundle signature verifies', True)
-    host = str(APP / 'Contents/MacOS/Ezerbot')
-    candidates = run(['/usr/bin/pgrep', '-x', 'Ezerbot']).splitlines()
-    host_commands = {host, os.path.relpath(host, ROOT)}
-    owners = [int(pid) for pid in candidates if process_command(pid) in host_commands]
-    require('this bundle is running', len(owners) == 1)
-    owner = owners[0]
-    require('running process is named Ezerbot', run(['/bin/ps', '-p', str(owner), '-o', 'ucomm=']) == 'Ezerbot')
-    children = run(['/usr/bin/pgrep', '-P', str(owner)]).splitlines()
-    engine = str(APP / 'Contents/MacOS/grokbot-wrapper')
-    owned = [int(pid) for pid in children if process_command(pid).startswith(engine + ' ')]
-    require('native host owns one Rust engine', len(owned) == 1)
-    engine_pid = owned[0]
-    sockets = run(['/usr/sbin/lsof', '-nP', '-a', '-p', str(engine_pid), '-iTCP', '-sTCP:LISTEN', '-Fn'])
-    listeners = [line[1:] for line in sockets.splitlines() if line.startswith('n')]
-    require('engine listens only on IPv4 loopback', len(listeners) == 1 and re.fullmatch(r'127\.0\.0\.1:\d+', listeners[0]))
-    url = 'http://' + listeners[0]
-    report['runtime'] = {'host_pid': owner, 'engine_pid': engine_pid, 'url': url}
-    for endpoint, source in [('/', 'index.html'), ('/styles.css', 'styles.css'), ('/app.js', 'app.js'),
+    args.report.parent.mkdir(parents=True, exist_ok=True)
+    with BundleInspection(APP, args.report.parent) as inspected:
+        runtime = runtime_snapshot(inspected)
+        owner = runtime['host_pid']
+        engine_pid = runtime['engine_pid']
+        url = runtime['url']
+        report['runtime'] = runtime.copy()
+        for endpoint, source in [('/', 'index.html'), ('/styles.css', 'styles.css'), ('/app.js', 'app.js'),
                              ('/mascot.css', 'mascot.css'), ('/mascot.js', 'mascot.js'),
                              ('/chat.css', 'chat.css'), ('/chat.js', 'chat.js')]:
-        with urllib.request.urlopen(url + endpoint, timeout=10) as response:
-            actual = response.read()
-        require(f'bundled {source} matches current source', actual == (ROOT / 'app/ui' / source).read_bytes())
-    for extension in ['js', 'css']:
-        expected = b''.join((b';(function () {\n' + path.read_bytes() + b'\n})();\n')
+            with urllib.request.urlopen(url + endpoint, timeout=10) as response:
+                actual = response.read()
+            require(f'bundled {source} matches current source', actual == (ROOT / 'app/ui' / source).read_bytes())
+        for extension in ['js', 'css']:
+            expected = b''.join((b';(function () {\n' + path.read_bytes() + b'\n})();\n')
                             if extension == 'js' else path.read_bytes() + b'\n'
                             for path in sorted((ROOT / 'app/ui/panels').glob(f'*.{extension}'))
                             if path.is_file())
-        with urllib.request.urlopen(url + f'/panels.{extension}', timeout=10) as response:
-            actual = response.read()
-        require(f'bundled panels.{extension} matches current sources', actual == expected)
-    try:
-        with urllib.request.urlopen(url + '/api/state', timeout=10):
-            refused = False
-    except urllib.error.HTTPError as error:
-        refused = error.code == 403
-    require('native launch identity stays private to the native host', refused)
-    from proof_chatgpt_mac import NativeHost, compile_host
-    with tempfile.TemporaryDirectory(prefix='grokbot-native-engine-qa-') as directory:
-        home = Path(directory).resolve()
-        isolated = NativeHost(compile_host(home, engine), home)
+            with urllib.request.urlopen(url + f'/panels.{extension}', timeout=10) as response:
+                actual = response.read()
+            require(f'bundled panels.{extension} matches current sources', actual == expected)
         try:
-            status, state = isolated.call('GET', '/api/state')
-            require('source-native host authenticates its own engine state', status == 200)
-            require('source-native engine advertises a known mode', state['mode'] in ('simulated', 'chatgpt'))
-            isolated.check_journals()
-        finally:
-            isolated.close()
+            with urllib.request.urlopen(url + '/api/state', timeout=10):
+                refused = False
+        except urllib.error.HTTPError as error:
+            refused = error.code == 403
+        require('native launch identity stays private to the native host', refused)
+        require('bundle runtime remains unchanged before authenticated state', runtime_snapshot(inspected) == runtime)
+        state = inspected.state(engine_pid, url)
+        require('inspected bundle authenticates its own engine state', state['status'] == 200)
+        require('inspected bundle engine advertises a known mode', state['mode'] in ('simulated', 'chatgpt'))
+        require('inspected bundle keeps its launch identity out of its journals', state['journals_safe'] is True)
+        require('bundle runtime remains unchanged after authenticated state', runtime_snapshot(inspected) == runtime)
+        report['runtime']['authenticated_state'] = state
 
-    # Query only this application's window metadata, without screen capture or Accessibility.
-    source = r'''#import <Cocoa/Cocoa.h>
+        # Query only this application's window metadata, without screen capture or Accessibility.
+        source = r'''#import <Cocoa/Cocoa.h>
 #import <ApplicationServices/ApplicationServices.h>
 int main(int argc, const char **argv) {
     @autoreleasepool {
@@ -638,23 +648,30 @@ int main(int argc, const char **argv) {
     return 0;
 }
 '''
-    with tempfile.TemporaryDirectory(prefix='grokbot-window-qa-') as directory:
-        helper = Path(directory) / 'windows.m'
-        binary = Path(directory) / 'windows'
-        helper.write_text(source)
-        run(['/usr/bin/clang', '-fobjc-arc', '-Wall', '-Wextra', '-Werror', str(helper),
+        with tempfile.TemporaryDirectory(prefix='grokbot-window-qa-', dir=args.report.parent) as directory:
+            helper = Path(directory) / 'windows.m'
+            binary = Path(directory) / 'windows'
+            helper.write_text(source)
+            run(['/usr/bin/clang', '-fobjc-arc', '-Wall', '-Wextra', '-Werror', str(helper),
              '-framework', 'Cocoa', '-framework', 'ApplicationServices', '-o', str(binary)])
-        windows = json.loads(run([str(binary), str(owner)]))
-    report['runtime']['windows'] = windows
-    require('native window exists at supported size', any(window['bounds'].get('Width', 0) >= 820
+            windows = json.loads(run([str(binary), str(owner)]))
+        report['runtime']['windows'] = windows
+        require('native window exists at supported size', any(window['bounds'].get('Width', 0) >= 820
                                                         and window['bounds'].get('Height', 0) >= 560 for window in windows))
+    require('inspected bundle exits normally after private EOF', inspected.process.returncode == 0)
+    require('isolated inspection HOME is removed', not inspected.home.exists())
+    stopped = subprocess.run(['/bin/ps', '-p', str(engine_pid), '-o', 'pid='], text=True,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+    require('owned Rust engine exits after private EOF', stopped.returncode == 1 and not stopped.stdout.strip())
     tracked = [APP / 'Contents/MacOS/Ezerbot', APP / 'Contents/MacOS/grokbot-wrapper',
-               APP / 'Contents/Info.plist', ROOT / 'app/native/main.m', ROOT / 'tools/build-app.sh']
+               APP / 'Contents/Info.plist', ROOT / 'app/native/main.m', ROOT / 'app/native/inspection.h',
+               ROOT / 'tools/build-app.sh', ROOT / 'tools/bundle_inspection.py', ROOT / 'tools/verify-app.py']
     report['sha256'] = {os.path.relpath(path, ROOT): hashlib.sha256(path.read_bytes()).hexdigest() for path in tracked}
     report['status'] = 'passed'
 except Exception as error:
     report['status'] = 'failed'
-    report['error'] = str(error)
+    report['error'] = str(error) if isinstance(error, (AssertionError, BundleInspectionError)) else 'Bundle verification failed'
+args.report.parent.mkdir(parents=True, exist_ok=True)
 args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
 print(json.dumps(report, ensure_ascii=False, indent=2))
 raise SystemExit(0 if report['status'] == 'passed' else 1)

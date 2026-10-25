@@ -74,7 +74,8 @@ async function runner() {
 async function main() {
   mkdirSync(base, { recursive: true });
   const { stdout: version } = await exec(binary, ['--version'], { timeout: 3000 });
-  const facts = { binary: resolve(binary), version: version.trim(), sha256: createHash('sha256').update(readFileSync(binary)).digest('hex'), platform: process.platform, arch: process.arch };
+  const { stdout: head } = await exec('git', ['-C', repo, 'rev-parse', 'HEAD'], { timeout: 3000 });
+  const facts = { head: head.trim(), binary: resolve(binary), version: version.trim(), sha256: createHash('sha256').update(readFileSync(binary)).digest('hex'), platform: process.platform, arch: process.arch };
   console.log(JSON.stringify(facts));
   for (const mode of ['SIGTERM', 'SIGKILL']) {
     const root = mkdtempSync(join(base, 'probe-profile-'));

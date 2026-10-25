@@ -124,11 +124,11 @@ du fournisseur. Elles mesurent l'écart de l'estimation, sans régler
 
 ## Journal des tours
 
-Chaque tour terminé laisse une ligne dans la table `wrapper_turn_log` de la base de l’espace (`run_id`, `at_ms`, `entry`). `entry` est un JSON. Rien n’est envoyé hors du Mac. Un tour n’est écrit qu’une fois : sa première ligne reste, même si on l’arrête ou le régénère ensuite.
+Chaque tour terminé laisse une ligne JSON dans la table `wrapper_turn_log` (`run_id`, `at_ms`, `entry`) de la base de l’espace ; rien ne quitte le Mac. Un tour n’est écrit qu’une fois : sa première ligne reste, même s’il est arrêté ou régénéré ensuite.
 
-Par tour : `at_ms` (fin du tour, en ms), `bot_id`, `source` (chat, routine, group, delegation, bot_to_bot : la même règle que `/api/usage`), `turn` (empreinte de 16 caractères, la même que `turn=` dans `logs/engine.log`), `model`, `effort`, `status` et `turn_end`, `error_kind`, `duration_ms`, `model_calls`, `tool_calls`, `tokens` (`input`, `output`, `cached`, ou `null` si le fournisseur n’a rien mesuré) et `tools`.
+Par tour : `at_ms`, `bot_id`, `source` (chat, routine, group, delegation, bot_to_bot, comme `/api/usage`), `turn` (empreinte de 16 caractères, la même que `turn=` dans `logs/engine.log`), `model`, `effort`, `status`, `error_kind`, `duration_ms`, `model_calls`, `tool_calls`, `tokens` (`input`, `output`, `cached`, ou `null` si le fournisseur n’a rien mesuré) et `tools`.
 
-Par appel d’outil, dans l’ordre d’exécution : `name`, `started_ms`, `duration_ms`, `result` et `code`. La durée va de l’entrée de l’appel à l’écriture de son résultat. Un appel suspendu pour approbation est chronométré à sa reprise : l’attente humaine n’y est pas. Un appel jamais exécuté ou d’effet incertain n’a ni début ni durée (`null`). Le nom d’un outil MCP est `mcp_<connecteur>_<outil>`. Un nom qui vient du modèle n’est gardé que s’il tient en 64 octets de `A-Z a-z 0-9 _ . -` et si l’appel a été validé (outil existant) ; sinon, et pour un appel `not_executed`, il devient `-`. Un résultat sans `code` (tour antérieur au journal) est déduit de son statut (`ok` ou `failed`) et son nom devient `-`. Un tour arrêté pendant qu’il attend une approbation est journalisé à l’arrêt ; une tâche déléguée suspendue, annulée avec son parent, ne l’est pas.
+Par appel d’outil, dans l’ordre : `name`, `started_ms`, `duration_ms`, `result` et `code`. La durée va de l’entrée de l’appel à son résultat ; un appel suspendu pour approbation est chronométré à sa reprise, sans l’attente humaine. Un appel jamais exécuté, repris après redémarrage ou d’effet incertain n’a ni début ni durée (`null`). Un nom venu du modèle (`mcp_<connecteur>_<outil>` pour un outil MCP) n’est gardé que s’il tient en 64 octets de `A-Z a-z 0-9 _ . -` et si l’appel a été validé ; sinon, et pour `unknown_tool` et `not_executed`, il devient `-`. Un résultat d’avant le journal, sans `code`, est déduit de son statut (`ok` ou `failed`) et son nom devient `-`. Un tour arrêté en attente d’approbation est journalisé à l’arrêt ; une tâche déléguée suspendue puis annulée avec son parent ne l’est pas.
 
 | `code` | `result` |
 | --- | --- |
@@ -140,31 +140,16 @@ Par appel d’outil, dans l’ordre d’exécution : `name`, `started_ms`, `dura
 
 **Jamais dans le journal** : texte de message, argument, sortie ou raison d’un outil, secret du coffre, jeton, en-tête, `request_id`, titre de conversation. Que des compteurs, des codes fixes et des identifiants opaques.
 
-**Bornes.** Au plus 64 appels détaillés par tour (`tool_calls` garde le vrai total) et 20 000 tours : les plus anciens sont supprimés au-delà. L’écriture se fait après le commit du tour ; si elle échoue, le tour n’en est pas changé.
+**Bornes.** 64 appels détaillés par tour au plus (`tool_calls` garde le vrai total), 20 000 tours au plus (les plus anciens partent), 30 jours : les lignes plus vieilles sont supprimées au démarrage puis une fois par jour, sans toucher aux autres tables. Une écriture qui échoue ne change pas l’issue du tour.
 
-**Rétention de 30 jours.** Les lignes plus vieilles sont supprimées au démarrage, puis une fois par jour. Aucune autre table n’est touchée.
-
-**Résumé d’une journée**, en heure locale du Mac (minuit à minuit, avec les changements d’heure) :
+**Résumé d’une journée**, en heure locale du Mac (minuit à minuit, changements d’heure compris), par la route ou la commande, qui renvoient le même JSON ; un jour qui n’est pas `AAAA-MM-JJ` donne une erreur 400 (code de sortie 1 en ligne de commande) :
 
 ```sh
 curl -s 'http://127.0.0.1:<port>/api/turns/summary?day=2026-10-24'
 grokbot-wrapper --turns-summary 2026-10-24 [--db chemin.sqlite]
 ```
 
-La route et la commande renvoient le même JSON ; un jour qui n’est pas `AAAA-MM-JJ` donne une erreur 400 (code de sortie 1 en ligne de commande).
-
-- `turns` : nombre de tours du jour.
-- `tokens` : `input`, `output`, `cached` sur les tours mesurés, et `unmeasured_turns` pour les autres (jamais comptés comme zéro).
-- `most_used` : `name` et `calls`, du plus appelé au moins appelé.
-- `slowest` : `name`, `calls` chronométrés, `median_ms` et `p95_ms`, du plus lent au plus rapide selon `p95_ms`.
-- `errors` : `name`, `code` et `count` pour tout résultat autre que `ok`.
-
-Médiane et p95 se calculent au rang le plus proche : sur `n` durées triées, la valeur de rang `ceil(n × p ÷ 100)` (p = 50 ou 95). Les égalités se départagent par nom, puis par code.
-
-```sh
-cargo test -p grokbot-wrapper --test turns
-cargo test -p grokbot-engine run_loop
-```
+`turns` ; `tokens` (`input`, `output`, `cached` sur les tours mesurés, `unmeasured_turns` pour les autres, jamais comptés comme zéro) ; `most_used` (`name`, `calls`) ; `slowest` (`name`, `calls` chronométrés, `median_ms`, `p95_ms`, du plus lent au plus rapide selon `p95_ms`) ; `errors` (`name`, `code`, `count` pour tout résultat autre que `ok`). Médiane et p95 se calculent au rang le plus proche : la valeur de rang `ceil(n × p ÷ 100)` sur `n` durées triées. Les égalités se départagent par nom, puis par code.
 
 ## Évaluation sur faux serveur (opt-in)
 

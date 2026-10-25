@@ -28,8 +28,6 @@ from verify_lib import (
     terminate_recorded,
 )
 
-VERIFY_AXI_SESSION = "verify-ezerbot"
-
 
 def axi_binary() -> str | None:
     override = os.environ.get("EZERBOT_VERIFY_AXI")
@@ -45,9 +43,10 @@ def axi_binary() -> str | None:
     return None
 
 
-def stop_verify_ezerbot_session() -> dict:
-    """Stop this skill's bridge only. The session name is not taken from the caller."""
-    session = VERIFY_AXI_SESSION
+def stop_verify_ezerbot_session(run: dict) -> dict:
+    session = run.get("session")
+    if not isinstance(session, str) or not session or not all(c.isalnum() or c in "-_" for c in session):
+        return {"session": None, "result": "refuse"}
     binary = axi_binary()
     if not binary:
         return {"session": session, "result": "absent"}
@@ -104,7 +103,7 @@ def main() -> None:
     assert_not_under(evidence, verified_home, "preuves")
     assert_not_under(evidence, verified_root, "preuves")
     results = {}
-    for name in ("wrapper", "fake"):
+    for name in ("auth", "wrapper", "fake"):
         pid = int(run.get(f"{name}_pid") or 0)
         identity = run.get(f"{name}_identity")
         if name == "wrapper" and identity and run.get("wrapper_pgid"):
@@ -127,7 +126,7 @@ def main() -> None:
                 (evidence / name).write_text("\n".join(tail) + ("\n" if tail else ""))
         shutil.rmtree(verified_root)
     finally:
-        results["axi"] = stop_verify_ezerbot_session()
+        results["axi"] = stop_verify_ezerbot_session(run)
     still = {
         name: pid_alive(int(run.get(f"{name}_pid") or 0)) and identity_matches(int(run.get(f"{name}_pid") or 0), run.get(f"{name}_identity"))
         for name in ("wrapper", "fake")

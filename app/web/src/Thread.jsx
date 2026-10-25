@@ -1,3 +1,4 @@
+import { localMarkdownComponents } from "./local-resource.js";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Streamdown } from "streamdown";
 import * as Tooltip from "@radix-ui/react-tooltip";
@@ -261,7 +262,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
           ? (
             <div data-find-body>
               <SourcesContext.Provider value={sourcesValue}>
-                <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal} {...(cited ? { allowedTags: citeTags, components: citeComponents } : {})}>
+                <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal} components={{ ...localMarkdownComponents, ...(cited ? citeComponents : {}) }} {...(cited ? { allowedTags: citeTags } : {})}>
                   {prose}
                 </Streamdown>
               </SourcesContext.Provider>

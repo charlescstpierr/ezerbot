@@ -130,7 +130,7 @@
     const chip = node("li", "attachment-chip");
     const image = item.document || item.refused ? node("span", "attachment-document-icon") : node("img", "attachment-preview");
     if (item.document || item.refused) { image.setAttribute("aria-hidden", "true"); image.append(window.GrokbotChat.createDocumentIcon()); }
-    else { image.src = item.preview; image.alt = `Aperçu de ${item.file.name || "l’image collée"}`; }
+    else { image.src = window.EzerbotLocal?.resourceURL(item.preview) ?? item.preview; image.alt = `Aperçu de ${item.file.name || "l’image collée"}`; }
     const copy = node("div", "attachment-copy");
     const name = node("strong", "", item.file.name || "Image collée");
     name.title = item.file.name || "Image collée";

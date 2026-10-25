@@ -17,6 +17,7 @@
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) NSTask *backendTask;
+@property(nonatomic, strong) EzerbotLocalAPI *localAPI;
 @property(nonatomic, strong) NSFileHandle *logHandle;
 @property(nonatomic, strong) NSURL *backendURL;
 @property(nonatomic, copy) NSString *supportPath;
@@ -300,10 +301,18 @@ static void shell_task_reap(const ShellChild *child) {
         [self failStartup:@"Le moteur Rust manque dans l’application. Relancez tools/build-app.sh." generation:generation];
         return;
     }
+    NSData *launchSecret = EzerbotNewLaunchSecret();
+    self.localAPI = launchSecret ? [[EzerbotLocalAPI alloc] initWithSecretData:launchSecret] : nil;
+    if (!self.localAPI) {
+        [self failStartup:@"Le canal de lancement sécurisé est indisponible." generation:generation];
+        return;
+    }
+    NSPipe *input = [NSPipe pipe];
     NSPipe *output = [NSPipe pipe];
     NSTask *task = [[NSTask alloc] init];
     task.executableURL = [NSURL fileURLWithPath:enginePath];
     task.arguments = @[@"--port", @"0", @"--db", [self.supportPath stringByAppendingPathComponent:@"workspace.sqlite"]];
+    task.standardInput = input;
     task.standardOutput = output;
     task.standardError = self.logHandle;
     task.currentDirectoryURL = [NSURL fileURLWithPath:self.supportPath isDirectory:YES];
@@ -330,6 +339,15 @@ static void shell_task_reap(const ShellChild *child) {
     self.backendTask = task;
     if (![task launchAndReturnError:&error]) {
         [self failStartup:error.localizedDescription generation:generation];
+        return;
+    }
+    BOOL delivered = [input.fileHandleForWriting writeData:launchSecret error:nil];
+    [input.fileHandleForWriting closeFile];
+    if ([launchSecret isKindOfClass:NSMutableData.class]) {
+        EzerbotClearLaunchBytes(((NSMutableData *)launchSecret).mutableBytes, launchSecret.length);
+    }
+    if (!delivered) {
+        [self failStartup:@"Le canal de lancement sécurisé a été interrompu." generation:generation];
         return;
     }
     NSFileHandle *reader = output.fileHandleForReading;
@@ -381,6 +399,8 @@ static void shell_task_reap(const ShellChild *child) {
 
 - (void)openWorkspace:(NSURL *)url {
     self.backendURL = url;
+    self.localAPI.backendURL = url;
+    self.floating.localAPI = self.localAPI;
     self.floating.backendURL = url;
     self.floating.mainWindow = self.window;
     self.floating.geometryPath = [self.supportPath stringByAppendingPathComponent:@"floating-panel.plist"];
@@ -397,6 +417,7 @@ static void shell_task_reap(const ShellChild *child) {
     };
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
     configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
+    [self.localAPI installInConfiguration:configuration];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotNotifications"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotVoice"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotVoiceSession"];
@@ -811,7 +832,14 @@ static void shell_task_reap(const ShellChild *child) {
     [request setValue:@"local" forHTTPHeaderField:@"X-Grokbot-Request"];
     NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
     configuration.timeoutIntervalForRequest = 15;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
+    configuration.HTTPShouldSetCookies = NO;
+    configuration.HTTPCookieStorage = nil;
+    configuration.URLCredentialStorage = nil;
+    configuration.URLCache = nil;
+    configuration.connectionProxyDictionary = @{};
+    request = [self.localAPI authorizeRequest:request];
+    if (!request) return;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration delegate:self.localAPI delegateQueue:nil];
     dispatch_semaphore_t finished = dispatch_semaphore_create(0);
     [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         (void)data; (void)response; (void)error;
@@ -827,6 +855,9 @@ static void shell_task_reap(const ShellChild *child) {
     [self.voiceSession cancel];
     [self.floating invalidate];
     self.floating.backendURL = nil;
+    self.floating.localAPI = nil;
+    [self.localAPI invalidate];
+    self.localAPI = nil;
     NSTask *task = self.backendTask;
     self.backendTask = nil;
     task.terminationHandler = nil;

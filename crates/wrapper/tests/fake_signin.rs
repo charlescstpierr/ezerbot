@@ -1,5 +1,8 @@
 //! `EZERBOT_FAKE_SIGNIN=1` n’est honoré que par le binaire de debug.
 #![cfg(debug_assertions)]
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
+use launch_identity::LaunchIdentity;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -9,7 +12,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-struct Running(Child);
+struct Running(Child, LaunchIdentity);
 impl Drop for Running {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -35,8 +38,9 @@ fn launch(directory: &std::path::Path, fake: bool) -> (Running, String) {
     } else {
         command.env_remove("EZERBOT_FAKE_SIGNIN");
     }
-    let child = command.spawn().unwrap();
-    let mut running = Running(child);
+    let identity = LaunchIdentity::new();
+    let child = identity.spawn(&mut command);
+    let mut running = Running(child, identity);
     let mut first = String::new();
     BufReader::new(running.0.stdout.take().unwrap())
         .read_line(&mut first)
@@ -51,14 +55,15 @@ fn launch(directory: &std::path::Path, fake: bool) -> (Running, String) {
     (running, address)
 }
 
-fn state(address: &str) -> Value {
+fn state(address: &str, identity: &LaunchIdentity) -> Value {
     let mut socket = std::net::TcpStream::connect(address).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     write!(
         socket,
-        "GET /api/state HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+        "GET /api/state HTTP/1.1\r\nHost: {address}\r\nX-Ezerbot-Launch: {}\r\nConnection: close\r\n\r\n",
+        identity.value()
     )
     .unwrap();
     let mut result = String::new();
@@ -71,7 +76,7 @@ fn state(address: &str) -> Value {
 fn la_connexion_factice_ouvre_chatgpt_sans_oauth() {
     let guard = grokbot_test_support::TestDir::new("ezerbot-fake-signin");
     let directory = guard.to_path_buf();
-    let (_running, address) = launch(&directory, true);
+    let (running, address) = launch(&directory, true);
     let ready = |provider: &Value| {
         provider["connected"] == true
             && provider["email"] == "vous@exemple.com"
@@ -79,13 +84,13 @@ fn la_connexion_factice_ouvre_chatgpt_sans_oauth() {
                 .as_array()
                 .is_some_and(|models| models.iter().any(|model| model["slug"] == "gpt-test"))
     };
-    let mut provider = state(&address)["provider"].clone();
+    let mut provider = state(&address, &running.1)["provider"].clone();
     for _ in 0..40 {
         if ready(&provider) {
             break;
         }
         thread::sleep(Duration::from_millis(250));
-        provider = state(&address)["provider"].clone();
+        provider = state(&address, &running.1)["provider"].clone();
     }
     assert_eq!(provider["connected"], true, "{provider}");
     assert_eq!(provider["signed_in"], true, "{provider}");
@@ -115,8 +120,8 @@ fn la_connexion_factice_ouvre_chatgpt_sans_oauth() {
 fn sans_le_drapeau_la_session_reste_locale() {
     let guard = grokbot_test_support::TestDir::new("ezerbot-fake-signin-off");
     let directory = guard.to_path_buf();
-    let (_running, address) = launch(&directory, false);
-    let provider = state(&address)["provider"].clone();
+    let (running, address) = launch(&directory, false);
+    let provider = state(&address, &running.1)["provider"].clone();
     assert_eq!(provider["connected"], false, "{provider}");
     assert_eq!(provider["signed_in"], false, "{provider}");
     assert!(!directory.join("workspace.codex-auth.json").exists());

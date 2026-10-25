@@ -707,19 +707,31 @@ fn private_purge_refuses_busy_runs_and_rolls_back_storage_errors() {
 #[test]
 fn draft_uploads_and_housekeeping_keep_the_local_request_gate() {
     use grokbot_wrapper::{body_limit, validate_headers_for_path, ATTACHMENT_BODY_LIMIT};
+    let mut bytes = [0; 32];
+    getrandom::getrandom(&mut bytes).unwrap();
+    let secret = grokbot_wrapper::LaunchSecret::read(bytes.as_slice()).unwrap();
     let mut headers = vec![
         ("Host".into(), "127.0.0.1:1234".into()),
         ("Content-Type".into(), "image/png".into()),
+        ("X-Ezerbot-Launch".into(), secret.header_value().into()),
     ];
-    assert!(
-        validate_headers_for_path(1234, "POST", "/api/attachments?draft_id=thread", &headers)
-            .is_err()
-    );
+    assert!(validate_headers_for_path(
+        1234,
+        "POST",
+        "/api/attachments?draft_id=thread",
+        &headers,
+        &secret
+    )
+    .is_err());
     headers.push(("X-Grokbot-Request".into(), "local".into()));
-    assert!(
-        validate_headers_for_path(1234, "POST", "/api/attachments?draft_id=thread", &headers)
-            .is_ok()
-    );
+    assert!(validate_headers_for_path(
+        1234,
+        "POST",
+        "/api/attachments?draft_id=thread",
+        &headers,
+        &secret
+    )
+    .is_ok());
     assert_eq!(
         body_limit("/api/attachments?draft_id=thread"),
         ATTACHMENT_BODY_LIMIT
@@ -753,7 +765,7 @@ fn draft_uploads_and_housekeeping_keep_the_local_request_gate() {
         "/api/storage/facts/delete",
         "/api/storage/drafts",
     ] {
-        assert!(validate_headers_for_path(1234, "POST", path, &headers).is_err());
+        assert!(validate_headers_for_path(1234, "POST", path, &headers, &secret).is_err());
     }
 }
 

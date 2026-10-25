@@ -225,7 +225,7 @@ def save_browser(run: dict, state: dict) -> None:
     path.write_text(json.dumps(state, indent=2) + "\n")
 
 
-def ensure_headless(run: dict) -> dict:
+def ensure_headless(run: dict, *, headed: bool = False) -> dict:
     session = session_id()
     if not os.environ.get("CHROME_DEVTOOLS_AXI_SESSION"):
         raise SystemExit("CHROME_DEVTOOLS_AXI_SESSION est obligatoire, même pour le substitut headless")
@@ -245,13 +245,16 @@ def ensure_headless(run: dict) -> dict:
     # navigation happens afterwards through CDP.
     command = [
         binary,
-        "--headless=new",
+        *([] if headed else ["--headless=new"]),
         "--disable-gpu",
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-extensions",
+        "--incognito",
+        "--use-mock-keychain",
+        "--password-store=basic",
         f"--user-data-dir={profile}",
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
@@ -279,7 +282,7 @@ def ensure_headless(run: dict) -> dict:
     port = int(port_file.read_text().splitlines()[0])
     identity = proc_identity(process.pid)
     state = {
-        "mode": "chrome-headless",
+        "mode": "chrome-devtools-axi" if headed else "chrome-headless",
         "session": session,
         "chrome_pid": process.pid,
         "pgid": process.pid,
@@ -287,7 +290,7 @@ def ensure_headless(run: dict) -> dict:
         "debug_port": port,
         "profile": str(profile),
         "started_by": "verify-ezerbot",
-        "stand_in_flags": ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage"],
+        "stand_in_flags": [] if headed else ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage"],
         "width": 1140,
         "height": 780,
     }
@@ -420,11 +423,18 @@ def command_pages(state: dict) -> None:
         print(f"{item.get('id')},{item.get('url','')},{selected}")
 
 
-def run_axi(arguments: list[str]) -> None:
+def run_axi(arguments: list[str], run: dict) -> None:
     if not os.environ.get("CHROME_DEVTOOLS_AXI_SESSION"):
         raise SystemExit("CHROME_DEVTOOLS_AXI_SESSION est obligatoire")
     env = os.environ.copy()
     env["CHROME_DEVTOOLS_AXI_SESSION"] = session_id()
+    state = load_browser(run)
+    if not state or not identity_matches(int(state.get("chrome_pid") or 0), state.get("identity")):
+        raise SystemExit("Chrome de ce run n'est plus disponible")
+    if not identity_matches(int(run.get("auth_pid") or 0), run.get("auth_identity")):
+        raise SystemExit("le transport authentifié de ce run n'est plus disponible")
+    env["CHROME_DEVTOOLS_AXI_BROWSER_URL"] = f"http://127.0.0.1:{state['debug_port']}"
+    env.pop("CHROME_DEVTOOLS_AXI_AUTO_CONNECT", None)
     result = subprocess.run([axi_binary(), *arguments], env=env)
     raise SystemExit(result.returncode)
 
@@ -479,7 +489,7 @@ def main() -> None:
     if browser_mode() == "chrome-headless":
         run_headless(run, command)
     else:
-        run_axi(command)
+        run_axi(command, run)
 
 
 if __name__ == "__main__":

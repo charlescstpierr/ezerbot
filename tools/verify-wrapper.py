@@ -5,11 +5,12 @@ from datetime import datetime, timezone
 import argparse
 import json
 import selectors
+import secrets
 import sqlite3
 import subprocess
 import tempfile
-import urllib.request
 import urllib.error
+from local_api import LaunchIdentity
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'target/debug/grokbot-wrapper'
@@ -27,7 +28,8 @@ def require(name, condition):
 
 class Server:
     def __init__(self, database):
-        self.process = subprocess.Popen([str(BINARY), '--port', '0', '--db', str(database)],
+        self.identity = LaunchIdentity()
+        self.process = self.identity.spawn([str(BINARY), '--port', '0', '--db', str(database)],
                                         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         selector = selectors.DefaultSelector()
         selector.register(self.process.stdout, selectors.EVENT_READ)
@@ -56,9 +58,8 @@ class Server:
         if headers:
             values.update(headers)
         data = raw if raw is not None else (json.dumps(payload).encode() if payload is not None else None)
-        request = urllib.request.Request(self.url + path, data=data, headers=values)
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with self.identity.open(self.url + path, data=data, headers=values, timeout=10) as response:
                 content = response.read()
                 return response.status, content, dict(response.headers)
         except urllib.error.HTTPError as error:
@@ -85,6 +86,10 @@ try:
                            ('/panels.css', 'text/css; charset=utf-8')]:
             status, _, headers = active.request(path)
             require(f'offline asset {path}', status == 200 and headers.get('Content-Type') == mime)
+        status, _, _ = active.request('/api/state', headers={'X-Ezerbot-Launch': ''})
+        require('API GET without launch authentication rejected', status == 403)
+        status, _, _ = active.request('/api/state', headers={'X-Ezerbot-Launch': secrets.token_bytes(32).hex()})
+        require('API GET with unrelated launch authentication rejected', status == 403)
         initial = active.json('/api/state')
         require('mode is explicitly simulated', initial['mode'] == 'simulated')
         conversation = active.json('/api/conversations', {'title': 'Conversation de vérification'})['conversation']
@@ -148,8 +153,13 @@ try:
         active.json('/api/conversations/update', {'id': identifier, 'title': 'Retrouvée après redémarrage',
                                                   'favorite': True})
         active.json('/api/preferences', {'theme': 'dark'})
+        previous_headers = active.identity.headers(active.url)
         active.close()
         active = Server(database)
+        status, _, _ = active.request('/api/state', headers={'X-Ezerbot-Launch': previous_headers['X-Ezerbot-Launch']})
+        require('previous launch authentication rejected after restart', status == 403)
+        require('restart generated a new launch identity',
+                previous_headers['X-Ezerbot-Launch'] != active.identity.headers(active.url)['X-Ezerbot-Launch'])
         state = active.json('/api/state')
         restored = next(item for item in state['conversations'] if item['id'] == identifier)
         require('appearance survives dynamic-port restart', state['preferences']['theme'] == 'dark')

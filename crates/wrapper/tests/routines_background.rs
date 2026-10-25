@@ -2,7 +2,10 @@
 //! No test invokes launchctl or touches the user's LaunchAgents directory.
 //! Installation still asks /usr/bin/plutil to read the agent plist, which exists only on macOS.
 #![cfg(target_os = "macos")]
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
 mod support;
+use launch_identity::LaunchIdentity;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -17,6 +20,7 @@ use support::{wait, FakeOpenAi, ScriptedResponse, Seen};
 struct Fixture {
     root: PathBuf,
     app: Option<Child>,
+    identity: LaunchIdentity,
     url: String,
     fake: FakeOpenAi,
     binary: PathBuf,
@@ -33,6 +37,7 @@ impl Fixture {
             database: root.join("workspace.sqlite"),
             root,
             app: None,
+            identity: LaunchIdentity::new(),
             url: String::new(),
             fake,
             binary: env!("CARGO_BIN_EXE_grokbot-wrapper").into(),
@@ -56,7 +61,8 @@ impl Fixture {
         c
     }
     fn open(&mut self) {
-        let mut child = self.command().args(["--port", "0"]).spawn().unwrap();
+        self.identity = LaunchIdentity::new();
+        let mut child = self.identity.spawn(self.command().args(["--port", "0"]));
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap())
             .read_line(&mut line)
@@ -78,6 +84,7 @@ impl Fixture {
     }
     fn state(&self) -> Value {
         ureq::get(&format!("{}/api/state", self.url))
+            .set("X-Ezerbot-Launch", &self.identity.value())
             .call()
             .unwrap()
             .into_json()
@@ -86,6 +93,7 @@ impl Fixture {
     fn post(&self, path: &str, body: Value) -> Value {
         ureq::post(&format!("{}{path}", self.url))
             .set("X-Grokbot-Request", "local")
+            .set("X-Ezerbot-Launch", &self.identity.value())
             .send_json(body)
             .unwrap()
             .into_json()
@@ -139,6 +147,7 @@ impl Fixture {
             "{}/api/routines/history?bot_id=grokbot&routine_id={id}",
             self.url
         ))
+        .set("X-Ezerbot-Launch", &self.identity.value())
         .call()
         .unwrap()
         .into_json()
@@ -263,6 +272,7 @@ fn due_run_finishes_persists_notifies_once_and_skips_idle_and_foreground_owner()
     assert!(h["occurrences"][0]["conversation_id"].is_string());
     assert!(f.state()["routines_background"]["last_run"].is_number());
     let inbox: Value = ureq::get(&format!("{}/api/notifications", f.url))
+        .set("X-Ezerbot-Launch", &f.identity.value())
         .call()
         .unwrap()
         .into_json()
@@ -382,7 +392,8 @@ fn opening_app_during_headless_run_waits_for_owner_and_does_not_duplicate() {
         !f.fake.seen.lock().unwrap().bodies.is_empty()
     });
     assert!(f.wake().status.success());
-    let mut foreground = f.command().args(["--port", "0"]).spawn().unwrap();
+    f.identity = LaunchIdentity::new();
+    let mut foreground = f.identity.spawn(f.command().args(["--port", "0"]));
     std::thread::sleep(Duration::from_millis(150));
     assert!(foreground.try_wait().unwrap().is_none());
     assert_eq!(

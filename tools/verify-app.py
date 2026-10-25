@@ -13,6 +13,9 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+import urllib.error
+import uuid
+from local_api import BrowserAuthentication, LaunchIdentity, launch_isolated_chrome
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / 'app/build/Ezerbot.app'
@@ -24,14 +27,18 @@ def verify_ui_regressions():
     parser.add_argument('--ui-regressions', action='store_true')
     parser.add_argument('--report', type=Path, help='Optional report path (otherwise stdout only)')
     args = parser.parse_args()
-    env = dict(os.environ, CHROME_DEVTOOLS_AXI_SESSION=os.environ.get('CHROME_DEVTOOLS_AXI_SESSION', 'grokbot-ui-regressions'))
+    session = os.environ.get('CHROME_DEVTOOLS_AXI_SESSION', 'grokbot-ui-regressions')
+    env = dict(os.environ, CHROME_DEVTOOLS_AXI_SESSION=f'{session}-ui-{os.getpid()}-{uuid.uuid4().hex[:8]}')
+    env.pop('CHROME_DEVTOOLS_AXI_AUTO_CONNECT', None)
     # Assets are embedded with include_str!: always rebuild with the parent HOME/toolchain.
-    subprocess.run([str(Path.home() / '.cargo/bin/cargo'), 'build', '--locked', '-p', 'grokbot-wrapper'],
+    subprocess.run([str(ROOT.parent / '_orch/bin/cargo-gate'), 'build', '--locked', '-p', 'grokbot-wrapper'],
                    cwd=ROOT, check=True)
 
     def chrome(*arguments):
         result = subprocess.run(['chrome-devtools-axi', *arguments], text=True, env=env, timeout=60,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if authentication:
+            authentication.check()
         if result.returncode or re.search(r'^error:', result.stdout, re.MULTILINE):
             raise AssertionError(result.stdout)
         return result.stdout
@@ -42,11 +49,13 @@ def verify_ui_regressions():
         # No account/token is copied, and no real provider endpoint is used.
         child_env.pop('GROKBOT_FAKE_OPENAI', None)
         with (home / 'wrapper.log').open('w+') as log:
-            child = subprocess.Popen([str(ROOT / 'target/debug/grokbot-wrapper'), '--port', '0',
+            identity = LaunchIdentity()
+            child = identity.spawn([str(ROOT / 'target/debug/grokbot-wrapper'), '--port', '0',
                                       '--db', str(home / 'workspace.sqlite')], cwd=ROOT, env=child_env,
                                      stdout=subprocess.PIPE, stderr=log, text=True)
             page_id = None
-            previous_page_id = None
+            browser = None
+            authentication = None
             try:
                 with selectors.DefaultSelector() as selector:
                     selector.register(child.stdout, selectors.EVENT_READ)
@@ -55,16 +64,18 @@ def verify_ui_regressions():
                 url = json.loads(child.stdout.readline())['url']
                 if not re.fullmatch(r'http://127\.0\.0\.1:\d+', url):
                     raise AssertionError('Wrapper must bind to IPv4 loopback')
-                with urllib.request.urlopen(url + '/app.js', timeout=10) as response:
+                with identity.open(url + '/app.js', timeout=10) as response:
                     if response.read() != (ROOT / 'app/ui/app.js').read_bytes():
                         raise AssertionError('Wrapper embeds a different app.js than the current worktree')
+                browser, browser_url, browser_ws = launch_isolated_chrome(home / 'chrome-profile', log)
+                authentication = BrowserAuthentication(identity, url, browser_ws)
+                env['CHROME_DEVTOOLS_AXI_BROWSER_URL'] = browser_url
                 pages = chrome('pages')
                 previous = re.search(r'^\s*(\d+),[^\n]*,true\s*$', pages, re.MULTILINE)
                 if not previous:
                     previous = re.search(r'^\s*(\d+),', pages, re.MULTILINE)
                     if previous:
                         chrome('selectpage', previous.group(1))
-                previous_page_id = previous.group(1) if previous else None
                 old_page_ids = set(re.findall(r'^\s*(\d+),', pages, re.MULTILINE))
                 try:
                     chrome('newpage', url)
@@ -484,19 +495,31 @@ def verify_ui_regressions():
                     args.report.write_text(json.dumps(ui_report, ensure_ascii=False, indent=2) + '\n')
                 print(json.dumps(ui_report, ensure_ascii=False, indent=2))
             finally:
-                child.terminate()
-                try:
-                    child.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait(timeout=5)
+                if authentication:
+                    authentication.close()
+                if browser:
+                    try:
+                        subprocess.run(['chrome-devtools-axi', 'stop'], env=env, timeout=30,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                    finally:
+                        if browser.poll() is None:
+                            browser.terminate()
+                            try:
+                                browser.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                browser.kill()
+                                browser.wait(timeout=5)
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=5)
                 child.stdout.close()
-                if page_id:
-                    subprocess.run(['chrome-devtools-axi', 'closepage', page_id], env=env, timeout=30,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-                if previous_page_id:
-                    subprocess.run(['chrome-devtools-axi', 'selectpage', previous_page_id], env=env, timeout=30,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
 
 
 if '--ui-regressions' in sys.argv:
@@ -574,10 +597,34 @@ try:
         with urllib.request.urlopen(url + f'/panels.{extension}', timeout=10) as response:
             actual = response.read()
         require(f'bundled panels.{extension} matches current sources', actual == expected)
-    with urllib.request.urlopen(url + '/api/state', timeout=10) as response:
-        state = json.load(response)
-    # Le mode suit la connexion de l'utilisateur : simulé sans compte, ChatGPT une fois connecté.
-    require('running engine advertises a known mode', state['mode'] in ('simulated', 'chatgpt'))
+    try:
+        with urllib.request.urlopen(url + '/api/state', timeout=10):
+            refused = False
+    except urllib.error.HTTPError as error:
+        refused = error.code == 403
+    require('native launch identity stays private to the native host', refused)
+    with tempfile.TemporaryDirectory(prefix='grokbot-native-engine-qa-') as directory:
+        identity = LaunchIdentity()
+        isolated = identity.spawn([engine, '--port', '0', '--db', str(Path(directory) / 'workspace.sqlite')],
+            env=dict(os.environ, HOME=directory, CFFIXED_USER_HOME=directory),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(isolated.stdout, selectors.EVENT_READ)
+                if not selector.select(15):
+                    raise TimeoutError('Isolated native engine did not announce its URL')
+            isolated_url = json.loads(isolated.stdout.readline())['url']
+            with identity.open(isolated_url + '/api/state', timeout=10) as response:
+                state = json.load(response)
+            require('running engine advertises a known mode', state['mode'] in ('simulated', 'chatgpt'))
+        finally:
+            isolated.terminate()
+            try:
+                isolated.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                isolated.kill()
+                isolated.wait(timeout=5)
+            isolated.stdout.close()
 
     # Query only this application's window metadata, without screen capture or Accessibility.
     source = r'''#import <Cocoa/Cocoa.h>

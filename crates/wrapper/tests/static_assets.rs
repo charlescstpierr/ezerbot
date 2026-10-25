@@ -1,6 +1,9 @@
 //! Static UI files over the actual local HTTP host: compression negotiation
 //! and the closed set of served paths. Never launch a release host here.
 #![cfg(debug_assertions)]
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
+use launch_identity::LaunchIdentity;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -8,31 +11,34 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: ezerbot-resource:; font-src 'self' data:; media-src 'self' blob: ezerbot-resource:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
 
 struct Host {
     child: Child,
     address: String,
+    identity: LaunchIdentity,
     _dir: grokbot_test_support::TestDir,
 }
 
 impl Host {
     fn new() -> Self {
         let directory = grokbot_test_support::TestDir::new("grokbot-assets");
-        let child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
-            .args(["--port", "0", "--db"])
-            .arg(directory.join("app.sqlite"))
-            .env("HOME", directory.path())
-            .env("CFFIXED_USER_HOME", directory.path())
-            .env_remove("GROKBOT_TEST_KEYCHAIN")
-            .env_remove("GROKBOT_TEST_SIGNATURE_REQUIREMENT")
-            .env_remove("GROKBOT_FAKE_OPENAI")
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let identity = LaunchIdentity::new();
+        let child = identity.spawn(
+            Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
+                .args(["--port", "0", "--db"])
+                .arg(directory.join("app.sqlite"))
+                .env("HOME", directory.path())
+                .env("CFFIXED_USER_HOME", directory.path())
+                .env_remove("GROKBOT_TEST_KEYCHAIN")
+                .env_remove("GROKBOT_TEST_SIGNATURE_REQUIREMENT")
+                .env_remove("GROKBOT_FAKE_OPENAI")
+                .stdout(Stdio::piped()),
+        );
         let mut host = Self {
             child,
             address: String::new(),
+            identity,
             _dir: directory,
         };
         let mut line = String::new();
@@ -57,8 +63,8 @@ impl Host {
             .unwrap_or_default();
         write!(
             socket,
-            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n{encoding}\r\n",
-            self.address
+            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nX-Ezerbot-Launch: {}\r\n{encoding}\r\n",
+            self.address, self.identity.value()
         )
         .unwrap();
         let mut raw = Vec::new();

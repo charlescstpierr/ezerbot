@@ -1,3 +1,4 @@
+import { localResourceURL } from "./local-resource.js";
 import { screenTools, screenWarnings, screenActionState, screenDecisionLabel } from "./screen-view.js";
 import { AUTOMATIC_LABEL, isAutomatic } from "./yolo-view.js";
 export { screenTools, screenWarnings };
@@ -23,7 +24,7 @@ export function ScreenCard({ message }) {
   return <article className="gb-message gb-engine-card screen-action-card" data-message-id={message.id} data-card-kind="tool" data-screen-error={state.error || undefined}>
     <div className="screen-action-heading"><strong>{screenTools[call.name]}</strong><span>{state.label}</span></div>
     {automatic && <p className="gb-auto-line"><span className="gb-auto-badge">{AUTOMATIC_LABEL}</span> Mode YOLO · la session d’écran reste celle que vous avez démarrée.</p>}
-    {typeof image === "string" && image.startsWith("/api/screen/shot?") ? <figure><button type="button" className="screen-thumbnail" aria-label="Agrandir la capture de l’écran" onClick={() => window.EzerbotScreen?.preview(image)}><img src={image} width={outcome?.output?.width || 1280} height={outcome?.output?.height || 800} loading="lazy" alt="Capture de l’écran après l’action" /></button><figcaption>{action}</figcaption></figure> : <p className="screen-action-detail">{action}</p>}
+    {typeof image === "string" && image.startsWith("/api/screen/shot?") ? <figure><button type="button" className="screen-thumbnail" aria-label="Agrandir la capture de l’écran" onClick={() => window.EzerbotScreen?.preview(image)}><img src={localResourceURL(image)} width={outcome?.output?.width || 1280} height={outcome?.output?.height || 800} loading="lazy" alt="Capture de l’écran après l’action" /></button><figcaption>{action}</figcaption></figure> : <p className="screen-action-detail">{action}</p>}
     {outcome?.output?.fixture && <p>Écran fictif · événement enregistré, aucun effet sur le Mac.</p>}
     {reason && <p role="status">{reason}</p>}
     {!outcome && !state.error && (message.payload.approval_status === "resolved" || automatic) && <p>{automatic ? "Geste en cours d’exécution." : "Geste autorisé par vous, en cours d’exécution."}</p>}

@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -52,11 +53,15 @@ pub struct SessionStore {
     database_path: PathBuf,
 }
 
+type SubmissionKey = (ConversationId, MessageId);
+
 /// Journal chargé avec la révision et l'origine de cette image.
 /// Les opérations du journal sont accessibles via `Deref` et `DerefMut`.
 pub struct StoredJournal {
     journal: Journal,
     revision: i64,
+    /// Lignes du compte telles qu'elles sont sur disque à `revision`.
+    saved: BTreeMap<SubmissionKey, CommittedSubmission>,
     account_id: AccountId,
     database_path: PathBuf,
 }
@@ -124,15 +129,22 @@ impl SessionStore {
     /// Remplace seulement le journal du compte par l'image courante.
     /// Une écriture concurrente impose de recharger le journal avant de réessayer.
     /// Le jeton de cette image avance seulement si le commit réussit.
+    /// Seules les lignes qui diffèrent de `journal.saved` sont écrites. C'est un
+    /// remplacement complet tant que cette méthode est le seul écrivain des
+    /// soumissions : la révision vérifiée prouve alors que le disque égale `saved`.
+    /// La révision avance même sans ligne modifiée.
     pub fn save_journal(&mut self, journal: &mut StoredJournal) -> Result<(), StoreError> {
         self.check_origin(&journal.account_id, &journal.database_path)?;
-        let items = journal.export_committed();
-        if items.iter().any(|item| item.account_id != self.account_id) {
+        if journal
+            .committed()
+            .any(|item| item.account_id != self.account_id)
+        {
             return Err(StoreError::AccountMismatch);
         }
-        for item in &items {
+        for item in journal.committed() {
             validate_submission(item)?;
         }
+        let (deleted, changed) = diff_saved(&journal.saved, journal.committed());
         let expected = journal.revision;
         let tx = self
             .connection
@@ -144,25 +156,38 @@ impl SessionStore {
         let next = actual
             .checked_add(1)
             .ok_or_else(|| StoreError::Invalid("révision du journal épuisée".into()))?;
-        tx.execute(
-            "DELETE FROM submissions WHERE account_id = ?1",
-            params![self.account_id.as_str()],
-        )?;
-        for item in items {
-            let state_json = serde_json::to_string(&submission_to_dto(&item.state))?;
-            tx.execute(
+        {
+            let mut delete = tx.prepare_cached(
+                "DELETE FROM submissions
+                 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+            )?;
+            for key in &deleted {
+                delete.execute(params![
+                    self.account_id.as_str(),
+                    key.0.as_str(),
+                    key.1.as_str(),
+                ])?;
+            }
+            let mut upsert = tx.prepare_cached(
                 "INSERT INTO submissions (
                     account_id, generation, conversation_id, message_id, body, state_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(account_id, conversation_id, message_id) DO UPDATE SET
+                    generation = excluded.generation,
+                    body = excluded.body,
+                    state_json = excluded.state_json",
+            )?;
+            for item in &changed {
+                let state_json = serde_json::to_string(&submission_to_dto(&item.state))?;
+                upsert.execute(params![
                     item.account_id.as_str(),
                     item.generation.0,
                     item.conversation_id.as_str(),
                     item.message_id.as_str(),
                     item.body,
                     state_json,
-                ],
-            )?;
+                ])?;
+            }
         }
         tx.execute(
             "INSERT INTO journal_revisions (account_id, revision) VALUES (?1, ?2)
@@ -171,22 +196,41 @@ impl SessionStore {
         )?;
         tx.commit()?;
         journal.revision = next;
+        for key in &deleted {
+            journal.saved.remove(key);
+        }
+        for item in changed {
+            journal.saved.insert(
+                (item.conversation_id.clone(), item.message_id.clone()),
+                item,
+            );
+        }
         Ok(())
     }
 
     /// Recharge le journal validé du compte et sa révision dans la même lecture.
     /// Une base vide donne un journal vide.
     pub fn load_journal(&self) -> Result<StoredJournal, StoreError> {
-        let (journal, revision) = self.read_journal()?;
+        let (items, revision) = self.read_journal()?;
+        let saved = items
+            .iter()
+            .map(|item| {
+                (
+                    (item.conversation_id.clone(), item.message_id.clone()),
+                    item.clone(),
+                )
+            })
+            .collect();
         Ok(StoredJournal {
-            journal,
+            journal: Journal::from_committed(items),
             revision,
+            saved,
             account_id: self.account_id.clone(),
             database_path: self.database_path.clone(),
         })
     }
 
-    fn read_journal(&self) -> Result<(Journal, i64), StoreError> {
+    fn read_journal(&self) -> Result<(Vec<CommittedSubmission>, i64), StoreError> {
         let tx = self.connection.unchecked_transaction()?;
         let revision = journal_revision(&tx, &self.account_id)?;
         let mut statement = tx.prepare(
@@ -194,38 +238,14 @@ impl SessionStore {
              FROM submissions WHERE account_id = ?1
              ORDER BY conversation_id, message_id",
         )?;
-        let rows = statement.query_map(params![self.account_id.as_str()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-            ))
-        })?;
+        let rows = statement.query_map(params![self.account_id.as_str()], submission_columns)?;
         let mut items = Vec::new();
         for row in rows {
-            let (account_id, generation, conversation_id, message_id, body, state_json) = row?;
-            if generation < 0 {
-                return Err(StoreError::Invalid("génération négative".into()));
-            }
-            let dto: SubmissionStateDto = serde_json::from_str(&state_json)?;
-            let item = CommittedSubmission {
-                account_id: AccountId::new(account_id).map_err(|_| StoreError::empty_id())?,
-                generation: AccountGeneration(generation as u64),
-                conversation_id: ConversationId::new(conversation_id)
-                    .map_err(|_| StoreError::empty_id())?,
-                message_id: MessageId::new(message_id).map_err(|_| StoreError::empty_id())?,
-                body,
-                state: submission_from_dto(dto)?,
-            };
-            validate_submission(&item)?;
-            items.push(item);
+            items.push(submission_from_columns(row?)?);
         }
         drop(statement);
         tx.commit()?;
-        Ok((Journal::from_committed(items), revision))
+        Ok((items, revision))
     }
 
     /// Remplace l'image de cette conversation si sa révision n'a pas changé.
@@ -356,7 +376,44 @@ impl SessionStore {
 
     /// Soumissions validées, pour l'affichage. Ne rafraîchit pas la révision d'écriture.
     pub fn list_submissions(&self) -> Result<Vec<CommittedSubmission>, StoreError> {
-        Ok(self.read_journal()?.0.export_committed())
+        Ok(self.read_journal()?.0)
+    }
+
+    /// Soumissions validées d'une seule conversation, dans l'ordre des messages.
+    pub fn list_conversation_submissions(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<Vec<CommittedSubmission>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT account_id, generation, conversation_id, message_id, body, state_json
+             FROM submissions WHERE account_id = ?1 AND conversation_id = ?2
+             ORDER BY message_id",
+        )?;
+        let rows = statement.query_map(
+            params![self.account_id.as_str(), conversation.as_str()],
+            submission_columns,
+        )?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(submission_from_columns(row?)?);
+        }
+        Ok(items)
+    }
+
+    /// Plus haute génération enregistrée pour le compte, sans relire les soumissions.
+    pub fn latest_generation(&self) -> Result<Option<AccountGeneration>, StoreError> {
+        let latest: Option<i64> = self.connection.query_row(
+            "SELECT MAX(generation) FROM submissions WHERE account_id = ?1",
+            params![self.account_id.as_str()],
+            |row| row.get(0),
+        )?;
+        latest
+            .map(|generation| {
+                u64::try_from(generation)
+                    .map(AccountGeneration)
+                    .map_err(|_| StoreError::Invalid("génération négative".into()))
+            })
+            .transpose()
     }
 
     fn check_origin(&self, account: &AccountId, path: &Path) -> Result<(), StoreError> {
@@ -368,6 +425,39 @@ impl SessionStore {
         }
         Ok(())
     }
+}
+
+type SubmissionColumns = (String, i64, String, String, String, String);
+
+fn submission_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<SubmissionColumns> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
+}
+
+fn submission_from_columns(
+    (account_id, generation, conversation_id, message_id, body, state_json): SubmissionColumns,
+) -> Result<CommittedSubmission, StoreError> {
+    if generation < 0 {
+        return Err(StoreError::Invalid("génération négative".into()));
+    }
+    let dto: SubmissionStateDto = serde_json::from_str(&state_json)?;
+    let item = CommittedSubmission {
+        account_id: AccountId::new(account_id).map_err(|_| StoreError::empty_id())?,
+        generation: AccountGeneration(generation as u64),
+        conversation_id: ConversationId::new(conversation_id)
+            .map_err(|_| StoreError::empty_id())?,
+        message_id: MessageId::new(message_id).map_err(|_| StoreError::empty_id())?,
+        body,
+        state: submission_from_dto(dto)?,
+    };
+    validate_submission(&item)?;
+    Ok(item)
 }
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
@@ -422,6 +512,28 @@ fn journal_revision(connection: &Connection, account: &AccountId) -> Result<i64,
         Some(value) => Ok(value),
         None => Ok(0),
     }
+}
+
+/// `journal` doit être ordonné par clé, comme `saved`.
+fn diff_saved<'a>(
+    saved: &BTreeMap<SubmissionKey, CommittedSubmission>,
+    journal: impl Iterator<Item = &'a CommittedSubmission>,
+) -> (Vec<SubmissionKey>, Vec<CommittedSubmission>) {
+    let mut deleted = Vec::new();
+    let mut changed = Vec::new();
+    let mut rows = saved.iter().peekable();
+    for item in journal {
+        let key = (&item.conversation_id, &item.message_id);
+        while let Some((saved_key, _)) = rows.next_if(|(k, _)| (&k.0, &k.1) < key) {
+            deleted.push(saved_key.clone());
+        }
+        match rows.next_if(|(k, _)| (&k.0, &k.1) == key) {
+            Some((_, row)) if row == item => {}
+            _ => changed.push(item.clone()),
+        }
+    }
+    deleted.extend(rows.map(|(key, _)| key.clone()));
+    (deleted, changed)
 }
 
 fn validate_submission(item: &CommittedSubmission) -> Result<(), StoreError> {
@@ -722,6 +834,73 @@ mod tests {
     }
 
     #[test]
+    fn lister_une_conversation_ne_rend_que_ses_soumissions() {
+        let db = TestDatabase::new("liste-par-conversation");
+        let account = must_id(AccountId::new("alice"));
+        let mut store = open_store(&db.0, &account).unwrap();
+        let mut journal = Journal::new();
+        for (conversation, message, body) in [
+            ("conversation-a", "m1", "a-premier"),
+            ("conversation-b", "m1", "b-premier"),
+            ("conversation-a", "m2", "a-second"),
+        ] {
+            journal
+                .prepare(PreparedMessage {
+                    actor: AuthenticatedActor {
+                        account_id: account.clone(),
+                        generation: AccountGeneration(1),
+                        team_id: None,
+                    },
+                    conversation_id: must_id(ConversationId::new(conversation)),
+                    message_id: must_id(MessageId::new(message)),
+                    body: body.into(),
+                })
+                .unwrap();
+        }
+        save_fixture_journal(&mut store, &journal).unwrap();
+        let listed = store
+            .list_conversation_submissions(&must_id(ConversationId::new("conversation-a")))
+            .unwrap();
+        let bodies: Vec<_> = listed.iter().map(|item| item.body.as_str()).collect();
+        assert_eq!(bodies, ["a-premier", "a-second"]);
+        assert!(store
+            .list_conversation_submissions(&must_id(ConversationId::new("inconnue")))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn la_derniere_generation_est_celle_du_compte() {
+        let db = TestDatabase::new("latest-generation");
+        let alice = must_id(AccountId::new("alice"));
+        let bob = must_id(AccountId::new("bob"));
+        let mut store_alice = open_store(&db.0, &alice).unwrap();
+        let mut store_bob = open_store(&db.0, &bob).unwrap();
+        assert_eq!(store_alice.latest_generation().unwrap(), None);
+        for (store, account, generation) in
+            [(&mut store_alice, &alice, 4), (&mut store_bob, &bob, 9)]
+        {
+            let mut journal = journal_for(account, "first", "corps");
+            journal
+                .adopt_generation(&AuthenticatedActor {
+                    account_id: account.clone(),
+                    generation: AccountGeneration(generation),
+                    team_id: None,
+                })
+                .unwrap();
+            save_fixture_journal(store, &journal).unwrap();
+        }
+        assert_eq!(
+            store_alice.latest_generation().unwrap(),
+            Some(AccountGeneration(4))
+        );
+        assert_eq!(
+            store_bob.latest_generation().unwrap(),
+            Some(AccountGeneration(9))
+        );
+    }
+
+    #[test]
     fn meme_conversation_ne_partage_pas_la_replique_entre_comptes() {
         let db = TestDatabase::new("replica-isolation");
         let alice = must_id(AccountId::new("alice"));
@@ -796,6 +975,99 @@ mod tests {
             .execute("DROP TRIGGER reject_message", [])
             .unwrap();
         store.save_journal(&mut journal).unwrap();
+        assert_eq!(store.list_submissions().unwrap().len(), 2);
+    }
+
+    fn actor_for(account: &AccountId) -> AuthenticatedActor {
+        AuthenticatedActor {
+            account_id: account.clone(),
+            generation: AccountGeneration(1),
+            team_id: None,
+        }
+    }
+
+    fn prepare_in(journal: &mut StoredJournal, account: &AccountId, message: &str, body: &str) {
+        journal
+            .prepare(PreparedMessage {
+                actor: actor_for(account),
+                conversation_id: must_id(ConversationId::new("conversation")),
+                message_id: must_id(MessageId::new(message)),
+                body: body.into(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn un_message_retire_disparait_du_disque_apres_la_sauvegarde() {
+        let db = TestDatabase::new("discard-on-disk");
+        let account = must_id(AccountId::new("alice"));
+        let mut store = open_store(&db.0, &account).unwrap();
+        let mut image = store.load_journal().unwrap();
+        prepare_in(&mut image, &account, "one", "premier");
+        prepare_in(&mut image, &account, "two", "second");
+        store.save_journal(&mut image).unwrap();
+        assert_eq!(store.list_submissions().unwrap().len(), 2);
+
+        image
+            .discard_undelivered(
+                &actor_for(&account),
+                &must_id(ConversationId::new("conversation")),
+                &must_id(MessageId::new("one")),
+            )
+            .unwrap();
+        store.save_journal(&mut image).unwrap();
+
+        let bodies: Vec<_> = store
+            .list_submissions()
+            .unwrap()
+            .into_iter()
+            .map(|item| item.body)
+            .collect();
+        assert_eq!(bodies, ["second"]);
+    }
+
+    #[test]
+    fn recharger_apres_plusieurs_sauvegardes_rend_exactement_l_image_en_memoire() {
+        let db = TestDatabase::new("save-round-trip");
+        let account = must_id(AccountId::new("alice"));
+        let conversation = must_id(ConversationId::new("conversation"));
+        let mut store = open_store(&db.0, &account).unwrap();
+        let mut image = store.load_journal().unwrap();
+        let assert_round_trip = |store: &SessionStore, image: &StoredJournal| {
+            assert_eq!(
+                store.load_journal().unwrap().export_committed(),
+                image.export_committed()
+            );
+        };
+
+        store.save_journal(&mut image).unwrap();
+        assert_round_trip(&store, &image);
+        prepare_in(&mut image, &account, "a", "alpha");
+        prepare_in(&mut image, &account, "b", "beta");
+        store.save_journal(&mut image).unwrap();
+        assert_round_trip(&store, &image);
+        image
+            .dispatch(
+                &actor_for(&account),
+                &conversation,
+                &must_id(MessageId::new("a")),
+                must_id(AttemptId::new("send-1")),
+            )
+            .unwrap();
+        prepare_in(&mut image, &account, "c", "gamma");
+        store.save_journal(&mut image).unwrap();
+        assert_round_trip(&store, &image);
+        image
+            .discard_undelivered(
+                &actor_for(&account),
+                &conversation,
+                &must_id(MessageId::new("b")),
+            )
+            .unwrap();
+        store.save_journal(&mut image).unwrap();
+        assert_round_trip(&store, &image);
+        store.save_journal(&mut image).unwrap();
+        assert_round_trip(&store, &image);
         assert_eq!(store.list_submissions().unwrap().len(), 2);
     }
 

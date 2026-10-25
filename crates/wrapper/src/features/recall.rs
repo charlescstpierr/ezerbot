@@ -914,7 +914,8 @@ fn start_summary(ctx: &Context<'_>, id: &str, manual: bool) -> Result<(), ApiErr
     Ok(())
 }
 fn spawn_summary(provider: Provider, path: PathBuf, id: String) {
-    std::thread::spawn(move || {
+    let owner = provider.clone();
+    owner.spawn_background(move || {
         let Ok(conn) = Connection::open(&path) else {
             return;
         };
@@ -1502,7 +1503,7 @@ pub fn tick(ctx: &Context<'_>) {
     NEXT_POLL.store(now + POLL_MS, Ordering::Release);
     let provider = ctx.provider.clone();
     let path = ctx.db_path.to_path_buf();
-    std::thread::spawn(move || {
+    ctx.provider.spawn_background(move || {
         struct Reset;
         impl Drop for Reset {
             fn drop(&mut self) {

@@ -610,7 +610,9 @@ pub(crate) fn startup(conn: &Connection) -> Result<(), ApiError> {
     mark_stopped(conn, None)
 }
 
-pub(crate) fn shutdown(conn: &Connection, db: &Path) {
+/// Arrête les tâches de fond de cette base. `Err` nomme celles qui n'ont pas fini dans les deux
+/// secondes : l'arrêt de l'application reste rapide, mais l'échec n'est plus silencieux.
+pub(crate) fn shutdown(conn: &Connection, db: &Path) -> Result<(), String> {
     let mine = {
         let mut tasks = registry().lock().unwrap_or_else(|error| error.into_inner());
         let keys: Vec<_> = tasks
@@ -632,9 +634,20 @@ pub(crate) fn shutdown(conn: &Connection, db: &Path) {
     {
         std::thread::sleep(Duration::from_millis(20));
     }
+    let unfinished = mine
+        .iter()
+        .filter(|task| !task.done.load(Ordering::SeqCst))
+        .count();
     if let Err(error) = mark_stopped(conn, None) {
         eprintln!("Arrêt des tâches de fond incomplet : {}", error.message);
     }
+    if unfinished > 0 {
+        return Err(format!(
+            "{unfinished} tâche(s) shell de fond n'ont pas fini deux secondes après leur arrêt : \
+             leur moniteur écrirait encore dans le dossier de l'application"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]

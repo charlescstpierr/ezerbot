@@ -637,6 +637,51 @@ fn deleting_a_thread_erases_its_images_but_keeps_one_another_thread_shows() {
 }
 
 #[test]
+fn a_live_page_keeps_a_deleted_thread_image_but_its_title_and_caption_job_do_not() {
+    let mut fixture = Fixture::new();
+    fixture.conversation("paged");
+    fixture.conversation("titled");
+    let paged = fixture.upload(PNG);
+    let titled = fixture.upload(&[PNG, b" titled"].concat());
+    let id = |image: &Value| image["id"].as_str().unwrap().to_owned();
+    let url = |image: &Value| image["url"].as_str().unwrap().to_owned();
+    fixture.send("paged", "image", "look", &[id(&paged)]);
+    fixture.send("titled", "image", "look", &[id(&titled)]);
+    let db = fixture.db();
+    db.execute("INSERT INTO bot_pages(id,bot_id,conversation_id,title,filename,source,status,preview,created_at,updated_at) VALUES ('page','grokbot','paged','Page','page.html',?1,'ready','',1,1)", [format!("<img src=\"{}\">", url(&paged))]).unwrap();
+    db.execute(
+        "UPDATE wrapper_conversations SET title=?1 WHERE id='titled'",
+        [id(&titled)],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO wrapper_attachment_jobs VALUES ('caption', ?1, 1)",
+        [
+            json!({"key": {"sha256": id(&titled).strip_prefix("attachment_").unwrap()}})
+                .to_string(),
+        ],
+    )
+    .unwrap();
+    for conversation in ["paged", "titled"] {
+        fixture.post("/api/conversations/delete", json!({"id": conversation}));
+    }
+    assert!(
+        fixture.app.api_response("GET", &url(&paged), &[]).is_ok(),
+        "a kept page still shows it"
+    );
+    assert_eq!(
+        fixture
+            .app
+            .api_response("GET", &url(&titled), &[])
+            .unwrap_err()
+            .status,
+        404
+    );
+    db.execute("DELETE FROM wrapper_attachment_jobs", [])
+        .unwrap();
+}
+
+#[test]
 fn legacy_retry_rows_gain_attempts_without_losing_existing_budgets() {
     let mut fixture = Fixture::new();
     fixture

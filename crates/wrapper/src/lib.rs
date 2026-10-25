@@ -5,6 +5,7 @@
 pub mod deep_links;
 mod fluidity;
 mod mcp;
+mod projection_hints;
 mod provider;
 mod upstream;
 

@@ -12,19 +12,18 @@ const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsa
 
 struct Host {
     child: Child,
-    directory: std::path::PathBuf,
     address: String,
+    _dir: grokbot_test_support::TestDir,
 }
 
 impl Host {
     fn new() -> Self {
-        let directory = std::env::temp_dir().join(format!("grokbot-assets-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
+        let directory = grokbot_test_support::TestDir::new("grokbot-assets");
         let child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
             .args(["--port", "0", "--db"])
             .arg(directory.join("app.sqlite"))
-            .env("HOME", &directory)
-            .env("CFFIXED_USER_HOME", &directory)
+            .env("HOME", directory.path())
+            .env("CFFIXED_USER_HOME", directory.path())
             .env_remove("GROKBOT_TEST_KEYCHAIN")
             .env_remove("GROKBOT_TEST_SIGNATURE_REQUIREMENT")
             .env_remove("GROKBOT_FAKE_OPENAI")
@@ -33,8 +32,8 @@ impl Host {
             .unwrap();
         let mut host = Self {
             child,
-            directory,
             address: String::new(),
+            _dir: directory,
         };
         let mut line = String::new();
         BufReader::new(host.child.stdout.take().unwrap())
@@ -98,7 +97,6 @@ impl Drop for Host {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
 

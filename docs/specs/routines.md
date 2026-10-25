@@ -100,6 +100,12 @@ Un groupe contient au moins deux déclencheurs simples et aucun groupe. Il part 
 
 L’horaire dans un groupe conserve la politique de rattrapage. Le webhook dans un groupe conserve Bearer, Funnel et l’idempotence.
 
+### Rien à signaler
+
+Un passage qui n'a rien de neuf ne fait aucun bruit. Le bot le dit lui-même en appelant l'outil `rien_a_signaler`, avant `complete_task` ; Ezerbot ne devine jamais à partir du texte de la réponse. L'outil n'est offert que dans un passage de routine (déclencheur occurrence) ; ailleurs il n'existe pas, et un appel direct est refusé.
+
+L'état vit sur l'occurrence : elle reste `done`, avec `quiet` vrai dans l'historique. Ce n'est pas un nouveau statut, car le `CHECK` sur `status` exigerait de refaire la table de chaque base existante ; la colonne est ajoutée comme les précédentes. Un passage quiet ne produit ni notification ni non-lu, garde ses tokens (`engine_response_usage`) et reste dans l'historique et dans le fil de la routine. Si le bot appelle l'outil puis écrit quand même une réponse, l'appel gagne : pas de notification. Un passage qui a appelé l'outil puis échoue notifie l'échec.
+
 ### Frontière de test
 
 Une seule frontière : la routine telle que le panneau, l’historique, le fil et le réglage d’agent la montrent. Les tests injectent l’horloge et le fait « le planificateur était censé tourner » à cette frontière. Ils n’ouvrent pas le parseur cron, déjà couvert, ni un second harnais. Le juge visuel rejoue les mêmes scénarios sur l’écran du Mac.

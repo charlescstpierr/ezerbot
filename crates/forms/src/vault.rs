@@ -87,6 +87,16 @@ pub struct Vault {
 }
 #[cfg(target_os = "macos")]
 mod keychain;
+#[cfg(debug_assertions)]
+std::thread_local! {
+    static READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// Reads of a vault's contents on this thread, file or keychain alike: what a test counts to
+/// show that one rendering reads the vault once (#328). Debug builds only.
+#[cfg(debug_assertions)]
+pub fn reads_on_this_thread() -> u64 {
+    READS.get()
+}
 // 0: explicit file-only library fixture; 1: host lacks a stable signer; 2: admitted.
 static OS_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -374,6 +384,8 @@ impl Vault {
     // Call only while holding VAULT_ACCESS and the companion-file lock. Parse
     // errors must not echo input: serde diagnostics can contain secret strings.
     fn read(&self) -> Result<Secrets> {
+        #[cfg(debug_assertions)]
+        READS.set(READS.get() + 1);
         #[cfg(target_os = "macos")]
         if let Some(target) = &self.keychain {
             return keychain::snapshot(self, target);

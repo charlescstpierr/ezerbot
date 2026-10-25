@@ -122,6 +122,50 @@ Le fichier ne contient ni texte de message, ni secret, ni identifiant brut.
 du fournisseur. Elles mesurent l'écart de l'estimation, sans régler
 `characters_per_token` ni `compaction_percent`.
 
+## Journal des tours
+
+Chaque tour terminé laisse une ligne dans la table `wrapper_turn_log` de la base de l’espace (`run_id`, `at_ms`, `entry`). `entry` est un JSON. Rien n’est envoyé hors du Mac. Réécrire le même tour remplace sa ligne.
+
+Par tour : `at_ms` (fin du tour, en ms), `bot_id`, `source` (chat, routine, group, delegation, bot_to_bot : la même règle que `/api/usage`), `turn` (empreinte de 16 caractères, la même que `turn=` dans `logs/engine.log`), `model`, `effort`, `status` et `turn_end`, `error_kind`, `duration_ms`, `model_calls`, `tool_calls`, `tokens` (`input`, `output`, `cached`, ou `null` si le fournisseur n’a rien mesuré) et `tools`.
+
+Par appel d’outil, dans l’ordre d’exécution : `name`, `started_ms`, `duration_ms`, `result` et `code`. La durée va de l’entrée de l’appel à l’écriture de son résultat. Un appel suspendu pour approbation est chronométré à sa reprise : l’attente humaine n’y est pas. Un appel jamais exécuté ou d’effet incertain n’a ni début ni durée (`null`). Le nom d’un outil MCP est `mcp_<connecteur>_<outil>`. Un nom qui vient du modèle n’est gardé que s’il tient en 64 octets de `A-Z a-z 0-9 _ . -` et si l’outil existe ; sinon il devient `-`.
+
+| `code` | `result` |
+| --- | --- |
+| `ok` | `ok` |
+| `failed`, `uncertain` | `erreur` |
+| `invalid_arguments`, `unknown_tool`, `follow_up_pending`, `approval_pending` | `refusé` |
+| `approval_denied` | `approbation refusée` |
+| `not_executed` | `annulé` |
+
+**Jamais dans le journal** : texte de message, argument, sortie ou raison d’un outil, secret du coffre, jeton, en-tête, `request_id`, titre de conversation. Que des compteurs, des codes fixes et des identifiants opaques.
+
+**Bornes.** Au plus 64 appels détaillés par tour (`tool_calls` garde le vrai total) et 20 000 tours : les plus anciens sont supprimés au-delà. L’écriture se fait après le commit du tour ; si elle échoue, le tour n’en est pas changé.
+
+**Rétention de 30 jours.** Les lignes plus vieilles sont supprimées au démarrage, puis une fois par jour. Aucune autre table n’est touchée.
+
+**Résumé d’une journée**, en heure locale du Mac (minuit à minuit, avec les changements d’heure) :
+
+```sh
+curl -s 'http://127.0.0.1:<port>/api/turns/summary?day=2026-10-24'
+grokbot-wrapper --turns-summary 2026-10-24 [--db chemin.sqlite]
+```
+
+La route et la commande renvoient le même JSON ; un jour qui n’est pas `AAAA-MM-JJ` donne une erreur 400 (code de sortie 1 en ligne de commande).
+
+- `turns` : nombre de tours du jour.
+- `tokens` : `input`, `output`, `cached` sur les tours mesurés, et `unmeasured_turns` pour les autres (jamais comptés comme zéro).
+- `most_used` : `name` et `calls`, du plus appelé au moins appelé.
+- `slowest` : `name`, `calls` chronométrés, `median_ms` et `p95_ms`, du plus lent au plus rapide selon `p95_ms`.
+- `errors` : `name`, `code` et `count` pour tout résultat autre que `ok`.
+
+Médiane et p95 se calculent au rang le plus proche : sur `n` durées triées, la valeur de rang `ceil(n × p ÷ 100)` (p = 50 ou 95). Les égalités se départagent par nom, puis par code.
+
+```sh
+cargo test -p grokbot-wrapper --test turns
+cargo test -p grokbot-engine run_loop
+```
+
 ## Évaluation sur faux serveur (opt-in)
 
 Le [lanceur d’évaluation — étape A](evaluation.md) rejoue un scénario de messages dans un espace neuf marqué, impose un plafond d’appels et écrit uniquement des chiffres dans `target/eval/`. Il ne se connecte à aucun compte réel.

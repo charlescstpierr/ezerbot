@@ -69,13 +69,13 @@ class TokenEstimateReportTests(unittest.TestCase):
         self.assertEqual([r["estimated_tokens"] for r in first["responses"]], [100.0, 50.0, 125.0])
         stats = first["signed_error"]
         self.assertEqual(stats["n"], 3)
-        self.assertEqual(stats["mean"], -0.083333)
+        self.assertEqual(stats["mean"], -0.0833333)
         self.assertEqual(stats["median"], 0.0)
         self.assertAlmostEqual(stats["pstdev"], 0.311805, places=6)
         self.assertEqual((stats["min"], stats["max"], stats["worst"]), (-0.5, 0.25, -0.5))
         self.assertEqual(stats["underestimates"], 1)
         with_tools = first["signed_error_with_tools"]
-        self.assertEqual(with_tools["mean"], 0.016667)
+        self.assertEqual(with_tools["mean"], 0.0166667)
         self.assertEqual(with_tools["median"], 0.1)
         self.assertEqual((with_tools["min"], with_tools["max"], with_tools["worst"]), (-0.4, 0.35, -0.4))
         self.assertEqual(second["signed_error"]["worst"], 0.25)
@@ -104,6 +104,12 @@ class TokenEstimateReportTests(unittest.TestCase):
         self.assertEqual(report["conversations"][0]["signed_error"]["n"], 0)
         self.assertIsNone(report["conversations"][0]["signed_error"]["mean"])
         self.assertEqual(report["global"]["signed_error"]["underestimates"], 0)
+
+    def test_an_underestimate_smaller_than_the_display_precision_still_counts(self):
+        self.response("conversation-secret-a", 600_000, 2_399_999, 0)
+        signed = build_report(self.conn)["global"]["signed_error"]
+        self.assertEqual(signed["underestimates"], 1)
+        self.assertLess(signed["min"], 0)
 
     def test_report_states_that_tool_definitions_are_not_counted(self):
         report = build_report(self.conn)

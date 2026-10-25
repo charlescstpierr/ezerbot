@@ -40,7 +40,8 @@ SYNTHETIC_NOTICE = (
 
 
 def rounded(value):
-    return round(value, DIGITS)
+    # Significant digits: a tiny underestimate must keep its sign on display.
+    return float(f"{value:.{DIGITS}g}")
 
 
 def summarize(errors):
@@ -99,10 +100,10 @@ def build_report(conn, synthetic=False):
             "input_tokens": inputs,
             "context_characters": characters,
             "tool_characters": tools,
-            "estimated_tokens": rounded(estimated),
-            "signed_error": rounded((estimated - inputs) / inputs),
-            "signed_error_with_tools": rounded((with_tools - inputs) / inputs),
-            "tool_share": rounded(tools / per_token / inputs),
+            "estimated_tokens": estimated,
+            "signed_error": (estimated - inputs) / inputs,
+            "signed_error_with_tools": (with_tools - inputs) / inputs,
+            "tool_share": tools / per_token / inputs,
         })
     for conversation, count in conn.execute(
         "SELECT conversation_id, COUNT(*) FROM engine_summaries "
@@ -118,6 +119,11 @@ def build_report(conn, synthetic=False):
         item.update(statistics_of(item["responses"]))
         everything.extend(item["responses"])
         items.append(item)
+    report_global = statistics_of(everything)
+    # Round for display only after the statistics, so a tiny underestimate stays negative.
+    for response in everything:
+        for key in ("estimated_tokens", "signed_error", "signed_error_with_tools", "tool_share"):
+            response[key] = rounded(response[key])
     report = {
         "schema_version": 1,
         "source": "engine_response_usage (réponses principales seulement)",
@@ -126,7 +132,7 @@ def build_report(conn, synthetic=False):
         "notice": NOTICE,
         "signed_error_definition": "(tokens estimés - tokens réels) / tokens réels ; négatif = sous-estimation",
         "unmeasured_responses": unmeasured,
-        "global": statistics_of(everything),
+        "global": report_global,
         "conversations": items,
     }
     if synthetic:

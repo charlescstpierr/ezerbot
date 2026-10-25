@@ -80,6 +80,17 @@ fn is_main_request(body: &Value) -> bool {
         && !instructions.contains("Tu écris le titre")
 }
 
+fn sent_text(body: &Value) -> i64 {
+    body["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|part| part["text"].as_str())
+        .map(|text| text.chars().count() as i64)
+        .sum()
+}
+
 fn long_message(conversation: usize, turn: usize) -> String {
     let marker = format!("PRIVATE-ESTIMATE-LONG-{conversation}-{turn} ");
     let mut text = marker;
@@ -116,9 +127,11 @@ fn varied_conversations_report_the_trigger_estimate_against_counted_tokens() {
         .ok()
         .map(|command| Mutex::new(Counter::spawn(&command)));
     let returned = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let observed = Arc::new(Mutex::new(Vec::<(i64, i64)>::new()));
     let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
     {
         let returned = returned.clone();
+        let observed = observed.clone();
         let counter = counter.map(Arc::new);
         server.seen.lock().unwrap().reply_for = Some(Arc::new(move |body: &Value| {
             if !is_main_request(body) {
@@ -130,6 +143,10 @@ fn varied_conversations_report_the_trigger_estimate_against_counted_tokens() {
                 None => body.to_string().chars().count() as u64 / 5 + 17,
             };
             returned.lock().unwrap().push(input_tokens);
+            observed.lock().unwrap().push((
+                body["tools"].to_string().chars().count() as i64,
+                sent_text(body),
+            ));
             Some(ScriptedResponse::events(&[
                 json!({"type":"response.created"}),
                 json!({"type":"response.output_text.delta","delta":"Bien reçu, je continue."}),
@@ -280,6 +297,32 @@ fn varied_conversations_report_the_trigger_estimate_against_counted_tokens() {
         assert!(
             tools.is_some_and(|t| t > 0),
             "tool definitions are sent and measured"
+        );
+    }
+    let observed = observed.lock().unwrap().clone();
+    for ((_, _, characters, _, tools), (sent_tools, sent_texts)) in rows.iter().zip(&observed) {
+        assert_eq!(
+            *tools,
+            Some(*sent_tools),
+            "tool_characters is the tools array the provider received"
+        );
+        assert!(
+            characters.unwrap() >= *sent_texts,
+            "the estimate covers every message text sent: {characters:?} < {sent_texts}"
+        );
+    }
+    const STEADY: usize = 3;
+    let first = turns[..STEADY].iter().sum::<usize>();
+    let steady: Vec<i64> = rows[first..][..turns[STEADY]]
+        .iter()
+        .map(|r| r.2.unwrap())
+        .collect();
+    for (turn, pair) in steady.windows(2).enumerate() {
+        let added =
+            sent[first + turn + 1].chars().count() + "Bien reçu, je continue.".chars().count();
+        assert!(
+            pair[1] - pair[0] >= added as i64,
+            "an uncompacted turn grows the estimate by at least its new texts: {steady:?}"
         );
     }
     for column in [

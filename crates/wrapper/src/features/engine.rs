@@ -2108,7 +2108,14 @@ fn context_estimate(
     Ok(ContextEstimate {
         characters: characters as u64,
         characters_per_token: budget.characters_per_token as u64,
-        tool_characters: serde_json::to_string(tools)?.chars().count() as u64,
+        // Exactly the `tools` array of the Responses body; absent when empty.
+        tool_characters: if tools.is_empty() {
+            0
+        } else {
+            serde_json::to_string(&crate::gateway::wire_tools(tools))?
+                .chars()
+                .count() as u64
+        },
     })
 }
 impl RunGatewayCall<'_> {
@@ -4010,14 +4017,14 @@ mod estimate_tests {
             + "Règles.".chars().count();
         assert_eq!(without.characters, documented as u64);
         assert_eq!(with.characters, without.characters);
-        assert_eq!(without.tool_characters, "[]".len() as u64);
-        assert_eq!(
-            with.tool_characters,
-            serde_json::to_string(&[tool("lire"), tool("écrire")])
-                .unwrap()
-                .chars()
-                .count() as u64
-        );
+        assert_eq!(without.tool_characters, 0);
+        let sent = r#"[{"description":"Lit un fait.","name":"lire","parameters":{"type":"object"},"strict":false,"type":"function"},{"description":"Lit un fait.","name":"écrire","parameters":{"type":"object"},"strict":false,"type":"function"}]"#;
+        assert_eq!(with.tool_characters, sent.chars().count() as u64);
+        let mut gated = tool("lire");
+        gated.requires_approval = true;
+        let unsent =
+            context_estimate(&history, "Règles.", None, &[gated, tool("écrire")], &budget).unwrap();
+        assert_eq!(unsent.tool_characters, with.tool_characters);
         assert_eq!(with.characters_per_token, 4);
     }
 

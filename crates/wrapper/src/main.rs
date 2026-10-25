@@ -191,8 +191,8 @@ impl Encoding {
 /// The coding an Accept-Encoding value picks among the variants an asset has:
 /// the highest weight wins, Brotli then gzip break a tie, and a variant must weigh at
 /// least as much as an explicit `identity` weight. When every coding is refused the
-/// body still goes out as identity. An explicit coding
-/// beats `*`; q=0 refuses; an unreadable weight counts as a refusal.
+/// body still goes out as identity. An explicit coding beats `*`; q=0 refuses; an
+/// unreadable weight counts as a refusal.
 fn negotiate(accept_encoding: Option<&str>, available: &[Encoding]) -> Encoding {
     let mut explicit: [Option<f32>; 3] = [None, None, None];
     let mut wildcard = None;

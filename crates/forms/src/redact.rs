@@ -544,4 +544,27 @@ mod tests {
         std::fs::write(test.vault.path(), b"broken").unwrap();
         assert!(held.settled().is_err());
     }
+
+    #[test]
+    fn a_stable_hold_reads_its_vault_once_and_still_sees_another_handle_write() {
+        let test = TestVault::new();
+        test.vault.set("TOKEN", "", "private-value").unwrap();
+        let reads = crate::vault::reads_on_this_thread();
+        let held = hold();
+        let patterns = app_patterns(test.vault.path()).unwrap();
+        assert_eq!(patterns.text("private-value").unwrap(), MASK);
+        assert_eq!(redact(&test.vault, "private-value").unwrap(), MASK);
+        assert!(held.settled().unwrap());
+        assert_eq!(crate::vault::reads_on_this_thread() - reads, 1);
+        let held = hold();
+        app_patterns(test.vault.path()).unwrap();
+        crate::vault::Vault::open(test.vault.path())
+            .unwrap()
+            .set("TOKEN", "", "private-valuf")
+            .unwrap();
+        assert!(
+            !held.settled().unwrap(),
+            "a secret replaced by one of the same length"
+        );
+    }
 }

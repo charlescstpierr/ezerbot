@@ -4301,8 +4301,9 @@ mod captures {
         }
     }
     /// One `/api/state` with `results` finished subtasks of `captures` captures each: what it
-    /// shows, its vault reads and its capture lookups.
-    fn measured_state(results: usize, captures: usize) -> (Value, u64, usize) {
+    /// shows, its vault reads, its capture lookups, and the vault reads of the subtask cards
+    /// alone (`delegation::state`, rendered again on their own).
+    fn measured_state(results: usize, captures: usize) -> (Value, u64, usize, u64) {
         let mut f = Fixture::new(false);
         let root = f.root("lot");
         let vault = Vault::open(&f.path.with_extension("secrets.json")).unwrap();
@@ -4316,14 +4317,23 @@ mod captures {
         drop(lookups);
         assert_eq!(shown_captures(&state), results * captures);
         assert!(!state.to_string().contains("Page remplie"));
-        (state, reads, looked)
+        let before = grokbot_forms::vault::reads_on_this_thread();
+        let cards = features::delegation::state(&f.app.feature_context());
+        let cards_reads = grokbot_forms::vault::reads_on_this_thread() - before;
+        assert_eq!(cards, state["delegation"]);
+        (state, reads, looked, cards_reads)
     }
 
     #[test]
-    fn a_state_read_of_fifty_results_of_four_captures_reads_the_vault_as_often_as_with_one() {
-        let (_, one, _) = measured_state(1, 4);
-        let (_, fifty, looked) = measured_state(50, 4);
-        eprintln!("50 résultats × 4 captures : {fifty} lectures du coffre (1 résultat : {one}), {looked} requêtes de résolution");
+    fn a_state_read_of_fifty_results_of_four_captures_reads_the_vault_once_for_their_cards() {
+        let (_, one, _, cards_of_one) = measured_state(1, 4);
+        let (_, fifty, looked, cards) = measured_state(50, 4);
+        eprintln!("50 résultats × 4 captures : {fifty} lectures du coffre (1 résultat : {one}), cartes seules : {cards} (1 résultat : {cards_of_one}), {looked} requêtes de résolution");
+        assert_eq!(
+            (cards, cards_of_one),
+            (1, 1),
+            "les cartes des sous-tâches lisent le coffre plus d'une fois"
+        );
         assert_eq!(
             fifty, one,
             "la lecture d'état relit le coffre par résultat ou par capture"
@@ -4332,8 +4342,8 @@ mod captures {
 
     #[test]
     fn resolving_the_captures_of_a_state_read_costs_as_many_queries_with_one_or_four_per_result() {
-        let (_, _, one) = measured_state(10, 1);
-        let (_, _, four) = measured_state(10, 4);
+        let (_, _, one, _) = measured_state(10, 1);
+        let (_, _, four, _) = measured_state(10, 4);
         eprintln!("10 résultats : {one} requêtes à 1 capture, {four} à 4 captures");
         assert_eq!(one, four, "chaque capture coûte ses requêtes");
     }

@@ -45,9 +45,12 @@ jobs:
       - name: cargo test --workspace
         run: cargo test --workspace --locked --no-fail-fast
       - name: npm ci (app/web)
+        if: ${{ !cancelled() }}
         working-directory: app/web
         run: npm ci --no-audit --no-fund
       - name: node --test app/web
+        if: ${{ !cancelled() }}
         run: node --test app/web/src/*.test.js
       - name: node --test app/ui
+        if: ${{ !cancelled() }}
         run: node --test app/ui/*.test.cjs app/ui/panels/*.test.cjs

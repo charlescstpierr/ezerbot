@@ -774,7 +774,11 @@ fn timeout_output_cap_and_cancel_kill_background_process_group() {
     let out = f.outcome("truncate");
     assert_eq!(out["output"]["truncated"], true);
     assert!(out["output"]["stdout"].as_str().unwrap().len() <= 1024);
-    let mut args = f.shell("(sleep 1; touch timeout-leak) & wait");
+    // A descendant that outlives the kill would write once the test says so,
+    // after the timeout or the cancel: never before, whatever the load.
+    let mut args = f.shell(
+        "(until [ -e go-timeout ]; do sleep 0.05; done; touch timeout-leak) & wait",
+    );
     args["timeout_ms"] = json!(100);
     f.send("timeout", "run_shell", args);
     let r = f.request("timeout");
@@ -784,7 +788,9 @@ fn timeout_output_cap_and_cancel_kill_background_process_group() {
     f.send(
         "cancel",
         "run_shell",
-        f.shell("(sleep 1; touch cancel-leak) & echo ready; wait"),
+        f.shell(
+            "(until [ -e go-cancel ]; do sleep 0.05; done; touch cancel-leak) & echo ready; wait",
+        ),
     );
     let r = f.request("cancel");
     f.decide(&r, json!("allow_once"));
@@ -810,6 +816,8 @@ fn timeout_output_cap_and_cancel_kill_background_process_group() {
     );
     f.finish("cancel");
     assert!(start.elapsed() < Duration::from_secs(1));
+    std::fs::write(f.root().join("go-timeout"), "").unwrap();
+    std::fs::write(f.root().join("go-cancel"), "").unwrap();
     std::thread::sleep(Duration::from_millis(1100));
     assert!(!f.root().join("cancel-leak").exists());
     assert!(!f.root().join("timeout-leak").exists());

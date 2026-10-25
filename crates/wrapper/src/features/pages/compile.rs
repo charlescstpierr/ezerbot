@@ -1242,6 +1242,34 @@ mod tests {
         compile(&source).map(|page| page.preview)
     }
 
+    fn preview_of(body: &str) -> String {
+        let source = format!("export default function Page() {{ return ({body}); }}");
+        compile(&source).expect("une Page valide").preview
+    }
+
+    #[test]
+    fn the_preview_breaks_at_every_block_and_stays_glued_inside_inline_text() {
+        let blocks = [
+            "<table><tbody><tr><td>Confort</td><td>19 €</td></tr></tbody></table>",
+            "<ul><li>Confort</li><li>19 €</li></ul>",
+            "<div><h1>Confort</h1><p>19 €</p></div>",
+            "<article><div>Confort</div><div>19 €</div></article>",
+        ];
+        for body in blocks {
+            let preview = preview_of(body);
+            assert_eq!(
+                preview.split_whitespace().collect::<Vec<_>>(),
+                ["Confort", "19", "€"],
+                "{body} : {preview:?}"
+            );
+            assert!(!preview.contains("Confort19"), "{body} : {preview:?}");
+        }
+        let inline = preview_of(
+            "<p>Con<strong>for</strong><em>t</em><span> 19</span><button>€</button></p>",
+        );
+        assert!(inline.contains("Confort 19€"), "{inline:?}");
+    }
+
     #[test]
     fn string_escapes_are_decoded() {
         let preview =

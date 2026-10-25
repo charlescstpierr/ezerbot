@@ -649,6 +649,124 @@ fn a_passage_across_two_cells_or_blocks_is_accepted_and_stored_as_sent() {
 }
 
 #[test]
+fn blanks_are_collapsed_never_removed_when_the_passage_is_checked() {
+    let mut f = after_first_page();
+    let page = f.page();
+    let chat = f.chat.clone();
+    for (n, passage) in [
+        "Con fort",
+        "Confort 1 9 €",
+        "Confort19 €",
+        "Confort 99 €",
+        "Essentiel Choisir",
+        "Conf ort\t19 €",
+        "Offre choisie: Essentiel",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("espace-refuse-{n}");
+        let error = f
+            .send_in(&chat, &id, Some(Fixture::anchor(&page, passage)))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("n’apparaît pas"),
+            "{passage:?} : {error}"
+        );
+        assert!(!f.has_message(&chat, &id), "{passage:?}");
+    }
+    assert_eq!(f.page()["anchors"], json!([]));
+    for (n, passage) in [
+        "Confort",
+        "Confort 19 €",
+        "Confort\t19 €",
+        "  Confort \n\t 19   €\n",
+        "Offre   choisie\n: Essentiel",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("espace-accepte-{n}");
+        f.answer(None);
+        f.send_in(&chat, &id, Some(Fixture::anchor(&page, passage)))
+            .unwrap_or_else(|error| panic!("{passage:?} : {error}"));
+        f.finish(&id);
+        assert_eq!(f.page()["anchors"][n]["passage"], passage.trim());
+    }
+}
+
+#[test]
+fn the_preview_marks_each_cell_and_block_and_keeps_inline_text_glued() {
+    let mut f = Fixture::new();
+    let source = "export default function Page() {\n  return (\n    <article>\n      <h1>Forfaits</h1>\n      <table><tbody><tr><td>Confort</td><td>19 €</td></tr></tbody></table>\n      <p>Con<strong>for</strong><span>t</span> 21 €</p>\n    </article>\n  );\n}\n";
+    f.write("ecrit", source);
+    let preview = f.page()["preview"].as_str().unwrap().to_owned();
+    let words: Vec<_> = preview.split_whitespace().collect();
+    assert_eq!(words.join(" "), "Forfaits Confort 19 € Confort 21 €", "{preview:?}");
+    assert!(!preview.contains("Confort19"), "{preview:?}");
+    assert!(preview.contains("Confort 21 €"), "{preview:?}");
+}
+
+#[test]
+fn a_page_stored_with_the_old_glued_preview_is_rebuilt_when_the_app_opens() {
+    let mut f = after_first_page();
+    let page = f.page();
+    let id = page["id"].as_str().unwrap().to_owned();
+    let current = page["preview"].as_str().unwrap().to_owned();
+    assert!(!current.contains("Confort19 €"), "{current:?}");
+    let glued: String = current.split_whitespace().collect();
+    f.db()
+        .execute(
+            "UPDATE bot_pages SET preview = ?2 WHERE id = ?1",
+            rusqlite::params![id, glued],
+        )
+        .unwrap();
+    let chat = f.chat.clone();
+    let error = f
+        .send_in(&chat, "colle", Some(Fixture::anchor(&page, "Confort\t19 €")))
+        .unwrap_err();
+    assert!(error.to_string().contains("n’apparaît pas"), "{error}");
+    f.reopen();
+    assert_eq!(f.page()["preview"], current.as_str());
+    f.answer(None);
+    f.send_in(&chat, "rebati", Some(Fixture::anchor(&page, "Confort\t19 €")))
+        .unwrap();
+    f.finish("rebati");
+    f.reopen();
+    assert_eq!(f.page()["preview"], current.as_str(), "une deuxième ouverture ne change rien");
+}
+
+#[test]
+fn a_two_cell_anchor_survives_a_restart_and_its_resend_unchanged() {
+    let mut f = after_first_page();
+    let page = f.page();
+    f.answer(None);
+    let chat = f.chat.clone();
+    f.send_in(&chat, "cellules", Some(Fixture::anchor(&page, "Confort\t19 €")))
+        .unwrap();
+    f.finish("cellules");
+    let kept = f.page()["anchors"].clone();
+    f.reopen();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let shown = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == chat.as_str())
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "cellules")
+        .unwrap()["payload"]["page_anchor"]
+        .clone();
+    assert_eq!(shown["passage"], "Confort\t19 €");
+    let rebuilt = json!({"page_id": shown["page_id"], "source_version": shown["source_version"], "passage": shown["passage"]});
+    f.send_in(&chat, "cellules", Some(rebuilt)).unwrap();
+    assert_eq!(f.page()["anchors"], kept);
+}
+
+#[test]
 fn deleting_the_conversation_deletes_its_anchors() {
     let mut f = after_first_page();
     let page = f.page();

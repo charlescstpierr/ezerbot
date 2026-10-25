@@ -391,7 +391,7 @@ test("une navigation refusée pendant une réponse prévient au lieu d’affiche
 const cell = (text) => ({ type: "element", tag: "td", children: [{ type: "text", text }] });
 const forfaits = {
   id: "page_forfaits", bot_id: "grokbot", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "ready", diagnostic: null,
-  preview: `Trois forfaitsForfait A9 €Forfait B19 €Forfait C29 €${"long ".repeat(100)}fin${"é".repeat(501)}${"😀".repeat(501)}${"a".repeat(500)}\uFEFFabc`, source_version: "a".repeat(64),
+  preview: `Trois forfaits Forfait A 9 € Forfait B 19 € Forfait C 29 € ${"long ".repeat(100)}fin${"é".repeat(501)}${"😀".repeat(501)}${"a".repeat(500)}\uFEFFabc`, source_version: "a".repeat(64),
   document: { states: [], view: { type: "element", tag: "article", children: [
     { type: "element", tag: "h1", children: [{ type: "text", text: "Trois forfaits" }] },
     { type: "element", tag: "table", children: [{ type: "element", tag: "tbody", children: [
@@ -601,6 +601,18 @@ test("une sélection sur plusieurs cellules et paragraphes donne le bouton et pa
   assert.equal(comment.hidden, false);
   comment.click();
   assert.equal(anchor().page_anchor.passage, "Trois forfaits\n\nForfait A\t9 €\nForfait B");
+});
+
+test("les blancs sont réduits à un espace, jamais supprimés : un blanc dans un mot, ou absent entre deux cellules, ne donne pas de bouton", async () => {
+  const { comment, select } = await openForfaits();
+  for (const refused of ["For fait B", "Forfait B 1 9 €", "Forfait B19 €", "Forfait B 99 €", "Forfait B\t1 9 €", "Forfait A 19 €", "Forfait A\tForfait B", "Forfait B 19 € Forfait C29 €"]) {
+    select(refused);
+    assert.equal(comment.hidden, true, JSON.stringify(refused));
+  }
+  for (const accepted of ["Forfait B", "Forfait B 19 €", "Forfait B\t19 €", "  Forfait B \n\t 19   €\n", "Forfait   B", "Trois forfaits\n\nForfait A\t9 €", "Forfait A\t9 €\nForfait B\t19 €"]) {
+    select(accepted);
+    assert.equal(comment.hidden, false, JSON.stringify(accepted));
+  }
 });
 
 test("un texte changé par l’état interactif de la Page, absent de l’aperçu que contrôle le moteur, ne donne pas de bouton", async () => {

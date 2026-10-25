@@ -31,7 +31,7 @@ BODY = "Peux-tu m'aider à préparer la réunion de demain ? " * 4
 
 
 def req(port, method, path, body=None, raw=None):
-    c = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=300)
     h = {"Host": f"127.0.0.1:{port}"}
     if method != "GET":
         h.update({"X-Grokbot-Request": "local", "Origin": f"http://127.0.0.1:{port}"})

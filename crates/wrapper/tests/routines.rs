@@ -3928,3 +3928,171 @@ fn a_start_from_before_a_resume_is_not_caught_up_and_a_new_trigger_starts_from_i
         .collect();
     assert_eq!(made, vec![edited_at + 1_000]);
 }
+
+// « Rien à signaler » (#286) : seul l'appel de l'outil compte, jamais le texte de la réponse.
+const QUIET: &str = "rien_a_signaler";
+fn complete_with_usage() -> Value {
+    json!({"type":"response.completed","response":{"usage":{"input_tokens":123,"output_tokens":45,"input_tokens_details":{"cached_tokens":0}}}})
+}
+fn done(summary: &str) -> Value {
+    call("done", "complete_task", json!({"summary":summary}))
+}
+impl Fixture {
+    /// One routine pass: the model answers with `calls`, which carry 123 + 45 tokens.
+    fn pass(&mut self, prompt: &str, calls: Vec<Value>) -> Routine {
+        let r = self.create(prompt);
+        self.events([calls, vec![complete_with_usage()]].concat());
+        self.events(vec![complete()]);
+        self.tick_due(&r);
+        self.wait_run(&r);
+        r
+    }
+    fn notifications(&mut self) -> Value {
+        self.app.api("GET", "/api/notifications", b"").unwrap()
+    }
+    fn occurrence(&mut self, r: &Routine) -> Value {
+        self.history(r)["occurrences"][0].clone()
+    }
+    fn offered(&self, tool: &str) -> bool {
+        let seen = self.server.seen.lock().unwrap();
+        seen.bodies.iter().any(|body| {
+            body["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|t| t["name"] == tool))
+        })
+    }
+}
+
+#[test]
+fn a_pass_with_nothing_to_report_makes_no_notification_nor_unread_and_keeps_its_tokens() {
+    let mut f = Fixture::new(true);
+    let r = f.pass(
+        "Surveille",
+        vec![call("quiet", QUIET, json!({})), done("Rien de neuf")],
+    );
+    let n = f.notifications();
+    assert_eq!(n["unread"], 0);
+    assert_eq!(n["items"], json!([]));
+    let o = f.occurrence(&r);
+    assert_eq!(o["status"]["status"], "done");
+    assert_eq!(o["quiet"], true);
+    let tokens: (i64, i64) = f.db().query_row(
+        "SELECT SUM(input_tokens),SUM(output_tokens) FROM engine_response_usage WHERE run_id=?1",
+        [f.run(&r).run_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap();
+    assert_eq!(tokens, (123, 45));
+    let usage = f.app.api("GET", "/api/usage", b"").unwrap();
+    let routine = usage["local"]["by_source"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["source"] == "routine")
+        .unwrap();
+    assert_eq!(routine["tokens"]["input_tokens"], 123);
+}
+
+#[test]
+fn a_pass_with_a_result_notifies_as_before() {
+    let mut f = Fixture::new(true);
+    let r = f.pass("Surveille", vec![done("Trois nouveaux courriels")]);
+    let n = f.notifications();
+    assert_eq!(n["unread"], 1);
+    assert_eq!(n["items"][0]["kind"], "routine");
+    assert_eq!(n["items"][0]["title"], "Routine terminée");
+    assert_eq!(f.occurrence(&r)["quiet"], false);
+}
+
+#[test]
+fn the_tool_call_wins_over_a_reply_written_anyway() {
+    let mut f = Fixture::new(true);
+    let r = f.pass(
+        "Surveille",
+        vec![
+            call("quiet", QUIET, json!({})),
+            json!({"type":"response.output_text.delta","delta":"Finalement, voici un long rapport."}),
+            done("Voici un rapport"),
+        ],
+    );
+    let n = f.notifications();
+    assert_eq!(
+        (n["unread"].clone(), n["items"].clone()),
+        (json!(0), json!([]))
+    );
+    let o = f.occurrence(&r);
+    assert_eq!(o["quiet"], true);
+    // The words stay in the routine's own conversation, like any pass.
+    assert_eq!(o["message_id"], format!("reply-{}", f.run(&r).run_id));
+}
+
+#[test]
+fn text_alone_never_makes_a_pass_quiet() {
+    let mut f = Fixture::new(true);
+    let r = f.pass(
+        "Surveille",
+        vec![
+            json!({"type":"response.output_text.delta","delta":"Rien à signaler."}),
+            done("Rien à signaler"),
+        ],
+    );
+    assert_eq!(f.notifications()["unread"], 1);
+    assert_eq!(f.occurrence(&r)["quiet"], false);
+}
+
+#[test]
+fn a_quiet_pass_that_then_fails_still_notifies_the_failure() {
+    let mut f = Fixture::new(true);
+    let r = f.pass("Surveille", vec![call("quiet", QUIET, json!({}))]);
+    assert_eq!(f.occurrence(&r)["status"]["status"], "failed");
+    let n = f.notifications();
+    assert_eq!(n["unread"], 1);
+    assert_eq!(n["items"][0]["title"], "Échec de la routine");
+}
+
+#[test]
+fn outside_a_routine_the_tool_is_not_offered_and_is_refused() {
+    let mut f = Fixture::new(true);
+    let conv = f.post("/api/conversations", json!({"title":"Principal"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.events(vec![complete()]);
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conv,"message_id":"hello","body":"Bonjour"}),
+    );
+    let db = f.db();
+    let chat = Trigger::UserMessage {
+        message_id: format!("{conv}/hello"),
+        attempt: 0,
+    };
+    wait("chat finished", || {
+        store::latest_run_for_trigger(&db, &chat)
+            .unwrap()
+            .is_some_and(|run| run.status.is_terminal())
+    });
+    assert!(!f.offered(QUIET));
+    let run = store::latest_run_for_trigger(&db, &chat).unwrap().unwrap();
+    let tx = features::write_transaction(&db).unwrap();
+    let mut ctx = f.app.feature_context();
+    ctx.connection = &tx;
+    ctx.bot_id = Some("grokbot");
+    ctx.conversation_id = Some(&conv);
+    ctx.run_id = Some(&run.run_id);
+    let outcome = features::call_tool(
+        &ctx,
+        &ToolCall {
+            call_id: "quiet".into(),
+            name: QUIET.into(),
+            arguments: json!({}),
+        },
+    );
+    tx.commit().unwrap();
+    assert!(
+        matches!(outcome, Some(ToolOutcome::Failed { .. })),
+        "{outcome:?}"
+    );
+    f.pass("Surveille", vec![done("Fini")]);
+    assert!(f.offered(QUIET));
+}

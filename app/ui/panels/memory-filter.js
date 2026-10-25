@@ -64,7 +64,9 @@
       clear.hidden = !ids;
       return ids;
     }
-    return { element, state, sync };
+    // Efface la recherche et les filtres (sans les relire : l'appelant repeint) : un écran ouvert pour des souvenirs précis ne les cache pas derrière un filtre d'avant.
+    const reset = () => { search.value = bot.value = scope.value = ""; Object.assign(state, { q: "", bot: "", scope: "" }); };
+    return { element, state, sync, reset };
   }
   window.EzerbotMemoryFilter = { normalize, filtre, botChoices, create };
 })();

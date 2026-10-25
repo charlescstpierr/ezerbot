@@ -79,6 +79,49 @@ compaction. Ils valident le calcul, pas le vrai taux de cache ; les repères 70 
 (« bon ») et > 90 % (« excellent ») ne sont pas des critères de sortie ici.
 Le rejeu réel et les essais d'ordre du préfixe restent un travail séparé.
 
+## Erreur d'estimation du contexte : mesure hors ligne
+
+À chaque réponse du modèle, `engine_response_usage` consigne trois entiers à côté
+des tokens fournisseur, sans aucun texte :
+
+- `context_characters` : le nombre exact que le déclencheur de compaction compare au
+  seuil pour cet envoi (historique éligible, instructions, texte du résumé en
+  vigueur). C'est la même valeur, calculée une seule fois ;
+- `characters_per_token` : le réglage utilisé pour passer des caractères aux tokens
+  (4 aujourd'hui) ;
+- `tool_characters` : la taille JSON des définitions d'outils envoyées avec la
+  requête. **Elles ne sont pas comptées** dans `context_characters`.
+
+Les anciennes lignes restent à `NULL` (inconnu, jamais zéro), comme une réponse sans
+télémétrie. Les tokens de l'appel de résumé ne sont pas dans cette table. Les envois
+des conversations de groupe, qui ne se compactent jamais, ont eux aussi un nombre.
+
+```sh
+python3 tools/token_estimate.py replay --output /tmp/ezerbot-token-estimate.json
+python3 tools/token_estimate.py replay --counter o200k --output /tmp/ezerbot-token-estimate.json
+python3 tools/token_estimate.py report --db /tmp/replay.sqlite --output /tmp/estimate.json
+python3 -m unittest discover -s tools -p test_token_estimate.py
+```
+
+`replay` lance le test `token_estimate_replay` sur `FakeOpenAi` (six conversations
+de longueurs différentes, dont une compactée au budget minimum et une de groupe). Sans `--counter`,
+`input_tokens` suit une formule fixe du test. Avec `--counter o200k`, un compteur
+`tiktoken` (`pip install tiktoken`) le calcule à partir du corps de chaque requête :
+c'est un proxy du tokenizer fournisseur, pas le fournisseur lui-même.
+
+Le rapport donne, par conversation (numérotée, sans identifiant brut) et globalement,
+l'erreur signée `(tokens estimés - tokens réels) ÷ tokens réels` avec
+`n`, `mean`, `median`, `pstdev`, `min`, `max`, `worst` (l'erreur de plus grande valeur
+absolue, signée) et `underestimates`. Un nombre négatif est une sous-estimation, le
+côté dangereux. `signed_error_with_tools` refait le calcul en ajoutant
+`tool_characters`. `tool_definitions_counted` vaut `false` et `notice` l'explique.
+Les lignes sans estimation ou à zéro token d'entrée vont dans `unmeasured_responses`.
+Le fichier ne contient ni texte de message, ni secret, ni identifiant brut.
+
+**Ces erreurs sont synthétiques** : `input_tokens` vient d'un compteur de test, pas
+du fournisseur. Elles mesurent l'écart de l'estimation, sans régler
+`characters_per_token` ni `compaction_percent`.
+
 ## Évaluation sur faux serveur (opt-in)
 
 Le [lanceur d’évaluation — étape A](evaluation.md) rejoue un scénario de messages dans un espace neuf marqué, impose un plafond d’appels et écrit uniquement des chiffres dans `target/eval/`. Il ne se connecte à aucun compte réel.

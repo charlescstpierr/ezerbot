@@ -282,8 +282,9 @@ pub struct ToolCall {
     /// The gateway preserves invalid/truncated/non-object JSON as Value::String(raw).
     /// Such strings carry the original provider argument text for faithful replay.
     /// Before check_approval or request_approval, the loop rejects non-object
-    /// arguments with a per-call Failed outcome ("invalid arguments"), retaining
-    /// the call ID and continuing the turn without asking the user to approve it.
+    /// or schema-nonconforming arguments (internal tools) with a per-call Failed
+    /// outcome ("invalid arguments", or the schema errors), retaining the call ID
+    /// and continuing the turn without asking the user to approve it.
     pub arguments: Value,
 }
 
@@ -497,6 +498,16 @@ pub struct TokenUsage {
     pub cached_input_tokens: u64,
 }
 
+/// What the context trigger counted for one request; counts only, never text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextEstimate {
+    /// The exact number compared by compaction::should_compact for this send.
+    pub characters: u64,
+    pub characters_per_token: u64,
+    /// Tool definitions sent with the request but not counted in `characters`.
+    pub tool_characters: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelEvent {
@@ -513,6 +524,10 @@ pub enum ModelEvent {
     Reasoning {
         item_id: String,
         encrypted_content: String,
+    },
+    /// Emitted by a context-aware gateway before the provider call; providers never emit it.
+    ContextEstimate {
+        estimate: ContextEstimate,
     },
     /// Optional provider usage, emitted before Completed or Incomplete.
     Usage {

@@ -7,9 +7,9 @@ use crate::*;
 use grokbot_domain::{ConversationId, DeliveryReceipt, MessageId, Refusal, TranscriptEntryId};
 use grokbot_engine::contracts::{
     component_version, set_component_version, ApprovalCheck, ContextBlock, ContextBudget,
-    ContextRequest, ContextSource, Error, HistoryItem, ImageInput, ModelEvent, ModelGateway,
-    ModelRequest, Role, RunBudgets, RunEvent, RunEventKind, RunKind, Summary, SuspendCause,
-    TaskStatus, ToolItem, ToolOutcome, ToolSpec, Trigger, TurnEnd,
+    ContextEstimate, ContextRequest, ContextSource, Error, HistoryItem, ImageInput, ModelEvent,
+    ModelGateway, ModelRequest, Role, RunBudgets, RunEvent, RunEventKind, RunKind, Summary,
+    SuspendCause, TaskStatus, ToolItem, ToolOutcome, ToolSpec, Trigger, TurnEnd,
 };
 use grokbot_engine::{
     compaction, context as assembler,
@@ -1635,6 +1635,10 @@ impl RunServices for Services<'_> {
                 !super::screen::is_tool(&s.name)
                     || super::screen::enabled(self.connection, &run.bot_id)
             })
+            .filter(|s| {
+                s.name != super::routines::QUIET_TOOL
+                    || matches!(run.trigger, Trigger::Occurrence { .. })
+            })
             .map(gated)
             .collect()
     }
@@ -2089,6 +2093,36 @@ struct RunGatewayCall<'a> {
     no_vision: &'a AtomicBool,
     captions_only: &'a AtomicBool,
 }
+/// The trigger's own count for one send, so the recorded number cannot drift from the decision.
+/// Tool definitions travel with the request but are measured apart, never added to `characters`.
+fn context_estimate(
+    eligible_from_start: &[HistoryItem],
+    instructions: &str,
+    summary: Option<&Summary>,
+    tools: &[ToolSpec],
+    budget: &ContextBudget,
+) -> grokbot_engine::contracts::Result<ContextEstimate> {
+    let history = eligible_from_start
+        .iter()
+        .map(assembler::input_characters)
+        .collect::<grokbot_engine::contracts::Result<Vec<_>>>()?
+        .into_iter()
+        .sum::<usize>();
+    let characters =
+        history + instructions.chars().count() + summary.map_or(0, |s| s.text.chars().count());
+    Ok(ContextEstimate {
+        characters: characters as u64,
+        characters_per_token: budget.characters_per_token as u64,
+        // Exactly the `tools` array of the Responses body; absent when empty.
+        tool_characters: if tools.is_empty() {
+            0
+        } else {
+            serde_json::to_string(&crate::gateway::wire_tools(tools))?
+                .chars()
+                .count() as u64
+        },
+    })
+}
 impl RunGatewayCall<'_> {
     /// A whole sending image suffix is useful only while it fits. Once a
     /// budget-bound preparation fails, allow normal rolling compaction rather
@@ -2295,10 +2329,7 @@ impl RunGatewayCall<'_> {
         if super::multibot::managed(self.connection, self.run_id) {
             summary = None;
         }
-        loop {
-            if super::multibot::managed(self.connection, self.run_id) {
-                break;
-            }
+        let estimate = loop {
             let start = summary
                 .as_ref()
                 .and_then(|s| {
@@ -2307,18 +2338,20 @@ impl RunGatewayCall<'_> {
                         .position(|i| i.entry_id == s.resume_from_entry_inclusive)
                 })
                 .unwrap_or(0);
-            let characters = eligible[start..]
-                .iter()
-                .map(assembler::input_characters)
-                .collect::<grokbot_engine::contracts::Result<Vec<_>>>()?
-                .into_iter()
-                .sum::<usize>()
-                + request.instructions.chars().count()
-                + summary.as_ref().map_or(0, |s| s.text.chars().count());
+            let estimate = context_estimate(
+                &eligible[start..],
+                &request.instructions,
+                summary.as_ref(),
+                &request.tools,
+                &budget,
+            )?;
+            if super::multibot::managed(self.connection, self.run_id) {
+                break estimate;
+            }
             if eligible.len().saturating_sub(start) < 2
-                || !compaction::should_compact(characters, &budget)?
+                || !compaction::should_compact(estimate.characters as usize, &budget)?
             {
-                break;
+                break estimate;
             }
             let mut services = Services {
                 path: self.path,
@@ -2347,7 +2380,7 @@ impl RunGatewayCall<'_> {
                 },
             )?;
             if !reserved {
-                break;
+                break estimate;
             }
             let revision = self.source_revision;
             let options = compaction::SummaryOptions {
@@ -2403,10 +2436,10 @@ impl RunGatewayCall<'_> {
                 .as_ref()
                 .is_some_and(|s| s.resume_from_entry_inclusive == next.resume_from_entry_inclusive)
             {
-                break;
+                break estimate;
             }
             summary = Some(next);
-        }
+        };
         // Keep built-in tool protocol with the app contract, BEFORE bot identity.
         let (instructions, protocol) = request
             .instructions
@@ -2499,6 +2532,9 @@ impl RunGatewayCall<'_> {
             metadata: Some((self.path, self.run_id)),
             turn: Some(self.run_id),
         };
+        emit(ModelEvent::ContextEstimate {
+            estimate: estimate.clone(),
+        })?;
         let mut deltas = RedactedDeltas::new(&vault)?;
         let mut forward = |event| {
             if let ModelEvent::TextDelta { text } = event {
@@ -3937,6 +3973,77 @@ mod title_tests {
 fn gated(mut spec: ToolSpec) -> ToolSpec {
     spec.requires_approval |= grokbot_forms::forbidden::classify(&spec.name).is_some();
     spec
+}
+
+#[cfg(test)]
+mod estimate_tests {
+    use super::*;
+
+    fn tool(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.into(),
+            description: "Lit un fait.".into(),
+            schema: json!({"type": "object"}),
+            requires_approval: false,
+        }
+    }
+
+    fn summary(text: &str) -> Summary {
+        Summary {
+            summary_id: "s".into(),
+            conversation_id: "c".into(),
+            text: text.into(),
+            truncation_last_entry_inclusive: "a".into(),
+            resume_from_entry_inclusive: "b".into(),
+            previous_summary_id: None,
+            includes_tool_results: false,
+            strategy: "test".into(),
+        }
+    }
+
+    #[test]
+    fn tools_are_measured_apart_from_the_characters_the_trigger_compares() {
+        let history = vec![
+            item("a", Role::User, "Bonjour".into()),
+            item("b", Role::Assistant, "Salut".into()),
+        ];
+        let budget = ContextBudget::default();
+        let without = context_estimate(&history, "Règles.", None, &[], &budget).unwrap();
+        let with = context_estimate(
+            &history,
+            "Règles.",
+            None,
+            &[tool("lire"), tool("écrire")],
+            &budget,
+        )
+        .unwrap();
+        let documented = history
+            .iter()
+            .map(|entry| assembler::input_characters(entry).unwrap())
+            .sum::<usize>()
+            + "Règles.".chars().count();
+        assert_eq!(without.characters, documented as u64);
+        assert_eq!(with.characters, without.characters);
+        assert_eq!(without.tool_characters, 0);
+        let sent = r#"[{"description":"Lit un fait.","name":"lire","parameters":{"type":"object"},"strict":false,"type":"function"},{"description":"Lit un fait.","name":"écrire","parameters":{"type":"object"},"strict":false,"type":"function"}]"#;
+        assert_eq!(with.tool_characters, sent.chars().count() as u64);
+        let mut gated = tool("lire");
+        gated.requires_approval = true;
+        let unsent =
+            context_estimate(&history, "Règles.", None, &[gated, tool("écrire")], &budget).unwrap();
+        assert_eq!(unsent.tool_characters, with.tool_characters);
+        assert_eq!(with.characters_per_token, 4);
+    }
+
+    #[test]
+    fn the_summary_text_is_counted_once_in_characters() {
+        let history = vec![item("b", Role::User, "x".into())];
+        let budget = ContextBudget::default();
+        let plain = context_estimate(&history, "", None, &[], &budget).unwrap();
+        let summarized =
+            context_estimate(&history, "", Some(&summary("résumé")), &[], &budget).unwrap();
+        assert_eq!(summarized.characters, plain.characters + 6);
+    }
 }
 
 #[cfg(test)]

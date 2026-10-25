@@ -310,8 +310,9 @@ pub(crate) mod test_hooks {
 
 #[cfg(test)]
 mod schema_coverage {
-    /// Ignored by the validator on purpose: the tool's own `deny_unknown_fields`
-    /// deserialization already enforces the `anyOf` branches.
+    /// Ignored by the validator on purpose: the engine does not check these `anyOf`
+    /// branches. Only the tool's own deserialization of `field_type` does, and it does
+    /// not reject extra fields.
     const TOLERATED: &[(&str, &str)] = &[
         (
             "request_form",

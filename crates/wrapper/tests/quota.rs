@@ -1,5 +1,8 @@
 //! Quota diagnostics and the durable UI path, only against the fake OpenAI.
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
 mod support;
+use launch_identity::LaunchIdentity;
 
 use grokbot_wrapper::{App, Provider};
 use serde_json::{json, Value};
@@ -410,19 +413,19 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
     std::fs::create_dir(fixture.directory.join("logs")).unwrap();
     let mut log = std::fs::File::create(fixture.directory.join("logs/engine.log")).unwrap();
     writeln!(log, "native startup").unwrap();
+    let identity = LaunchIdentity::new();
     let mut child = Child(
-        Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
-            .args(["--port", "0", "--db"])
-            .arg(fixture.directory.join("workspace.sqlite"))
-            .env("HOME", &fixture.directory)
-            .env("CFFIXED_USER_HOME", &fixture.directory)
-            .env("TZ", "America/Toronto")
-            .env("GROKBOT_FAKE_OPENAI", &fixture.server.base)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(log.try_clone().unwrap())
-            .spawn()
-            .unwrap(),
+        identity.spawn(
+            Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
+                .args(["--port", "0", "--db"])
+                .arg(fixture.directory.join("workspace.sqlite"))
+                .env("HOME", &fixture.directory)
+                .env("CFFIXED_USER_HOME", &fixture.directory)
+                .env("TZ", "America/Toronto")
+                .env("GROKBOT_FAKE_OPENAI", &fixture.server.base)
+                .stdout(Stdio::piped())
+                .stderr(log.try_clone().unwrap()),
+        ),
     );
     let mut first = String::new();
     BufReader::new(child.0.stdout.take().unwrap())
@@ -433,6 +436,7 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
     let post = |path: &str, body: Value| -> Value {
         ureq::post(&format!("{base}{path}"))
             .set("X-Grokbot-Request", "local")
+            .set("X-Ezerbot-Launch", &identity.value())
             .send_json(body)
             .unwrap()
             .into_json()
@@ -440,6 +444,7 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
     };
     wait("child catalogue", || {
         let state: Value = ureq::get(&format!("{base}/api/state"))
+            .set("X-Ezerbot-Launch", &identity.value())
             .call()
             .unwrap()
             .into_json()
@@ -456,6 +461,7 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
     });
     wait("local reset card", || {
         let state: Value = ureq::get(&format!("{base}/api/state"))
+            .set("X-Ezerbot-Launch", &identity.value())
             .call()
             .unwrap()
             .into_json()

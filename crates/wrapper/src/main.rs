@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use grokbot_wrapper::{
     body_limit, default_database_path, header_safe, too_large, validate_headers_for_path, ApiError,
-    ApiResponse, App, Provider,
+    ApiResponse, App, LaunchSecret, Provider,
 };
 use serde_json::json;
 use tiny_http::{Header, Request, Response, Server, StatusCode};
@@ -335,6 +335,7 @@ fn payload(
     port: u16,
     app: &mut App,
     remote: bool,
+    secret: &LaunchSecret,
 ) -> Result<(ApiResponse, Negotiated), ApiError> {
     let method = request.method().as_str().to_owned();
     let path = request.url().to_owned();
@@ -343,6 +344,14 @@ fn payload(
         .iter()
         .map(|header| (header.field.as_str().to_string(), header.value.to_string()))
         .collect();
+    let asset_path = if path.starts_with("/?notification=") {
+        "/"
+    } else {
+        path.as_str()
+    };
+    let asset = (method == "GET")
+        .then(|| ASSETS.iter().find(|asset| asset.path == asset_path))
+        .flatten();
     if remote {
         grokbot_wrapper::features::iphone::validate_headers(&method, &headers)?;
         if !grokbot_wrapper::features::iphone::enabled(app) {
@@ -351,39 +360,34 @@ fn payload(
                 grokbot_wrapper::features::iphone::ACCESS_DISABLED,
             ));
         }
+    } else if asset.is_some() {
+        grokbot_wrapper::validate_static_headers(port, &headers)?;
     } else {
-        validate_headers_for_path(port, &method, &path, &headers)?;
+        validate_headers_for_path(port, &method, &path, &headers, secret)?;
     }
     let limit = body_limit(&path);
     if request.body_length().is_some_and(|length| length > limit) {
         return Err(too_large(&path));
     }
-    if method == "GET" {
-        let asset_path = if path.starts_with("/?notification=") {
-            "/"
-        } else {
-            path.as_str()
-        };
-        if let Some(asset) = ASSETS.iter().find(|asset| asset.path == asset_path) {
-            let accept_encoding = headers
-                .iter()
-                .filter(|(name, _)| name.eq_ignore_ascii_case("accept-encoding"))
-                .map(|(_, value)| value.as_str())
-                .collect::<Vec<_>>()
-                .join(",");
-            let available = asset.encodings();
-            let encoding = negotiate(Some(accept_encoding.as_str()), &available);
-            return Ok((
-                ApiResponse::Bytes {
-                    content_type: asset.content_type.into(),
-                    body: asset.body(encoding).to_vec(),
-                },
-                Negotiated {
-                    encoding,
-                    vary: !available.is_empty(),
-                },
-            ));
-        }
+    if let Some(asset) = asset {
+        let accept_encoding = headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("accept-encoding"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let available = asset.encodings();
+        let encoding = negotiate(Some(accept_encoding.as_str()), &available);
+        return Ok((
+            ApiResponse::Bytes {
+                content_type: asset.content_type.into(),
+                body: asset.body(encoding).to_vec(),
+            },
+            Negotiated {
+                encoding,
+                vary: !available.is_empty(),
+            },
+        ));
     }
     let mut body = Vec::new();
     request
@@ -635,6 +639,11 @@ fn turns_summary(db: &std::path::Path, day: &str) -> Result<(), String> {
 
 fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use grokbot_wrapper::features::routines_background::{self, Owner};
+    let secret = if options.routine_wake {
+        None
+    } else {
+        Some(LaunchSecret::read_pipe()?)
+    };
     // Acquire BEFORE App::open: its crash recovery must not interrupt a peer.
     let _owner = if options.routine_wake {
         let Some(owner) = Owner::try_acquire(&options.db)? else {
@@ -665,6 +674,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         // Retain Owner until process death; idle provider threads cannot outlive it.
         std::process::exit(code);
     }
+    let secret = secret.ok_or("Le canal de lancement sécurisé est indisponible.")?;
     leave_on_quit(options.db.clone());
     let server = Server::http(("127.0.0.1", options.port))?;
     let port = server
@@ -802,6 +812,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             port,
             &mut app,
             remote,
+            &secret,
         ) {
             Ok((mut response, reply)) => {
                 if remote && request.url() == "/api/iphone/exchange" {
@@ -872,7 +883,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             ("X-Content-Type-Options", "nosniff"),
             ("X-Frame-Options", "DENY"),
             ("Referrer-Policy", "no-referrer"),
-            ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
+            ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: ezerbot-resource:; font-src 'self' data:; media-src 'self' blob: ezerbot-resource:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
         ] {
             response.add_header(Header::from_bytes(name, value).expect("validated response header"));
         }
@@ -897,6 +908,21 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         if let Some(elapsed) = state_elapsed {
             app.log_state_served(elapsed);
         }
+    }
+}
+
+fn main() {
+    let result = match options() {
+        Ok(Some(options)) => match options.turns_summary.as_deref() {
+            Some(day) => turns_summary(&options.db, day),
+            None => serve(options).map_err(|error| error.to_string()),
+        },
+        Ok(None) => Ok(()),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        eprintln!("Ezerbot Local : {error}");
+        std::process::exit(1);
     }
 }
 
@@ -1073,20 +1099,5 @@ mod fake_tests {
         ] {
             assert!(super::fake_openai_base(value).is_none());
         }
-    }
-}
-
-fn main() {
-    let result = match options() {
-        Ok(Some(options)) => match options.turns_summary.as_deref() {
-            Some(day) => turns_summary(&options.db, day),
-            None => serve(options).map_err(|error| error.to_string()),
-        },
-        Ok(None) => Ok(()),
-        Err(error) => Err(error),
-    };
-    if let Err(error) = result {
-        eprintln!("Ezerbot Local : {error}");
-        std::process::exit(1);
     }
 }

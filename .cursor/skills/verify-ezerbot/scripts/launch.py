@@ -27,6 +27,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tools"))
+from local_api import LaunchIdentity
+
 from verify_lib import (
     assert_not_under,
     assert_outside_repo,
@@ -40,6 +43,8 @@ from verify_lib import (
     repo_root,
     resolve_commit,
     save_run,
+    run_lock,
+    run_path,
     session_id,
     sha256_file,
     sign_run_directory,
@@ -109,7 +114,7 @@ def allocate_run_root(evidence: Path) -> tuple[Path, Path, dict[str, str]]:
         assert_outside_repo(run_root, "répertoire jetable")
         assert_not_under(evidence, home, "preuves")
         assert_not_under(evidence, run_root, "preuves")
-        signature = sign_run_directory(run_root)
+        signature = sign_run_directory(run_root, session_id())
     except BaseException:
         shutil.rmtree(run_root, ignore_errors=True)
         raise
@@ -124,6 +129,13 @@ def main() -> None:
     repo = repo_root()
     session = session_id()
     evidence = evidence_dir(session, str(args.evidence) if args.evidence else None)
+    with run_lock(evidence):
+        if run_path(evidence).exists():
+            raise SystemExit("refus: ce dossier de preuves contient déjà un run; choisir un dossier neuf")
+        launch_run(args, repo, session, evidence)
+
+
+def launch_run(args: argparse.Namespace, repo: Path, session: str, evidence: Path) -> None:
     if not compiled_sources_clean(repo):
         raise SystemExit(
             "refus: crates/, app/ui/, app/web/ ou Cargo.lock diffèrent du commit. "
@@ -133,10 +145,13 @@ def main() -> None:
     if not cargo.is_file():
         raise SystemExit(f"cargo introuvable: {cargo}")
     print(f"build: {cargo} build --locked -p grokbot-wrapper", flush=True)
+    gate = os.environ.get("EZERBOT_VERIFY_CARGO_GATE")
+    compile_env = build_env()
+    compile_env["EZERBOT_GIT_COMMIT"] = resolve_commit(repo, "HEAD")
     subprocess.run(
-        [str(cargo), "build", "--locked", "-p", "grokbot-wrapper"],
+        ([gate] if gate else []) + [str(cargo), "build", "--locked", "-p", "grokbot-wrapper"],
         cwd=repo,
-        env=build_env(),
+        env=compile_env,
         check=True,
     )
     sha = resolve_commit(repo, "HEAD")
@@ -223,11 +238,11 @@ def main() -> None:
             f"run: {binary} --port 0 --db {db}",
             flush=True,
         )
-        wrapper = subprocess.Popen(
+        identity = LaunchIdentity()
+        wrapper = identity.spawn(
             [str(binary), "--port", "0", "--db", str(db)],
             stdout=subprocess.PIPE,
             stderr=wrapper_log,
-            stdin=subprocess.DEVNULL,
             text=True,
             env=child_env,
             cwd=repo,
@@ -249,6 +264,19 @@ def main() -> None:
         record["port"] = port
         record["wrapper_identity"] = proc_identity(wrapper.pid)
         save_run(evidence, record)
+        from browser import ensure_headless, http_json
+        state = ensure_headless(record, headed=sys.platform == "darwin" and os.environ.get("EZERBOT_VERIFY_BROWSER") != "chrome-headless")
+        version = http_json(f"http://127.0.0.1:{state['debug_port']}/json/version")
+        auth = identity.spawn(
+            [sys.executable, str(repo / "tools/local_api.py"), "--browser-auth", version["webSocketDebuggerUrl"], url],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            cwd=repo, start_new_session=True,
+        )
+        record["auth_pid"] = auth.pid
+        record["auth_identity"] = proc_identity(auth.pid)
+        save_run(evidence, record)
+        if read_line(auth, 20) != "ready":
+            raise SystemExit("le transport du navigateur n'est pas prêt")
     except Exception:
         save_run(evidence, record)
         raise

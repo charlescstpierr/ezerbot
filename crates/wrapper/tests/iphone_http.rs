@@ -1,6 +1,9 @@
 #![cfg(debug_assertions)]
 //! Actual dual-listener, HttpOnly cookie and PWA path. All hosts are loopback;
 //! the fake CLI lives in a throwaway HOME and never calls real Tailscale.
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
+use launch_identity::LaunchIdentity;
 use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader},
@@ -9,8 +12,27 @@ use std::{
 };
 struct Host {
     child: std::process::Child,
+    identity: LaunchIdentity,
     root: std::path::PathBuf,
     url: String,
+}
+impl Host {
+    fn post(&self, path: &str, body: Value) -> ureq::Response {
+        response(
+            ureq::post(&format!("{}{path}", self.url))
+                .set("Origin", &self.url)
+                .set("X-Grokbot-Request", "local")
+                .set("X-Ezerbot-Launch", &self.identity.value())
+                .send_json(body),
+        )
+    }
+    fn get(&self, path: &str) -> ureq::Response {
+        response(
+            ureq::get(&format!("{}{path}", self.url))
+                .set("X-Ezerbot-Launch", &self.identity.value())
+                .call(),
+        )
+    }
 }
 impl Drop for Host {
     fn drop(&mut self) {
@@ -62,20 +84,22 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
         .local_addr()
         .unwrap()
         .port();
-    let child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
-        .env("GROKBOT_IPHONE_PORT", iphone_port.to_string())
-        .args(["--port", "0", "--db"])
-        .arg(root.join("workspace.sqlite"))
-        .env("HOME", &root)
-        .env("CFFIXED_USER_HOME", &root)
-        .env("GROKBOT_FAKE_TAILSCALE", fake)
-        .env_remove("GROKBOT_FAKE_OPENAI")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+    let identity = LaunchIdentity::new();
+    let child = identity.spawn(
+        Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
+            .env("GROKBOT_IPHONE_PORT", iphone_port.to_string())
+            .args(["--port", "0", "--db"])
+            .arg(root.join("workspace.sqlite"))
+            .env("HOME", &root)
+            .env("CFFIXED_USER_HOME", &root)
+            .env("GROKBOT_FAKE_TAILSCALE", fake)
+            .env_remove("GROKBOT_FAKE_OPENAI")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit()),
+    );
     let mut host = Host {
         child,
+        identity,
         root,
         url: String::new(),
     };
@@ -89,7 +113,7 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
         .into();
     let remote = format!("http://127.0.0.1:{iphone_port}");
     assert!(ureq::get(&format!("{remote}/api/state")).call().is_err());
-    post(&host.url, "/api/iphone/enabled", json!({"enabled":true}));
+    host.post("/api/iphone/enabled", json!({"enabled":true}));
     for _ in 0..60 {
         if ureq::get(&format!("{remote}/")).call().is_ok() {
             break;
@@ -204,25 +228,27 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
         .timeout(Duration::from_secs(1))
         .build()
         .get(&format!("{}/api/ping", host.url))
+        .set("X-Ezerbot-Launch", &host.identity.value())
         .call();
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     for reader in flood {
         reader.join().unwrap();
     }
     assert_eq!(local.unwrap().status(), 200);
-    let ts: Value = response(ureq::get(&format!("{}/api/iphone/tailscale", host.url)).call())
-        .into_json()
-        .unwrap();
+    let ts: Value = host.get("/api/iphone/tailscale").into_json().unwrap();
     assert_eq!(ts["url"], "https://mac.qa.ts.net");
     assert_eq!(
-        post(&host.url, "/api/iphone/serve", json!({"start":true})).status(),
+        host.post("/api/iphone/serve", json!({"start":true}))
+            .status(),
         200
     );
     assert_eq!(
-        post(&host.url, "/api/iphone/serve", json!({"start":false})).status(),
+        host.post("/api/iphone/serve", json!({"start":false}))
+            .status(),
         200
     );
-    let code: Value = post(&host.url, "/api/iphone/code", json!({}))
+    let code: Value = host
+        .post("/api/iphone/code", json!({}))
         .into_json()
         .unwrap();
     let claim: Value = post(
@@ -232,11 +258,8 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
     )
     .into_json()
     .unwrap();
-    let status: Value = response(ureq::get(&format!("{}/api/iphone/status", host.url)).call())
-        .into_json()
-        .unwrap();
-    post(
-        &host.url,
+    let status: Value = host.get("/api/iphone/status").into_json().unwrap();
+    host.post(
         "/api/iphone/confirm",
         json!({"id":status["devices"][0]["id"],"allow":true}),
     );
@@ -289,6 +312,7 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
         response(
             ureq::get(&format!("{}/api/state", host.url))
                 .set("Host", "mac.qa.ts.net")
+                .set("X-Ezerbot-Launch", &host.identity.value())
                 .call()
         )
         .status(),
@@ -296,11 +320,12 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
     );
     // Forced-close private responses retain binary data and WebKit byte ranges.
     use base64::{engine::general_purpose::STANDARD, Engine};
-    let conversation: Value = post(&host.url, "/api/conversations", json!({}))
+    let conversation: Value = host
+        .post("/api/conversations", json!({}))
         .into_json()
         .unwrap();
     let wav = include_bytes!("fixtures/voice.wav");
-    let memo:Value=post(&host.url,"/api/voice/memos",json!({"conversation_id":conversation["conversation"]["id"],"upload_id":"phone-range","data":STANDARD.encode(wav),"transcript":"Lecture de test.","language":"fr"})).into_json().unwrap();
+    let memo:Value=host.post("/api/voice/memos",json!({"conversation_id":conversation["conversation"]["id"],"upload_id":"phone-range","data":STANDARD.encode(wav),"transcript":"Lecture de test.","language":"fr"})).into_json().unwrap();
     let ranged = ureq::get(&format!(
         "{remote}/api/voice/audio/{}",
         memo["id"].as_str().unwrap()
@@ -360,18 +385,18 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
     let mut socket = BufReader::new(socket);
     assert_eq!(exchange_socket(&mut socket, iphone_port).unwrap().0, 200);
     for _ in 0..4 {
-        post(&host.url, "/api/iphone/enabled", json!({"enabled":false}));
+        host.post("/api/iphone/enabled", json!({"enabled":false}));
         // Access is denied on both old and fresh connections, never left hanging.
         let denial = response(ureq::get(&format!("{remote}/iphone.js")).call());
         assert_eq!(denial.status(), 403);
         assert_eq!(denial.header("Connection"), Some("close"));
         assert_eq!(denial.header("Cache-Control"), Some("no-store"));
-        post(&host.url, "/api/iphone/enabled", json!({"enabled":true}));
+        host.post("/api/iphone/enabled", json!({"enabled":true}));
         let start = std::time::Instant::now();
         assert_eq!(exchange_socket(&mut socket, iphone_port).unwrap().0, 200);
         assert!(start.elapsed() < Duration::from_secs(2));
     }
-    post(&host.url, "/api/iphone/enabled", json!({"enabled":false}));
+    host.post("/api/iphone/enabled", json!({"enabled":false}));
     let (status, headers) = exchange_socket(&mut socket, iphone_port).unwrap();
     assert_eq!(status, 403);
     assert!(headers.iter().any(|h| h == "connection: close"));

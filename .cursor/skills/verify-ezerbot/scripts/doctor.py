@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import sys
 import urllib.request
+import urllib.error
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -75,6 +76,18 @@ def main() -> None:
         except OSError as error:
             page_detail = str(error)
     failures.append(check("page", page_ok, page_detail) or "")
+    auth_pid = int(run.get("auth_pid") or 0)
+    auth_ok = pid_alive(auth_pid) and identity_matches(auth_pid, run.get("auth_identity"))
+    failures.append(check("auth-navigateur", auth_ok, "transport en mémoire du run vivant") or "")
+    api_denied = False
+    try:
+        with urllib.request.urlopen(url + "/api/state", timeout=5):
+            pass
+    except urllib.error.HTTPError as error:
+        api_denied = error.code == 403
+    except OSError:
+        pass
+    failures.append(check("api-sans-identite", api_denied, "GET externe refusé sans identité de lancement") or "")
     fake_pid = int(run.get("fake_pid") or 0)
     fake_ok = pid_alive(fake_pid) and identity_matches(fake_pid, run.get("fake_identity"))
     failures.append(check("faux-openai", fake_ok, run.get("fake_base", "")) or "")

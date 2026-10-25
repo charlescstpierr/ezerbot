@@ -2,9 +2,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod local_auth;
+pub use local_auth::LaunchSecret;
 pub mod deep_links;
 mod fluidity;
 mod mcp;
+mod projection_hints;
 mod provider;
 mod upstream;
 
@@ -608,13 +611,15 @@ impl Drop for App {
         // L'attente passe avant l'arrêt des tâches shell : un tour encore en vol peut lancer une
         // tâche pendant la vidange, et son moniteur est alors arrêté et joint comme les autres.
         // Les deux échecs sont explicites : l'attente bornée, puis les tâches non finies.
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions, feature = "test-support"))]
         let waited = self.provider.wait_for_background_work();
         let stopped = features::local::shutdown(&self.connection, &self.db_path);
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions, feature = "test-support"))]
         let stopped = waited.and(stopped);
         if let Err(message) = stopped {
-            if cfg!(debug_assertions) && !std::thread::panicking() {
+            if cfg!(any(test, debug_assertions, feature = "test-support"))
+                && !std::thread::panicking()
+            {
                 panic!("{message}");
             }
             eprintln!("{message}");
@@ -1202,11 +1207,38 @@ pub fn validate_headers(
     port: u16,
     method: &str,
     headers: &[(String, String)],
+    secret: &LaunchSecret,
 ) -> Result<(), ApiError> {
-    validate_headers_for_path(port, method, "", headers)
+    validate_headers_for_path(port, method, "", headers, secret)
 }
 
 pub fn validate_headers_for_path(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    secret: &LaunchSecret,
+) -> Result<(), ApiError> {
+    let mut supplied = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(local_auth::LAUNCH_HEADER));
+    let accepted = supplied
+        .next()
+        .is_some_and(|(_, value)| secret.matches(value));
+    if !accepted || supplied.next().is_some() {
+        return Err(ApiError::new(
+            403,
+            "Cette requête ne provient pas de l'application locale.",
+        ));
+    }
+    validate_request_headers(port, method, path, headers)
+}
+
+pub fn validate_static_headers(port: u16, headers: &[(String, String)]) -> Result<(), ApiError> {
+    validate_request_headers(port, "GET", "", headers)
+}
+
+fn validate_request_headers(
     port: u16,
     method: &str,
     path: &str,

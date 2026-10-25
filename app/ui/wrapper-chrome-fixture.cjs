@@ -5,6 +5,7 @@
 // own cleanup on the test context, so the processes stop when the test ends for any reason,
 // including a failed assertion or the test timeout.
 const { spawn } = require("node:child_process");
+const { LaunchIdentity, connectCdp } = require("./local-api-client.cjs");
 const { createServer } = require("node:http");
 const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
@@ -134,33 +135,6 @@ function debuggingPort(directory, chrome) {
   })();
 }
 
-function connectCdp(url) {
-  const ws = new WebSocket(url);
-  const pending = new Map();
-  let next = 0;
-  ws.addEventListener("message", (event) => {
-    const message = JSON.parse(String(event.data));
-    if (!message.id || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
-    pending.delete(message.id);
-    if (message.error) reject(new Error(message.error.message));
-    else resolve(message.result || {});
-  });
-  return new Promise((resolve, reject) => {
-    ws.addEventListener("open", () => resolve({
-      send(method, params = {}) {
-        return new Promise((resolveSend, rejectSend) => {
-          const id = ++next;
-          pending.set(id, { resolve: resolveSend, reject: rejectSend });
-          ws.send(JSON.stringify({ id, method, params }));
-        });
-      },
-      close() { ws.close(); },
-    }));
-    ws.addEventListener("error", () => reject(new Error("devtools websocket failed")));
-  });
-}
-
 async function pageTarget(port) {
   const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
@@ -252,7 +226,8 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
   writeFakeSession(dbDir);
 
   let stderr = "";
-  const wrapper = spawn(binary, ["--port", "0", "--db", join(dbDir, "app.sqlite")], {
+  const identity = new LaunchIdentity();
+  const wrapper = identity.spawn(binary, ["--port", "0", "--db", join(dbDir, "app.sqlite")], {
     env: {
       PATH: process.env.PATH,
       HOME: dbDir,
@@ -275,6 +250,11 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
     "--no-sandbox",
     "--disable-gpu",
     "--disable-dev-shm-usage",
+    "--incognito",
+    "--use-mock-keychain",
+    "--password-store=basic",
+    "--disable-breakpad",
+    "--disable-crash-reporter",
     "--remote-allow-origins=*",
     "--remote-debugging-port=0",
     `--user-data-dir=${join(chromeDir, "profile")}`,
@@ -288,7 +268,7 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
     const url = JSON.parse(await readLine(wrapper, details)).url;
     const headers = { Origin: url, "Content-Type": "application/json", "X-Grokbot-Request": "local" };
     const api = async (path, body) => {
-      const response = await fetch(`${url}${path}`, body === undefined ? { headers } : { method: "POST", headers, body: JSON.stringify(body) });
+      const response = await identity.fetch(`${url}${path}`, body === undefined ? { headers } : { method: "POST", headers, body: JSON.stringify(body) });
       const text = await response.text();
       if (!response.ok) throw new Error(`${path} ${response.status}: ${text}${details()}`);
       return JSON.parse(text);
@@ -319,6 +299,7 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
       }
       return result.result.value;
     };
+    watches.push(await identity.authenticateBrowser(cdp, url));
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     await cdp.send("Page.navigate", { url });

@@ -1,3 +1,4 @@
+import { localResourceURL } from "../local-resource.js";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ImageViewer } from "../image-gallery.jsx";
 
@@ -19,7 +20,7 @@ function Thumb({ capture, onOpen }) {
   const [broken, setBroken] = useState(false);
   return (
     <button type="button" className="gb-image-cell gb-capture-thumb" aria-label={capture.caption} onClick={(event) => onOpen(event.currentTarget)}>
-      {broken ? <span className="gb-capture-missing">Image non disponible</span> : <img src={capture.url} alt={capture.caption} loading="lazy" onError={() => setBroken(true)} />}
+      {broken ? <span className="gb-capture-missing">Image non disponible</span> : <img src={localResourceURL(capture.url)} alt={capture.caption} loading="lazy" onError={() => setBroken(true)} />}
     </button>
   );
 }

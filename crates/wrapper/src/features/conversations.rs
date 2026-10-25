@@ -380,6 +380,11 @@ impl App {
         only: Option<&str>,
         after_entry: &mut dyn FnMut(),
     ) -> Result<Vec<Conversation>, ApiError> {
+        // The whole history: which of its messages and runs have rows in the side tables (#515).
+        let _hints = match only {
+            None => Some(crate::projection_hints::hold(&self.connection)),
+            Some(_) => None,
+        };
         let mut conversations = BTreeMap::new();
         let mut hidden = HashSet::new();
         let mut created = BTreeMap::new();
@@ -451,7 +456,12 @@ impl App {
             if hidden.contains(id) {
                 continue;
             }
-            let metadata: Option<(i64, u64)> = self.connection.prepare_cached("SELECT ordinal, created_at FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND kind = 'submission'")?.query_row(params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let metadata: Option<(i64, u64)> =
+                match crate::projection_hints::submission(id, record.message_id.as_str()) {
+                    crate::projection_hints::Known::Row(row) => Some(row),
+                    crate::projection_hints::Known::Absent => None,
+                    crate::projection_hints::Known::Unknown => self.connection.prepare_cached("SELECT ordinal, created_at FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND kind = 'submission'")?.query_row(params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?,
+                };
             let (ordinal, created_at) =
                 metadata.unwrap_or((i64::MAX, *created.get(id).unwrap_or(&0)));
             let conversation = conversations

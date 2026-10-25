@@ -28,7 +28,6 @@ réellement fait (soumissions en base) ; une passe avec erreur fait échouer le 
 from pathlib import Path
 import argparse
 import hashlib
-import http.client
 import json
 import os
 import shutil
@@ -40,6 +39,9 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from local_api import LaunchIdentity, LocalEndpoint
+
 ROOT = Path(__file__).resolve().parents[2]
 BODY = "Peux-tu m'aider à préparer la réunion de demain ? " * 4
 PROBE_SENDS = 20
@@ -47,10 +49,11 @@ PROBE_SENDS = 20
 
 class Server:
     def __init__(self, binary, database):
-        self.process = subprocess.Popen(
+        identity = LaunchIdentity()
+        self.process = identity.spawn(
             [binary, '--port', '0', '--db', str(database)],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        self.port = int(json.loads(self.process.stdout.readline())['url'].rsplit(':', 1)[1])
+        self.endpoint = LocalEndpoint(identity, json.loads(self.process.stdout.readline())['url'])
         deadline = time.monotonic() + 30
         while True:
             try:
@@ -63,19 +66,10 @@ class Server:
             time.sleep(0.01)
 
     def request(self, method, path, body=None):
-        connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=60)
-        headers = {'Host': f'127.0.0.1:{self.port}'}
-        if method != 'GET':
-            headers.update({
-                'X-Grokbot-Request': 'local',
-                'Content-Type': 'application/json',
-                'Origin': f'http://127.0.0.1:{self.port}',
-            })
-        connection.request(method, path, body=None if body is None else json.dumps(body), headers=headers)
-        response = connection.getresponse()
-        data = response.read()
-        connection.close()
-        return response.status, data
+        status, data, _ = self.endpoint.request(method, path,
+            body=None if body is None else json.dumps(body),
+            headers={'Content-Type': 'application/json'}, timeout=60)
+        return status, data
 
     def conversation(self):
         status, data = self.request('POST', '/api/conversations', {})

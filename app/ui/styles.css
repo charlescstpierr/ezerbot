@@ -23,6 +23,10 @@
   --scope-private: #6d4ae0;
   --scope-team: #15803d;
   --scope-topic: #2563eb;
+  /* « À revoir » (mémoire) : l'orange du halo et de son panneau, distinct de l'ambre des avertissements et du citron. */
+  --verify: #b83a06;
+  --verify-bg: #fff1e8;
+  --verify-line: #b83a0640;
   --accent-rgb: 230 255 61;
   --accent-on: #0a0b0d;
   --accent-deep: #5b6b00;
@@ -61,6 +65,9 @@
   --scope-private: #a78bfa;
   --scope-team: #35c58a;
   --scope-topic: #6ea8ff;
+  --verify: #ff9a55;
+  --verify-bg: #2b1d12;
+  --verify-line: #ff9a5540;
   --accent-ink: var(--accent);
   --focus: #a9acb3;
 }

@@ -7,37 +7,29 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 const PASSWORD: &str = "ezerbot-throwaway-test-991";
 // Admission simulation only; no real signing or trust settings in tests.
 const CERTIFICATE_REQUIREMENT: &str =
     "certificate leaf = H\"0123456789ABCDEF0123456789ABCDEF01234567\"";
-static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture {
     home: PathBuf,
     keychain: PathBuf,
     db: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        let home = std::env::temp_dir().join(format!(
-            "ezerbot-keychain-{}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&home).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-keychain");
+        let home = guard.to_path_buf();
         fs::write(home.join(".ezerbot-test-home"), "test").unwrap();
         let f = Self {
             keychain: home.join("ezerbot-test.keychain-db"),
             db: home.join("workspace.sqlite"),
             home,
+            _dir: guard,
         };
         f.security(&["create-keychain", "-p", PASSWORD]);
         f.security(&["unlock-keychain", "-p", PASSWORD]);
@@ -129,7 +121,6 @@ impl Drop for Fixture {
             .env("HOME", &self.home)
             .env("CFFIXED_USER_HOME", &self.home)
             .output();
-        let _ = fs::remove_dir_all(&self.home);
     }
 }
 struct Host {

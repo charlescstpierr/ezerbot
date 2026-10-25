@@ -1012,21 +1012,13 @@ mod approvals_tests {
     #[test]
     fn approvals_single_use_is_atomic_across_connections() {
         use std::sync::{Arc, Barrier};
-        struct TempDb(std::path::PathBuf);
-        impl Drop for TempDb {
-            fn drop(&mut self) {
-                for suffix in ["", "-wal", "-shm"] {
-                    let _ = std::fs::remove_file(format!("{}{suffix}", self.0.display()));
-                }
-            }
-        }
-        let mut random = [0_u8; 8];
-        getrandom::getrandom(&mut random).unwrap();
-        let file = TempDb(std::env::temp_dir().join(format!(
-            "forms-approval-{}-{:x}.sqlite",
-            std::process::id(),
-            u64::from_ne_bytes(random)
-        )));
+        // Déclaré avant `conn` : la connexion se ferme avant la suppression du dossier.
+        struct TempDb(
+            std::path::PathBuf,
+            #[allow(dead_code)] grokbot_test_support::TestDir,
+        );
+        let directory = grokbot_test_support::TestDir::new("forms-approval");
+        let file = TempDb(directory.join("approvals.sqlite"), directory);
         let conn = Connection::open(&file.0).unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL").unwrap();
         crate::migrate(&conn).unwrap();

@@ -1,14 +1,12 @@
+use grokbot_test_support::TestDir;
 use std::fs;
-use std::path::PathBuf;
 use std::process::{Command, Output};
 
-struct DemoDatabase(PathBuf);
+struct DemoDatabase(TestDir);
 
 impl DemoDatabase {
     fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("grokbot-cli-{name}-{}", std::process::id()));
-        fs::create_dir(&path).expect("dossier temporaire distinct");
-        Self(path)
+        Self(TestDir::new(&format!("grokbot-cli-{name}")))
     }
 
     fn run(&self, command: &str) -> Output {
@@ -18,12 +16,6 @@ impl DemoDatabase {
             .arg(self.0.join("session.sqlite"))
             .output()
             .expect("lancer le programme compilé")
-    }
-}
-
-impl Drop for DemoDatabase {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
     }
 }
 

@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -22,17 +22,12 @@ struct Fixture {
     path: PathBuf,
     server: FakeOpenAi,
     provider: Provider,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new(live: bool) -> Self {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir()
-            .join(format!(
-                "ezerbot-multibot-{}-{}",
-                std::process::id(),
-                N.fetch_add(1, Ordering::SeqCst)
-            ))
-            .join("workspace.sqlite");
+        let guard = grokbot_test_support::TestDir::new("ezerbot-multibot");
+        let path = guard.to_path_buf().join("workspace.sqlite");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         if live {
@@ -48,6 +43,7 @@ impl Fixture {
             path,
             server,
             provider,
+            _dir: guard,
         }
     }
     fn post(&mut self, p: &str, v: Value) -> Value {
@@ -104,11 +100,6 @@ impl Fixture {
     }
     fn restart(&mut self) {
         self.app = App::open_with(&self.path, self.provider.clone()).unwrap();
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 fn function_call(id: &str, name: &str, arguments: Value) -> Vec<Value> {

@@ -13,26 +13,19 @@ use grokbot_wrapper::{
 };
 use rusqlite::{params, Connection, StatementStatus};
 use serde_json::{json, Value};
-use std::{
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::path::PathBuf;
 
 struct Fixture {
     app: App,
     conn: Connection,
     dir: PathBuf,
     conversation: String,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "tasks-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("tasks");
+        let dir = guard.to_path_buf();
         let path = dir.join("workspace.sqlite");
         let mut app = App::open(&path).unwrap();
         let conversation = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]
@@ -48,6 +41,7 @@ impl Fixture {
             conn,
             dir,
             conversation,
+            _dir: guard,
         }
     }
     fn post(&mut self, path: &str, body: Value) -> Value {
@@ -249,12 +243,6 @@ impl Fixture {
         self.conn.execute("INSERT INTO forms_requests(id,run_id,entry_id,kind_json,route_json,boot_id,created_at) VALUES (?1,?2,?1,?3,?4,(SELECT boot_id FROM wrapper_forms_boot WHERE singleton=1),5000)", params![id,run,kind.to_string(),json!({"target_conversation_id":self.conversation}).to_string()]).unwrap();
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
 #[test]
 fn approval_is_first_has_its_card_and_disappears_after_a_real_decision() {
     let mut f = Fixture::new();

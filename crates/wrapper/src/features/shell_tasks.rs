@@ -775,14 +775,8 @@ pub(crate) fn input(db: &Path, body: &[u8]) -> Result<Value, ApiError> {
 mod tests {
     use super::*;
     use grokbot_forms::vault::Vault;
-    use std::path::PathBuf;
 
-    struct Temp(PathBuf);
-    impl Drop for Temp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    struct Temp(grokbot_test_support::TestDir);
 
     #[test]
     fn only_a_prompt_for_a_secret_is_refused() {
@@ -839,13 +833,7 @@ mod tests {
     }
 
     fn db() -> (Temp, Connection) {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ezerbot-shell-task-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
+        let path = grokbot_test_support::TestDir::new("ezerbot-shell-task");
         let file = path.join("workspace.sqlite");
         let conn = Connection::open(&file).unwrap();
         conn.execute_batch(

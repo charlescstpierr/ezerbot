@@ -1,16 +1,9 @@
 use super::*;
-use std::sync::atomic::{AtomicU64, Ordering};
-struct Db(PathBuf);
+struct Db(PathBuf, #[allow(dead_code)] grokbot_test_support::TestDir);
 impl Db {
     fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let p = std::env::temp_dir().join(format!(
-            "ezerbot-demo-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        Self(p)
+        let directory = grokbot_test_support::TestDir::new("ezerbot-demo");
+        Self(directory.to_path_buf(), directory)
     }
     fn credentials(&self) -> PathBuf {
         self.0.join("workspace.chatgpt-auth.json")
@@ -45,7 +38,6 @@ impl Drop for Db {
             .lock()
             .unwrap()
             .remove(&self.0.join("workspace.sqlite"));
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 fn post(app: &mut App, path: &str, body: Value) -> Value {

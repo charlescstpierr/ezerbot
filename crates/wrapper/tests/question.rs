@@ -19,8 +19,8 @@ fn script(f: &FakeOpenAi, events: Vec<Value>) {
 
 #[test]
 fn a_question_asked_with_the_tool_waits_in_to_decide_until_charles_writes() {
-    let root = std::env::temp_dir().join(format!("ezerbot-question-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    let guard = grokbot_test_support::TestDir::new("ezerbot-question");
+    let root = guard.to_path_buf();
     let path = root.join("workspace.sqlite");
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

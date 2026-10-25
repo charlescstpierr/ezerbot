@@ -5,7 +5,7 @@ const { mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
-const { chromeBinary } = require("./chrome-binary.cjs");
+const { chromeBinary, freezeHint } = require("./chrome-binary.cjs");
 
 const UI = __dirname;
 function commands(path) {
@@ -87,7 +87,8 @@ function measure(modeSvg, memoSvgText) {
   const directory = mkdtempSync(join(tmpdir(), "voice-icons-"));
   const file = join(directory, "icons.html");
   writeFileSync(file, page(modeSvg, memoSvgText));
-  const chrome = spawn(chromeBinary(), [
+  const binary = chromeBinary({ dumpDom: true });
+  const chrome = spawn(binary, [
     "--headless=new",
     "--no-sandbox",
     "--disable-gpu",
@@ -104,7 +105,7 @@ function measure(modeSvg, memoSvgText) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       chrome.kill("SIGKILL");
-      reject(new Error(`chrome did not compare icons\n${err.slice(-400)}`));
+      reject(new Error(`chrome did not compare icons\n${err.slice(-400)}${freezeHint(binary)}`));
     }, 20000);
     chrome.stdout.on("data", (chunk) => {
       dom += chunk;
@@ -241,7 +242,8 @@ function measureGlyphs(icons) {
   const directory = mkdtempSync(join(tmpdir(), "voice-glyphs-"));
   const file = join(directory, "glyphs.html");
   writeFileSync(file, glyphPage(icons));
-  const chrome = spawn(chromeBinary(), [
+  const binary = chromeBinary({ dumpDom: true });
+  const chrome = spawn(binary, [
     "--headless=new",
     "--no-sandbox",
     "--disable-gpu",
@@ -258,7 +260,7 @@ function measureGlyphs(icons) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       chrome.kill("SIGKILL");
-      reject(new Error(`chrome did not measure glyphs\n${err.slice(-400)}`));
+      reject(new Error(`chrome did not measure glyphs\n${err.slice(-400)}${freezeHint(binary)}`));
     }, 20000);
     chrome.stdout.on("data", (chunk) => {
       dom += chunk;

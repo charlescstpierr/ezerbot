@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -27,17 +27,12 @@ struct Fixture {
     provider: Provider,
     server: FakeOpenAi,
     path: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir()
-            .join(format!(
-                "grokbot-attachments-run-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ))
-            .join("app.sqlite");
+        let guard = grokbot_test_support::TestDir::new("grokbot-attachments-run");
+        let path = guard.to_path_buf().join("app.sqlite");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let now = SystemTime::now()
@@ -64,6 +59,7 @@ impl Fixture {
             provider,
             server,
             path,
+            _dir: guard,
         }
     }
     fn db(&self) -> Connection {
@@ -210,7 +206,6 @@ impl Drop for Fixture {
         if !std::thread::panicking() {
             self.idle();
         }
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 

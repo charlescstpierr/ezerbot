@@ -717,8 +717,6 @@ fn validate_value(value: &str, purpose: &str) -> Result<()> {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
     type Pause = (
         PathBuf,
         std::sync::mpsc::Sender<()>,
@@ -751,27 +749,18 @@ pub(crate) mod test_support {
         }
     }
     pub(crate) struct TestVault {
-        directory: PathBuf,
         pub(crate) vault: Vault,
+        // Après `vault` : le coffre se ferme avant la suppression du dossier.
+        _directory: grokbot_test_support::TestDir,
     }
     impl TestVault {
         pub(crate) fn new() -> Self {
-            let directory = std::env::temp_dir().join(format!(
-                "grokbot-vault-{}-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
+            let directory = grokbot_test_support::TestDir::new("grokbot-vault");
             let vault = Vault::open(&directory.join("workspace.secrets.json")).unwrap();
-            Self { directory, vault }
-        }
-    }
-    impl Drop for TestVault {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.directory);
+            Self {
+                vault,
+                _directory: directory,
+            }
         }
     }
 }
@@ -1079,14 +1068,7 @@ mod tests {
 
     #[test]
     fn a_vault_scanning_its_directory_does_not_hold_up_another_vault() {
-        let directory = std::env::temp_dir().join(format!(
-            "grokbot-vault-scan-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory = grokbot_test_support::TestDir::new("grokbot-vault-scan");
         let slow = directory.join("slow.secrets.json");
         let (entered, release) = test_support::hold_cleanup(&slow);
         let scanning = std::thread::spawn({
@@ -1107,7 +1089,6 @@ mod tests {
         release.send(()).unwrap();
         scanning.join().unwrap().unwrap();
         other.join().unwrap();
-        let _ = fs::remove_dir_all(&directory);
         assert_eq!(
             finished
                 .expect("another vault waited for a directory scan it does not share")

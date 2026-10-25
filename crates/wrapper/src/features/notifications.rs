@@ -408,12 +408,8 @@ mod tests {
     use super::*;
     #[test]
     fn reply_projection_uses_both_full_message_primary_key_lookups() {
-        let directory = std::env::temp_dir().join(format!(
-            "notification-plan-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
+        let guard = grokbot_test_support::TestDir::new("notification-plan");
+        let directory = guard.to_path_buf();
         {
             let app = App::open(&directory.join("workspace.sqlite")).unwrap();
             let ctx = app.feature_context();
@@ -457,12 +453,8 @@ mod tests {
 
     #[test]
     fn a_waiting_approval_is_reminded_once_after_the_chosen_delay_on_a_simulated_clock() {
-        let directory = std::env::temp_dir().join(format!(
-            "notification-reminder-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
+        let guard = grokbot_test_support::TestDir::new("notification-reminder");
+        let directory = guard.to_path_buf();
         {
             let mut app = App::open(&directory.join("workspace.sqlite")).unwrap();
             let conversation = app.api("POST", "/api/conversations", b"{}").unwrap()

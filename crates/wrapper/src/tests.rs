@@ -1,13 +1,10 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grokbot_domain::{ConversationId, MessageId};
 use grokbot_session::SubmissionTransport;
 use serde_json::json;
 
 use super::{validate_headers, App};
-
-static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 // Seed only metadata: linking does not read image bytes. This exercises the real
 // attachment core without implementing the downstream upload/thumbnail adapter.
@@ -663,15 +660,14 @@ fn hidden_context_and_tool_probes_use_the_feature_dispatcher() {
     assert!(state["conversations"].is_array());
 }
 
-struct Database(PathBuf);
+/// Chemin de la base, puis le dossier unique qui la contient : `-wal`, `-shm`,
+/// `.secrets.json`, `.lock` et `logs/` y vivent aussi et partent avec lui.
+struct Database(PathBuf, #[allow(dead_code)] grokbot_test_support::TestDir);
 
 impl Database {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!(
-            "grokbot-wrapper-{}-{}.sqlite",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        )))
+        let directory = grokbot_test_support::TestDir::new("grokbot-wrapper");
+        Self(directory.join("workspace.sqlite"), directory)
     }
 }
 
@@ -1130,16 +1126,6 @@ fn existing_wrapper_database_migrates_title_metadata_without_losing_conversation
         send(&mut app, "older", "Titre après migration", false)["conversation"]["title"],
         "Titre après migration"
     );
-}
-
-impl Drop for Database {
-    fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm"] {
-            let mut path = self.0.as_os_str().to_os_string();
-            path.push(suffix);
-            let _ = std::fs::remove_file(PathBuf::from(path));
-        }
-    }
 }
 
 #[test]
@@ -1608,460 +1594,6 @@ fn database_without_shape_column_gives_every_bot_the_pebble() {
             (json!("grokbot"), json!("galet")),
             (json!("ancien"), json!("galet"))
         ]
-    );
-}
-
-/// Enregistre une proposition comme le ferait le flux, sur la réponse simulée d'un message.
-fn propose(
-    app: &mut App,
-    conversation: &str,
-    message: &str,
-    call_id: &str,
-    name: &str,
-    arguments: serde_json::Value,
-) -> Option<String> {
-    super::record_proposal(
-        &app.connection,
-        conversation,
-        message,
-        &super::ToolCall {
-            item_id: format!("fc_{call_id}"),
-            call_id: call_id.into(),
-            name: name.into(),
-            arguments: arguments.to_string(),
-        },
-    )
-    .unwrap()
-}
-
-fn proposals(app: &mut App, conversation: &str) -> Vec<serde_json::Value> {
-    let state = app.api("GET", "/api/state", b"").unwrap();
-    let found = state["conversations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["id"] == conversation)
-        .unwrap();
-    found["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|message| message["role"] == "assistant")
-        .flat_map(|message| message["proposals"].as_array().cloned().unwrap_or_default())
-        .collect()
-}
-
-const RELECTEUR: &str = r#"{"name":"Relecteur","shape":"nuage","color":"menthe","description":"Relit vos textes.","instructions":"Sois bref et précis.","reason":"Vous relisez souvent."}"#;
-
-#[test]
-#[ignore = "propositions de bots : chantier suspendu, test inachevé"]
-fn model_arguments_are_validated_at_the_boundary_and_recorded_once_per_call_id() {
-    let db = Database::new();
-    let mut app = App::open(&db.0).unwrap();
-    let id = conversation(&mut app);
-    send(&mut app, &id, "Crée un relecteur", false);
-    let good: serde_json::Value = serde_json::from_str(RELECTEUR).unwrap();
-
-    // Forme ou couleur inconnues, nom vide, outil inconnu, arguments illisibles : une note, pas de carte.
-    let mut triangle = good.clone();
-    triangle["shape"] = json!("triangle");
-    let mut terracotta = good.clone();
-    terracotta["color"] = json!("terracotta");
-    let mut unnamed = good.clone();
-    unnamed["name"] = json!("   ");
-    for (call, name, arguments) in [
-        ("call_1", "propose_bot", triangle),
-        ("call_2", "propose_bot", terracotta),
-        ("call_3", "propose_bot", unnamed),
-        ("call_4", "propose_dog", good.clone()),
-        (
-            "call_5",
-            "propose_bot_update",
-            json!({"bot_id": "absent", "changes": {"name": "X"}, "reason": ""}),
-        ),
-        (
-            "call_6",
-            "propose_bot_update",
-            json!({"bot_id": "grokbot", "changes": {"name": "Ezerbot"}, "reason": "rien"}),
-        ),
-    ] {
-        let notice = propose(&mut app, &id, "stable-nonce", call, name, arguments);
-        assert!(
-            notice.as_deref().is_some_and(
-                |notice| notice.starts_with("Une proposition de bot n'a pas été retenue")
-            ),
-            "{call}: {notice:?}"
-        );
-    }
-    assert!(proposals(&mut app, &id).is_empty());
-    let illegible = super::record_proposal(
-        &app.connection,
-        &id,
-        "stable-nonce",
-        &super::ToolCall {
-            call_id: "call_7".into(),
-            name: "propose_bot".into(),
-            arguments: "{".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert!(illegible.unwrap().contains("illisibles"));
-
-    // Un appel valide crée une proposition en attente ; le même call_id rejoué n'en crée pas de seconde.
-    assert_eq!(
-        propose(
-            &mut app,
-            &id,
-            "stable-nonce",
-            "call_ok",
-            "propose_bot",
-            good.clone()
-        ),
-        None
-    );
-    assert_eq!(
-        propose(
-            &mut app,
-            &id,
-            "stable-nonce",
-            "call_ok",
-            "propose_bot",
-            good
-        ),
-        None
-    );
-    let listed = proposals(&mut app, &id);
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0]["id"], "call_ok");
-    assert_eq!(listed[0]["kind"], "create");
-    assert_eq!(listed[0]["status"], "pending");
-    assert_eq!(listed[0]["reason"], "Vous relisez souvent.");
-    assert_eq!(
-        listed[0]["payload"],
-        json!({"name": "Relecteur", "shape": "nuage", "color": "menthe", "description": "Relit vos textes.", "instructions": "Sois bref et précis."})
-    );
-    // L'historique rejoue la proposition en texte court, après la réponse.
-    let history = app.history(&id, "stable-nonce").unwrap();
-    assert_eq!(history.len(), 2);
-    assert_eq!(history[0], ("user", "Crée un relecteur".to_owned()));
-    assert!(
-        history[1]
-            .1
-            .ends_with("\n\n[Proposition de bot « Relecteur » : en attente]"),
-        "{}",
-        history[1].1
-    );
-}
-
-#[test]
-#[ignore = "propositions de bots : chantier suspendu, test inachevé"]
-fn proposal_transitions_are_idempotent_and_refuse_a_dismissed_one() {
-    let db = Database::new();
-    let mut app = App::open(&db.0).unwrap();
-    let id = conversation(&mut app);
-    send(&mut app, &id, "Crée un relecteur", false);
-    let good: serde_json::Value = serde_json::from_str(RELECTEUR).unwrap();
-    propose(
-        &mut app,
-        &id,
-        "stable-nonce",
-        "call_a",
-        "propose_bot",
-        good.clone(),
-    );
-    propose(&mut app, &id, "stable-nonce", "call_b", "propose_bot", good);
-    assert_eq!(
-        post(
-            &mut app,
-            "/api/proposals/accept",
-            json!({"id": "call_absent"})
-        ),
-        Err(404)
-    );
-
-    // Accepter crée le bot avec un identifiant dérivé, et le rend tel quel au second clic.
-    let first = post(&mut app, "/api/proposals/accept", json!({"id": "call_a"})).unwrap();
-    assert_eq!(first["bot"]["id"], "proposition-call_a");
-    assert_eq!(first["bot"]["name"], "Relecteur");
-    assert_eq!(first["bot"]["shape"], "nuage");
-    let replay = post(&mut app, "/api/proposals/accept", json!({"id": "call_a"})).unwrap();
-    assert_eq!(replay["bot"], first["bot"]);
-    assert_eq!(bot_ids(&mut app), ["grokbot", "proposition-call_a"]);
-    let listed = proposals(&mut app, &id);
-    assert_eq!(
-        (
-            listed[0]["status"].clone(),
-            listed[0]["result_bot_id"].clone()
-        ),
-        (json!("accepted"), json!("proposition-call_a"))
-    );
-    assert_eq!(
-        post(&mut app, "/api/proposals/dismiss", json!({"id": "call_a"})),
-        Err(409)
-    );
-
-    // Écarter, écarter encore, puis accepter : 409.
-    eprintln!("AVANT {:?}", proposals(&mut app, &id));
-    let rows: Vec<(String, String, String)> = app
-        .connection
-        .prepare("SELECT id, status, message_id FROM wrapper_proposals")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    eprintln!("ROWS {rows:?}");
-    post(&mut app, "/api/proposals/dismiss", json!({"id": "call_b"})).unwrap();
-    post(&mut app, "/api/proposals/dismiss", json!({"id": "call_b"})).unwrap();
-    eprintln!("APRES {:?}", proposals(&mut app, &id));
-    assert_eq!(proposals(&mut app, &id)[1]["status"], "dismissed");
-    assert_eq!(
-        post(&mut app, "/api/proposals/accept", json!({"id": "call_b"})),
-        Err(409)
-    );
-    assert_eq!(bot_ids(&mut app), ["grokbot", "proposition-call_a"]);
-    let history = app.history(&id, "stable-nonce").unwrap();
-    assert!(history[1].1.ends_with("[Proposition de bot « Relecteur » : acceptée]\n\n[Proposition de bot « Relecteur » : refusée]"), "{}", history[1].1);
-
-    // « Modifier avant » : les valeurs retenues remplacent celles proposées, avec les mêmes bornes.
-    let good: serde_json::Value = serde_json::from_str(RELECTEUR).unwrap();
-    propose(&mut app, &id, "stable-nonce", "call_c", "propose_bot", good);
-    assert_eq!(
-        post(
-            &mut app,
-            "/api/proposals/accept",
-            json!({"id": "call_c", "overrides": {"shape": "cercle"}})
-        ),
-        Err(400)
-    );
-    assert_eq!(
-        post(
-            &mut app,
-            "/api/proposals/accept",
-            json!({"id": "call_c", "overrides": {"avatar": "x"}})
-        ),
-        Err(400)
-    );
-    let edited = post(
-        &mut app,
-        "/api/proposals/accept",
-        json!({"id": "call_c", "overrides": {"name": "Correcteur", "color": "violet"}}),
-    )
-    .unwrap()["bot"]
-        .clone();
-    assert_eq!(
-        (
-            edited["name"].clone(),
-            edited["color"].clone(),
-            edited["shape"].clone(),
-            edited["instructions"].clone()
-        ),
-        (
-            json!("Correcteur"),
-            json!("violet"),
-            json!("nuage"),
-            json!("Sois bref et précis.")
-        )
-    );
-}
-
-#[test]
-#[ignore = "propositions de bots : chantier suspendu, test inachevé"]
-fn update_proposal_applies_the_changes_or_goes_stale_when_the_bot_moves() {
-    let db = Database::new();
-    let mut app = App::open(&db.0).unwrap();
-    post(
-        &mut app,
-        "/api/bots",
-        json!({"id": "chef", "name": "Chef", "color": "orange", "description": "Cuisine."}),
-    )
-    .unwrap();
-    let id = conversation(&mut app);
-    send(&mut app, &id, "Rends le chef plus doux", false);
-    let update = |changes: serde_json::Value| json!({"bot_id": "chef", "changes": changes, "reason": "Plus doux."});
-    // Les champs égaux à la valeur actuelle sont retirés, et `before` mémorise les autres.
-    assert_eq!(
-        propose(
-            &mut app,
-            &id,
-            "stable-nonce",
-            "call_u1",
-            "propose_bot_update",
-            update(
-                json!({"name": "Chef", "shape": null, "color": null, "description": "Cuisine avec douceur.", "instructions": "Tutoie."})
-            )
-        ),
-        None
-    );
-    let listed = proposals(&mut app, &id);
-    assert_eq!(listed[0]["kind"], "update");
-    assert_eq!(listed[0]["bot_id"], "chef");
-    assert_eq!(
-        listed[0]["payload"],
-        json!({"changes": {"description": "Cuisine avec douceur.", "instructions": "Tutoie."}, "before": {"description": "Cuisine.", "instructions": ""}})
-    );
-    assert!(app.history(&id, "stable-nonce").unwrap()[1]
-        .1
-        .ends_with("[Proposition de modification du bot « chef » : en attente]"));
-    let applied =
-        post(&mut app, "/api/proposals/accept", json!({"id": "call_u1"})).unwrap()["bot"].clone();
-    assert_eq!(
-        (
-            applied["description"].clone(),
-            applied["instructions"].clone(),
-            applied["customized"].clone()
-        ),
-        (
-            json!("Cuisine avec douceur."),
-            json!("Tutoie."),
-            json!(true)
-        )
-    );
-    // Le bot a changé depuis : la même proposition relue reste acceptée, pas périmée.
-    assert_eq!(proposals(&mut app, &id)[0]["status"], "accepted");
-
-    // Une seconde proposition se périme dès qu'un champ visé change ailleurs, et ne s'applique plus.
-    propose(
-        &mut app,
-        &id,
-        "stable-nonce",
-        "call_u2",
-        "propose_bot_update",
-        update(
-            json!({"name": "Chef pâtissier", "shape": null, "color": null, "description": null, "instructions": null}),
-        ),
-    );
-    post(
-        &mut app,
-        "/api/bots/update",
-        json!({"id": "chef", "color": "ambre"}),
-    )
-    .unwrap();
-    assert_eq!(
-        proposals(&mut app, &id)[1]["status"],
-        "pending",
-        "un champ non visé ne périme pas"
-    );
-    post(
-        &mut app,
-        "/api/bots/update",
-        json!({"id": "chef", "name": "Cheffe"}),
-    )
-    .unwrap();
-    assert_eq!(proposals(&mut app, &id)[1]["status"], "stale");
-    assert_eq!(
-        post(&mut app, "/api/proposals/accept", json!({"id": "call_u2"})),
-        Err(409)
-    );
-    assert_eq!(
-        app.api("GET", "/api/state", b"").unwrap()["bots"][1]["name"],
-        "Cheffe"
-    );
-
-    // La suppression du bot périme aussi.
-    propose(
-        &mut app,
-        &id,
-        "stable-nonce",
-        "call_u3",
-        "propose_bot_update",
-        update(
-            json!({"name": null, "shape": "etoile", "color": null, "description": null, "instructions": null}),
-        ),
-    );
-    post(&mut app, "/api/bots/delete", json!({"id": "chef"})).unwrap();
-    assert_eq!(proposals(&mut app, &id)[2]["status"], "stale");
-    assert!(app.history(&id, "stable-nonce").unwrap()[1]
-        .1
-        .ends_with("[Proposition de modification du bot « chef » : périmée]"));
-}
-
-#[test]
-#[ignore = "propositions de bots : désactivées par PROPOSALS_ENABLED"]
-fn only_the_default_bot_gets_the_proposal_tools_and_the_roster() {
-    let default = super::Bot {
-        id: "grokbot".into(),
-        name: "Ezerbot".into(),
-        created_at: 0,
-        color: "citron".into(),
-        shape: "galet".into(),
-        description: String::new(),
-        instructions: String::new(),
-        is_default: true,
-        template: None,
-        customized: false,
-        deleted: false,
-    };
-    let other = super::Bot {
-        id: "chef".into(),
-        name: "Chef".into(),
-        is_default: false,
-        description: "Cuisine.".into(),
-        ..default.clone()
-    };
-    let gone = super::Bot {
-        id: "parti".into(),
-        name: "Parti".into(),
-        is_default: false,
-        deleted: true,
-        ..default.clone()
-    };
-    assert!(super::features::engine::tools_for(&other).is_empty());
-    let tools = super::features::engine::tools_for(&default);
-    let names: Vec<&str> = tools
-        .iter()
-        .map(|tool| tool["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, ["propose_bot", "propose_bot_update"]);
-    for tool in &tools {
-        assert_eq!(
-            (tool["type"].clone(), tool["strict"].clone()),
-            (json!("function"), json!(true))
-        );
-        assert_eq!(tool["parameters"]["additionalProperties"], false);
-    }
-    let create = &tools[0]["parameters"];
-    assert_eq!(
-        create["required"],
-        json!([
-            "name",
-            "shape",
-            "color",
-            "description",
-            "instructions",
-            "reason"
-        ])
-    );
-    assert_eq!(create["properties"]["shape"]["enum"], json!(super::SHAPES));
-    assert_eq!(create["properties"]["color"]["enum"], json!(super::ACCENTS));
-    let update = &tools[1]["parameters"];
-    assert_eq!(update["required"], json!(["bot_id", "changes", "reason"]));
-    assert_eq!(
-        update["properties"]["changes"]["additionalProperties"],
-        false
-    );
-    assert_eq!(
-        update["properties"]["changes"]["required"],
-        json!(["name", "shape", "color", "description", "instructions"])
-    );
-    assert_eq!(
-        update["properties"]["changes"]["properties"]["shape"]["anyOf"][0]["enum"],
-        json!(super::SHAPES)
-    );
-    assert_eq!(
-        update["properties"]["changes"]["properties"]["name"]["anyOf"][1],
-        json!({"type": "null"})
-    );
-
-    let instructions = super::features::engine::compose_instructions(
-        &default,
-        &[default.clone(), other.clone(), gone],
-    );
-    assert!(instructions.contains("propose_bot_update"));
-    assert!(instructions.ends_with("Bots existants (identifiant : nom — présentation) :\n- grokbot : Ezerbot\n- chef : Chef — Cuisine."), "{instructions}");
-    assert!(
-        !super::features::engine::compose_instructions(&other, &[default]).contains("propose_bot")
     );
 }
 
@@ -2568,7 +2100,7 @@ fn a_secret_stored_while_the_replies_are_masked_never_leaves_in_clear() {
     // for it, a tool worker stores the renewed token, before the second reply is masked.
     let mut stored = false;
     let conversations = app
-        .conversations_settled(&mut || {
+        .conversations_settled(None, &mut || {
             if !stored {
                 vault.set("OAUTH_RENOUVELE", "", secret).unwrap();
                 stored = true;
@@ -2586,7 +2118,7 @@ fn a_secret_stored_while_the_replies_are_masked_never_leaves_in_clear() {
     // with a stale snapshot.
     let mut renewals = 0;
     let refused = app
-        .conversations_settled(&mut || {
+        .conversations_settled(None, &mut || {
             renewals += 1;
             vault
                 .set("OAUTH_RENOUVELE", "", &format!("{secret}-{renewals}"))
@@ -2594,6 +2126,32 @@ fn a_secret_stored_while_the_replies_are_masked_never_leaves_in_clear() {
         })
         .unwrap_err();
     assert_eq!(refused.status, 503);
+}
+
+#[test]
+fn a_send_response_projecting_one_conversation_is_masked_with_a_settled_vault() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let secret = "jeton-oauth-renouvele-pendant-la-reponse";
+    let id = history_quoting(&mut app, secret);
+    let vault = super::features::engine::event_vault(&app.connection).unwrap();
+    let mut stored = false;
+    let conversations = app
+        .conversations_settled(Some(&id), &mut || {
+            if !stored {
+                vault.set("OAUTH_RENOUVELE", "", secret).unwrap();
+                stored = true;
+            }
+        })
+        .unwrap();
+    assert!(stored, "the vault changed during the projection");
+    assert_eq!(conversations.len(), 1);
+    let replies = replies(&conversations);
+    assert_eq!(replies.len(), 2);
+    for reply in &replies {
+        assert!(!reply.contains(secret), "secret in clear: {reply}");
+        assert!(reply.contains("[...]"), "{reply}");
+    }
 }
 
 /// A conversation without any direct reply (#377): one routine reply (`engine_reply`) and one
@@ -2707,7 +2265,7 @@ fn a_secret_stored_while_routine_and_group_replies_are_masked_never_leaves_in_cl
     // renewed token, before the group reply is masked.
     let mut stored = false;
     let conversations = app
-        .conversations_settled(&mut || {
+        .conversations_settled(None, &mut || {
             if !stored {
                 vault.set("OAUTH_RENOUVELE", "", secret).unwrap();
                 stored = true;

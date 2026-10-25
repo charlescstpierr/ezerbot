@@ -1974,7 +1974,6 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         error: None,
         error_kind: None,
         notice: None,
-        proposals: Vec::new(),
     })
 }
 

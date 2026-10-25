@@ -5,30 +5,17 @@ use grokbot_wrapper::{features, App};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-struct Database(PathBuf);
+struct Database(grokbot_test_support::TestDir);
 impl Database {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "grokbot-memory-wrapper-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
+        Self(grokbot_test_support::TestDir::new("grokbot-memory-wrapper"))
     }
     fn path(&self) -> PathBuf {
         self.0.join("app.sqlite")
     }
     fn open(&self) -> App {
         App::open(&self.path()).unwrap()
-    }
-}
-impl Drop for Database {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 fn post(app: &mut App, path: &str, body: Value) -> Value {

@@ -1,12 +1,11 @@
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use grokbot_domain::{
     AccountGeneration, AccountId, AuthenticatedActor, ConversationId, DeliveryReceipt, MessageId,
     Refusal, SubmissionState, TranscriptEntryId,
 };
 use grokbot_store::SessionStore;
+use grokbot_test_support::TestDir;
 use rusqlite::Connection;
 
 use crate::{
@@ -14,16 +13,12 @@ use crate::{
     SubmissionSession, SubmissionTransport,
 };
 
-static DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-struct Database(PathBuf);
+/// Chemin de la base, puis le dossier unique qui la contient (supprimé en entier à la fin).
+struct Database(PathBuf, #[allow(dead_code)] TestDir);
 impl Database {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!(
-            "grokbot-session-{}-{}.sqlite",
-            std::process::id(),
-            DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed)
-        )))
+        let directory = TestDir::new("grokbot-session");
+        Self(directory.join("session.sqlite"), directory)
     }
     fn fail_writes(&self) {
         fail_writes(&self.0);
@@ -33,11 +28,6 @@ impl Database {
             .unwrap()
             .execute_batch("DROP TRIGGER fail_submission_save;")
             .unwrap();
-    }
-}
-impl Drop for Database {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
     }
 }
 
@@ -676,4 +666,90 @@ fn echoed_state_is_committed_before_return_and_rejects_old_lookup() {
         session.apply_reconciliation(&request, LookupOutcome::NotFound),
         Err(SessionError::StaleRequest)
     ));
+}
+
+fn other_conversation() -> ConversationId {
+    ConversationId::new("other").unwrap()
+}
+
+fn deliver(
+    session: &mut SubmissionSession,
+    db: &Database,
+    conversation: &ConversationId,
+    entry: &str,
+) {
+    let mut transport = Observer::new(
+        db,
+        SendOutcome::Accepted(DeliveryReceipt {
+            account_id: AccountId::new("alice").unwrap(),
+            conversation_id: conversation.clone(),
+            message_id: message(),
+        }),
+        LookupOutcome::Unknown,
+    );
+    session
+        .prepare(conversation.clone(), message(), "original body".into())
+        .unwrap();
+    session
+        .send_with(conversation, &message(), &mut transport)
+        .unwrap();
+    session
+        .observe_echo(
+            conversation,
+            &message(),
+            TranscriptEntryId::new(entry).unwrap(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn sending_in_one_conversation_never_rewrites_another_conversations_rows() {
+    let db = Database::new();
+    let mut session = SubmissionSession::open(&db.0, actor("alice", 1)).unwrap();
+    deliver(&mut session, &db, &other_conversation(), "other-echo");
+    let before = SessionStore::open(&db.0, &AccountId::new("alice").unwrap())
+        .unwrap()
+        .list_conversation_submissions(&other_conversation())
+        .unwrap();
+    assert_eq!(before.len(), 1);
+
+    Connection::open(&db.0)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE audit (event TEXT NOT NULL);
+             CREATE TRIGGER audit_insert AFTER INSERT ON submissions
+             WHEN NEW.conversation_id = 'other'
+             BEGIN INSERT INTO audit VALUES ('insert'); END;
+             CREATE TRIGGER audit_update AFTER UPDATE ON submissions
+             WHEN NEW.conversation_id = 'other' OR OLD.conversation_id = 'other'
+             BEGIN INSERT INTO audit VALUES ('update'); END;
+             CREATE TRIGGER audit_delete AFTER DELETE ON submissions
+             WHEN OLD.conversation_id = 'other'
+             BEGIN INSERT INTO audit VALUES ('delete'); END;",
+        )
+        .unwrap();
+
+    deliver(&mut session, &db, &conversation(), "echo");
+
+    let audit: Vec<String> = {
+        let connection = Connection::open(&db.0).unwrap();
+        let mut statement = connection.prepare("SELECT event FROM audit").unwrap();
+        let rows = statement.query_map([], |row| row.get(0)).unwrap();
+        rows.map(Result::unwrap).collect()
+    };
+    assert_eq!(audit, Vec::<String>::new());
+    let store = SessionStore::open(&db.0, &AccountId::new("alice").unwrap()).unwrap();
+    assert_eq!(
+        store
+            .list_conversation_submissions(&other_conversation())
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        store
+            .list_conversation_submissions(&conversation())
+            .unwrap()
+            .len(),
+        1
+    );
 }

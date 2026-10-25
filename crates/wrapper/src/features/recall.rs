@@ -1647,8 +1647,8 @@ mod tests {
 
     #[test]
     fn a_keychain_that_refuses_the_write_leaves_no_fallback_file() {
-        let dir = std::env::temp_dir().join(format!("ezerbot-recall-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-recall");
+        let dir = guard.to_path_buf();
         let file = dir.join("workspace.secrets.json");
         let vault = grokbot_forms::vault::Vault::open_refusing_keychain(&file).unwrap();
         let secret = "recall-key-must-never-reach-a-file-0123456789";

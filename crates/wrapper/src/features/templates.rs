@@ -748,7 +748,6 @@ pub(crate) fn exists(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::now;
 
     #[test]
     fn catalogue_has_twenty_valid_french_templates() {
@@ -822,11 +821,8 @@ mod tests {
 
     #[test]
     fn one_click_creation_exports_and_imports_without_conversations() {
-        let path = std::env::temp_dir().join(format!(
-            "ezerbot-templates-{}-{}.sqlite",
-            std::process::id(),
-            now()
-        ));
+        let directory = grokbot_test_support::TestDir::new("ezerbot-templates");
+        let path = directory.join("workspace.sqlite");
         let mut app = App::open(&path).unwrap();
         let created = post(
             &mut app,
@@ -958,12 +954,11 @@ mod tests {
             .count();
         assert_eq!(copied, 0);
         drop(app);
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn a_copy_carries_active_facts_only_and_never_conversations() {
-        let (path, mut app) = temporary("copy");
+        let (_directory, mut app) = temporary("copy");
         post(
             &mut app,
             "/api/templates/create",
@@ -1105,7 +1100,6 @@ mod tests {
         .unwrap_err();
         assert_eq!(missing.status, 404);
         drop(app);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1159,11 +1153,8 @@ mod tests {
         document.id = None;
         document.category = None;
         document.skills[0].body = body.clone();
-        let path = std::env::temp_dir().join(format!(
-            "ezerbot-templates-large-{}-{}.sqlite",
-            std::process::id(),
-            now()
-        ));
+        let directory = grokbot_test_support::TestDir::new("ezerbot-templates-large");
+        let path = directory.join("workspace.sqlite");
         let mut app = App::open(&path).unwrap();
         let payload = json!({"bot_id": "bot-large", "document": document});
         assert!(serde_json::to_vec(&payload).unwrap().len() > crate::BODY_LIMIT);
@@ -1185,17 +1176,12 @@ mod tests {
             .unwrap();
         assert_eq!(revue["body"], body);
         drop(app);
-        let _ = std::fs::remove_file(&path);
     }
 
-    fn temporary(label: &str) -> (std::path::PathBuf, App) {
-        let path = std::env::temp_dir().join(format!(
-            "ezerbot-templates-{label}-{}-{}.sqlite",
-            std::process::id(),
-            now()
-        ));
-        let app = App::open(&path).unwrap();
-        (path, app)
+    fn temporary(label: &str) -> (grokbot_test_support::TestDir, App) {
+        let directory = grokbot_test_support::TestDir::new(&format!("ezerbot-templates-{label}"));
+        let app = App::open(&directory.join("workspace.sqlite")).unwrap();
+        (directory, app)
     }
 
     fn minimal_document() -> Document {
@@ -1212,7 +1198,7 @@ mod tests {
 
     #[test]
     fn a_bot_with_twenty_one_skills_round_trips() {
-        let (path, mut app) = temporary("skills");
+        let (_directory, mut app) = temporary("skills");
         post(
             &mut app,
             "/api/bots",
@@ -1247,12 +1233,11 @@ mod tests {
         let skills = app.api("GET", "/api/skills?bot_id=bot-copy", b"").unwrap();
         assert_eq!(skills["skills"].as_array().unwrap().len(), 21);
         drop(app);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn eleven_routines_and_fifty_one_memories_round_trip() {
-        let (path, mut app) = temporary("counts");
+        let (_directory, mut app) = temporary("counts");
         let mut document = minimal_document();
         document.routines = (0..11)
             .map(|index| RoutineDocument {
@@ -1306,12 +1291,11 @@ mod tests {
             .unwrap();
         assert_eq!(memories["facts"].as_array().unwrap().len(), 51);
         drop(app);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn export_refuses_a_model_past_the_shared_ceiling() {
-        let (path, mut app) = temporary("ceiling");
+        let (_directory, mut app) = temporary("ceiling");
         post(
             &mut app,
             "/api/bots",
@@ -1350,12 +1334,11 @@ mod tests {
             "Un modèle compte au plus 250 skills, 250 routines, 500 souvenirs, 40 connecteurs et 6 amorces."
         );
         drop(app);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn a_document_over_four_mebibytes_is_refused() {
-        let (path, mut app) = temporary("bytes");
+        let (_directory, mut app) = temporary("bytes");
         let mut document = minimal_document();
         // Each skill stays under the library ceiling; only the whole document exceeds 4 MiB.
         document.skills = (0..17)
@@ -1374,12 +1357,11 @@ mod tests {
         assert_eq!(error.status, 400);
         assert_eq!(error.message, "Ce modèle dépasse 4 Mo.");
         drop(app);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn a_multiline_memory_round_trips() {
-        let (path, mut app) = temporary("lines");
+        let (_directory, mut app) = temporary("lines");
         let memory = "Première ligne\r\nDeuxième\tligne";
         let mut document = minimal_document();
         document.memories = vec![memory.into()];
@@ -1442,7 +1424,6 @@ mod tests {
         )
         .is_err());
         drop(app);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1469,7 +1450,7 @@ mod tests {
 
     #[test]
     fn replay_reports_whether_routines_are_enabled() {
-        let (path, mut app) = temporary("replay");
+        let (_directory, mut app) = temporary("replay");
         post(
             &mut app,
             "/api/templates/create",
@@ -1510,7 +1491,6 @@ mod tests {
         assert_eq!(replay["replayed"], true);
         assert_eq!(replay["routines_enabled"], false);
         drop(app);
-        let _ = std::fs::remove_file(path);
     }
 
     fn exported_document(app: &mut App, bot_id: &str) -> Value {
@@ -1519,7 +1499,7 @@ mod tests {
 
     #[test]
     fn export_reports_a_routine_whose_skill_is_missing() {
-        let (path, mut app) = temporary("missing-skill");
+        let (_directory, mut app) = temporary("missing-skill");
         post(
             &mut app,
             "/api/bots",
@@ -1587,16 +1567,12 @@ mod tests {
             json!(["La routine « Bilan » utilise une skill absente et n’a pas été incluse."])
         );
         drop(app);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn an_imported_webhook_routine_gets_its_trigger_and_token() {
-        let path = std::env::temp_dir().join(format!(
-            "ezerbot-templates-webhook-{}-{}.sqlite",
-            std::process::id(),
-            now()
-        ));
+        let directory = grokbot_test_support::TestDir::new("ezerbot-templates-webhook");
+        let path = directory.join("workspace.sqlite");
         let mut app = App::open(&path).unwrap();
         post(
             &mut app,

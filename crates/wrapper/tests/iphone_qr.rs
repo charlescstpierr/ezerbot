@@ -95,8 +95,8 @@ fn files(root: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn qr_link_prefills_a_single_use_code_that_still_needs_the_mac_and_never_reaches_logs() {
-    let root = std::env::temp_dir().join(format!("iphone-qr-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    let guard = grokbot_test_support::TestDir::new("iphone-qr");
+    let root = guard.to_path_buf();
     let fake = root.join("tailscale-fake");
     std::fs::write(&fake,"#!/bin/sh\nprintf '%s\\n' '{\"BackendState\":\"Running\",\"Self\":{\"DNSName\":\"mac.qa.ts.net.\"},\"CurrentTailnet\":{\"Name\":\"qa-tailnet\"}}'\n").unwrap();
     use std::os::unix::fs::PermissionsExt;

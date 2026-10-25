@@ -7,7 +7,7 @@
 //! a general decoder for arbitrary encodings or repeated serialization.
 //! PS11 (`reports/goal-permissions-secrets.md`) only establishes targeted Grok
 //! sanitizers; this broader boundary is the plan's defense-in-depth choice.
-use crate::vault::Vault;
+use crate::vault::{Stamp, Vault};
 use grokbot_engine::contracts::{Error, Result};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -60,16 +60,17 @@ pub struct Hold {
 }
 
 impl Hold {
-    /// Ends the hold and reads every vault it kept again: true when each still holds exactly
-    /// what was used to mask. False means a secret was stored or removed meanwhile, and what
-    /// was masked during the hold must be rendered again. Nothing read means nothing masked.
+    /// Ends the hold: true when every vault it kept still holds exactly what was used to mask.
+    /// False means a secret was stored or removed meanwhile, and what was masked during the
+    /// hold must be rendered again. Nothing read means nothing masked. A vault whose `Stamp`
+    /// did not move is not read again, so a stable rendering reads each vault once (#328).
     pub fn settled(self) -> Result<bool> {
         if !self.outermost {
             return Ok(true);
         }
         let kept = HELD.take().unwrap_or_default();
         for held in &kept {
-            if read_patterns(&held.vault)? != held.patterns {
+            if held.vault.stamp()? != held.stamp && read_patterns(&held.vault)?.0 != held.patterns {
                 return Ok(false);
             }
         }
@@ -88,13 +89,14 @@ impl Drop for Hold {
 struct Held {
     vault: Vault,
     patterns: Vec<String>,
+    stamp: Stamp,
     /// The `app_patterns` paths that opened this vault during the hold.
     opened_as: Vec<PathBuf>,
 }
 
-/// `Patterns::of(&Vault::open_app(path)?)`. Under a hold, a vault already read through this
-/// path is not opened again: opening locks the file and lists its directory, which a state
-/// read would otherwise do once per reply of the history.
+/// `Patterns::of(&Vault::open_app(path)?)`, with the one read that opening does. Under a hold,
+/// a vault already read through this path is not opened again: opening locks the file and
+/// lists its directory, which a state read would otherwise do once per reply of the history.
 pub fn app_patterns(path: &Path) -> Result<Patterns> {
     let kept = HELD.with_borrow(|held| {
         held.as_ref()?
@@ -105,14 +107,23 @@ pub fn app_patterns(path: &Path) -> Result<Patterns> {
     if let Some(patterns) = kept {
         return Ok(Patterns(patterns));
     }
-    let vault = Vault::open_app(path)?;
-    let patterns = known_patterns(&vault)?;
+    let (vault, values, stamp) = Vault::open_app_known(path)?;
+    let mut patterns = patterns_of(values)?;
     HELD.with_borrow_mut(|held| {
-        if let Some(read) = held
-            .as_mut()
-            .and_then(|kept| kept.iter_mut().find(|read| read.vault.same_store(&vault)))
-        {
-            read.opened_as.push(path.to_owned());
+        let Some(kept) = held else {
+            return;
+        };
+        match kept.iter_mut().find(|read| read.vault.same_store(&vault)) {
+            Some(read) => {
+                read.opened_as.push(path.to_owned());
+                patterns = read.patterns.clone();
+            }
+            None => kept.push(Held {
+                vault,
+                patterns: patterns.clone(),
+                stamp,
+                opened_as: vec![path.to_owned()],
+            }),
         }
     });
     Ok(Patterns(patterns))
@@ -178,24 +189,30 @@ pub fn redact_value(vault: &Vault, value: &Value) -> Result<Value> {
 fn known_patterns(vault: &Vault) -> Result<Vec<String>> {
     HELD.with_borrow_mut(|held| {
         let Some(kept) = held else {
-            return read_patterns(vault);
+            return Ok(read_patterns(vault)?.0);
         };
         if let Some(read) = kept.iter().find(|read| read.vault.same_store(vault)) {
             return Ok(read.patterns.clone());
         }
-        let patterns = read_patterns(vault)?;
+        let (patterns, stamp) = read_patterns(vault)?;
         kept.push(Held {
             vault: vault.handle(),
             patterns: patterns.clone(),
+            stamp,
             opened_as: Vec::new(),
         });
         Ok(patterns)
     })
 }
 
-fn read_patterns(vault: &Vault) -> Result<Vec<String>> {
+fn read_patterns(vault: &Vault) -> Result<(Vec<String>, Stamp)> {
+    let (values, stamp) = vault.known_values_stamped()?;
+    Ok((patterns_of(values)?, stamp))
+}
+
+fn patterns_of(values: Vec<String>) -> Result<Vec<String>> {
     let mut patterns = BTreeSet::new();
-    for value in vault.known_values()? {
+    for value in values {
         let encoded = serde_json::to_string(&value)?;
         // The serializer always adds ASCII quotes around a String. Retain the
         // interior so a tool result containing serialized JSON is also masked.

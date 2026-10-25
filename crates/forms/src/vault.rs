@@ -95,6 +95,11 @@ std::thread_local! {
 pub fn reads_on_this_thread() -> u64 {
     READS.get()
 }
+/// The vault file as it is on disk, without a read of the secrets. Every write renames a new
+/// file over it (`Vault::write`), a keychain write too (`keychain::set`, `keychain::remove`), so
+/// a write of this process or of another wrapper process changes the stamp.
+#[derive(PartialEq)]
+pub(crate) struct Stamp(u64, u64, Option<std::time::SystemTime>);
 // 0: explicit file-only library fixture; 1: host lacks a stable signer; 2: admitted.
 static OS_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -118,6 +123,12 @@ impl Vault {
     /// atomic. Recover a zero-length file left by an interrupted older initializer;
     /// refuse all other corrupt content. Missing data after open fails closed.
     pub fn open(path: &Path) -> Result<Self> {
+        let vault = Self::create(path)?;
+        vault.known_values()?;
+        Ok(vault)
+    }
+    /// `open` without its read of the secrets, which the caller does next and fails closed on.
+    fn create(path: &Path) -> Result<Self> {
         let guard = access();
         let path = std::env::current_dir()?.join(path);
         if path.file_name().is_none() {
@@ -149,7 +160,6 @@ impl Vault {
         if initialize {
             vault.write(&Secrets::new())?;
         }
-        vault.read()?;
         Ok(vault)
     }
     /// Application entry point. macOS release hosts prefer Keychain; development
@@ -157,20 +167,22 @@ impl Vault {
     /// The empty legacy file remains a recovery container. ChatGPT credentials
     /// are never opened by this code.
     pub fn open_app(path: &Path) -> Result<Self> {
-        let vault = Self::open(path)?;
+        Ok(Self::open_app_known(path)?.0)
+    }
+    /// `open_app` and what its one read found, keychain migration included: redaction masks with
+    /// it instead of reading the vault again (`redact::app_patterns`, #328).
+    pub(crate) fn open_app_known(path: &Path) -> Result<(Self, Vec<String>, Stamp)> {
+        let vault = Self::create(path)?;
         #[cfg(target_os = "macos")]
         let mut vault = vault;
         #[cfg(target_os = "macos")]
         match OS_MODE.load(std::sync::atomic::Ordering::Relaxed) {
             1 => vault.signature_notice = Some(keychain::signature_notice(&vault.path)),
-            2 => {
-                if let Some(target) = keychain::Target::for_app() {
-                    return vault.with_keychain(target);
-                }
-            }
+            2 => vault.keychain = keychain::Target::for_app(),
             _ => (),
         }
-        Ok(vault)
+        let (values, stamp) = vault.known_values_stamped()?;
+        Ok((vault, values, stamp))
     }
     /// Active keychain that refuses writes and deletions. Debug tests only:
     /// nothing is stored in the plaintext file.
@@ -206,6 +218,15 @@ impl Vault {
             #[cfg(debug_assertions)]
             refuse_keychain: self.refuse_keychain,
         }
+    }
+    /// See `Stamp`. Reads no secret.
+    pub(crate) fn stamp(&self) -> Result<Stamp> {
+        let metadata = fs::symlink_metadata(&self.path)?;
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(&metadata);
+        #[cfg(not(unix))]
+        let inode = 0;
+        Ok(Stamp(inode, metadata.len(), metadata.modified().ok()))
     }
     /// Whether both handles read the same secrets: same file, same backend.
     pub(crate) fn same_store(&self, other: &Self) -> bool {
@@ -332,6 +353,10 @@ impl Vault {
     }
     /// Restricted to redaction, not model context construction.
     pub(crate) fn known_values(&self) -> Result<Vec<String>> {
+        Ok(self.known_values_stamped()?.0)
+    }
+    /// `known_values`, and the stamp of the content they were read from.
+    pub(crate) fn known_values_stamped(&self) -> Result<(Vec<String>, Stamp)> {
         let _guard = access();
         let _file_guard = self.lock_file(true)?;
         let mut values = Vec::new();
@@ -376,7 +401,7 @@ impl Vault {
             }
             values.push(secret.value);
         }
-        Ok(values)
+        Ok((values, self.stamp()?))
     }
 
     // Call only while holding VAULT_ACCESS and the companion-file lock. Parse

@@ -2006,7 +2006,7 @@ fn context_checked(ctx: &Context<'_>, request: &ContextRequest) -> Result<Vec<Co
     Ok(blocks)
 }
 
-/// Every card is masked with one read of the vault, read again once they are all done: if a
+/// Every card is masked with one read of the vault, checked once they are all done: if a
 /// secret was stored meanwhile the cards are rendered again, as `App::conversations_settled`
 /// does for the conversations (#377, #328). A vault that keeps changing or fails is refused.
 pub fn state(ctx: &Context<'_>) -> Value {

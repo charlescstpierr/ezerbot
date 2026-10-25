@@ -3,7 +3,7 @@ use std::cell::Cell;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -71,19 +71,41 @@ impl Diagnostics {
     }
 }
 
+pub(crate) struct Timing {
+    pub(crate) first_event: Duration,
+    pub(crate) max_gap: Duration,
+    pub(crate) total: Duration,
+    pub(crate) input_chars: usize,
+}
+
 /// Per-attempt status only: opaque local turn digest, HTTP integer and a local
 /// fixed code. No prompt, generated text, credentials or upstream headers.
-pub(crate) fn turn(directory: &std::path::Path, id: &str, status: u16, code: &'static str) {
+pub(crate) fn turn(
+    directory: &std::path::Path,
+    id: &str,
+    status: u16,
+    code: &'static str,
+    timing: Option<&Timing>,
+) {
     use sha2::{Digest, Sha256};
     let digest = format!("{:x}", Sha256::digest(id.as_bytes()));
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    let timing = timing.map_or_else(String::new, |t| {
+        format!(
+            " ttfe_ms={} max_gap_ms={} total_ms={} input_chars={}",
+            t.first_event.as_millis(),
+            t.max_gap.as_millis(),
+            t.total.as_millis(),
+            t.input_chars
+        )
+    });
     append(
         &directory.join("logs/engine.log"),
         &format!(
-            "[{timestamp}] upstream turn={} status={status} code={code}\n",
+            "[{timestamp}] upstream turn={} status={status} code={code}{timing}\n",
             &digest[..16]
         ),
     );

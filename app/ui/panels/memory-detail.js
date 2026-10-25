@@ -187,7 +187,7 @@
     }
     // Un clic n'importe où sur la carte ouvre le souvenir ; au clavier, le bouton du texte s'en charge.
     const bind = (el, factId) => el.addEventListener("click", () => open(factId));
-    return { element: root, open, close, refresh, bind };
+    return { element: root, open, close, refresh, bind, busy: () => busy };
   }
   window.EzerbotMemoryDetail = { create };
 })();

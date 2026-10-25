@@ -1166,13 +1166,19 @@ fn restart_with_delayed_catalogue(already_created: bool) {
         tx.commit().unwrap();
     }
     let models_gate = Arc::new(AtomicBool::new(false));
-    f.server.seen.lock().unwrap().models_gate = Some(models_gate.clone());
+    // The first provider has already fetched its catalogue (twice: the catalogue
+    // and the connection probe). Only the reopened provider's request is held.
+    let held = {
+        let mut seen = f.server.seen.lock().unwrap();
+        seen.models_gate = Some(models_gate.clone());
+        seen.model_requests + 1
+    };
     f.path = recovered;
     f.provider = Provider::with_endpoints(&f.path, f.server.endpoints(), false);
     f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
     assert_eq!(f.provider.status()["models_ready"], false);
     wait("catalogue retenu", || {
-        f.server.seen.lock().unwrap().model_requests == 2
+        f.server.seen.lock().unwrap().model_requests == held
     });
     for _ in 0..3 {
         f.app.tick(0);

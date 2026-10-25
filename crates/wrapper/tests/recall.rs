@@ -84,6 +84,11 @@ impl Recall {
                 let (status, data) = if method == "POST" && url == "/api/v1/bot/" {
                     seen.creates
                         .push((auth, serde_json::from_str(&body).unwrap_or(Value::Null)));
+                    // Un bot qui vient d'être créé se connecte, comme chez Recall : une
+                    // réinvitation ne reprend pas l'état du bot précédent (« dans l'appel »).
+                    if (200..300).contains(&seen.create_status) {
+                        seen.code = "joining_call".into();
+                    }
                     let delay = seen.create_delay;
                     drop(seen);
                     std::thread::sleep(delay);
@@ -280,6 +285,17 @@ impl Fixture {
             .find(|e| e.kind == RunEventKind::ToolResult)
             .unwrap();
         serde_json::from_value(event.payload["outcome"].clone()).unwrap()
+    }
+    /// Le faux OpenAI sert les réponses scriptées dans l'ordre d'arrivée, tous tours confondus :
+    /// tant que ce tour doit encore sa requête de suite, celle du tour suivant pourrait prendre
+    /// sa réponse. On ne script le tour suivant qu'une fois celui-ci fini.
+    fn turn_finished(&self, run: &str) {
+        wait("turn finished", || {
+            store::required(&self.db(), run)
+                .unwrap()
+                .status
+                .is_terminal()
+        });
     }
     fn script_call(&self, name: &str, id: &str, arguments: Value) {
         let mut seen = self.ai.seen.lock().unwrap();
@@ -528,6 +544,9 @@ fn a_clean_close_removes_the_bot_and_a_crash_never_leaves_in_progress() {
     assert_eq!(f.item()["meeting"]["label"], "Terminée");
     // Arrêt brutal : rien ne ferme la réunion, la réouverture ne dit plus En cours.
     f.joined();
+    // Le suivi de fond peut passer dès l'accord : le nouveau bot se connecte encore.
+    f.sync();
+    assert_eq!(f.meeting_state(), "joining");
     f.recall.code("in_call_recording");
     f.sync();
     assert_eq!(f.meeting_state(), "in_call");
@@ -612,6 +631,7 @@ fn a_bot_asked_in_the_thread_follows_the_same_gate_and_can_be_told_to_leave() {
         other => panic!("{other:?}"),
     }
     assert_eq!(f.recall.creates(), 0);
+    f.turn_finished(&run);
     // Un bon lien ouvre la carte ; rien ne part avant Accepter.
     f.script_call(recall::JOIN, "join-ok", json!({"lien":MEET}));
     f.script_done();
@@ -631,6 +651,7 @@ fn a_bot_asked_in_the_thread_follows_the_same_gate_and_can_be_told_to_leave() {
             .unwrap()
             == 1
     });
+    f.turn_finished(&run);
     // « Quitte la réunion » : sans carte, le bot sort.
     f.script_call(recall::LEAVE, "leave-1", json!({}));
     f.script_done();
@@ -1093,6 +1114,7 @@ fn an_instruction_said_in_the_call_triggers_no_message_no_exit_and_no_other_acti
     offered.sort_unstable();
     assert_eq!(offered, closed);
     // Une nouvelle demande de Charles, elle, peut toujours faire quitter le bot.
+    f.turn_finished(&run);
     f.script_call(recall::LEAVE, "l-2", json!({}));
     f.script_done();
     f.say_text("leave-for-real", "Quitte la réunion");

@@ -73,7 +73,9 @@
   // botSection may return a cleanup function, called before remount and on dialog close.
   // onState(state, context), onConnection(connected, context), onCardAction(message, action, detail, context); only true claims an action.
   // wantsPolling(context) and sendExtras(context) are synchronous; sendExtras returns extra /api/send fields.
-  // composer: mount(container, context), onFiles(files, event, context), blocked(context), onSent({messageId, extras}, context).
+  // composer: mount(container, context), onFiles(files, event, context), blocked(context), capture(context),
+  // onSent({messageId, extras, captured}, context). capture runs with sendExtras when a message is submitted; its value
+  // comes back to the same panel as `captured`, so a panel tells what left with this message from what was staged since.
   // onSent runs once the server holds the message, including unknown/queued states, not on confirmation.
   // onFiles returns false to preserve normal paste/drop. Async uploads call composerChanged() when ready.
   const panelContext = () => ({ state, connected, conversation: currentConversation(), bot: currentBot(), draft: ui.input?.value || "" });
@@ -112,7 +114,7 @@
       if (!pending) continue;
       if (!pending.consumed) {
         pending.consumed = true;
-        for (const panel of panels.values()) panelCall(panel, panel.composer?.onSent, { messageId: message.id, extras: pending.extras });
+        for (const panel of panels.values()) panelCall(panel, panel.composer?.onSent, { messageId: message.id, extras: pending.extras, captured: pending.captured.get(panel.id) });
       }
       if (message.state !== "queued") pendingSends.delete(message.id);
     }
@@ -128,6 +130,11 @@
       }
     }
     return extras;
+  }
+  function captureComposer() {
+    const captured = new Map();
+    for (const panel of panels.values()) if (panel.composer?.capture) captured.set(panel.id, panelCall(panel, panel.composer.capture));
+    return captured;
   }
   function composerFiles(files, event) {
     if (!files?.length) return false;
@@ -1385,6 +1392,7 @@
     const submittedDocument = ui.input.document;
     const body = submittedDraft.trim();
     const extras = structuredClone(sendExtras());
+    const captured = captureComposer();
     let conversation = currentConversation();
     approvalFollow.arm(conversation?.id ?? null, conversation?.messages || [], ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);
     busy = true;
@@ -1416,7 +1424,7 @@
         approvalFollow.bind(conversation.id);
       }
       messageId = crypto.randomUUID();
-      pendingSends.set(messageId, { extras, consumed: false });
+      pendingSends.set(messageId, { extras, captured, consumed: false });
       conversation.messages.push({ ...extras, ...(conversation.kind === "task" ? { payload: { source: "follow_up" } } : {}), id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       removePreference(previousDraftKey);
       removePreference(`${previousDraftKey}.document`);

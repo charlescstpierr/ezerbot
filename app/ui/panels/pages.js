@@ -19,6 +19,7 @@
   let generation = 0;
   let knownPages = [];
   let quote = null;
+  let quoteSerial = 0;
   let candidate = null;
   const passageLimit = 500;
 
@@ -204,7 +205,7 @@
 
   function startQuote() {
     if (!candidate || !detail) return;
-    quote = { page_id: detail.id, title: detail.title, source_version: detail.source_version, passage: candidate };
+    quote = { serial: ++quoteSerial, page_id: detail.id, title: detail.title, source_version: detail.source_version, passage: candidate };
     candidate = null;
     shell.comment.hidden = true;
     document.getSelection().removeAllRanges();
@@ -479,9 +480,10 @@
     openPage: showPage,
     sendExtras: () => quote ? { page_anchor: { page_id: quote.page_id, source_version: quote.source_version, passage: quote.passage } } : {},
     composer: {
-      onSent({ extras }) {
-        const sent = extras && extras.page_anchor;
-        if (quote && sent && sent.page_id === quote.page_id && sent.passage === quote.passage) clearQuote();
+      // L'accusé ne retire que la citation partie avec ce message, jamais une citation posée depuis, même passage compris.
+      capture: () => quote ? quote.serial : null,
+      onSent({ captured }) {
+        if (quote && captured === quote.serial) clearQuote();
       },
     },
   });

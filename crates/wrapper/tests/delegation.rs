@@ -172,17 +172,14 @@ impl Fixture {
         self.app.tick(ms);
     }
     fn wait_parent(&mut self, c: &str, m: &str, status: RunStatus) {
-        let mut delivered = false;
         wait("parent state", || {
             // A background launch pauses on its own card. Existing engine tests
-            // that wait for the child (or for the parent to finish) allow it once.
+            // that wait for the child (or for the parent to finish) allow it.
             if self.run(c, m).status == RunStatus::AwaitingApproval {
-                if self.allow_pending_background() || !delivered {
-                    self.tick_suspended();
-                    delivered = true;
-                }
-            } else {
-                delivered = false;
+                self.allow_pending_background();
+                // Tick like the host loop: a tick that races the suspended worker's
+                // ownership release delivers nothing, and only a later one resumes the run.
+                self.tick_suspended();
             }
             self.run(c, m).status == status && self.provider.status()["titling"] == false
         });
@@ -311,7 +308,12 @@ impl Fixture {
             json!({"type":"response.output_text.delta","delta":"Parent acknowledged"}),
             completed(),
         ]);
-        self.tick();
+        // Tick like the host loop until the parent leaves its batch wait: a tick that
+        // races the previous worker's ownership release does not resume it.
+        wait("parent resumed", || {
+            self.tick();
+            self.run(c, m).status != RunStatus::AwaitingChildren
+        });
         self.wait_parent(c, m, RunStatus::Finished);
     }
 }
@@ -498,16 +500,11 @@ fn tool_budget_cannot_skip_the_final_batch_wait() {
     }
     tx.commit().unwrap();
     f.tick();
-    let mut budget_delivered = false;
     wait("budget batch waits", || {
-        if store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingApproval
-            && (f.allow_pending_background() || !budget_delivered)
-        {
+        // Tick like the host loop, as wait_parent does.
+        if store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingApproval {
+            f.allow_pending_background();
             f.tick_suspended();
-            budget_delivered = true;
-        }
-        if store::required(&f.db(), &root.run_id).unwrap().status != RunStatus::AwaitingApproval {
-            budget_delivered = false;
         }
         store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingChildren
     });
@@ -835,8 +832,9 @@ fn rejected_last_delegate_still_waits_for_approved_sibling(expired: bool) {
             && f.provider.status()["titling"] == false
     });
     assert!(f.allow_pending_background());
-    f.tick_suspended();
     wait("second approval", || {
+        // Tick like the host loop, as wait_parent does.
+        f.tick_suspended();
         f.run(&c, "mixed").status == RunStatus::AwaitingApproval
             && f.children(&f.run(&c, "mixed")).len() == 1
             && f.provider.status()["titling"] == false
@@ -872,9 +870,11 @@ fn rejected_last_delegate_still_waits_for_approved_sibling(expired: bool) {
         );
     }
     f.events(vec![completed()]);
-    f.tick_suspended();
     wait("approval settled", || {
-        f.provider.status()["titling"] == false
+        // Tick like the host loop, as wait_parent does.
+        f.tick_suspended();
+        f.run(&c, "mixed").status != RunStatus::AwaitingApproval
+            && f.provider.status()["titling"] == false
     });
     let parent = f.run(&c, "mixed");
     assert_eq!(parent.status, RunStatus::AwaitingChildren);
@@ -1213,6 +1213,8 @@ fn revoking_one_selected_fact_keeps_other_context_and_reports_revocation() {
     f.post("/api/forms/submit",json!({"entry_id":entry,"submission_id":"after-forget","conversation_id":c,"values":{"answer":"continue"}}));
     f.tick();
     wait("child finished", || {
+        // Tick like the host loop, as wait_parent does.
+        f.tick_suspended();
         matches!(
             graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
             DelegationStatus::Done { .. }
@@ -2719,7 +2721,6 @@ fn group_member_can_delegate_and_receive_a_scoped_child_followup() {
     ]);
     f.post("/api/send",json!({"conversation_id":c,"message_id":"group-root","body":"Analyse en sous-tâche","mentions":[{"id":"grokbot","label":"Ezerbot"}]}));
     f.tick();
-    let mut group_delivered = false;
     wait("group delegates", || {
         let waiting = f
             .db()
@@ -2729,14 +2730,12 @@ fn group_member_can_delegate_and_receive_a_scoped_child_followup() {
                 |r| r.get::<_, bool>(0),
             )
             .unwrap_or(false);
-        if waiting && (f.allow_pending_background() || !group_delivered) {
+        if waiting {
+            f.allow_pending_background();
             // Group turns resume from the multibot driver, which a full tick runs
-            // after the engine has already scanned queued children.
+            // after the engine has already scanned queued children. Tick like the
+            // host loop, as wait_parent does.
             f.tick();
-            group_delivered = true;
-        }
-        if !waiting {
-            group_delivered = false;
         }
         f.db()
             .query_row("SELECT COUNT(*) FROM delegation_graph", [], |r| {

@@ -1,0 +1,11 @@
+ok  pid: 42699 vivant et toujours le wrapper lancé
+ok  port: 57718 écouté par [42699]
+ok  build-sha: binaire 7427e46b36ee558878440fead366c74c511b778e commit extrait 7427e46b36ee558878440fead366c74c511b778e
+ok  binaire: empreinte inchangée depuis le lancement
+ok  sources: crates et interface identiques au commit
+ok  home: /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r12/tmp/verify-ezerbot.xte562ga/home
+ok  page: http://127.0.0.1:57718 titre Ezerbot
+ok  auth-navigateur: transport en mémoire du run vivant
+ok  api-sans-identite: GET externe refusé sans identité de lancement
+ok  faux-openai: http://127.0.0.1:57715
+doctor: ok

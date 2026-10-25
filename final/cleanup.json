@@ -1,0 +1,23 @@
+{
+  "cleaned": true,
+  "killed": {
+    "auth": "arrete",
+    "wrapper": "arrete",
+    "fake": "arrete",
+    "chrome": "arrete",
+    "axi": {
+      "session": "pm-i294",
+      "result": "arrete",
+      "code": 0
+    }
+  },
+  "removed_home": true,
+  "home_still_present": false,
+  "processes_still_ours": {
+    "wrapper": false,
+    "fake": false
+  },
+  "evidence": "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r12/final",
+  "build_sha": "7427e46b36ee558878440fead366c74c511b778e",
+  "url": "http://127.0.0.1:57718"
+}

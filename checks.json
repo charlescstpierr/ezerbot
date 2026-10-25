@@ -1,0 +1,52 @@
+{
+  "head": "7427e46b36ee558878440fead366c74c511b778e",
+  "node_first": {
+    "tests": 1126,
+    "pass": 1124,
+    "fail": 0,
+    "cancelled": 2,
+    "skipped": 0,
+    "todo": 0
+  },
+  "node_serial": {
+    "tests": 1126,
+    "pass": 1126,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "rust_pages": {
+    "pass": 34,
+    "fail": 0,
+    "ignored": 0,
+    "filtered": 0
+  },
+  "web_build": 0,
+  "wrapper_build": 0,
+  "owner_proof": "PASS",
+  "cleanup": true,
+  "ci": [
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-10-25T21:24:58Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/charlescstpierr/ezerbot/actions/runs/40235364330/job/121295660899",
+      "name": "compile",
+      "startedAt": "2026-10-25T21:24:47Z",
+      "status": "COMPLETED",
+      "workflowName": "Coque macOS"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-10-25T21:24:52Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/charlescstpierr/ezerbot/actions/runs/40235359834/job/121295647040",
+      "name": "compile",
+      "startedAt": "2026-10-25T21:24:43Z",
+      "status": "COMPLETED",
+      "workflowName": "Coque macOS"
+    }
+  ],
+  "official_verifier": "reserved_for_coordinator"
+}

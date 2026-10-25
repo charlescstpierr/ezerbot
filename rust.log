@@ -1,0 +1,42 @@
+   Compiling grokbot-wrapper v0.1.0 (/Users/cstpierrecharles/.treehouse/pm/ez-i294/crates/wrapper)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6m 53s
+     Running tests/pages.rs (target/debug/deps/pages-f5c5e9ee5812ec72)
+
+running 34 tests
+test a_message_without_anchor_behaves_as_before ... ok
+test a_passage_across_two_cells_or_blocks_is_accepted_and_stored_as_sent ... ok
+test a_kept_version_that_no_longer_compiles_is_refused_and_nothing_changes ... ok
+test a_page_stored_with_the_old_glued_preview_is_rebuilt_when_the_app_opens ... ok
+test a_passage_missing_from_the_source_reaches_the_bot_as_a_quote_only ... ok
+test a_resend_cannot_add_remove_or_change_the_anchor_of_the_first_send ... ok
+test a_resend_is_judged_while_the_first_answer_is_still_running ... ok
+test a_refused_edit_leaves_the_anchor_open_with_its_original_version ... ok
+test a_resend_rebuilt_from_the_thread_data_after_a_restart_is_accepted_without_a_second_anchor ... ok
+test a_successful_edit_settles_the_anchor_with_the_new_source_version ... ok
+test a_two_cell_anchor_survives_a_restart_and_its_resend_unchanged ... ok
+test a_rewrite_keeps_the_version_before_it_and_a_broken_write_does_not_replace_it ... ok
+test an_anchor_can_only_address_the_bot_owning_the_page ... ok
+test anchor_is_settled_after_a_successful_write_in_the_same_answer ... ok
+test anchored_message_is_kept_and_the_bot_reads_the_cited_lines ... ok
+test anchor_stays_open_after_a_compile_failure ... ok
+test deleting_the_conversation_deletes_its_anchors ... ok
+test blanks_are_collapsed_never_removed_when_the_passage_is_checked ... ok
+test edit_refuses_the_page_of_another_bot ... ok
+test edit_refuses_a_passage_that_is_missing_empty_or_not_unique ... ok
+test edit_replaces_one_passage_and_leaves_every_other_byte ... ok
+test interactive_table_becomes_a_local_page_and_survives_restart ... ok
+test edit_that_breaks_the_compilation_changes_neither_the_row_nor_the_file ... ok
+test only_the_version_before_the_last_change_can_be_put_back_and_only_once ... ok
+test photo::a_page_photo_gives_an_image_and_a_capture_id_usable_in_the_same_thread ... ok
+test photo::a_sub_bot_without_a_screen_session_photographs_a_page_but_not_the_screen ... ok
+test photo::light_and_dark_give_two_different_images_and_light_is_the_default ... ok
+test refused_anchors_create_no_message ... ok
+test the_preview_marks_each_cell_and_block_and_keeps_inline_text_glued ... ok
+test retrying_an_accepted_anchored_message_survives_the_edit_that_removed_its_passage ... ok
+test photo::refused_targets_leave_no_capture_and_a_local_site_is_photographed ... ok
+test the_same_message_id_in_another_conversation_is_a_first_send ... ok
+test the_thread_carries_each_messages_anchor_for_the_bubble_chip ... ok
+test the_size_limit_counts_the_bytes_of_the_resulting_source ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.24s
+

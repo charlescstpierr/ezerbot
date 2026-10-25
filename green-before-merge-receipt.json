@@ -1,0 +1,11 @@
+{
+  "command": "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/test-gate node --test app/ui/draft-transfer.test.cjs app/ui/panels/pages.test.cjs",
+  "exit": 0,
+  "tests": 56,
+  "pass": 56,
+  "fail": 0,
+  "skipped": 0,
+  "log": "green-before-merge.log",
+  "note": "Ex\u00e9cution avec le correctif de cinq lignes. Le merge ne modifie pas app.js, pages.js ou le test. La suite compl\u00e8te sera rejou\u00e9e sur la t\u00eate finale exacte.",
+  "source_commit": "bd1c0673794f633a678877f37b4c2a180e853287"
+}

@@ -1,0 +1,26 @@
+ .cursor/skills/verify-ezerbot/features/pages.md |   1 +
+ app/ui/app.js                                   |  49 ++-
+ app/ui/chat.css                                 |   2 +-
+ app/ui/chat.js                                  |  96 +++---
+ app/ui/draft-transfer.test.cjs                  | 262 +++++++++++++++-
+ app/ui/panels/pages.css                         |   6 +-
+ app/ui/panels/pages.js                          | 196 +++++++++++-
+ app/ui/panels/pages.test.cjs                    | 399 +++++++++++++++++++++++-
+ app/web/src/Thread.jsx                          |   9 +-
+ app/web/src/chat.css                            |  11 +
+ app/web/src/page-quote-ui.test.js               |  78 +++++
+ app/web/src/page-quote.jsx                      |  10 +
+ crates/wrapper/src/features/conversations.rs    |   2 +-
+ crates/wrapper/src/features/pages/anchors.rs    |  98 +++++-
+ crates/wrapper/src/features/pages/compile.rs    | 147 +++++++--
+ crates/wrapper/src/features/pages/mod.rs        |  25 ++
+ crates/wrapper/tests/pages.rs                   | 232 ++++++++++++++
+ docs/captures/294-bouton-clair-1140x780.png     | Bin 0 -> 39211 bytes
+ docs/captures/294-bouton-sombre-1140x780.png    | Bin 0 -> 38788 bytes
+ docs/captures/294-bulle-clair-1140x780.png      | Bin 0 -> 38087 bytes
+ docs/captures/294-bulle-sombre-1140x780.png     | Bin 0 -> 37885 bytes
+ docs/captures/294-puce-clair-1140x780.png       | Bin 0 -> 38225 bytes
+ docs/captures/294-puce-clair-820x560.png        | Bin 0 -> 22151 bytes
+ docs/captures/294-puce-sombre-1140x780.png      | Bin 0 -> 37990 bytes
+ docs/captures/294-puce-sombre-820x560.png       | Bin 0 -> 21985 bytes
+ 25 files changed, 1522 insertions(+), 101 deletions(-)

@@ -1,0 +1,100 @@
+✔ a draft typed during creation stays on its thread and does not return on Nouvelle conversation (414.455793ms)
+✔ an orphan welcome document left by an older transfer is purged instead of restored (179.410403ms)
+✔ a refused creation keeps both the submitted text and the text typed while waiting (51.159363ms)
+✔ a maximal bot name and its edit action stay inside an ellipsis rule (132.852953ms)
+✔ the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape (62.195664ms)
+✔ a disabled composer bot focuses the conversation title when the editor is not editable (83.967599ms)
+✔ a disabled composer bot returns menu focus to the editor (139.646811ms)
+✔ short composer names stay whole and a maximal name ellipsizes only when the bar is full (59.712313ms)
+✔ l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce (269.90785ms)
+✔ l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre (134.446183ms)
+✔ « Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file (52.78795ms)
+✔ le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée (62.63142ms)
+✔ r11 une citation orpheline revient après création puis refus 400 et repart avec son ancre (96.713564ms)
+✔ r11 refus ancien après remove de citation (60.740475ms)
+✔ r11 refus ancien après same de citation (82.193021ms)
+✔ r11 refus ancien après other de citation (93.582265ms)
+✔ r11 un passage disparu ne revient pas et son avertissement reste visible après le refus (74.164844ms)
+✔ r12 citation retirée pendant création puis refus 400 (99.099451ms)
+✖ r12 citation Confort pendant création puis refus 400 (84.167465ms)
+✖ r12 citation Con pendant création puis refus 400 (63.466764ms)
+✔ la Page s’affiche à côté du fil, se renomme, s’ouvre en pleine page, et ne propose pas de partage (26.095761ms)
+✔ une Page de 64 niveaux s’affiche encore (3.174483ms)
+✔ une Page de 65 niveaux est refusée avant de peindre le DOM (71.374375ms)
+✔ une Page déjà enregistrée plus profonde que 64 niveaux est refusée sans construire le DOM (70.073734ms)
+✔ un useState se réinitialise quand la source change et garde le clic si la version est la même (21.58412ms)
+✔ une compilation cassée montre la ligne et le caractère, pas une Page vide réussie (3.679115ms)
+✔ les maps imbriquées respectent le budget cumulé (14, 1) (33.98777ms)
+✔ les maps imbriquées respectent le budget cumulé (14, 0) (19.452103ms)
+✔ les maps imbriquées respectent le budget cumulé (8, 3000) (13.842357ms)
+✔ les maps imbriquées respectent le budget cumulé (40, 1) (141.399704ms)
+✔ 1 000 000 octets de texte répartis en 100 paragraphes se peignent, un de plus non (même borne que compile.rs) (72.846468ms)
+✔ un rafraîchissement identique ne reconstruit pas la Page et garde le focus (2.304721ms)
+✔ une Page écrite par un autre participant d’un groupe s’affiche avec le fil du groupe (2.641459ms)
+✔ une Page dont la conversation a disparu reste ouvrable, sans l’afficher à côté d’un autre fil (9.654929ms)
+✔ une navigation refusée pendant une réponse prévient au lieu d’afficher la Page à côté d’un autre fil (6.416314ms)
+✔ sélectionner « Forfait B » affiche « Commenter » près de la sélection ; le clic pose la puce au-dessus de la boîte de message (5.23072ms)
+✔ l’envoi transmet la Page, la version lue par le panneau et le passage rogné ; la puce part avec le message (2.310133ms)
+✔ l’accusé d’un envoi ne retire que sa citation : la même citation posée à nouveau entre-temps reste (2.441339ms)
+✔ la croix retire la puce : le message part sans ancre (2.332225ms)
+✔ une sélection de plus de 500 caractères ne donne ni bouton ni ancre ; 500 passent (2.279158ms)
+✔ une sélection vide, hors de la Page ou qui déborde du canevas ne donne pas de bouton (1.718685ms)
+✔ au clavier, « Commenter » est un bouton après le canevas et garde la sélection quand il prend le focus (3.078886ms)
+✔ changer de fil retire la puce, et « Commenter » depuis la pleine page revient au fil pour écrire (2.193828ms)
+✔ un clic sur la puce du fil montre la Page ; une Page disparue prévient (2.066885ms)
+✔ ouvrir une autre Page du même fil retire la citation de la première avant tout envoi (2.56185ms)
+✔ dans une sous-tâche déléguée, « Commenter » n’est pas proposé : son envoi n’emporte pas d’ancre (2.751284ms)
+✔ 500 caractères en comptant les emoji comme le moteur : 500 passent, 501 non (60.978925ms)
+✔ le rognage suit `str::trim` de Rust : U+0085 est retiré, U+FEFF est gardé (35.23929ms)
+✔ une sélection sur plusieurs cellules et paragraphes donne le bouton et part telle quelle (5.251181ms)
+✔ les blancs sont réduits à un espace, jamais supprimés : un blanc dans un mot, ou absent entre deux cellules, ne donne pas de bouton (49.089589ms)
+✔ un texte changé par l’état interactif de la Page, absent de l’aperçu que contrôle le moteur, ne donne pas de bouton (6.512193ms)
+✔ dans un groupe, la Page d’un autre participant que le bot du fil ne donne pas de bouton (le moteur répondrait 409) (3.282129ms)
+✔ une navigation refusée vers une autre Page (liste ou puce du fil) garde la citation posée (3.013349ms)
+✔ renommer la Page met le nouveau titre dans la puce de la citation posée (14.218627ms)
+✔ après un renommage, la liste garde le nouveau titre quand l’hôte repeint avec son état (3.825801ms)
+✔ « Commenter » gardé au clavier ne cite pas un passage que la Page modifiée entre-temps n’affiche plus (3.151925ms)
+ℹ tests 56
+ℹ suites 0
+ℹ pass 54
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2484.107481
+
+✖ failing tests:
+
+test at app/ui/draft-transfer.test.cjs:813:49
+✖ r12 citation Confort pendant création puis refus 400 (84.167465ms)
+  AssertionError [ERR_ASSERTION]: le refus respecte la citation choisie pendant la création
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:828:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:813:49
+✖ r12 citation Con pendant création puis refus 400 (63.466764ms)
+  AssertionError [ERR_ASSERTION]: le refus respecte la citation choisie pendant la création
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:828:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

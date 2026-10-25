@@ -1,0 +1,14 @@
+wrapper
+COMMAND     PID             USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+grokbot-w 42699 cstpierrecharles    9u  IPv4 0xfc846f5b902de607      0t0  TCP 127.0.0.1:57718 (LISTEN)
+grokbot-w 42699 cstpierrecharles   10u  IPv4  0xe9b97212cd887d0      0t0  TCP 127.0.0.1:57718->127.0.0.1:57923 (ESTABLISHED)
+grokbot-w 42699 cstpierrecharles   11u  IPv4  0xe9b97212cd887d0      0t0  TCP 127.0.0.1:57718->127.0.0.1:57923 (ESTABLISHED)
+grokbot-w 42699 cstpierrecharles   12u  IPv4 0xd759e0bdd7f827b2      0t0  TCP 127.0.0.1:57718->127.0.0.1:57924 (ESTABLISHED)
+grokbot-w 42699 cstpierrecharles   13u  IPv4 0xd759e0bdd7f827b2      0t0  TCP 127.0.0.1:57718->127.0.0.1:57924 (ESTABLISHED)
+grokbot-w 42699 cstpierrecharles   14u  IPv4 0x538f1939538b876e      0t0  TCP 127.0.0.1:57718->127.0.0.1:57979 (ESTABLISHED)
+grokbot-w 42699 cstpierrecharles   15u  IPv4 0x538f1939538b876e      0t0  TCP 127.0.0.1:57718->127.0.0.1:57979 (ESTABLISHED)
+grokbot-w 42699 cstpierrecharles   16u  IPv4 0xc7969938dc40b978      0t0  TCP 127.0.0.1:57718->127.0.0.1:57980 (ESTABLISHED)
+grokbot-w 42699 cstpierrecharles   17u  IPv4 0xc7969938dc40b978      0t0  TCP 127.0.0.1:57718->127.0.0.1:57980 (ESTABLISHED)
+fake
+COMMAND   PID             USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+Python  42696 cstpierrecharles    4u  IPv4 0xbc4d794165841d8b      0t0  TCP 127.0.0.1:57715 (LISTEN)

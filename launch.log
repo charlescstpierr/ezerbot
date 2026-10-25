@@ -1,0 +1,5 @@
+build: /Users/cstpierrecharles/.cargo/bin/cargo build --locked -p grokbot-wrapper
+   Compiling grokbot-wrapper v0.1.0 (/Users/cstpierrecharles/.treehouse/pm/ez-i294/crates/wrapper)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 49.78s
+run: /Users/cstpierrecharles/.treehouse/pm/ez-i294/target/debug/grokbot-wrapper --port 0 --db /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r12/tmp/verify-ezerbot.xte562ga/home/workspace.sqlite
+{"url": "http://127.0.0.1:57718", "evidence": "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r12/final", "sha": "7427e46b36ee558878440fead366c74c511b778e", "port": 57718}

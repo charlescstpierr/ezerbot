@@ -4254,6 +4254,36 @@ mod captures {
             .unwrap();
         assert!(!stored.contains(secret), "{stored}");
     }
+
+    #[test]
+    fn forgetting_the_parent_fact_a_child_echoed_clears_it_from_the_parent_card() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let secret = "Allergique aux kumquats mauves.";
+        let fact = match f
+            .app
+            .invoke_tool("grokbot", "remember", json!({"text":secret}))
+            .unwrap()
+        {
+            ToolOutcome::Done { output } => output["fact"]["fact_id"].clone(),
+            _ => panic!(),
+        };
+        let mut a = args("child");
+        a["selected_context"]["fact_ids"] = json!([fact]);
+        let (_, edge) = f.begin(&c, "oubli-parent", a);
+        complete(&f, &format!("fini. Retenu : {secret}"), json!([]));
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        wait("child released", || f.provider.status()["titling"] == false);
+        f.post(
+            "/api/memory/forget",
+            json!({"bot_id":"grokbot","fact_id":fact}),
+        );
+        let result = card(&mut f, &edge)["status"]["result"].clone();
+        assert!(!result.as_str().unwrap().contains(secret), "{result}");
+    }
 }
 
 /// What the provider received since `from`, in the instructions of every call.

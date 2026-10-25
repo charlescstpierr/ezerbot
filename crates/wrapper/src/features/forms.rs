@@ -24,7 +24,7 @@ use grokbot_engine::{
 use grokbot_forms::{
     approvals::{self, ApprovalDecision, ApprovalRule, RuleScope},
     forbidden::{classify, classify_in, Forbidden},
-    redact::redact_value,
+    redact::{self, redact_value},
     requests::{self, Field, HumanInputRequest, InputKind, RequestStatus},
     rules,
     vault::{canonical_secret_name, Vault, MAX_SECRET_PURPOSE_CHARACTERS, MAX_SECRET_VALUE_BYTES},
@@ -106,6 +106,16 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
 
 /// Match the provider's <directory>/<database-stem> companion-file convention.
 pub fn vault(ctx: &Context<'_>) -> Result<Vault, ApiError> {
+    Ok(Vault::open_app(&vault_path(ctx))?)
+}
+
+/// The secrets of this database's vault, to mask every fragment of one rendering with one read.
+/// Under a state read's `redact::hold`, a vault already read is not opened again (#328).
+pub fn patterns(ctx: &Context<'_>) -> Result<redact::Patterns, ApiError> {
+    Ok(redact::app_patterns(&vault_path(ctx))?)
+}
+
+fn vault_path(ctx: &Context<'_>) -> std::path::PathBuf {
     let directory = ctx
         .db_path
         .parent()
@@ -116,9 +126,7 @@ pub fn vault(ctx: &Context<'_>) -> Result<Vault, ApiError> {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("grokbot");
-    Ok(Vault::open_app(
-        &directory.join(format!("{stem}.secrets.json")),
-    )?)
+    directory.join(format!("{stem}.secrets.json"))
 }
 
 #[derive(Deserialize)]

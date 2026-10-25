@@ -26,8 +26,7 @@ use grokbot_engine::{
 };
 use grokbot_forms::{
     approvals::args_digest,
-    redact::{redact, redact_value},
-    vault::Vault,
+    redact::{redact, redact_value, Patterns},
 };
 use grokbot_memory::facts;
 use grokbot_skills::library;
@@ -35,6 +34,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{cell::RefCell, collections::HashSet};
+
+/// Captures shown on the cards, as (thread, image): see `screen::in_live_threads`.
+type Shown = HashSet<(String, String)>;
 
 pub fn routes(
     app: &mut crate::App,
@@ -1210,30 +1212,35 @@ fn model_status(status: &DelegationStatus, limit: usize) -> Value {
     }
     value
 }
+/// Which captures joined to these results their cards show, in one query for all of them.
+fn shown_captures<'a>(conn: &Connection, edges: impl IntoIterator<Item = &'a Delegation>) -> Shown {
+    let pairs: Vec<_> = edges
+        .into_iter()
+        .filter_map(|edge| match (&edge.status, &edge.conversation_id) {
+            (DelegationStatus::Done { captures, .. }, Some(thread)) => {
+                Some(captures.iter().map(|c| (thread.as_str(), c.id.as_str())))
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    super::screen::in_live_threads(conn, &pairs).unwrap_or_default()
+}
 /// The card gets each reference that still exists in the task thread, with its
 /// thumbnail route. Added after the vault masking: ids and routes are generated
 /// by the host, never a secret, and masking them would break the thumbnails.
-fn attach_references(conn: &Connection, vault: &Vault, edge: &Delegation, edge_json: &mut Value) {
+fn attach_references(shown: &Shown, secrets: &Patterns, edge: &Delegation, edge_json: &mut Value) {
     let (DelegationStatus::Done { captures, .. }, Some(conversation)) =
         (&edge.status, &edge.conversation_id)
     else {
         return;
     };
-    let live: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id=?1 AND id=?2 AND deleted=0)",
-            params![ACCOUNT, conversation],
-            |r| r.get(0),
-        )
-        .unwrap_or(false);
     let shown: Vec<Value> = captures
         .iter()
-        .filter(|c| {
-            live && super::screen::exists_in_thread(conn, conversation, &c.id).unwrap_or(false)
-        })
+        .filter(|c| shown.contains(&(conversation.clone(), c.id.clone())))
         .filter_map(|c| {
             Some(
-                json!({"id":c.id,"label":c.label,"caption":redact(vault,&c.caption).ok()?,
+                json!({"id":c.id,"label":c.label,"caption":secrets.text(&c.caption).ok()?,
                 "url":capture_url(conversation,&c.id)}),
             )
         })
@@ -2000,16 +2007,19 @@ fn context_checked(ctx: &Context<'_>, request: &ContextRequest) -> Result<Vec<Co
 }
 
 pub fn state(ctx: &Context<'_>) -> Value {
-    let Ok(vault) = super::forms::vault(ctx) else {
+    let Ok(secrets) = super::forms::patterns(ctx) else {
         return json!({"error":"Delegation state is unavailable"});
     };
     let mut counts = serde_json::Map::new();
-    let delegations: Vec<_> = state_edges(ctx.connection)
-        .unwrap_or_default()
+    let edges = state_edges(ctx.connection).unwrap_or_default();
+    let shown = shown_captures(ctx.connection, &edges);
+    let delegations: Vec<_> = edges
         .into_iter()
         .filter_map(|edge| {
-            let mut value = redact_value(&vault, &card_edge(ctx.connection, &edge).ok()?).ok()?;
-            attach_references(ctx.connection, &vault, &edge, &mut value);
+            let mut value = secrets
+                .value(&card_edge(ctx.connection, &edge).ok()?)
+                .ok()?;
+            attach_references(&shown, &secrets, &edge, &mut value);
             if matches!(
                 edge.status,
                 DelegationStatus::Queued | DelegationStatus::Running
@@ -2037,14 +2047,13 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         if ctx.conversation_id != edge.conversation_id.as_deref() {
             return None;
         }
-        let vault = super::forms::vault(ctx).ok()?;
         return Some(Message {
             id: id.into(),
             kind: "message".into(),
             payload: json!({"source":"follow_up"}),
             attachments: super::attachments::for_message(ctx, ctx.conversation_id?, id),
             role: "user",
-            body: grokbot_forms::redact::redact(&vault, &text).ok()?,
+            body: super::forms::patterns(ctx).ok()?.text(&text).ok()?,
             state: "echoed",
             created_at,
             error: None,
@@ -2080,14 +2089,13 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
                 attachments.push(file);
             }
         }
-        let vault = super::forms::vault(ctx).ok()?;
         return Some(Message {
             id: id.into(),
             kind: "delegation_brief".into(),
             payload: json!({"source":"delegation","from_bot":edge.parent_bot,"parent_bot":edge.parent_bot}),
             attachments,
             role: "assistant",
-            body: grokbot_forms::redact::redact(&vault, &text).ok()?,
+            body: super::forms::patterns(ctx).ok()?.text(&text).ok()?,
             state: "echoed",
             created_at,
             error: None,
@@ -2100,9 +2108,12 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         return None;
     }
     let edge = graph::get(ctx.connection, id).ok()??;
-    let vault = super::forms::vault(ctx).ok()?;
-    let mut payload = redact_value(&vault, &card_edge(ctx.connection, &edge).ok()?).ok()?;
-    attach_references(ctx.connection, &vault, &edge, &mut payload);
+    let secrets = super::forms::patterns(ctx).ok()?;
+    let mut payload = secrets
+        .value(&card_edge(ctx.connection, &edge).ok()?)
+        .ok()?;
+    let shown = shown_captures(ctx.connection, [&edge]);
+    attach_references(&shown, &secrets, &edge, &mut payload);
     if ctx.conversation_id != payload["parent_conversation_id"].as_str() {
         return None;
     }

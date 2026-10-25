@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(body["input"][0]["content"][0]["type"], "input_image");
         assert_eq!(body["tools"][0]["name"], "remember");
         assert_eq!(body["tool_choice"], "auto");
-        assert_eq!(body["parallel_tool_calls"], true);
+        assert_eq!(body["parallel_tool_calls"], false);
         assert_eq!(body["prompt_cache_key"], "conversation");
         assert!(body.get("max_output_tokens").is_none());
     }

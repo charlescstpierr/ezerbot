@@ -338,7 +338,7 @@ fn headers_stream_tools_images_and_cache_use_only_codex_backend() {
     );
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert!(body.get("text").is_none());
-    assert_eq!(body["parallel_tool_calls"], true);
+    assert_eq!(body["parallel_tool_calls"], false);
     assert_eq!(body["input"][0]["content"][1]["type"], "input_image");
     assert_eq!(body["tools"][0]["name"], "remember");
 }
@@ -974,6 +974,51 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
     assert_eq!(status["status"], "done", "{status}");
     assert_eq!(status["result"], complete_result);
     let seen = f.server.seen.lock().unwrap();
+    let (tooled, untooled): (Vec<&Value>, Vec<&Value>) = seen.bodies.iter().partition(|body| {
+        body["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty())
+    });
+    let delegate_output = |body: &Value| {
+        body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "function_call_output" && item["call_id"] == "delegate")
+    };
+    let task = |body: &Value| {
+        body["instructions"]
+            .as_str()
+            .is_some_and(|text| text.contains("You are executing a Task"))
+    };
+    let first_turn = tooled.iter().find(|body| {
+        !task(body) && !delegate_output(body) && body.to_string().contains("Délègue la relecture")
+    });
+    let after_approval = tooled.iter().find(|body| delegate_output(body));
+    let delegated = tooled
+        .iter()
+        .find(|body| task(body) && body.to_string().contains("Relis ce texte"));
+    let flags = [
+        ("premier tour", first_turn),
+        ("reprise après approbation", after_approval),
+        ("sous-tâche déléguée", delegated),
+    ]
+    .map(|(what, body)| {
+        let body = body.unwrap_or_else(|| panic!("requête manquante : {what}"));
+        (what, body["parallel_tool_calls"].clone())
+    });
+    assert_eq!(
+        flags,
+        [
+            ("premier tour", json!(false)),
+            ("reprise après approbation", json!(false)),
+            ("sous-tâche déléguée", json!(false)),
+        ]
+    );
+    for body in untooled {
+        assert!(body.get("tool_choice").is_none(), "{body}");
+        assert!(body.get("parallel_tool_calls").is_none(), "{body}");
+    }
     let task_requests: Vec<_> = seen
         .bodies
         .iter()

@@ -3404,6 +3404,43 @@ mod tests {
     }
 
     #[test]
+    fn two_calls_in_one_response_run_in_order_and_both_reach_the_next_turn() -> Result<()> {
+        let conn = database(false, RunBudgets::default())?;
+        let gateway = Scripted::new(vec![
+            response(vec![
+                call("first", "work", json!({})),
+                call("second", "work", json!({})),
+            ]),
+            response(vec![]),
+        ]);
+        let mut services = Services {
+            specs: vec![spec("work", false)],
+            ..Services::default()
+        };
+        run(&conn, &gateway, &mut services, "run")?;
+        assert_eq!(services.calls, ["first", "second"]);
+        assert_eq!(count(&conn, "effects"), 2);
+        let results: Vec<_> = store::events(&conn, "run", 0)?
+            .into_iter()
+            .filter(|event| event.kind == RunEventKind::ToolResult)
+            .map(|event| event.payload["call_id"].clone())
+            .collect();
+        assert_eq!(results, [json!("first"), json!("second")]);
+        let requests = gateway.requests.lock().unwrap();
+        let outputs: Vec<_> = requests[1]
+            .input
+            .iter()
+            .flat_map(|item| &item.tool_items)
+            .filter_map(|item| match item {
+                ToolItem::Output { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs, ["first", "second"]);
+        Ok(())
+    }
+
+    #[test]
     fn resumed_resolution_replaces_original_tool_output_in_causal_order() -> Result<()> {
         let conn = database(true, RunBudgets::default())?;
         let gateway = Scripted::new(vec![

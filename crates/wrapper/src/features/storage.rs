@@ -140,14 +140,20 @@ fn roots(conn: &Connection) -> Result<HashSet<String>, ApiError> {
         // A deleted conversation's own row, transcript and run journal keep no
         // file alive. Tables that only name a conversation (a page, a topic
         // fact, a routine) stay roots.
-        let live = match table.as_str() {
-            "wrapper_conversations" => " WHERE t.deleted=0",
+        const DELETED: &str = "EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.deleted=1 AND c.id=t.conversation_id)";
+        const DELETED_RUN: &str = "EXISTS(SELECT 1 FROM engine_runs r JOIN wrapper_conversations c ON c.id=r.conversation_id WHERE c.deleted=1 AND r.run_id=t.run_id)";
+        let sql = match table.as_str() {
+            "wrapper_conversations" => format!("SELECT * FROM {quoted} t WHERE t.deleted=0"),
             "wrapper_messages" | "submissions" | "wrapper_remote" | "engine_runs"
-            | "engine_summaries" | "delegation_graph" => " WHERE NOT EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.deleted=1 AND c.id=t.conversation_id)",
-            "engine_run_events" | "wrapper_engine_runs" => " WHERE NOT EXISTS(SELECT 1 FROM engine_runs r JOIN wrapper_conversations c ON c.id=r.conversation_id WHERE c.deleted=1 AND r.run_id=t.run_id)",
-            _ => "",
+            | "engine_summaries" => format!("SELECT * FROM {quoted} t WHERE NOT {DELETED}"),
+            "engine_run_events" | "wrapper_engine_runs" | "engine_external_tools" => {
+                format!("SELECT * FROM {quoted} t WHERE NOT {DELETED_RUN}")
+            }
+            // The parent card still shows a deleted thread's result, never its captures.
+            "delegation_graph" => format!("SELECT t.selected_context, CASE WHEN {DELETED} THEN json_remove(t.status,'$.captures') ELSE t.status END FROM {quoted} t"),
+            _ => format!("SELECT * FROM {quoted}"),
         };
-        let mut statement = conn.prepare(&format!("SELECT * FROM {quoted} t{live}"))?;
+        let mut statement = conn.prepare(&sql)?;
         let columns = statement.column_count();
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {

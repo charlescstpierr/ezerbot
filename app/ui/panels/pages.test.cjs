@@ -130,7 +130,6 @@ function harness(page) {
       requests.push({ path, body });
       if (path === "/api/pages/rename") {
         current = { ...current, title: body.title };
-        panels.state.pages.by_bot.grokbot[0].title = body.title;
         return { page: current };
       }
       if (path === `/api/pages/${page.id}`) return { page: current };
@@ -553,3 +552,97 @@ test("r6 réouverture et changement de Page", async () => {
   await panels.panel.onState(panels.state, ctxOf("fil"));
   assert.equal(input.value, "[...]");
 });
+
+for (const rename of [false, true]) {
+  for (const reopen of [false, true]) {
+    test(`r7 cache après ${rename ? "renommage" : "lecture"} masqué, ${reopen ? "réouverture" : "rendu local"} puis GET échoué`, async () => {
+      const page = { id: "r7_cache", title: "Titre synthétique", status: "ready", document: readyDocument };
+      const { panels, main, sidebar } = harness(page);
+      await panels.panel.onState(panels.state, ctxOf("fil"));
+      const input = main.querySelector("input");
+      input.ownerDocument.activeElement = input;
+      input.value += " suite";
+      assert.equal(panels.state.pages.by_bot.grokbot[0].title, page.title, "le résumé est encore périmé avant la réponse masquée");
+      panels.api = async () => ({ page: { ...page, title: "[...]" } });
+      await (rename ? input.listeners.change() : panels.panel.onState(panels.state, ctxOf("fil")));
+      assert.equal(input.value, "[...]");
+      panels.api = async () => { throw new Error("indisponible"); };
+      if (reopen) await panels.panel.onState(panels.state, ctxOf(null));
+      for (let render = 0; render < 2; render++) {
+        const pending = panels.panel.onState(panels.state, ctxOf("fil"));
+        const before = { input: input.value, listed: sidebar.textContent.includes(page.title) };
+        await pending;
+        assert.deepEqual({ before, after: { input: input.value, listed: sidebar.textContent.includes(page.title) } }, {
+          before: { input: "[...]", listed: false }, after: { input: "[...]", listed: false },
+        }, "champ et liste restent masqués pendant le rendu et après le repli GET");
+      }
+    });
+  }
+}
+
+test("r7 le clic conserve le titre masqué reçu par GET", async () => {
+  const page = { id: "r7_click", title: "Titre synthétique", status: "ready", document: readyDocument };
+  const { panels, main, sidebar, use } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  use({ ...page, title: "[...]" });
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  panels.api = async () => { throw new Error("indisponible"); };
+  sidebar.querySelector(".page-link").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(main.querySelector("input").value, "[...]");
+  assert.equal(sidebar.textContent.includes(page.title), false);
+});
+
+test("r7 les résumés multi-bot conservent le titre masqué après échec GET", async () => {
+  const page = { id: "r7_group", title: "Titre synthétique", status: "ready", document: readyDocument };
+  const { panels, main, sidebar, use } = harness(page);
+  const summary = panels.state.pages.by_bot.grokbot[0];
+  panels.state.pages.by_bot = { grokbot: [], participant: [summary], autre: [{ ...summary }] };
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  use({ ...page, title: "[...]" });
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  panels.state.pages.by_bot.participant = [];
+  panels.api = async () => { throw new Error("indisponible"); };
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(main.querySelector("input").value, "[...]");
+  assert.equal(sidebar.textContent.includes(page.title), false);
+});
+
+for (const rename of [false, true]) {
+  test(`r7 réponse ${rename ? "rename" : "GET"} tardive sans pré-masquage du résumé`, async () => {
+    const page = { id: "r7_late", title: "Titre synthétique", status: "ready", document: readyDocument };
+    const { panels, main, sidebar } = harness(page);
+    await panels.panel.onState(panels.state, ctxOf("fil"));
+    const input = main.querySelector("input");
+    input.value += " suite";
+    let complete;
+    panels.api = () => new Promise((resolve) => { complete = resolve; });
+    const pending = rename ? input.listeners.change() : panels.panel.onState(panels.state, ctxOf("fil"));
+    panels.api = async () => ({ page: { ...page, title: "[...]" } });
+    await panels.panel.onState(panels.state, ctxOf("fil"));
+    complete({ page });
+    await pending;
+    panels.api = async () => { throw new Error("indisponible"); };
+    await panels.panel.onState(panels.state, ctxOf("fil"));
+    assert.equal(input.value, "[...]");
+    assert.equal(sidebar.textContent.includes(page.title), false);
+  });
+}
+
+for (const failed of [false, true]) {
+  test(`r7 renommage ordinaire ${failed ? "refusé" : "accepté"} conserve le brouillon après échec GET`, async () => {
+    const page = { id: "r7_public", title: "Titre public", status: "ready", document: readyDocument };
+    const { panels, main, sidebar } = harness(page);
+    await panels.panel.onState(panels.state, ctxOf("fil"));
+    const input = main.querySelector("input");
+    input.ownerDocument.activeElement = input;
+    input.value = "Nouveau titre public";
+    if (failed) panels.api = async () => { throw new Error("indisponible"); };
+    await input.listeners.change();
+    input.value = "Brouillon public suivant";
+    panels.api = async () => { throw new Error("indisponible"); };
+    await panels.panel.onState(panels.state, ctxOf("fil"));
+    assert.equal(input.value, "Brouillon public suivant");
+    assert.equal(sidebar.querySelector(".page-link").textContent, failed ? page.title : "Nouveau titre public");
+  });
+}

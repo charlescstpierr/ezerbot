@@ -36,6 +36,7 @@
     root.setAttribute("aria-label", "Lié à");
     for (const fact of linked) {
       const item = document.createElement("li"), button = Object.assign(make("button", "memory-detail-link-item", text(fact)), { type: "button" });
+      button.dataset.factId = String(fact.fact_id); // deux textes tronqués peuvent se ressembler : le panneau retrouve un bouton par cet identifiant
       button.addEventListener("click", () => open(String(fact.fact_id)));
       item.append(button);
       list.append(item);

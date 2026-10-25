@@ -40,9 +40,9 @@
       const fact = current();
       if (!fact) return;
       shown = stamp(fact);
-      // Le focus reste sur le même contrôle quand la liste change autour du panneau : on le retrouve par ce qu'il est (balise, classe, libellé), pas par son rang,
+      // Le focus reste sur le même contrôle quand la liste change autour du panneau : on le retrouve par ce qu'il est (balise, classe, libellé ou identifiant du souvenir lié), pas par son rang,
       // car la section « Lié à » change le nombre de contrôles et un rang décalé tomberait sur un autre bouton, par exemple « Oublier ce souvenir » à la place d'« Annuler ».
-      const controls = () => [...root.querySelectorAll("h2, button, textarea")], identity = (el) => [el.tagName, el.className, el.textContent].join("|");
+      const controls = () => [...root.querySelectorAll("h2, button, textarea")], identity = (el) => [el.tagName, el.className, el.dataset?.factId ?? el.textContent].join("|");
       const held = root.contains(document.activeElement) ? identity(document.activeElement) : null;
       const editing = mode === "edit", confirming = mode === "confirm", conversation = fact.provenance?.conversation_id;
       const origin = conversation ? button("Ouvrir la conversation", "memory-detail-link", () => { if (!panels.openConversation?.(conversation)) { problem = "Cette conversation n’existe plus, ou une autre action est en cours."; render("origin"); } }, false) : "Hors conversation";
@@ -80,7 +80,7 @@
       root.parentElement.dataset.detail = "open";
       mark();
       ({ title, body, back, edit, ask, origin })[want]?.focus();
-      if (!want && held !== null) controls().find((el) => identity(el) === held)?.focus();
+      if (!want && held !== null) (controls().find((el) => identity(el) === held) || title).focus(); // un contrôle disparu (souvenir lié oublié ou corrigé) : le focus va au titre, il ne se perd pas
     }
     // Après une action, la liste ET l'état partagé de l'application sont relus : un fil en cache afficherait sinon un reçu de mémoire périmé (un texte oublié, des commandes actives).
     // L'échec de cette relecture ne devient pas celui de l'action : le panneau ne l'affiche pas comme une erreur.

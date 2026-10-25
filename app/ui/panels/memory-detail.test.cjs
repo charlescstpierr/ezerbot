@@ -508,6 +508,30 @@ test("un souvenir lié qui arrive pendant la confirmation d'oubli ne déplace pa
   assert.equal(Element.active.textContent, "Annuler", "le focus est resté sur Annuler");
   assert.deepEqual(h.mutations(), [], "rien n'a été oublié");
 });
+const FAR = "Même début de phrase très long pour que deux souvenirs se ressemblent après troncature, vraiment très long";
+test("deux souvenirs liés au texte tronqué identique : le focus reste sur celui qui l'avait, après une relecture", async () => {
+  const start = [fact("m", "grokbot", "private", "Principal", "automatic", "c1"), fact("b", "grokbot", "private", `${FAR} B`, "automatic", "c1"), fact("c", "grokbot", "private", `${FAR} C`, "automatic", "c1")];
+  const h = await harness({ start });
+  h.item("m").click();
+  const items = () => h.panel().querySelectorAll(".memory-detail-link-item");
+  assert.equal(items()[0].textContent, items()[1].textContent, "les deux boutons portent le même libellé");
+  items()[1].focus();
+  const wanted = Element.active.dataset.factId;
+  h.net.touch("m");
+  h.reload();
+  await h.settle();
+  assert.equal(Element.active.dataset.factId, wanted, "le focus est resté sur le même souvenir lié");
+});
+test("le souvenir lié focalisé disparaît : le focus va au titre du panneau", async () => {
+  const h = await harness({ start: CHAIN });
+  h.item("l1").click();
+  const target = h.panel().querySelectorAll(".memory-detail-link-item")[0];
+  target.focus();
+  h.net.drop(target.dataset.factId);
+  h.reload();
+  await h.settle();
+  assert.equal(Element.active.classes.includes("memory-detail-title"), true);
+});
 test("un clic sur un souvenir lié ouvre ce souvenir dans le panneau", async () => {
   const h = await harness({ start: CHAIN });
   h.item("l1").click();

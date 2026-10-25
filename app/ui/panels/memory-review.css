@@ -1,0 +1,16 @@
+/* Mémoire : panneau « À revoir » (Encore vrai ?). Jetons Galet et jeton --verify uniquement. */
+.memory-review { display: grid; gap: 10px; margin: 0 0 18px; padding: 14px 16px; border: 1px solid var(--verify-line); border-radius: 12px; background: var(--verify-bg); }
+.memory-review[hidden], .memory-review p:empty { display: none; }
+.memory-review-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--verify); outline: none; }
+.memory-review-help, .memory-review-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.memory-review-error { margin: 0; font-size: 12px; line-height: 1.5; color: var(--danger-text); }
+.memory-review-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 320px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.memory-review-item { display: grid; gap: 6px; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--pane); }
+.memory-review-text { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text); overflow-wrap: anywhere; white-space: pre-line; }
+.memory-review-reason { margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--verify); }
+.memory-review .memory-space-meta { margin-top: 0; }
+.memory-review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.memory-review-ask { margin-right: 4px; font-size: 12px; font-weight: 600; color: var(--text); }
+.memory-review-button { padding: 7px 12px; }
+.memory-review-button:disabled { opacity: .5; cursor: default; }
+.memory-review-button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }

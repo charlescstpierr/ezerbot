@@ -146,11 +146,13 @@
       event.preventDefault();
       close(true);
     });
-    function open(factId) {
+    // `start` : "edit" ou "confirm" ouvre directement Modifier ou la confirmation d'Oublier (le panneau « À revoir ») ; un souvenir de sujet ne se modifie pas.
+    function open(factId, start = "view") {
       if (busy) return;
       epoch += 1;
-      [id, mode, draft, note, problem] = [factId, "view", "", "", ""];
-      render("title");
+      const fact = (facts() || []).find((item) => item.fact_id === factId), first = (start === "edit" && fact?.scope !== "topic") || start === "confirm" ? start : "view";
+      [id, mode, draft, note, problem] = [factId, first, first === "edit" ? String(fact?.text ?? "") : "", "", ""];
+      render(first === "edit" ? "body" : first === "confirm" ? "back" : "title");
     }
     // Un clic n'importe où sur la carte ouvre le souvenir ; au clavier, le bouton du texte s'en charge.
     const bind = (el, factId) => el.addEventListener("click", () => open(factId));

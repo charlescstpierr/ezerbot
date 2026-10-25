@@ -17,6 +17,9 @@
 .memory-graph-point.is-active circle { transform: scale(1.6); }
 .memory-graph-node:focus-visible circle { stroke: var(--focus); }
 .memory-graph-point.is-match circle { stroke: var(--text); stroke-width: 2.5; transform: scale(1.5); }
+/* Halo orange d'un souvenir à revoir (le drapeau vient du moteur) ; plus spécifique que les règles des cercles de point, quel que soit l'ordre des feuilles. */
+.memory-graph-point.is-review circle.memory-graph-halo { fill: color-mix(in srgb, var(--verify) 14%, transparent); stroke: var(--verify); stroke-width: 2; transform: none; pointer-events: none; }
+.memory-graph-swatch.is-review { background: transparent; box-shadow: inset 0 0 0 2px var(--verify); }
 .is-dim { opacity: .18; }
 .memory-graph-label, .memory-graph-initial { text-anchor: middle; pointer-events: none; }
 .memory-graph-label { fill: var(--text); font-size: calc(12px * var(--k, 1)); paint-order: stroke; stroke: var(--pane); stroke-width: 4px; stroke-linejoin: round; }

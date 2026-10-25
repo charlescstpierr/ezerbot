@@ -22,9 +22,11 @@ empty_hooks!(
 // SQLite CROSS JOIN fixes r→m loop order, so both reply branches use the full
 // message primary key even on a new database without ANALYZE statistics.
 // A routine pass the bot noted with `rien_a_signaler` is done without a notification (#286), and
-// so are the sub-tasks anywhere below it (`root_run_id` is the run of the occurrence). Only the
-// "done" kinds go quiet: the same pass failing afterwards still notifies, and a request waiting on
-// Charles (approval, form, secret) is not a result, so it stays.
+// so are the sub-tasks anywhere below it (`root_run_id` is the run of the occurrence). `quiet` is
+// only known once the pass is over and a projected row is never taken back, so a sub-task of a
+// pass waits for the end of that pass. Only the "done" kinds go quiet: the same pass failing
+// afterwards still notifies, and a request waiting on Charles (approval, form, secret) is not a
+// result, so it stays.
 const SOURCES: &str = "
 SELECT 'reply:'||r.run_id AS id, 'reply' AS kind, r.conversation_id AS conversation_id,
  'reply-'||m.message_id AS card_id, 'Réponse terminée' AS title
@@ -55,7 +57,8 @@ UNION ALL
 SELECT 'delegation:'||d.id, 'delegation', p.conversation_id, d.id, 'Sous-tâche terminée'
  FROM delegation_graph d JOIN engine_runs p ON p.run_id=d.parent_run_id
  WHERE json_extract(d.status,'$.status')='done'
- AND NOT EXISTS (SELECT 1 FROM scheduler_occurrences q WHERE q.run_id=d.root_run_id AND q.status='done' AND q.quiet=1)
+ AND NOT EXISTS (SELECT 1 FROM scheduler_occurrences q WHERE q.run_id=d.root_run_id
+ AND (q.status NOT IN ('done','failed') OR q.status='done' AND q.quiet=1))
 ";
 
 #[derive(Clone, Deserialize, Serialize)]

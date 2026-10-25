@@ -3,6 +3,7 @@
 //! the bot can rewrite the file. There is no public address.
 pub(super) mod anchors;
 mod compile;
+mod privacy;
 
 use super::{priority, write_transaction, Context};
 use crate::{parse, ApiError, ApiResponse, App};
@@ -51,6 +52,14 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     )?;
     if !kept {
         conn.execute_batch("ALTER TABLE bot_pages ADD COLUMN previous_source TEXT")?;
+    }
+    let carded: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bot_pages') WHERE name = 'entry_id')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !carded {
+        conn.execute_batch("ALTER TABLE bot_pages ADD COLUMN entry_id TEXT")?;
     }
     anchors::migrate(conn)
 }
@@ -110,6 +119,9 @@ struct PageKey<'a> {
     conversation: &'a str,
     title: &'a str,
     filename: &'a str,
+    /// The thread card of the write that made this version; none for a revert or a broken
+    /// write. The old card is kept only while the Page stays in the same conversation.
+    entry: Option<&'a str>,
 }
 
 pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
@@ -140,12 +152,14 @@ fn persist(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     let (bot, conversation) = attached(ctx)?;
     let id = page_id(bot, &filename);
     let compiled = compile::compile(&args.source);
+    let card = super::images::tool_message_id(ctx, &call.call_id).ok();
     let key = PageKey {
         id: &id,
         bot,
         conversation,
         title: &title,
         filename: &filename,
+        entry: card.as_deref().filter(|_| compiled.is_ok()),
     };
     store(
         ctx.connection,
@@ -217,10 +231,14 @@ fn store(
     }
     conn.execute(
         "INSERT INTO bot_pages (
-            id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+            id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview, created_at, updated_at, entry_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12)
          ON CONFLICT(id) DO UPDATE SET
             conversation_id = excluded.conversation_id,
+            entry_id = CASE
+                WHEN excluded.entry_id IS NOT NULL THEN excluded.entry_id
+                WHEN bot_pages.conversation_id = excluded.conversation_id THEN bot_pages.entry_id
+                END,
             title = excluded.title,
             previous_source = CASE
                 WHEN bot_pages.status = 'ready' AND bot_pages.source <> excluded.source
@@ -242,7 +260,8 @@ fn store(
             diagnostic,
             document,
             preview,
-            now_ms
+            now_ms,
+            key.entry
         ],
     )?;
     Ok(())
@@ -307,12 +326,14 @@ fn edit(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
             ),
         ));
     }
+    let card = super::images::tool_message_id(ctx, &call.call_id).ok();
     let key = PageKey {
         id: &args.id,
         bot,
         conversation,
         title: &title,
         filename: &filename,
+        entry: card.as_deref(),
     };
     store(
         ctx.connection,
@@ -428,7 +449,7 @@ fn rename(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
     }
     let page = load(&tx, &input.id)?;
     tx.commit()?;
-    Ok(json!({"page": page}))
+    masked(&app.connection, json!({"page": page}))
 }
 
 #[derive(Deserialize)]
@@ -461,10 +482,11 @@ fn revert(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
         previous.ok_or_else(|| ApiError::new(400, "Cette Page n’a pas de version d’avant."))?;
     let compiled = compile::compile(&previous);
     if let Err(error) = &compiled {
-        return Err(ApiError::new(
-            400,
-            format!("{}. Rien n’a été modifié.", error.text()),
-        ));
+        let message = format!("{}. Rien n’a été modifié.", error.text());
+        drop(tx);
+        return super::disclosure::read(&app.connection, |patterns| {
+            Err(ApiError::new(400, patterns.text(&message)))
+        });
     }
     let key = PageKey {
         id: &input.id,
@@ -472,6 +494,7 @@ fn revert(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
         conversation: &conversation,
         title: &title,
         filename: &filename,
+        entry: None,
     };
     store(
         &tx,
@@ -487,11 +510,36 @@ fn revert(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
     )?;
     let page = load(&tx, &input.id)?;
     tx.commit()?;
-    Ok(json!({"page": page}))
+    masked(&app.connection, json!({"page": page}))
 }
 
 fn read(app: &App, id: &str) -> Result<Value, ApiError> {
-    Ok(json!({"page": load(&app.connection, id)?}))
+    masked(&app.connection, json!({"page": load(&app.connection, id)?}))
+}
+
+/// What a route sends out: a secret the vault learned since the bot wrote the Page is hidden,
+/// as in the thread.
+fn masked(conn: &Connection, page: Value) -> Result<Value, ApiError> {
+    super::disclosure::read(conn, |patterns| {
+        for field in [
+            "id",
+            "bot_id",
+            "conversation_id",
+            "source_version",
+            "status",
+        ] {
+            patterns.identity(&page["page"][field])?;
+        }
+        let mut value = patterns.value(&page)?;
+        if let Some(document) = value
+            .get_mut("page")
+            .and_then(|p| p.get_mut("document"))
+            .filter(|d| !d.is_null())
+        {
+            privacy::protect(document, patterns)?;
+        }
+        patterns.value(&value)
+    })
 }
 
 struct PageRecord {

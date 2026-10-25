@@ -12,6 +12,8 @@
 //! Hooks MUST return 409 if a nonempty retry list differs from the existing set;
 //! silently accumulating attachments would violate message nonce immutability.
 
+pub(crate) mod disclosure;
+
 use crate::{ApiError, ApiResponse, App, Message, Provider};
 use grokbot_engine::contracts::{
     ContextBlock, ContextRequest, RunEvent, ToolCall, ToolOutcome, ToolSpec,
@@ -96,6 +98,7 @@ pub mod generated;
 pub mod images;
 pub mod iphone;
 pub mod library;
+pub mod livrables;
 pub mod local;
 pub mod mcp;
 pub mod meetings;
@@ -180,6 +183,7 @@ registry!(
     generated,
     pages,
     images,
+    livrables,
     mcp,
     storage,
     usage,
@@ -203,6 +207,7 @@ registry!(
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     let tx = write_transaction(conn)?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS component_versions (component TEXT PRIMARY KEY, version INTEGER NOT NULL)")?;
+    disclosure::migrate(&tx)?;
     for feature in FEATURES {
         (feature.migrate)(&tx)?;
     }

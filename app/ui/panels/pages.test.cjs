@@ -309,6 +309,62 @@ test("un rafraîchissement identique ne reconstruit pas la Page et garde le focu
   assert.match(main.textContent, /Offre choisie : Confort/);
 });
 
+test("un document masqué à version identique retire le contenu du DOM, de l’état choisi et des clics", async () => {
+  const privateValue = "CANARI_PAGE_CACHE_C7_482";
+  const mask = "[masqué]";
+  const page = {
+    id: "page_cache_mask",
+    title: "Choix synthétiques",
+    filename: "choix.page.tsx",
+    status: "ready",
+    diagnostic: null,
+    preview: "",
+    source_version: "v1",
+    document: {
+      states: [{ name: "choix", initial: "Aucun" }],
+      view: {
+        type: "element", tag: "article", children: [
+          { type: "element", tag: "p", children: [{ type: "text", text: "Choix : " }, { type: "state", name: "choix" }] },
+          { type: "element", tag: "p", children: [{ type: "text", text: `Détail : ${privateValue}` }] },
+          { type: "element", tag: "button", click: { state: "choix", value: privateValue }, children: [{ type: "text", text: "Choisir" }] },
+          { type: "map", items: [[privateValue]], node: {
+            type: "element", tag: "div", children: [
+              { type: "field", index: 0 },
+              { type: "element", tag: "button", click: { state: "choix", index: 0 }, children: [{ type: "text", text: "Choisir une ligne" }] },
+            ],
+          } },
+        ],
+      },
+    },
+  };
+  const { panels, main, use } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  buttons(canvasOf(main)).find((button) => button.textContent === "Choisir").click();
+  assert.equal(canvasOf(main).querySelector("p").textContent, `Choix : ${privateValue}`);
+  const selectedButtons = buttons(canvasOf(main));
+
+  use(JSON.parse(JSON.stringify(page)));
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(canvasOf(main).querySelector("p").textContent, `Choix : ${privateValue}`);
+  const unchangedButtons = buttons(canvasOf(main));
+  assert.equal(unchangedButtons.length, 2);
+  assert.equal(unchangedButtons.every((button, index) => button === selectedButtons[index]), true);
+
+  use({ ...page, document: JSON.parse(JSON.stringify(page.document).replaceAll(privateValue, mask)) });
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(main.textContent.includes(privateValue), false, "le rafraîchissement retire le contenu et l’état privés précédents");
+  assert.equal(canvasOf(main).querySelector("p").textContent, "Choix : Aucun");
+  assert.equal(canvasOf(main).textContent.includes(`Détail : ${mask}`), true);
+
+  for (const label of ["Choisir", "Choisir une ligne"]) {
+    const choice = buttons(canvasOf(main)).find((button) => button.textContent === label);
+    assert.ok(choice, `le bouton ${label} reste disponible après masque`);
+    choice.click();
+    assert.equal(canvasOf(main).querySelector("p").textContent, `Choix : ${mask}`);
+    assert.equal(main.textContent.includes(privateValue), false, `le clic ${label} ne réexpose pas la valeur privée`);
+  }
+});
+
 test("une Page écrite par un autre participant d’un groupe s’affiche avec le fil du groupe", async () => {
   const page = { id: "page_ready", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "ready", diagnostic: null, preview: "", source_version: "v1", document: readyDocument };
   const { panels, main, sidebar } = harness(page);
@@ -352,4 +408,54 @@ test("une navigation refusée pendant une réponse prévient au lieu d’affiche
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(notices.length, 1);
   assert.equal(descendants(main).some((el) => el.classes.includes("page-canvas") && el.children.length > 0), false);
+});
+
+
+test("renommer applique immédiatement le document masqué reçu, sans attendre un poll", async () => {
+  const privateValue = "CANARI_RENAME_CACHE_281";
+  const document = { states: [], view: { type: "element", tag: "article", children: [{ type: "text", text: privateValue }] } };
+  const page = { id: "page_rename_mask", title: "Avant", status: "ready", source_version: "v1", document };
+  const { panels, main, use } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(main.textContent.includes(privateValue), true);
+  use({ ...page, document: JSON.parse(JSON.stringify(document).replaceAll(privateValue,"[...]")) });
+  const input = descendants(main).find((element) => element.tagName === "input");
+  input.value = "Après";
+  await input.listeners.change();
+  assert.equal(main.textContent.includes(privateValue),false);
+  assert.equal(canvasOf(main).textContent,"[...]");
+});
+
+
+test("un titre nouvellement masqué remplace aussi la valeur du champ focalisé", async () => {
+  const page = { id: "page_title_mask", title: "CANARI_TITRE_CACHE_281", status: "ready", source_version: "v1", document: readyDocument };
+  const { panels, main, use } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  const input = descendants(main).find((element) => element.tagName === "input");
+  input.ownerDocument.activeElement = input;
+  use({ ...page, title: "[...]" });
+  panels.state.pages.by_bot.grokbot[0].title = "[...]";
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(input.value,"[...]");
+});
+
+
+test("une réponse rename ancienne ne réexpose pas un document masqué par un poll plus récent", async () => {
+  const privateValue = "CANARI_RENAME_RACE_281";
+  const document = { states: [], view: { type: "element", tag: "article", children: [{ type: "text", text: privateValue }] } };
+  const page = { id: "page_rename_race", title: "Avant", status: "ready", source_version: "v1", document };
+  const { panels, main, use } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  const normalApi = panels.api;
+  let completeRename;
+  panels.api = (path, body) => path === "/api/pages/rename" ? new Promise((resolve) => { completeRename = resolve; }) : normalApi(path,body);
+  const input = descendants(main).find((element) => element.tagName === "input");
+  input.value = "Après";
+  const rename = input.listeners.change();
+  use({ ...page, document: JSON.parse(JSON.stringify(document).replaceAll(privateValue,"[...]")) });
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(canvasOf(main).textContent,"[...]");
+  completeRename({ page: { ...page, title: "Après" } });
+  await rename;
+  assert.equal(canvasOf(main).textContent,"[...]");
 });

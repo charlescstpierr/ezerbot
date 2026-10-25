@@ -4141,7 +4141,7 @@ mod captures {
     }
 
     #[test]
-    fn masking_a_secret_hides_its_text_but_never_breaks_a_reference() {
+    fn masking_a_secret_hides_text_and_refuses_a_private_reference() {
         let mut f = Fixture::new(true);
         let c = f.conversation();
         let (_, edge) = f.begin(&c, "masque", args("child"));
@@ -4160,10 +4160,8 @@ mod captures {
         wait("child done", || {
             matches!(status(&f, &edge), DelegationStatus::Done { .. })
         });
-        // One secret appears in the caption; another one overlaps the generated id and route.
         let vault = Vault::open(&f.path.with_extension("secrets.json")).unwrap();
         vault.set("legende", "test", "CLE-SECRETE-9").unwrap();
-        vault.set("recoupe", "test", "screen:run:be").unwrap();
         let shown = card(&mut f, &edge);
         let reference = &shown["status"]["captures"][0];
         assert_eq!(reference["id"], "screen:run:before");
@@ -4174,6 +4172,12 @@ mod captures {
         let url = reference["url"].as_str().unwrap().to_owned();
         assert!(url.contains("screen%3Arun%3Abefore"), "{url}");
         assert!(image(&mut f, &url).starts_with(b"\x89PNG"));
+
+        vault.set("recoupe", "test", "screen:run:be").unwrap();
+        let refused = f.app.api("GET", "/api/state", b"").unwrap_err();
+        assert_eq!(refused.status, 409);
+        assert!(!refused.message.contains("screen:run:be"));
+        assert!(!refused.message.contains("CLE-SECRETE-9"));
     }
 
     #[test]

@@ -923,9 +923,15 @@ impl App {
         if body.len() > body_limit(path) {
             return Err(too_large(path));
         }
-        deep_links::route(self, method, path, body)
+        let response = deep_links::route(self, method, path, body)
             .or_else(|| features::routes(self, method, path, body))
-            .unwrap_or_else(|| Err(ApiError::new(404, "Cette adresse n'existe pas.")))
+            .unwrap_or_else(|| Err(ApiError::new(404, "Cette adresse n'existe pas.")))?;
+        match response {
+            ApiResponse::Json(value) if path == "/api/state" => Ok(ApiResponse::Json(
+                features::disclosure::state(&self.connection, &value)?,
+            )),
+            other => Ok(other),
+        }
     }
 
     /// JSON-only compatibility entry point; binary consumers use `api_response`.
@@ -1025,7 +1031,7 @@ impl App {
         let conversation = self
             .conversation(id)?
             .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?;
-        Ok(json!({"conversation": conversation}))
+        features::disclosure::state(&self.connection, &json!({"conversation": conversation}))
     }
 }
 

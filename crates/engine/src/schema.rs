@@ -39,11 +39,40 @@ pub fn unsupported_keywords(schema: &Value) -> Vec<String> {
     found
 }
 
-/// Cuts `text` to `max` characters, never mid-character, and appends "…" when it cut.
-pub fn truncate_chars(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((end, _)) => format!("{}…", &text[..end]),
-        None => text.to_owned(),
+/// Cuts serialized JSON at `max` characters, and appends "…" when it cut. A cut inside a
+/// string token goes back to before its opening quote, so a string is echoed whole or
+/// not at all: a prefix of a forgotten text would escape the exact-match scrub.
+pub fn cut_json(json: &str, max: usize) -> String {
+    let mut string_start = None;
+    let mut escaped = false;
+    for (count, (at, ch)) in json.char_indices().enumerate() {
+        if count == max {
+            return format!("{}…", &json[..string_start.unwrap_or(at)]);
+        }
+        match (string_start, ch) {
+            (Some(_), _) if escaped => escaped = false,
+            (Some(_), '\\') => escaped = true,
+            (Some(_), '"') => string_start = None,
+            (None, '"') => string_start = Some(at),
+            _ => {}
+        }
+    }
+    json.to_owned()
+}
+
+/// `Value`'s own equality tells `3` from `3.0`; JSON Schema does not.
+fn same_json(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_json(a, b))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(k, a)| b.get(k).is_some_and(|b| same_json(a, b)))
+        }
+        _ => a == b,
     }
 }
 
@@ -96,18 +125,18 @@ fn walk(schema: &Value, value: &Value, pointer: &str, errors: &mut Vec<SchemaErr
     };
     if !kinds.is_empty() && !kinds.iter().any(|kind| type_matches(kind, value)) {
         let expected: Vec<_> = kinds.iter().map(|kind| type_label(kind)).collect();
-        let received = truncate_chars(&value.to_string(), 60);
+        let received = cut_json(&value.to_string(), 60);
         let message = format!("{} attendu, reçu {received}", expected.join(" ou "));
         return push(errors, pointer.to_owned(), message);
     }
     let not_enumerated = schema
         .get("enum")
         .and_then(Value::as_array)
-        .is_some_and(|allowed| !allowed.contains(value));
+        .is_some_and(|allowed| !allowed.iter().any(|one| same_json(one, value)));
     if not_enumerated
         || schema
             .get("const")
-            .is_some_and(|expected| expected != value)
+            .is_some_and(|expected| !same_json(expected, value))
     {
         push(errors, pointer.to_owned(), "valeur non autorisée");
     }
@@ -135,7 +164,10 @@ fn walk(schema: &Value, value: &Value, pointer: &str, errors: &mut Vec<SchemaErr
             push(errors, pointer.to_owned(), format!("valeur maximale {max}"));
         }
     }
-    if let (Some(items), Some(item_schema)) = (value.as_array(), schema.get("items")) {
+    let item_schema = schema
+        .get("items")
+        .filter(|_| !schema.contains_key("prefixItems"));
+    if let (Some(items), Some(item_schema)) = (value.as_array(), item_schema) {
         for (index, item) in items.iter().enumerate() {
             walk(
                 item_schema,
@@ -153,7 +185,8 @@ fn walk(schema: &Value, value: &Value, pointer: &str, errors: &mut Vec<SchemaErr
             }
         }
         let properties = schema.get("properties").and_then(Value::as_object);
-        let closed = schema.get("additionalProperties") == Some(&Value::Bool(false));
+        let closed = schema.get("additionalProperties") == Some(&Value::Bool(false))
+            && !schema.contains_key("patternProperties");
         for (name, field) in fields {
             match properties.and_then(|properties| properties.get(name)) {
                 Some(field_schema) => walk(field_schema, field, &child(pointer, name), errors),
@@ -215,6 +248,10 @@ mod tests {
         assert!(validate(&integer, &json!(3.0)).is_empty());
         assert_eq!(paths(integer, json!(1.5)), [""]);
         assert!(validate(&json!({"type":["number","null"]}), &json!(1.5)).is_empty());
+        assert!(validate(&json!({"enum":[3, [1]]}), &json!(3.0)).is_empty());
+        assert!(validate(&json!({"enum":[3, [1]]}), &json!([1.0])).is_empty());
+        assert!(validate(&json!({"const":{"n":3}}), &json!({"n":3.0})).is_empty());
+        assert_eq!(paths(json!({"const":3}), json!(3.5)), [""]);
     }
 
     #[test]
@@ -260,5 +297,15 @@ mod tests {
             unsupported_keywords(&schema),
             ["/properties/list/items/oneOf", "/properties/when/format"]
         );
+    }
+
+    #[test]
+    fn a_string_crossing_the_cut_is_dropped_whole_and_short_strings_are_kept() {
+        let long = "é".repeat(80);
+        let json = json!({"a":"court", "b":long, "c":1}).to_string();
+        assert_eq!(cut_json(&json, 60), r#"{"a":"court","b":…"#);
+        assert_eq!(cut_json(&json, 1_000), json);
+        let escaped = json!({"a":"x\"y\\"}).to_string();
+        assert_eq!(cut_json(&escaped, 9), r#"{"a":…"#);
     }
 }

@@ -1046,7 +1046,7 @@ fn schema_failure_reason(errors: &[schema::SchemaError], arguments: &Value) -> S
     format!(
         "Arguments invalides : {}. Arguments reçus : {}",
         errors.join(" ; "),
-        schema::truncate_chars(&arguments.to_string(), MAX_ECHOED_ARGUMENTS)
+        schema::cut_json(&arguments.to_string(), MAX_ECHOED_ARGUMENTS)
     )
 }
 
@@ -2822,8 +2822,11 @@ mod tests {
     #[test]
     fn keywords_outside_the_supported_subset_never_refuse_a_call() -> Result<()> {
         let schema = json!({"type":"object", "oneOf":[{"required":["a"]}, {"required":["b"]}],
-            "properties":{"a":{"$ref":"#/definitions/a"}, "b":{"type":"string", "pattern":"^x"}}});
-        let (_, services, outcome) = run_one_call(false, schema, json!({"b":"y"}))?;
+            "additionalProperties":false, "patternProperties":{"^x":{}},
+            "properties":{"a":{"$ref":"#/definitions/a"}, "b":{"type":"string", "pattern":"^x"},
+                "c":{"type":"array", "items":{"type":"string"}, "prefixItems":[{"type":"integer"}]}}});
+        let arguments = json!({"b":"y", "x1":"ok", "c":[1]});
+        let (_, services, outcome) = run_one_call(false, schema, arguments)?;
         assert_eq!(outcome["status"], "done");
         assert_eq!(services.calls, ["c1"]);
         Ok(())

@@ -969,10 +969,10 @@ fn rendered_page(page: &Value, chosen: Option<&str>) -> String {
 
 #[test]
 fn r5_page_fragments_cannot_reassemble_a_private_value_on_any_response() {
-    let secret = "synthetic-fragments-281";
+    let secret = "canari-canari";
     for source in [
-        "export default function Page() { return (<article><span>synthetic-</span><span>fragments-281</span></article>); }",
-        "export default function Page() { const [choice, setChoice] = useState(\"public\"); const rows = [[\"fragments-281\"]]; return (<article><p>synthetic-{choice}</p>{rows.map((row) => (<button onClick={() => setChoice(row[0])}>Choisir</button>))}</article>); }",
+        "export default function Page() { return (<article><span>canari-</span><span>canari</span></article>); }",
+        "export default function Page() { const [choice, setChoice] = useState(\"public\"); const rows = [[\"canari\"]]; return (<article><p>canari-{choice}</p>{rows.map((row) => (<button onClick={() => setChoice(row[0])}>Choisir</button>))}</article>); }",
     ] {
         let mut f = Fixture::new();
         let chat = f.chat("alpha");
@@ -987,7 +987,7 @@ fn r5_page_fragments_cannot_reassemble_a_private_value_on_any_response() {
             ("POST", "/api/pages/revert".into(), json!({"id":id})),
         ] {
             let result = f.app.api(method, &path, payload.to_string().as_bytes()).unwrap();
-            for chosen in [None, Some("fragments-281")] {
+            for chosen in [None, Some("canari")] {
                 let shown = rendered_page(&result["page"], chosen);
                 assert!(!shown.contains(secret), "a private value was reconstructed by the Page");
             }
@@ -1001,7 +1001,7 @@ fn r5_revert_diagnostic_hides_private_source_and_keeps_the_page_unchanged() {
     let chat = f.chat("alpha");
     f.page(&chat, "p1", "diagnostic.page.tsx", "Diagnostic");
     let id = f.list("type=page")[0]["id"].as_str().unwrap().to_owned();
-    let secret = "privateSyntheticTag281";
+    let secret = "CanariCanari";
     let previous = format!("export default function Page() {{ return (<{secret}>x</{secret}>); }}");
     f.db()
         .execute(

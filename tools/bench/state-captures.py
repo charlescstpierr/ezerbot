@@ -173,19 +173,24 @@ def run_pass(binary, workdir, results, captures, reads, trace):
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def traced(pid, work):
-    """Syscall counts of the server while `work` runs, and how long it ran."""
+def traced(pid, work, busy):
+    """Syscall counts of the server while `work` runs, and how long it ran. A busy window that
+    traced nothing means strace never attached: an error, never zero opens."""
     log = Path(tempfile.mkstemp(suffix=".strace")[1])
     tracer = subprocess.Popen(["strace", "-f", "-qq", "-e", "trace=openat,getdents64", "-o", str(log),
-                               "-p", str(pid)], stderr=subprocess.DEVNULL)
+                               "-p", str(pid)], stderr=subprocess.PIPE, text=True)
     time.sleep(1.0)
+    if tracer.poll() is not None:
+        raise RuntimeError(f"strace s'est arrêté : {tracer.stderr.read().strip()}")
     started = time.monotonic()
     work()
     elapsed = time.monotonic() - started
     tracer.send_signal(signal.SIGINT)
-    tracer.wait()
+    errors = tracer.communicate()[1].strip()
     text = log.read_text()
     log.unlink()
+    if busy and "secrets.json" not in text:
+        raise RuntimeError(f"strace n'a vu aucune ouverture du coffre pendant les lectures : {errors}")
     return elapsed, {
         "coffre_ouvert": len(re.findall(r'secrets\.json", ', text)),
         "verrou_ouvert": len(re.findall(r'secrets\.json\.lock", ', text)),
@@ -200,8 +205,8 @@ def strace_counts(server, reads, parent, results, captures):
             if status != 200:
                 raise RuntimeError(f"/api/state : statut {status}")
             check(data, parent, results, captures)
-    elapsed, busy = traced(server.process.pid, states)
-    _, idle = traced(server.process.pid, lambda: time.sleep(elapsed))
+    elapsed, busy = traced(server.process.pid, states, True)
+    _, idle = traced(server.process.pid, lambda: time.sleep(elapsed), False)
     return {key: (busy[key] - idle[key]) / reads for key in busy}
 
 

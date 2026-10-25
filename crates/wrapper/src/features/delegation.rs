@@ -26,7 +26,7 @@ use grokbot_engine::{
 };
 use grokbot_forms::{
     approvals::args_digest,
-    redact::{redact, redact_value, Patterns},
+    redact::{self, redact, redact_value, Patterns},
 };
 use grokbot_memory::facts;
 use grokbot_skills::library;
@@ -2006,10 +2006,22 @@ fn context_checked(ctx: &Context<'_>, request: &ContextRequest) -> Result<Vec<Co
     Ok(blocks)
 }
 
+/// Every card is masked with one read of the vault, read again once they are all done: if a
+/// secret was stored meanwhile the cards are rendered again, as `App::conversations_settled`
+/// does for the conversations (#377, #328). A vault that keeps changing or fails is refused.
 pub fn state(ctx: &Context<'_>) -> Value {
-    let Ok(secrets) = super::forms::patterns(ctx) else {
-        return json!({"error":"Delegation state is unavailable"});
-    };
+    for _ in 0..super::conversations::VAULT_SETTLE_ATTEMPTS {
+        let held = redact::hold();
+        match (cards(ctx), held.settled()) {
+            (Some(state), Ok(true)) => return state,
+            (Some(_), Ok(false)) => continue,
+            _ => break,
+        }
+    }
+    json!({"error":"Delegation state is unavailable"})
+}
+fn cards(ctx: &Context<'_>) -> Option<Value> {
+    let secrets = super::forms::patterns(ctx).ok()?;
     let mut counts = serde_json::Map::new();
     let edges = state_edges(ctx.connection).unwrap_or_default();
     let shown = shown_captures(ctx.connection, &edges);
@@ -2031,7 +2043,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
             Some(value)
         })
         .collect();
-    json!({"delegations":delegations,"active_by_conversation":counts})
+    Some(json!({"delegations":delegations,"active_by_conversation":counts}))
 }
 pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
     if kind == "delegation_followup" {

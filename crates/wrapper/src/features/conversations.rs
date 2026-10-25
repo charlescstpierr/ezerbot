@@ -341,7 +341,7 @@ pub fn has_submission(
 }
 
 /// Projections attempted before a state read gives up on a vault that keeps changing.
-const VAULT_SETTLE_ATTEMPTS: usize = 4;
+pub(super) const VAULT_SETTLE_ATTEMPTS: usize = 4;
 
 impl App {
     pub(crate) fn conversations(&self) -> Result<Vec<Conversation>, ApiError> {

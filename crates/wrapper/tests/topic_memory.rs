@@ -6,29 +6,25 @@ use grokbot_engine::{
 use grokbot_wrapper::{ApiError, App};
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use std::{
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-};
-
-static NEXT: AtomicUsize = AtomicUsize::new(0);
+use std::path::PathBuf;
 
 struct Fixture {
     app: App,
     path: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "topic-memory-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("topic-memory");
+        let dir = guard.to_path_buf();
         let path = dir.join("workspace.sqlite");
         let app = App::open(&path).unwrap();
-        Self { app, path }
+        Self {
+            app,
+            path,
+            _dir: guard,
+        }
     }
 
     fn db(&self) -> Connection {
@@ -661,4 +657,92 @@ fn un_souvenir_ajoute_a_la_main_au_sujet_est_lu_par_ses_fils_seulement() {
         assert_eq!(error.status, status);
     }
     assert_eq!(f.topic_facts(&topic).len(), 1);
+}
+
+fn add_topic_fact(f: &mut Fixture, topic: &str, bot: &str, text: &str) -> Value {
+    f.post(
+        "/api/memory/add",
+        json!({"bot_id": bot, "text": text, "scope": "topic", "topic_id": topic}),
+    )["fact"]
+        .clone()
+}
+
+fn stored_in_catalog(f: &mut Fixture, topic: &str) -> usize {
+    f.app.api("GET", "/api/memory/all", b"").unwrap()["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|fact| fact["topic_id"] == json!(topic))
+        .count()
+}
+
+#[test]
+fn rejouer_un_ajout_de_sujet_renvoie_le_meme_souvenir_sans_rien_ecrire() {
+    let mut f = Fixture::new();
+    let topic = f.topic("Déménagement");
+    let first = add_topic_fact(&mut f, &topic, "grokbot", FACT);
+    let again = add_topic_fact(&mut f, &topic, "grokbot", FACT);
+    assert_eq!(again, first, "même identifiant, même réponse");
+    // Le rognage de la route fait partie de la clé : un réessai avec des marges converge.
+    let padded = add_topic_fact(&mut f, &topic, "grokbot", &format!("  {FACT}\n"));
+    assert_eq!(padded["id"], first["id"]);
+    assert_eq!(f.topic_facts(&topic).len(), 1);
+    assert_eq!(stored_in_catalog(&mut f, &topic), 1);
+}
+
+#[test]
+fn deux_textes_differents_ou_deux_bots_font_deux_souvenirs_de_sujet() {
+    let mut f = Fixture::new();
+    let topic = f.topic("Déménagement");
+    let other = f.topic("Impôts");
+    f.group("Camion", &topic); // crée aussi le bot « second-bot »
+    let first = add_topic_fact(&mut f, &topic, "grokbot", FACT);
+    let different = add_topic_fact(&mut f, &topic, "grokbot", "Le garde-meuble ferme à 18 h");
+    assert_ne!(different["id"], first["id"]);
+    assert_eq!(f.topic_facts(&topic).len(), 2);
+    // Même texte, autre bot : l'auteur affiché diffère, ce n'est pas un réessai.
+    let by_other_bot = add_topic_fact(&mut f, &topic, "second-bot", FACT);
+    assert_ne!(by_other_bot["id"], first["id"]);
+    assert_eq!(by_other_bot["bot_id"], "second-bot");
+    // Même texte, autre sujet : un souvenir à part.
+    let elsewhere = add_topic_fact(&mut f, &other, "grokbot", FACT);
+    assert_ne!(elsewhere["id"], first["id"]);
+    assert_eq!(f.topic_facts(&topic).len(), 3);
+    assert_eq!(f.topic_facts(&other).len(), 1);
+}
+
+#[test]
+fn un_souvenir_de_sujet_oublie_puis_rajoute_revient_comme_un_nouveau_souvenir() {
+    let mut f = Fixture::new();
+    let topic = f.topic("Déménagement");
+    let first = add_topic_fact(&mut f, &topic, "grokbot", FACT);
+    f.post("/api/topics/memory/forget", json!({"fact_id": first["id"]}));
+    assert!(f.topic_facts(&topic).is_empty());
+    let back = add_topic_fact(&mut f, &topic, "grokbot", FACT);
+    assert_ne!(back["id"], first["id"]);
+    assert_eq!(f.topic_facts(&topic).len(), 1);
+    assert_eq!(f.topic_facts(&topic)[0]["id"], back["id"]);
+}
+
+#[test]
+fn des_doublons_deja_stockes_ne_bloquent_rien_et_le_plus_ancien_est_renvoye() {
+    let mut f = Fixture::new();
+    let topic = f.topic("Déménagement");
+    for (id, created_at) in [("tf-b", 2_000), ("tf-a", 1_000), ("tf-c", 1_000)] {
+        f.db()
+            .execute(
+                "INSERT INTO wrapper_topic_facts (account_id, id, topic_id, text, bot_id, created_at)
+                 VALUES ('local-workspace', ?1, ?2, ?3, 'grokbot', ?4)",
+                rusqlite::params![id, topic, FACT, created_at],
+            )
+            .unwrap();
+    }
+    assert_eq!(f.topic_facts(&topic).len(), 3);
+    let again = add_topic_fact(&mut f, &topic, "grokbot", FACT);
+    assert_eq!(again["id"], "tf-a");
+    assert_eq!(
+        f.topic_facts(&topic).len(),
+        3,
+        "rien n'est écrit ni fusionné"
+    );
 }

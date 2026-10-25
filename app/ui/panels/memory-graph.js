@@ -88,6 +88,12 @@
       const el = make("g", { class: `memory-graph-node memory-graph-${kind} is-${scope}`, tabindex: "0", role: "img", "aria-label": name, "data-id": item.id });
       el.append(make("circle", { cx: item.x, cy: item.y, r: radius }));
       if (kind === "point") el.append(make("title", {}, name));
+      if (kind === "point" && options?.onSelect) {
+        // Un clic ouvre le souvenir, sauf s'il termine un glisser ; Entrée et Espace font de même au clavier.
+        el.setAttribute("role", "button");
+        el.addEventListener("click", () => { if (!dragged) options.onSelect(item.id, el); });
+        el.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); options.onSelect(item.id, el); } });
+      }
       if (caption) el.append(make("text", { class: "memory-graph-label", x: item.x, y: item.y + radius, dy: "1.4em" }, caption));
       for (const on of ["mouseenter", "focus"]) el.addEventListener(on, () => highlight(item.id));
       for (const off of ["mouseleave", "blur"]) el.addEventListener(off, () => highlight(null));
@@ -113,7 +119,7 @@
     svg.append(edgeLayer, nodeLayer);
     highlight(null);
     // Zoom : le viewBox se resserre autour du centre de la vue ; le texte garde sa taille à l'écran (--k = unités par pixel).
-    let { zoom, ox, oy } = kept, scale = 1, drag = null;
+    let { zoom, ox, oy } = kept, scale = 1, drag = null, dragged = false;
     const apply = () => {
       const rect = svg.getBoundingClientRect?.();
       if (matches && rect?.width) { box = room(1, rect); for (let i = 0; i < 6; i++) box = room(Math.min(rect.width / box.w, rect.height / box.h), rect); } // à neuf à chaque fois, en quelques passes : la place dépend de l'échelle
@@ -124,8 +130,21 @@
       Object.assign(kept, { zoom, ox, oy });
     };
     const step = (factor) => () => { zoom = Math.min(4, Math.max(0.5, zoom * factor)); apply(); };
-    svg.addEventListener("pointerdown", (event) => { drag = event; svg.setPointerCapture?.(event.pointerId); });
-    svg.addEventListener("pointermove", (event) => { if (!drag) return; ox -= (event.clientX - drag.clientX) / scale; oy -= (event.clientY - drag.clientY) / scale; drag = event; apply(); });
+    // Le glisser ne commence qu'au-delà de 5 px, et ne capture le pointeur qu'alors : un simple clic reste un clic sur son point.
+    svg.addEventListener("pointerdown", (event) => { drag = event; dragged = false; });
+    svg.addEventListener("pointermove", (event) => {
+      if (event.buttons === 0) drag = null; // le bouton a été relâché hors du graphe : plus de glisser
+      if (!drag) return;
+      if (!dragged) {
+        if (Math.hypot(event.clientX - drag.clientX, event.clientY - drag.clientY) < 5) return;
+        dragged = true;
+        svg.setPointerCapture?.(event.pointerId);
+      }
+      ox -= (event.clientX - drag.clientX) / scale;
+      oy -= (event.clientY - drag.clientY) / scale;
+      drag = event;
+      apply();
+    });
     for (const end of ["pointerup", "pointercancel"]) svg.addEventListener(end, () => { drag = null; });
     const tools = html("div", "memory-graph-tools");
     for (const [label, text, action] of [["Zoom avant", "+", step(1.25)], ["Zoom arrière", "−", step(0.8)], ["Recadrer", "Recadrer", () => { zoom = 1; ox = oy = 0; apply(); }]]) {

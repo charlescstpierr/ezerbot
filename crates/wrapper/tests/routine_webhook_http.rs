@@ -9,7 +9,6 @@ use std::{
     io::{BufRead, BufReader},
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicUsize, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 use support::wait;
@@ -21,17 +20,13 @@ struct Host {
     root: PathBuf,
     url: String,
     hook: String,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Host {
     fn new() -> Self {
         // The clock alone can repeat across parallel tests: add a counter.
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-webhook-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-webhook");
+        let root = guard.to_path_buf();
         // Behaviour is switched by files, so a test can stop Tailscale between calls.
         let fake = root.join("tailscale-fake");
         let script = format!(
@@ -71,6 +66,7 @@ esac
             root,
             url: String::new(),
             hook: String::new(),
+            _dir: guard,
         };
         host.open();
         host
@@ -233,7 +229,6 @@ esac
 impl Drop for Host {
     fn drop(&mut self) {
         self.stop();
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 struct Hook {

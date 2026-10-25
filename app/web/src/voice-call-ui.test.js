@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import test, { after } from "node:test";
-import { fileURLToPath } from "node:url";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createServer } from "vite";
+import { createTestServer } from "./vite-test-server.js";
 import react from "@vitejs/plugin-react";
 import { voiceNeedsAction } from "./voice-conversation.js";
 
@@ -231,10 +230,7 @@ test("switching conversation ends the call and keeps the lines already written",
   assert.deepEqual(f.calls.filter(c => c.path === "/api/voice/call/line").map(c => c.text), ["Salut"]);
 });
 
-const vite = await createServer({
-  root: fileURLToPath(new URL("..", import.meta.url)), configFile: false,
-  plugins: [react()], server: { middlewareMode: true }, logLevel: "error", optimizeDeps: { noDiscovery: true },
-});
+const vite = await createTestServer({ plugins: [react()] });
 after(() => vite.close());
 const { Card } = await vite.ssrLoadModule("/src/cards/voice-call.jsx");
 

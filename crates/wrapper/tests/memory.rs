@@ -5,30 +5,17 @@ use grokbot_wrapper::{features, App};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-struct Database(PathBuf);
+struct Database(grokbot_test_support::TestDir);
 impl Database {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "grokbot-memory-wrapper-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
+        Self(grokbot_test_support::TestDir::new("grokbot-memory-wrapper"))
     }
     fn path(&self) -> PathBuf {
         self.0.join("app.sqlite")
     }
     fn open(&self) -> App {
         App::open(&self.path()).unwrap()
-    }
-}
-impl Drop for Database {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 fn post(app: &mut App, path: &str, body: Value) -> Value {
@@ -1049,6 +1036,20 @@ fn manual_add_is_declared_listed_and_found_by_recall_memory() {
     // Il reste privé : un autre bot ne le voit pas.
     add_bot(&mut app);
     assert!(list(&mut app, "other").is_empty());
+}
+
+#[test]
+fn manual_private_add_keeps_creating_a_fact_per_request() {
+    // Figé : la portée privée n'est pas dédupliquée par la route (retirée en #312).
+    // Seule la portée sujet est idempotente (#341).
+    let db = Database::new();
+    let mut app = db.open();
+    let body =
+        json!({"bot_id": "grokbot", "text": "Le code du portail est 4821", "scope": "private"});
+    let first = post(&mut app, "/api/memory/add", body.clone());
+    let again = post(&mut app, "/api/memory/add", body);
+    assert_ne!(again["fact"]["fact_id"], first["fact"]["fact_id"]);
+    assert_eq!(list(&mut app, "grokbot").len(), 2);
 }
 
 #[test]

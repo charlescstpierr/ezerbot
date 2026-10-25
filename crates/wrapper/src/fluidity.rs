@@ -208,12 +208,7 @@ mod tests {
     }
 
     fn logged(reads: &[Value]) -> Vec<String> {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "ezerbot-fluidity-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        ));
+        let directory = grokbot_test_support::TestDir::new("ezerbot-fluidity");
         let mut watch = StreamWatch::default();
         let now = Instant::now();
         for (n, read) in reads.iter().enumerate() {
@@ -225,7 +220,6 @@ mod tests {
             );
         }
         let log = std::fs::read_to_string(directory.join("logs/engine.log")).unwrap_or_default();
-        let _ = std::fs::remove_dir_all(&directory);
         assert!(!log.contains("Tout d'un coup") && !log.contains("En cours"));
         log.lines().map(str::to_owned).collect()
     }
@@ -281,8 +275,8 @@ mod tests {
 
     #[test]
     fn idle_reads_are_summarized_once_a_minute_and_reply_reads_each_logged() {
-        let directory =
-            std::env::temp_dir().join(format!("ezerbot-fluidity-idle-{}", std::process::id()));
+        let guard = grokbot_test_support::TestDir::new("ezerbot-fluidity-idle");
+        let directory = guard.to_path_buf();
         let mut watch = StreamWatch::default();
         let start = Instant::now();
         let read = |watch: &mut StreamWatch, state: &Value, second: u64| {
@@ -308,7 +302,6 @@ mod tests {
             read(&mut watch, &state(&[old, settled]), second);
         }
         let log = std::fs::read_to_string(directory.join("logs/engine.log")).unwrap_or_default();
-        let _ = std::fs::remove_dir_all(&directory);
         let lines: Vec<&str> = log.lines().collect();
         assert_eq!(lines.len(), 5, "{log}");
         assert!(lines[0]
@@ -340,8 +333,8 @@ mod tests {
         assert_eq!(client(false, Some("autre chose")), "principal");
         assert_eq!(client(true, Some("flottant")), "iphone");
         // The main window reads at 0 and 1000 ms; the floating panel in between.
-        let directory =
-            std::env::temp_dir().join(format!("ezerbot-fluidity-clients-{}", std::process::id()));
+        let guard = grokbot_test_support::TestDir::new("ezerbot-fluidity-clients");
+        let directory = guard.to_path_buf();
         let mut main = StreamWatch::default();
         let mut floating = StreamWatch::default();
         let now = Instant::now();
@@ -374,7 +367,6 @@ mod tests {
             now + Duration::from_millis(1200),
         );
         let log = std::fs::read_to_string(directory.join("logs/engine.log")).unwrap_or_default();
-        let _ = std::fs::remove_dir_all(&directory);
         assert_eq!(log.lines().count(), 1, "{log}");
         assert!(log.trim_end().ends_with(&format!(
             "affichage client=principal réponse={} mises_a_jour=2 ecart_max_ms=1000",

@@ -290,7 +290,7 @@ fn item_of(
         .and_then(|(code, expires)| code.map(|code| json!({"user_code":code,"verification_uri":github::DEVICE_PAGE,"expires_at":expires})))
         .unwrap_or(Value::Null);
     Ok(
-        json!({"device":device,"device_flow":m.id=="github","multi_account":multi_account(m.id),"configured":!matches!(m.id,"github"|"gmail"|"slack"|"linear"|"jira"|"microsoft365")||has_client,"unconfigured_message":(!has_client).then(||match m.id{"gmail"=>Some(gmail::not_configured().message),"slack"=>Some(slack::not_configured().message),"linear"=>Some(linear::not_configured().message),"jira"=>Some(jira::not_configured().message),"microsoft365"=>Some(microsoft::not_configured().message),_=>None}).flatten(),"id":m.id,"slot":row_id,"category":m.category,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(m),"redirect_uri":Value::Null,"source":m.source,"license":m.license,"setup":m.setup,"needs_client":!matches!(m.id,"notion"|"github"|"gmail"|"slack"|"linear"|"jira"|"microsoft365"),"has_client":has_client,"has_tokens":has_tokens,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}),
+        json!({"device":device,"device_flow":m.id=="github","multi_account":multi_account(m.id),"configured":!matches!(m.id,"github"|"gmail"|"slack"|"linear"|"jira"|"microsoft365")||has_client,"unconfigured_message":(!has_client).then(||match m.id{"gmail"=>Some(gmail::not_configured().message),"slack"=>Some(slack::not_configured().message),"linear"=>Some(linear::not_configured().message),"jira"=>Some(jira::not_configured().message),"microsoft365"=>Some(microsoft::not_configured().message),_=>None}).flatten(),"id":m.id,"slot":row_id,"category":m.category,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"redirect_uri":Value::Null,"needs_client":!matches!(m.id,"notion"|"github"|"gmail"|"slack"|"linear"|"jira"|"microsoft365"),"has_client":has_client,"has_tokens":has_tokens,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}),
     )
 }
 #[derive(Deserialize)]
@@ -353,7 +353,21 @@ fn another_slot(ctx: &Context<'_>, m: Manifest) -> Result<String, ApiError> {
         .find(|row| rows.iter().all(|(taken, _)| taken != row))
         .expect("an unbounded range has a free slot"))
 }
+/// Static install text of every card, loaded once by the settings panel (#374):
+/// it is the same on every read, so `/api/state` does not carry it.
+fn details() -> Value {
+    let mut items: Vec<Value> = MANIFESTS
+        .iter()
+        .map(|m| json!({"id":m.id,"setup":m.setup,"scopes_label":scopes_label(*m),"license":m.license,"source":m.source}))
+        .collect();
+    items.push(super::super::recall::details());
+    json!({ "details": items })
+}
+
 pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
+    if path == "/api/connectors/details" {
+        return Ok(details());
+    }
     let ctx = app.feature_context();
     if path == "/api/connectors/disconnect" {
         let input: Slot = parse(body)?;

@@ -5,7 +5,6 @@ use grokbot_engine::{contracts::RunKind, model};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
 };
 
 #[derive(Deserialize)]
@@ -104,19 +103,14 @@ impl Guardrails {
 struct Fixture {
     app: App,
     path: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 
 impl Fixture {
     fn new(case: &Case) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "memory-auto-evaluation-{}-{}-{}",
-            std::process::id(),
-            crate::now(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let guard = grokbot_test_support::TestDir::new("memory-auto-evaluation");
+        let directory = guard.to_path_buf();
         // A new, explicit space only; never read the user's database or auth.
-        std::fs::create_dir(&directory).unwrap();
         let path = directory.join("workspace.sqlite");
         let app = App::open(&path).unwrap();
         let conn = &app.connection;
@@ -172,7 +166,11 @@ impl Fixture {
             params![case.id, serde_json::to_string(&input).unwrap()],
         ).unwrap();
         tx.commit().unwrap();
-        Self { app, path }
+        Self {
+            app,
+            path,
+            _dir: guard,
+        }
     }
 
     fn written(&self) -> Vec<String> {
@@ -203,7 +201,6 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         // Only the new directory this fixture created, never an existing space.
-        std::fs::remove_dir_all(self.path.parent().unwrap()).unwrap();
     }
 }
 

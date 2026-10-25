@@ -1,29 +1,25 @@
 //! Sujets : regrouper des fils, sans jamais toucher aux conversations elles-mêmes.
 use grokbot_wrapper::{ApiError, App};
 use serde_json::{json, Value};
-use std::{
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-};
-
-static NEXT: AtomicUsize = AtomicUsize::new(0);
+use std::path::PathBuf;
 
 struct Fixture {
     app: App,
     path: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "topics-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("topics");
+        let dir = guard.to_path_buf();
         let path = dir.join("workspace.sqlite");
         let app = App::open(&path).unwrap();
-        Self { app, path }
+        Self {
+            app,
+            path,
+            _dir: guard,
+        }
     }
 
     /// Referme puis rouvre la même base, comme après un redémarrage de l'app.

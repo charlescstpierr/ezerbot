@@ -69,14 +69,18 @@ const quit = async (signal, mode = []) => {
   const parent = spawn(compile(), mode, { stdio: ["ignore", "pipe", "inherit"] });
   let out = "";
   parent.stdout.on("data", (chunk) => { out += chunk; });
-  const started = Date.now();
   while (!/ready \d+\n/.test(out)) await once(parent.stdout, "data");
   const child = Number(out.match(/ready (\d+)/)[1]);
+  // The contract is the stop, not the start: the clock runs from the signal to the
+  // exit. Starting it before "ready" counted the exec of a fresh binary and its
+  // engine child, which alone took 0.5 to 4.5 s on a loaded Mac (#368).
+  const started = Date.now();
   parent.kill(signal);
   const [code, died] = await once(parent, "exit");
+  const ms = Date.now() - started;
   const orphan = alive(child);
   if (orphan) process.kill(child, "SIGKILL");
-  return { code, died, orphan, stopped: out.match(/stopped (\w+)/)?.[1], ms: Date.now() - started };
+  return { code, died, orphan, stopped: out.match(/stopped (\w+)/)?.[1], ms };
 };
 
 test("SIGTERM stops the engine child and the shell exits 0", { timeout: 5000 }, async () => {

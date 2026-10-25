@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test, after } from "node:test";
-import { fileURLToPath } from "node:url";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createServer } from "vite";
+import { createTestServer } from "./vite-test-server.js";
 import react from "@vitejs/plugin-react";
 
 const listeners = { addEventListener() {}, removeEventListener() {} };
@@ -50,14 +49,7 @@ function withoutMentionsAndCards() {
   };
 }
 
-const vite = await createServer({
-  root: fileURLToPath(new URL("..", import.meta.url)),
-  configFile: false,
-  plugins: [withoutMentionsAndCards(), recordCopiedText(), react()],
-  server: { middlewareMode: true },
-  logLevel: "error",
-  optimizeDeps: { noDiscovery: true },
-});
+const vite = await createTestServer({ plugins: [withoutMentionsAndCards(), recordCopiedText(), react()] });
 after(() => vite.close());
 const { Thread } = await vite.ssrLoadModule("/src/Thread.jsx");
 

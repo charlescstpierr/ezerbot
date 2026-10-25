@@ -2192,16 +2192,9 @@ mod tests {
 
     #[test]
     fn a_real_symlink_is_not_followed() {
-        let stamp = format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let root = std::env::temp_dir().join(format!("grokbot-skill-link-{stamp}"));
-        let outside = std::env::temp_dir().join(format!("grokbot-skill-outside-{stamp}"));
+        let scratch = grokbot_test_support::TestDir::new("grokbot-skill-link");
+        let root = scratch.join("root");
+        let outside = scratch.join("outside");
         let folder = root.join("dossier");
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
@@ -2234,7 +2227,5 @@ mod tests {
             .files
             .iter()
             .all(|file| !file.content.contains("secret")));
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&outside);
     }
 }

@@ -259,7 +259,7 @@ pub fn for_message(
     conversation: &str,
     message: &str,
 ) -> Result<Vec<Value>, ApiError> {
-    let mut query = conn.prepare(&format!(
+    let mut query = conn.prepare_cached(&format!(
         "{SELECT} WHERE conversation_id=?1 AND message_id=?2 ORDER BY created_at,id"
     ))?;
     let rows = query

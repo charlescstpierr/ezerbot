@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { test } from "node:test";
 import { documentToolView } from "./generated-presentation.js";
+
+const { launchFixture } = createRequire(import.meta.url)("../../ui/wrapper-chrome-fixture.cjs");
 
 const component = readFileSync(new URL("./generated-document.jsx", import.meta.url), "utf8");
 test("both document dialogs synchronize React state on native close, including Escape and shell navigation", () => {
@@ -12,12 +14,23 @@ test("both document dialogs synchronize React state on native close, including E
   assert.equal(documentToolView({ call: { name: "document_action", arguments: { action: "save" } } }, { status: "running" }).note, "L’action est en cours sur votre Mac.");
 });
 
-const url = process.env.GROKBOT_DIALOG_TEST_URL;
-test("rendered GeneratedDocument reopens after dialog.close() and survives incoming links", { skip: !url, timeout: 90000 }, () => {
+// One conversation per format, so the thumbnails of paged and unpaged files are both measured.
+const documents = [
+  { title: "Document PDF", name: "Résumé", format: "pdf", content: "Été à Québec — Cœur : 12 €" },
+  { title: "Document DOCX", name: "Compte rendu", format: "docx", content: "# Été à Québec\n- Cœur : 12 €" },
+  { title: "Document PPTX", name: "Présentation", format: "pptx", content: "Été à Québec\nCœur : 12 €\n---\nDeuxième diapositive" },
+  { title: "Document MD", name: "Notes", format: "md", content: "# Notes\nÉté à Québec" },
+  { title: "Document CSV", name: "Budget", format: "csv", content: "[[\"Été\",\"Coût\"],[\"Cœur\",\"12 €\"]]" },
+  { title: "Document SVG", name: "Schéma", format: "svg", content: "flowchart LR\nA[Été] -->|puis| B(Cœur)" },
+];
+
+test("rendered GeneratedDocument reopens after dialog.close() and survives incoming links", { timeout: 60000 }, async (t) => {
+  const { url, evaluate } = await launchFixture(t, { documents });
   assert.match(url, /^http:\/\/127\.0\.0\.1:\d+\/?$/);
-  const cli = (...args) => execFileSync("chrome-devtools-axi", args, { encoding: "utf8", timeout: 20000, maxBuffer: 1024 * 1024 });
-  cli("eval", `() => { if (location.origin !== ${JSON.stringify(new URL(url).origin)}) throw new Error("Ouvrez la fixture dans cette session Chrome avant le test"); return true; }`);
-  cli("eval", `async () => {
+  // Same page functions as before, now run by CDP in the page of the isolated Chrome.
+  const inPage = (source) => evaluate(`(${source})()`);
+  await inPage(`() => { if (location.origin !== ${JSON.stringify(new URL(url).origin)}) throw new Error("La page ouverte n’est pas la fixture"); return true; }`);
+  await inPage(`async () => {
     const pause = () => new Promise(resolve => setTimeout(resolve, 30));
     const expect = (value, message) => { if (!value) throw new Error(message); };
     const until = async (predicate, message) => {

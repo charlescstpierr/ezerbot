@@ -172,19 +172,13 @@ struct Fixture {
     ai: FakeOpenAi,
     recall: Recall,
     _guard: MutexGuard<'static, ()>,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
         let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let path = std::env::temp_dir()
-            .join(format!(
-                "ezerbot-recall-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ))
-            .join("workspace.sqlite");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let directory = grokbot_test_support::TestDir::new("ezerbot-recall");
+        let path = directory.join("workspace.sqlite");
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -206,6 +200,7 @@ impl Fixture {
             ai,
             recall,
             _guard: guard,
+            _dir: directory,
         }
     }
     fn db(&self) -> rusqlite::Connection {
@@ -321,7 +316,6 @@ impl Drop for Fixture {
         recall::pause_background(false);
         recall::set_live_tries(3);
         std::env::remove_var("GROKBOT_FAKE_RECALL");
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 

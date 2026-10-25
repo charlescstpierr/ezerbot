@@ -4,8 +4,9 @@
 // person's apps: everything lives under one temporary directory and `launchFixture` registers its
 // own cleanup on the test context, so the processes stop when the test ends for any reason,
 // including a failed assertion or the test timeout. The directory is removed only once the wrapper
-// and Chrome, helper processes included, have really exited (see `cleanUpFixture`).
-const { spawn } = require("node:child_process");
+// and Chrome, helper processes included, have really exited (see `cleanUpFixture`), and a guard
+// process does the same if the test runner itself dies before its cleanup runs (see `startGuard`).
+const { execFileSync, spawn } = require("node:child_process");
 const { createServer } = require("node:http");
 const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
@@ -216,7 +217,8 @@ function spawnGroup(command, args, options) {
 }
 
 // Whether any process of the group led by `pid` is still there. EPERM means a member exists that
-// we may not signal (macOS answers that for a process that has died but is not yet reaped).
+// we may not signal (macOS answers that for a process that has died but is not yet reaped), so it
+// counts as "still disappearing", like a live member.
 function groupExists(pid) {
   try {
     process.kill(-pid, 0);
@@ -228,35 +230,89 @@ function groupExists(pid) {
   }
 }
 
-// Resolves once no process of the group remains; rejects with a clear message after `ms`.
-async function waitForGroupExit(name, pid, ms) {
+function killGroup(pid) {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    // ESRCH: already gone. EPERM: killed but not yet reaped (macOS). Both are waited for below.
+    if (error.code !== "ESRCH" && error.code !== "EPERM") throw error;
+  }
+}
+
+// Pids of the processes whose command line names `root`, this one excluded. Chrome's profile is
+// `--user-data-dir=<root>/chrome/profile`, and its helpers that leave the process group (Crashpad
+// starts its own session with setsid) still carry that path, so this finds what a group wait cannot.
+function processesCiting(root) {
+  const listing = execFileSync("ps", ["-axww", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  return listing.split("\n").map((line) => line.trim()).filter((line) => line.includes(root))
+    .map((line) => Number(line.split(/\s+/)[0])).filter((pid) => pid !== process.pid);
+}
+
+// SIGKILLs every group in `groups` ({ name, pid }), then waits until every group is gone and no
+// process names `root` any more, within `ms` in all. Rejects, listing what is left, after that.
+async function stopFixtureProcesses({ root, groups, ms = 10000 }) {
+  groups.forEach(({ pid }) => killGroup(pid));
   const deadline = Date.now() + ms;
-  while (groupExists(pid)) {
-    if (Date.now() >= deadline) throw new Error(`${name} (process group ${pid}) is still running ${ms} ms after SIGKILL`);
-    await sleep(10);
+  for (;;) {
+    const left = groups.filter(({ pid }) => groupExists(pid)).map(({ name, pid }) => `${name} (process group ${pid})`);
+    if (!left.length) left.push(...processesCiting(root).map((pid) => `process ${pid} (its command line names the fixture directory)`));
+    if (!left.length) return;
+    if (Date.now() >= deadline) throw new Error(`still running ${ms} ms after SIGKILL: ${left.join(", ")}`);
+    await sleep(20);
   }
 }
 
-// SIGKILLs every group in `groups` ({ name, child }), then waits for all of them to be gone.
-// Rejects, listing every group that is not, if one is still running after `ms`.
-async function stopGroups(groups, ms) {
-  for (const { child } of groups) {
-    try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
-  }
-  const results = await Promise.allSettled(groups.map(({ name, child }) => waitForGroupExit(name, child.pid, ms)));
-  const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason.message);
-  if (failures.length) throw new Error(failures.join("; "));
-}
-
-// The fixture's cleanup: stops the groups, waits for their exit (bounded), then removes `root`,
-// once. If a group does not exit in time the directory is kept, and the error says which one.
+// The fixture's cleanup: stops the processes and waits for their exit (bounded), then removes
+// `root`, once. If something does not exit in time the directory is kept, and the error says what.
 async function cleanUpFixture({ root, groups, stopMs = 10000 }) {
   try {
-    await stopGroups(groups, stopMs);
+    await stopFixtureProcesses({ root, groups, ms: stopMs });
   } catch (error) {
     throw new Error(`fixture directory ${root} kept: ${error.message}`);
   }
   rmSync(root, { recursive: true, force: true });
+}
+
+// `detached` children outlive their parent, and `t.after` does not run if the test runner itself
+// dies (crash, SIGKILL, deadline). So a guard process of its own session holds the read end of a
+// pipe from the runner: when the runner ends, the pipe closes and the guard runs the same cleanup.
+// A normal cleanup tells it "done" first. The runner sends the directory, then each group it starts.
+function startGuard(root) {
+  const guard = spawn(process.execPath, [__filename, "--guard"], { detached: true, stdio: ["pipe", "ignore", "ignore"] });
+  guard.unref();
+  guard.stdin.unref();
+  guard.stdin.on("error", () => {});
+  guard.on("error", () => {});
+  guard.stdin.write(`root ${root}\n`);
+  return {
+    register(name, pid) { guard.stdin.write(`group ${name} ${pid}\n`); },
+    release() { guard.stdin.end("done\n"); },
+  };
+}
+
+function runGuard() {
+  let root = null;
+  const groups = [];
+  let buffer = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    buffer += chunk;
+    for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
+      const line = buffer.slice(0, end);
+      buffer = buffer.slice(end + 1);
+      if (line === "done") process.exit(0);
+      if (line.startsWith("root ")) root = line.slice(5);
+      else if (line.startsWith("group ")) {
+        const [, name, pid] = line.split(" ");
+        groups.push({ name, pid: Number(pid) });
+      }
+    }
+  });
+  process.stdin.on("end", async () => {
+    // The runner is gone without saying "done": clean up for it.
+    if (root) await cleanUpFixture({ root, groups }).catch(() => {});
+    process.exit(0);
+  });
 }
 
 async function untilTrue(read, message, ms = 20000) {
@@ -281,6 +337,7 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
   const fake = { server: null };
   const processes = { wrapper: null, chrome: null };
   const watches = [];
+  const guard = startGuard(root);
   let cdp;
   // Registered before anything can fail, and run by node:test when the test ends for any reason,
   // including the test timeout, where the awaited body never reaches a `finally`.
@@ -289,8 +346,12 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
     cdp?.close();
     fake.server?.closeAllConnections();
     fake.server?.close();
-    const groups = Object.entries(processes).filter(([, child]) => child?.pid).map(([name, child]) => ({ name, child }));
-    await cleanUpFixture({ root, groups });
+    const groups = Object.entries(processes).filter(([, child]) => child?.pid).map(([name, child]) => ({ name, pid: child.pid }));
+    try {
+      await cleanUpFixture({ root, groups });
+    } finally {
+      guard.release();
+    }
   });
   const whileRunning = (work) => Promise.race([work, ...watches.map((watch) => watch.failed)]);
 
@@ -311,6 +372,7 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
     stdio: ["ignore", "pipe", "pipe"],
   });
   processes.wrapper = wrapper;
+  if (wrapper.pid) guard.register("wrapper", wrapper.pid);
   wrapper.stderr.on("data", (chunk) => { if (stderr.length < 4000) stderr += chunk; });
   const details = () => (stderr ? `: ${stderr}` : "");
   watches.push(watchChild("grokbot-wrapper", wrapper, details));
@@ -329,6 +391,7 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
     "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
   processes.chrome = chrome;
+  if (chrome.pid) guard.register("chrome", chrome.pid);
   watches.push(watchChild("chrome", chrome));
 
   return whileRunning((async () => {
@@ -369,8 +432,10 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     await cdp.send("Page.navigate", { url });
-    return { url, evaluate: (source) => whileRunning(evaluate(source)), details };
+    return { url, evaluate: (source) => whileRunning(evaluate(source)), details, root, pids: { wrapper: wrapper.pid, chrome: chrome.pid } };
   })());
 }
 
-module.exports = { launchFixture, cleanUpFixture, spawnGroup, waitForGroupExit };
+if (require.main === module && process.argv[2] === "--guard") runGuard();
+
+module.exports = { launchFixture, cleanUpFixture, spawnGroup, startGuard };

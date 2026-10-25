@@ -1071,11 +1071,8 @@ mod fake_tests {
 
 fn turns_summary(db: &Path, day: &str) -> Result<(), String> {
     let conn =
-        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|error| format!("Base illisible ({}) : {error}", db.display()))?;
-    conn.busy_timeout(Duration::from_secs(3))
-        .map_err(|e| e.to_string())?;
-    grokbot_wrapper::features::turns::migrate(&conn).map_err(|e| e.message)?;
     let summary = grokbot_wrapper::features::turns::summary(&conn, day).map_err(|e| e.message)?;
     println!("{summary}");
     Ok(())

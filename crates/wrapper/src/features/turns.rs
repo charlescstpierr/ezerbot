@@ -30,32 +30,17 @@ const MAX_TOOLS: usize = 64;
 const MAX_NAME_BYTES: usize = 64;
 static LAST_PURGE: AtomicU64 = AtomicU64::new(0);
 
-/// Résultat d'un appel d'outil, affiché tel quel. Le code fixe reste la clé de regroupement.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-enum Verdict {
-    #[serde(rename = "ok")]
-    Ok,
-    #[serde(rename = "erreur")]
-    Error,
-    #[serde(rename = "refusé")]
-    Refused,
-    #[serde(rename = "approbation refusée")]
-    ApprovalDenied,
-    #[serde(rename = "annulé")]
-    Cancelled,
-}
-impl Verdict {
-    fn of(code: ToolCode) -> Self {
-        match code {
-            ToolCode::Ok => Self::Ok,
-            ToolCode::Failed | ToolCode::Uncertain => Self::Error,
-            ToolCode::InvalidArguments
-            | ToolCode::UnknownTool
-            | ToolCode::FollowUpPending
-            | ToolCode::ApprovalPending => Self::Refused,
-            ToolCode::ApprovalDenied => Self::ApprovalDenied,
-            ToolCode::NotExecuted => Self::Cancelled,
-        }
+/// Résultat affiché d'un appel ; le code fixe reste la clé de regroupement.
+fn verdict(code: ToolCode) -> &'static str {
+    match code {
+        ToolCode::Ok => "ok",
+        ToolCode::Failed | ToolCode::Uncertain => "erreur",
+        ToolCode::InvalidArguments
+        | ToolCode::UnknownTool
+        | ToolCode::FollowUpPending
+        | ToolCode::ApprovalPending => "refusé",
+        ToolCode::ApprovalDenied => "approbation refusée",
+        ToolCode::NotExecuted => "annulé",
     }
 }
 
@@ -71,7 +56,7 @@ struct Tool {
     name: String,
     started_ms: Option<i64>,
     duration_ms: Option<u64>,
-    result: Verdict,
+    result: String,
     code: ToolCode,
 }
 
@@ -165,7 +150,7 @@ fn tools_of(conn: &Connection, run_id: &str) -> Result<Vec<Tool>, ApiError> {
                 name: safe_name(name, code),
                 started_ms: e.payload["started_ms"].as_i64(),
                 duration_ms: e.payload["elapsed_ms"].as_u64(),
-                result: Verdict::of(code),
+                result: verdict(code).into(),
                 code,
             }
         })

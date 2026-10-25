@@ -10,11 +10,11 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
 };
-use support::{form, wait, FakeOpenAi, ScriptedResponse, Seen};
+use support::{ask_before_acting, form, wait, FakeOpenAi, ScriptedResponse, Seen};
 const CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 static OAUTH: Mutex<()> = Mutex::new(());
 
@@ -22,16 +22,12 @@ struct Fixture {
     db: PathBuf,
     server: FakeOpenAi,
     provider: Provider,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "ezerbot-codex-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-codex");
+        let dir = guard.to_path_buf();
         let db = dir.join("app.sqlite");
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let provider = Self::provider(&db, &server);
@@ -39,6 +35,7 @@ impl Fixture {
             db,
             server,
             provider,
+            _dir: guard,
         }
     }
     fn provider(db: &std::path::Path, server: &FakeOpenAi) -> Provider {
@@ -88,7 +85,6 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.provider.cancel_signin();
-        let _ = std::fs::remove_dir_all(self.db.parent().unwrap());
     }
 }
 fn post(app: &mut App, path: &str, value: Value) -> Value {
@@ -342,7 +338,7 @@ fn headers_stream_tools_images_and_cache_use_only_codex_backend() {
     );
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert!(body.get("text").is_none());
-    assert_eq!(body["parallel_tool_calls"], true);
+    assert_eq!(body["parallel_tool_calls"], false);
     assert_eq!(body["input"][0]["content"][1]["type"], "input_image");
     assert_eq!(body["tools"][0]["name"], "remember");
 }
@@ -832,6 +828,7 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
     let f = Fixture::new();
     f.login();
     let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    ask_before_acting(&mut app);
     post(
         &mut app,
         "/api/bots",
@@ -875,6 +872,7 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
     assert_eq!(refused.status, 409);
     assert!(refused.message.contains("avant de changer de connexion"));
     assert_eq!(f.provider.status()["backend"], "codex");
+    let mut approvals = 0;
     wait("délégation Codex terminée", || {
         tick(&mut app);
         let state = app.api("GET", "/api/state", b"").unwrap();
@@ -903,6 +901,7 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
             .collect();
         if !pending.is_empty() {
             for (entry, conversation) in pending {
+                approvals += 1;
                 post(
                     &mut app,
                     "/api/approvals/resolve",
@@ -931,6 +930,7 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
                     && message["body"] == "Le relecteur a terminé."
             })
     });
+    assert!(approvals > 0, "la délégation a demandé une approbation");
     let routine = post(&mut app, "/api/routines", json!({"bot_id":"grokbot","name":"Routine Codex","prompt":"Fais un bilan","schedule":"@every 1m"}))["routine"].clone();
     f.reply(ScriptedResponse::events(&[
         json!({"type":"response.output_text.delta","delta":"Bilan Codex."}),
@@ -978,6 +978,51 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
     assert_eq!(status["status"], "done", "{status}");
     assert_eq!(status["result"], complete_result);
     let seen = f.server.seen.lock().unwrap();
+    let (tooled, untooled): (Vec<&Value>, Vec<&Value>) = seen.bodies.iter().partition(|body| {
+        body["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty())
+    });
+    let delegate_output = |body: &Value| {
+        body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "function_call_output" && item["call_id"] == "delegate")
+    };
+    let task = |body: &Value| {
+        body["instructions"]
+            .as_str()
+            .is_some_and(|text| text.contains("You are executing a Task"))
+    };
+    let first_turn = tooled.iter().find(|body| {
+        !task(body) && !delegate_output(body) && body.to_string().contains("Délègue la relecture")
+    });
+    let after_approval = tooled.iter().find(|body| delegate_output(body));
+    let delegated = tooled
+        .iter()
+        .find(|body| task(body) && body.to_string().contains("Relis ce texte"));
+    let flags = [
+        ("premier tour", first_turn),
+        ("reprise après approbation", after_approval),
+        ("sous-tâche déléguée", delegated),
+    ]
+    .map(|(what, body)| {
+        let body = body.unwrap_or_else(|| panic!("requête manquante : {what}"));
+        (what, body["parallel_tool_calls"].clone())
+    });
+    assert_eq!(
+        flags,
+        [
+            ("premier tour", json!(false)),
+            ("reprise après approbation", json!(false)),
+            ("sous-tâche déléguée", json!(false)),
+        ]
+    );
+    for body in untooled {
+        assert!(body.get("tool_choice").is_none(), "{body}");
+        assert!(body.get("parallel_tool_calls").is_none(), "{body}");
+    }
     let task_requests: Vec<_> = seen
         .bodies
         .iter()

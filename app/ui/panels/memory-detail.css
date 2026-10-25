@@ -12,6 +12,11 @@
 .memory-detail-fields dt { color: var(--muted); }
 .memory-detail-fields dd { margin: 0; overflow-wrap: anywhere; }
 .memory-detail-link { padding: 0; font-size: 12px; color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
+.memory-detail-links { display: grid; gap: 6px; }
+.memory-detail-links-title { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted); }
+.memory-detail-linked { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.memory-detail-link-item { display: block; width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); color: var(--text); font-family: inherit; font-size: 12px; line-height: 1.5; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.memory-detail-link-item:hover { border-color: var(--focus); }
 .memory-detail-note, .memory-detail-warning, .memory-detail-error { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
 .memory-detail-warning { padding: 10px 12px; border: 1px solid var(--warning-line); border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); }
 .memory-detail-error { color: var(--danger-text); }

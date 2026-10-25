@@ -50,8 +50,8 @@ fn raw_get(port: u16, path: &str, accept_encoding: &str) -> (String, Vec<u8>) {
 }
 #[test]
 fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
-    let root = std::env::temp_dir().join(format!("iphone-http-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    let guard = grokbot_test_support::TestDir::new("iphone-http");
+    let root = guard.to_path_buf();
     let fake = root.join("tailscale-fake");
     std::fs::write(&fake,format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/commands'\nprintf '%s\\n' '{{\"BackendState\":\"Running\",\"Self\":{{\"DNSName\":\"mac.qa.ts.net.\"}},\"CurrentTailnet\":{{\"Name\":\"qa-tailnet\"}}}}'\n",root.display())).unwrap();
     use std::os::unix::fs::PermissionsExt;

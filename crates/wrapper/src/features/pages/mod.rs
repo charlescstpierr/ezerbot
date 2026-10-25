@@ -762,25 +762,11 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
-    fn scratch(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "ezerbot-pages-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        path
+    fn scratch(name: &str) -> grokbot_test_support::TestDir {
+        grokbot_test_support::TestDir::new(&format!("ezerbot-pages-{name}"))
     }
 
-    struct Temp(PathBuf);
-    impl Drop for Temp {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    struct Temp(grokbot_test_support::TestDir);
 
     #[test]
     fn write_refuses_a_bot_directory_symlink_that_leaves_pages() {

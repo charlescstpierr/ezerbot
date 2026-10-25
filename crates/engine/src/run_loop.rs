@@ -291,7 +291,7 @@ fn checkpoint(
         return Err(invalid("engine owner handover"));
     }
     if services.is_cancelled(run_id) {
-        return cancel(conn, services, run_id, TurnEnd::Stopped).map(Some);
+        return ended(&cancel(conn, services, run_id, TurnEnd::Stopped)?).map(Some);
     }
     if run.status == RunStatus::Running
         && store::budget_usage(conn, run_id, now_ms())?.elapsed_ms >= run.budgets.duration_ms
@@ -446,12 +446,14 @@ pub fn append_unsettled_results(conn: &Connection, run_id: &str, reason: &str) -
 /// Stop/regenerate entry point. Settle every outstanding call and deliver the
 /// cancellation reaction in the same transaction. External writers must use
 /// this instead of model::cancel; use with_run_events for other lifecycle writes.
+/// Returns the run as the cancellation left it: Stopped on a run that had
+/// already ended, even in failure, keeps its outcome and succeeds without effect.
 pub fn cancel(
     conn: &Connection,
     services: &mut dyn RunServices,
     run_id: &str,
     end: TurnEnd,
-) -> Result<RunProgress> {
+) -> Result<Run> {
     commit(conn, services, run_id, |conn, _| {
         if !store::required(conn, run_id)?.status.is_terminal() {
             settle_pending(
@@ -464,7 +466,7 @@ pub fn cancel(
                 },
             )?;
         }
-        ended(&model::cancel(conn, run_id, end)?)
+        model::cancel(conn, run_id, end)
     })
 }
 
@@ -1491,6 +1493,7 @@ mod tests {
         cancel: Arc<AtomicBool>,
         cancel_in_tool: bool,
         interrupt: Arc<AtomicBool>,
+        interrupt_after: Option<String>,
         journaled_external: bool,
         external_calls: usize,
         cancel_in_context: bool,
@@ -1534,6 +1537,9 @@ mod tests {
             conn.execute("INSERT INTO effects VALUES (?1)", [&call.call_id])?;
             if self.cancel_in_tool {
                 self.cancel.store(true, Ordering::SeqCst);
+            }
+            if self.interrupt_after.as_ref() == Some(&call.call_id) {
+                self.interrupt.store(true, Ordering::SeqCst);
             }
             if self.error_in_tool {
                 return Err(invalid("effect failed"));
@@ -3259,8 +3265,8 @@ mod tests {
             Ok(())
         })?;
         assert_eq!(
-            cancel(&conn, &mut services, "run", TurnEnd::Stopped)?,
-            RunProgress::Ended(TurnEnd::Stopped)
+            cancel(&conn, &mut services, "run", TurnEnd::Stopped)?.turn_end,
+            Some(TurnEnd::Stopped)
         );
         assert!(pending_calls(&store::events(&conn, "run", 0)?)?.is_empty());
         assert_eq!(
@@ -3272,8 +3278,8 @@ mod tests {
             1
         );
         assert_eq!(
-            cancel(&conn, &mut services, "run", TurnEnd::Stopped)?,
-            RunProgress::Ended(TurnEnd::Stopped)
+            cancel(&conn, &mut services, "run", TurnEnd::Stopped)?.turn_end,
+            Some(TurnEnd::Stopped)
         );
         assert_eq!(
             services
@@ -3402,6 +3408,54 @@ mod tests {
     }
 
     #[test]
+    fn two_calls_in_one_response_run_in_order_and_both_reach_the_next_turn() -> Result<()> {
+        let conn = database(false, RunBudgets::default())?;
+        let gateway = Scripted::new(vec![
+            response(vec![
+                call("first", "work", json!({})),
+                call("second", "work", json!({})),
+            ]),
+            response(vec![]),
+        ]);
+        let mut services = Services {
+            specs: vec![spec("work", false)],
+            interrupt_after: Some("first".into()),
+            ..Services::default()
+        };
+        assert!(run(&conn, &gateway, &mut services, "run").is_err());
+        assert_eq!(services.calls, ["first"]);
+        assert_eq!(count(&conn, "effects"), 1);
+        let pending: Vec<_> = pending_calls(&store::events(&conn, "run", 0)?)?
+            .into_iter()
+            .map(|call| call.call_id)
+            .collect();
+        assert_eq!(pending, ["second"]);
+        services.interrupt_after = None;
+        services.interrupt.store(false, Ordering::SeqCst);
+        run(&conn, &gateway, &mut services, "run")?;
+        assert_eq!(services.calls, ["first", "second"]);
+        assert_eq!(count(&conn, "effects"), 2);
+        let results: Vec<_> = store::events(&conn, "run", 0)?
+            .into_iter()
+            .filter(|event| event.kind == RunEventKind::ToolResult)
+            .map(|event| event.payload["call_id"].clone())
+            .collect();
+        assert_eq!(results, [json!("first"), json!("second")]);
+        let requests = gateway.requests.lock().unwrap();
+        let outputs: Vec<_> = requests[1]
+            .input
+            .iter()
+            .flat_map(|item| &item.tool_items)
+            .filter_map(|item| match item {
+                ToolItem::Output { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs, ["first", "second"]);
+        Ok(())
+    }
+
+    #[test]
     fn resumed_resolution_replaces_original_tool_output_in_causal_order() -> Result<()> {
         let conn = database(true, RunBudgets::default())?;
         let gateway = Scripted::new(vec![
@@ -3470,14 +3524,8 @@ mod tests {
                 emit(ModelEvent::Completed)
             }
         }
-        let path = std::env::temp_dir().join(format!(
-            "engine-loop-{}-{}.sqlite",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory = grokbot_test_support::TestDir::new("engine-loop");
+        let path = directory.join("engine.sqlite");
         let conn = setup(Connection::open(&path)?, false, RunBudgets::default())?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         with_tx(&conn, |conn| {
@@ -3513,7 +3561,6 @@ mod tests {
             worker.join().unwrap()?;
         }
         drop(conn);
-        std::fs::remove_file(path)?;
         Ok(())
     }
 

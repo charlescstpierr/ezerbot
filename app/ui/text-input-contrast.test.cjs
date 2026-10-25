@@ -6,7 +6,7 @@ const { mkdtempSync, readdirSync, readFileSync, writeFileSync } = require("node:
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
-const { chromeBinary } = require("./chrome-binary.cjs");
+const { chromeBinary, freezeHint } = require("./chrome-binary.cjs");
 
 const UI = __dirname;
 const AA = 4.5;
@@ -119,7 +119,8 @@ function measure() {
   const file = join(directory, "form.html");
   const html = page().replaceAll(`file://${UI}/panels.bundle.css`, `file://${directory}/panels.bundle.css`);
   writeFileSync(file, html);
-  const chrome = spawn(chromeBinary(), [
+  const binary = chromeBinary({ dumpDom: true });
+  const chrome = spawn(binary, [
     "--headless=new",
     "--no-sandbox",
     "--disable-gpu",
@@ -136,7 +137,7 @@ function measure() {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       chrome.kill("SIGKILL");
-      reject(new Error(`chrome did not report contrast\n${err.slice(-500)}`));
+      reject(new Error(`chrome did not report contrast\n${err.slice(-500)}${freezeHint(binary)}`));
     }, 20000);
     chrome.stdout.on("data", (chunk) => {
       dom += chunk;

@@ -3,7 +3,6 @@
 
 mod support;
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use grokbot_wrapper::{App, Endpoints, Provider};
@@ -30,8 +29,8 @@ fn assistant(app: &mut App) -> Value {
 
 #[test]
 fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
-    let directory: PathBuf =
-        std::env::temp_dir().join(format!("grokbot-chatgpt-{}", std::process::id()));
+    let guard = grokbot_test_support::TestDir::new("grokbot-chatgpt");
+    let directory = guard.to_path_buf();
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
     let db = directory.join("app.sqlite");

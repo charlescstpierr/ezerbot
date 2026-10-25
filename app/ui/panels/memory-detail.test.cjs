@@ -29,13 +29,13 @@ const fact = (id, bot, scope, text, source, conversation, extra = {}) => ({ fact
 const FACTS = [fact("f1", "grokbot", "private", "Aime le café <b>noir</b>", "user_stated", "c1"), fact("f2", "chef", "team", "L’équipe déjeune à midi", "model_inferred", null), fact("f3", "chef", "topic", "Le garde-meuble ferme à 18 h", "user_stated", null, { topic_id: "t1", topic_name: "Déménagement" })];
 // `refuse` : le moteur répond à toute action par cette erreur ; `opened` : les fils que l'application sait ouvrir.
 // `lose` : le moteur applique l'action mais la réponse se perd (erreur réseau sans `status`).
-async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFails = false } = {}) {
+async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFails = false, start = FACTS } = {}) {
   const sidebar = new Element("aside"), main = new Element("main"), dock = new Element("div"), bots = new Element("div"), keys = [], registered = [];
   bots.className = "sidebar-bots"; dock.className = "composer-dock"; sidebar.append(bots); main.append(dock);
   const nodes = { sidebar, "conversation-title": new Element("h1"), "workspace-label": new Element("button") };
   const document = { createElement: (tag) => new Element(tag), createElementNS: (_, tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (s) => (s === ".main-panel" ? main : s === "dialog[open]" ? null : dock), addEventListener: (_, action) => keys.push(action), get activeElement() { return Element.active; }, body: new Element("body") };
-  let facts = FACTS.map((item) => ({ ...item })), n = 0;
-  const cache = { seen: null, work: null }, calls = { api: [], opened: [], refresh: 0 }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); }, touch: (id) => { facts = facts.map((item) => (item.fact_id === id ? { ...item, needs_review: true } : item)); } };
+  let facts = start.map((item) => ({ ...item })), n = 0;
+  const cache = { seen: null, work: null }, calls = { api: [], opened: [], refresh: 0 }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); }, add: (item) => { facts = [item, ...facts]; }, touch: (id) => { facts = facts.map((item) => (item.fact_id === id ? { ...item, needs_review: true } : item)); } };
   const panels = {
     register: (panel) => registered.push(panel), leaveConversation() {},
     // L'état partagé de l'application (fils en cache, reçus) : comme app.js, une lecture déjà en vol est partagée, et elle rend l'état tel qu'il était à son départ.
@@ -57,7 +57,7 @@ async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFai
     },
   };
   const context = vm.createContext({ window: { GrokbotPanels: panels }, document, setInterval: () => 0, JSON, Number, String, Date, Promise, Object, Array, Boolean, Math, Set, Map });
-  for (const file of ["memory-detail.js", "memory-filter.js", "memory-graph.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
+  for (const file of ["memory-detail.js", "memory-filter.js", "memory-links.js", "memory-graph.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
   const settle = async () => { for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
   Element.active = null;
   registered[0].onState({ bots: [{ id: "grokbot", name: "Ezerbot" }, { id: "chef", name: "Chef" }], memory_auto: { revision: 1 } }, {});
@@ -86,6 +86,9 @@ async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFai
     button: (label) => h.panel().querySelectorAll("button").find((b) => b.textContent === label),
     points: () => main.querySelectorAll(".memory-graph-point").length,
     items: () => main.querySelectorAll(".memory-space-item").length,
+    leaveScreen: () => registered[0].onNavigate(), enterScreen: () => sidebar.querySelector(".memory-entry").click(),
+    field: () => h.panel().querySelector(".memory-detail-field"),
+    write(text) { h.field().value = text; h.field().fire("input"); },
     escape: () => keys.forEach((key) => key({ key: "Escape", preventDefault() {} })),
     mutations: () => calls.api.filter(([path]) => path !== "/api/memory/all"),
     async type(label, text) { const field = h.panel().querySelector(".memory-detail-field"); field.value = text; field.fire("input"); h.button(label).click(); await settle(); },
@@ -460,6 +463,272 @@ test("un souvenir de sujet s'oublie par /api/topics/memory/forget, sans Modifier
   assert.deepEqual([ok.mutations(), ok.open(), ok.items()], [[["/api/topics/memory/forget", { fact_id: "f3" }]], false, 2]);
 });
 
+// #342 : Échap, Fermer et un autre souvenir ne font plus perdre le texte d'une modification en cours.
+const ORIGINAL = "Aime le café <b>noir</b>";
+async function editing(options) {
+  const h = await harness(options);
+  h.item("f1").click();
+  h.button("Modifier").click();
+  return h;
+}
+
+test("Échap sur une édition sans changement ferme seulement l'édition ; hors édition, Échap ferme le panneau", async () => {
+  const h = await editing();
+  h.escape();
+  assert.deepEqual([h.open(), h.panel().querySelector(".memory-detail-field"), h.text("text"), h.mutations()], [true, null, ORIGINAL, []]);
+  assert.equal(h.panel().textContent.includes("Abandonner"), false, "aucune confirmation quand rien n'a changé");
+  assert.equal(Element.active, h.button("Modifier"), "le focus revient à Modifier");
+  h.escape();
+  assert.deepEqual([h.open(), h.main.querySelector(".memory-space").dataset.detail], [false, undefined], "hors édition, Échap ferme le panneau");
+  const forget = await harness();
+  forget.item("f1").click();
+  forget.button("Oublier…").click();
+  forget.escape();
+  assert.equal(forget.open(), false, "comme avant, Échap ferme aussi le panneau pendant la confirmation d'oubli");
+});
+
+test("Échap sur une édition modifiée demande « Abandonner la modification ? » : Continuer garde le texte et le focus, Abandonner remet le texte d'origine", async () => {
+  const h = await editing();
+  h.write("Aime le thé");
+  h.escape();
+  assert.equal(h.open(), true);
+  assert.match(h.text("warning"), /^Abandonner la modification \?/);
+  assert.deepEqual(h.panel().querySelector(".memory-detail-actions").querySelectorAll("button").map((b) => [b.textContent, b.classes.includes("danger-button")]), [["Abandonner", true], ["Continuer", false]]);
+  assert.deepEqual([h.field().value, h.field().readOnly, Element.active === h.button("Continuer")], ["Aime le thé", true, true], "le texte reste visible ; le focus est sur le choix sans danger");
+  h.button("Continuer").click();
+  assert.deepEqual([h.field().value, h.field().readOnly, Element.active === h.field(), h.mutations()], ["Aime le thé", false, true, []]);
+  h.escape();
+  h.escape(); // Échap sur la confirmation répond « Continuer »
+  assert.deepEqual([h.field().value, Element.active === h.field()], ["Aime le thé", true]);
+  h.escape();
+  h.button("Abandonner").click();
+  assert.deepEqual([h.open(), h.panel().querySelector(".memory-detail-field"), h.text("text"), h.mutations(), Element.active === h.button("Modifier")], [true, null, ORIGINAL, [], true]);
+  h.button("Modifier").click();
+  assert.equal(h.field().value, ORIGINAL, "la modification suivante repart du texte d'origine");
+  h.write("Aime le thé");
+  h.write(ORIGINAL);
+  h.escape();
+  assert.equal(h.panel().querySelector(".memory-detail-field"), null, "revenir au texte d'origine à la main compte comme sans changement");
+});
+
+test("la confirmation d'abandon résiste à une relecture de la liste ; la modification reste enregistrable après Continuer", async () => {
+  const h = await editing();
+  h.write("Aime le thé");
+  h.escape();
+  h.reload("Zéphyr");
+  await h.settle();
+  assert.deepEqual([h.cells()[0], h.button("Abandonner") !== undefined, h.field().value], ["Zéphyr", true, "Aime le thé"]);
+  h.button("Continuer").click();
+  await h.type("Enregistrer", "Aime le thé");
+  assert.deepEqual([h.mutations(), h.text("text")], [[["/api/memory/correct", { bot_id: "grokbot", fact_id: "f1", text: "Aime le thé" }]], "Aime le thé"]);
+});
+
+test("Fermer pendant une édition modifiée passe par la même confirmation ; sans changement, il ferme tout de suite", async () => {
+  const h = await editing();
+  h.button("Fermer").click();
+  assert.equal(h.open(), false, "édition intacte : rien à perdre");
+  h.item("f1").click();
+  h.button("Modifier").click();
+  h.write("Aime le thé");
+  h.button("Fermer").click();
+  assert.deepEqual([h.open(), h.field().value, Element.active === h.button("Continuer")], [true, "Aime le thé", true]);
+  h.button("Continuer").click();
+  assert.deepEqual([h.open(), h.field().value], [true, "Aime le thé"]);
+  h.button("Fermer").click();
+  h.button("Abandonner").click();
+  assert.deepEqual([h.open(), h.mutations(), h.item("f1").contains(Element.active)], [false, [], true], "Abandonner fait ce que Fermer demandait");
+  h.item("f1").click();
+  assert.equal(h.text("text"), ORIGINAL, "rouvert, le souvenir est intact");
+});
+
+test("ouvrir un autre souvenir pendant une édition modifiée demande confirmation ; re-cliquer le même ne l'efface pas", async () => {
+  const h = await editing();
+  h.write("Aime le thé");
+  h.item("f1").click();
+  assert.deepEqual([h.field().value, h.panel().textContent.includes("Abandonner")], ["Aime le thé", false], "le souvenir en cours de modification garde sa saisie");
+  h.item("f2").click();
+  assert.deepEqual([h.cells()[0], h.button("Abandonner") !== undefined, h.item("f2").classes.includes("is-selected")], ["Ezerbot", true, false], "la confirmation s'affiche, f1 reste ouvert");
+  h.button("Continuer").click();
+  assert.equal(h.field().value, "Aime le thé");
+  h.item("f2").click();
+  h.button("Abandonner").click();
+  assert.deepEqual([h.text("text"), h.cells()[0], h.item("f2").classes.includes("is-selected"), h.mutations()], ["L’équipe déjeune à midi", "Chef", true, []]);
+  h.item("f1").click();
+  assert.equal(h.text("text"), ORIGINAL);
+});
+
+test("quitter l'écran Mémoire pendant une édition modifiée garde le brouillon pour le retour sur ce souvenir seulement", async () => {
+  const h = await editing();
+  h.write("Aime le thé");
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f2").click();
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f1").click();
+  assert.deepEqual([h.field().value, Element.active === h.field(), h.mutations()], ["Aime le thé", true, []], "brouillon retrouvé, rien d'envoyé");
+  assert.match(h.panel().textContent, /Brouillon retrouvé/);
+  h.write(ORIGINAL);
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f1").click();
+  assert.equal(h.text("text"), ORIGINAL, "sans changement, rien n'est gardé");
+  h.button("Modifier").click();
+  h.write("Aime le thé");
+  h.escape();
+  h.button("Abandonner").click();
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f1").click();
+  assert.equal(h.text("text"), ORIGINAL, "un brouillon abandonné ne revient pas");
+});
+
+test("deux brouillons laissés en quittant l'écran sont gardés chacun pour son souvenir", async () => {
+  const h = await editing();
+  h.write("Brouillon A");
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f2").click();
+  h.button("Modifier").click();
+  h.write("Brouillon B");
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f1").click();
+  assert.equal(h.field().value, "Brouillon A");
+  h.escape();
+  h.button("Abandonner").click();
+  h.item("f2").click();
+  assert.equal(h.field().value, "Brouillon B");
+});
+
+test("le souvenir visé disparaît pendant la confirmation d'abandon : le panneau reste sur la modification abandonnée, sans se figer", async () => {
+  const h = await editing();
+  h.write("Brouillon A");
+  h.item("f2").click();
+  h.net.drop("f2");
+  h.reload();
+  await h.settle();
+  h.button("Abandonner").click();
+  assert.deepEqual([h.open(), h.panel().querySelector(".memory-detail-field"), h.text("text"), h.cells()[0], h.mutations()], [true, null, ORIGINAL, "Ezerbot", []]);
+  h.button("Modifier").click();
+  assert.equal(h.field().value, ORIGINAL, "le panneau répond à nouveau");
+});
+
+test("Échap et Fermer pendant l'envoi ne font rien : la saisie part ou reste, l'erreur du moteur la rend", async () => {
+  const h = await editing({ refuse: "Texte refusé par le moteur." });
+  let release;
+  h.net.hold = new Promise((resolve) => { release = resolve; });
+  await h.type("Enregistrer", "Aime le thé");
+  h.escape();
+  assert.deepEqual([h.open(), h.field().value, h.field().disabled, h.button("Fermer").disabled], [true, "Aime le thé", true, true]);
+  h.button("Fermer").click();
+  assert.equal(h.open(), true);
+  release();
+  await h.settle();
+  assert.deepEqual([h.text("error"), h.field().value, Element.active === h.field()], ["Texte refusé par le moteur.", "Aime le thé", true]);
+  h.escape();
+  assert.match(h.text("warning"), /Abandonner la modification/, "après l'erreur, Échap redemande");
+});
+
+// Les liens (#265) : même conversation = « Lié à » dans le détail.
+const CHAIN = [fact("l1", "grokbot", "private", "Aime le café noir", "automatic", "c1"), fact("l2", "chef", "team", "Déjeune à midi", "automatic", "c1"), fact("l3", "chef", "topic", "Garde-meuble fermé le soir", "user_stated", "c1", { topic_id: "t1", topic_name: "Déménagement" }), fact("l4", "grokbot", "private", "Préfère le thé le soir", "automatic", "c2"), fact("l5", "grokbot", "private", "Seul, sans conversation", "automatic", null)];
+const linkedTexts = (h) => h.panel().querySelectorAll(".memory-detail-link-item").map((item) => item.textContent);
+test("le détail liste « Lié à » : les autres souvenirs de la même conversation, pas lui-même ni ceux d'ailleurs", async () => {
+  const h = await harness({ start: CHAIN });
+  h.tab("graph");
+  h.point("l1").click();
+  assert.equal(h.panel().querySelector(".memory-detail-links-title").textContent, "Lié à");
+  assert.deepEqual(linkedTexts(h), ["Déjeune à midi", "Garde-meuble fermé le soir"], "un souvenir d'équipe et un souvenir de sujet de la même conversation");
+  for (const id of ["l4", "l5"]) { h.point(id).click(); assert.equal(h.panel().querySelector(".memory-detail-links"), null, `${id} est isolé : pas de section « Lié à »`); }
+});
+test("le graphe dessine un trait fin par lien, et un souvenir plus lié a un point un peu plus gros", async () => {
+  const h = await harness({ start: CHAIN });
+  h.tab("graph");
+  const lines = h.main.querySelectorAll(".memory-graph-edge");
+  assert.equal(lines.filter((line) => line.classes.includes("is-link")).length, 2, "trois souvenirs d'une même conversation : une chaîne de deux traits qui les relie tous");
+  assert.equal(lines.length, 2 + (3 + 5), "deux traits de lien, plus les traits vous → groupe (3) et groupe → souvenir (5)");
+  const r = (id) => Number(h.point(id).querySelector("circle").attributes.r);
+  assert.ok(r("l1") > r("l4") && r("l4") === r("l5"), "lié deux fois > isolés");
+});
+test("au survol d'un point, tous les souvenirs de sa conversation s'allument, les autres s'estompent", async () => {
+  const h = await harness({ start: CHAIN });
+  h.tab("graph");
+  h.point("l1").fire("mouseenter");
+  const dim = (id) => h.point(id).classes.includes("is-dim");
+  assert.deepEqual(["l2", "l3"].map(dim), [false, false], "l3 n'est pas voisin de l1 dans la chaîne tracée, mais il est lié");
+  assert.deepEqual(["l4", "l5"].map(dim), [true, true]);
+  const chain = () => h.main.querySelectorAll(".memory-graph-edge").filter((line) => line.classes.includes("is-link")).map((line) => line.classes.includes("is-dim"));
+  assert.deepEqual(chain(), [false, false], "toute la chaîne de la conversation reste visible, y compris le trait qui ne touche pas l1");
+  h.point("l1").fire("mouseleave");
+  assert.deepEqual(["l2", "l3", "l4", "l5"].map(dim), [false, false, false, false]);
+  h.point("l4").fire("mouseenter");
+  assert.deepEqual(chain(), [true, true], "un souvenir d'une autre conversation estompe les traits de celle-ci");
+});
+test("un souvenir lié qui arrive pendant la confirmation d'oubli ne déplace pas le focus sur « Oublier ce souvenir »", async () => {
+  const h = await harness({ start: CHAIN });
+  h.item("l4").click();
+  h.panel().querySelectorAll("button").find((b) => b.textContent === "Oublier…").click();
+  assert.equal(Element.active.textContent, "Annuler", "après « Oublier… », le focus est sur Annuler");
+  h.panel().querySelectorAll("button").find((b) => b.textContent === "Annuler").click();
+  h.panel().querySelectorAll("button").find((b) => b.textContent === "Oublier…").click();
+  h.net.add(fact("l6", "grokbot", "private", "Autre souvenir de la conversation c2", "automatic", "c2"));
+  h.reload();
+  await h.settle();
+  assert.equal(h.panel().querySelectorAll(".memory-detail-link-item").length, 1, "le souvenir lié est arrivé dans le panneau");
+  assert.equal(Element.active.textContent, "Annuler", "le focus est resté sur Annuler");
+  assert.deepEqual(h.mutations(), [], "rien n'a été oublié");
+});
+const FAR = "Même début de phrase très long pour que deux souvenirs se ressemblent après troncature, vraiment très long";
+test("deux souvenirs liés au texte tronqué identique : le focus reste sur celui qui l'avait, après une relecture", async () => {
+  const start = [fact("m", "grokbot", "private", "Principal", "automatic", "c1"), fact("b", "grokbot", "private", `${FAR} B`, "automatic", "c1"), fact("c", "grokbot", "private", `${FAR} C`, "automatic", "c1")];
+  const h = await harness({ start });
+  h.item("m").click();
+  const items = () => h.panel().querySelectorAll(".memory-detail-link-item");
+  assert.equal(items()[0].textContent, items()[1].textContent, "les deux boutons portent le même libellé");
+  assert.deepEqual(items().map((item) => item.title), [`${FAR} B`, `${FAR} C`], "le titre porte le texte entier");
+  items()[1].focus();
+  assert.equal(Element.active.dataset.factId, "c", "le deuxième bouton est celui du souvenir c");
+  h.net.touch("m");
+  h.reload();
+  await h.settle();
+  assert.equal(Element.active.dataset.factId, "c", "le focus est resté sur le souvenir c, pas sur son jumeau b");
+});
+test("le souvenir lié focalisé disparaît : le focus va au titre du panneau", async () => {
+  const h = await harness({ start: CHAIN });
+  h.item("l1").click();
+  const target = h.panel().querySelectorAll(".memory-detail-link-item")[0];
+  target.focus();
+  h.net.drop(target.dataset.factId);
+  h.reload();
+  await h.settle();
+  assert.equal(Element.active.classes.includes("memory-detail-title"), true);
+});
+test("un clic sur un souvenir lié ouvre ce souvenir dans le panneau", async () => {
+  const h = await harness({ start: CHAIN });
+  h.item("l1").click();
+  h.panel().querySelectorAll(".memory-detail-link-item").find((item) => item.textContent === "Déjeune à midi").click();
+  assert.equal(h.text("text"), "Déjeune à midi");
+  assert.deepEqual(linkedTexts(h), ["Aime le café noir", "Garde-meuble fermé le soir"]);
+});
+test("un texte lié reste du texte, et un souvenir lié oublié ensuite sort de « Lié à » après la relecture", async () => {
+  const h = await harness({ start: [fact("x1", "grokbot", "private", "<b>gras</b>", "automatic", "c1"), fact("x2", "grokbot", "private", "Deuxième", "automatic", "c1"), fact("x3", "grokbot", "private", "Troisième", "automatic", "c1")] });
+  h.item("x2").click();
+  assert.deepEqual(linkedTexts(h), ["<b>gras</b>", "Troisième"]);
+  h.net.drop("x3");
+  h.reload();
+  await h.settle();
+  assert.deepEqual(linkedTexts(h), ["<b>gras</b>"]);
+  h.net.drop("x1");
+  h.reload();
+  await h.settle();
+  assert.equal(h.panel().querySelector(".memory-detail-links"), null, "plus aucun souvenir lié");
+});
 test("styles : jetons seulement, aucun texte sous 11,5 px", () => {
   const css = fs.readFileSync(`${__dirname}/memory-detail.css`, "utf8");
   assert.doesNotMatch(css, /#[0-9a-fA-F]{3,8}\b|rgb\(|hsl\(/);

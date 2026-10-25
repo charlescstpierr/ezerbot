@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import launch
+import verify_lib
 from verify_lib import proc_identity
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -463,11 +464,20 @@ fcntl.flock = flock
 
     def test_headless_cleanup_stops_only_recorded_chrome_without_axi(self) -> None:
         chrome = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        identity_reader = verify_lib.proc_identity
+        observations = []
+        def startup_identity(pid):
+            identity = identity_reader(pid)
+            observations.append(identity)
+            if len(observations) == 1:
+                return {"pid": pid, "platform": sys.platform, "command": "", "marker": ""}
+            return identity
         try:
-            (self.run_root / "browser.json").write_text(json.dumps({
-                "mode": "chrome-headless", "session": "pm-i545", "started_by": "verify-ezerbot",
-                "chrome_pid": chrome.pid, "identity": proc_identity(chrome.pid), "pgid": chrome.pid,
-            }))
+            with patch.object(verify_lib, "proc_identity", side_effect=startup_identity):
+                (self.run_root / "browser.json").write_text(json.dumps({
+                    "mode": "chrome-headless", "session": "pm-i545", "started_by": "verify-ezerbot",
+                    "chrome_pid": chrome.pid, "identity": verify_lib.proc_identity(chrome.pid), "pgid": chrome.pid,
+                }))
             cleanup = self.cleanup()
             chrome.wait(timeout=5)
             self.assertEqual(cleanup["killed"]["chrome"], "arrete")

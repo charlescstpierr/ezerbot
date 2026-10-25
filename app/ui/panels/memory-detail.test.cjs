@@ -487,8 +487,12 @@ test("au survol d'un point, tous les souvenirs de sa conversation s'allument, le
   const dim = (id) => h.point(id).classes.includes("is-dim");
   assert.deepEqual(["l2", "l3"].map(dim), [false, false], "l3 n'est pas voisin de l1 dans la chaîne tracée, mais il est lié");
   assert.deepEqual(["l4", "l5"].map(dim), [true, true]);
+  const chain = () => h.main.querySelectorAll(".memory-graph-edge").filter((line) => line.classes.includes("is-link")).map((line) => line.classes.includes("is-dim"));
+  assert.deepEqual(chain(), [false, false], "toute la chaîne de la conversation reste visible, y compris le trait qui ne touche pas l1");
   h.point("l1").fire("mouseleave");
   assert.deepEqual(["l2", "l3", "l4", "l5"].map(dim), [false, false, false, false]);
+  h.point("l4").fire("mouseenter");
+  assert.deepEqual(chain(), [true, true], "un souvenir d'une autre conversation estompe les traits de celle-ci");
 });
 test("un clic sur un souvenir lié ouvre ce souvenir dans le panneau", async () => {
   const h = await harness({ start: CHAIN });

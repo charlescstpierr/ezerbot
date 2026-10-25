@@ -52,9 +52,19 @@ test("une conversation de 4 000 souvenirs reste bornée : n − 1 traits, et lir
   const many = Array.from({ length: 4000 }, (_, i) => fact(`m${i}`, "gros"));
   assert.equal(pairs(many).length, 3999);
   assert.equal(counts(many).get("m7"), 3999, "mais chacun est bien lié aux 3 999 autres");
-  const alone = fact("seul", "autre"), started = Date.now();
-  for (let i = 0; i < 50; i += 1) assert.deepEqual(ids(of([...many, alone], alone)), []);
-  assert.ok(Date.now() - started < 2000, "50 lectures d'un souvenir isolé parmi 4 000 en moins de 2 s");
+  const alone = fact("seul", "autre"), all = [...many, alone];
+  assert.equal(pairs(all).length, 3999);
+  assert.equal(counts(all).size, 4000);
+  assert.deepEqual(ids(of(all, alone)), []);
+});
+test("le coût des traits, des comptes et d'un souvenir isolé croît à peu près comme le nombre de souvenirs, pas comme son carré", () => {
+  const best = (n) => { // le meilleur de cinq passes : le bruit de la machine ne compte pas
+    const list = [...Array.from({ length: n }, (_, i) => fact(`m${i}`, "gros")), fact("seul", "autre")];
+    let min = Infinity;
+    for (let run = 0; run < 5; run += 1) { const start = process.hrtime.bigint(); pairs(list); counts(list); of(list, list[n]); min = Math.min(min, Number(process.hrtime.bigint() - start)); }
+    return min;
+  };
+  assert.ok(best(32000) / best(8000) < 10, "4 fois plus de souvenirs : moins de 10 fois le temps (linéaire ≈ 4, quadratique ≥ 16)");
 });
 test("la taille d'un point grandit un peu avec ses liens, sans jamais dépasser un plafond", () => {
   assert.equal(radius(0), 6, "un souvenir isolé garde la taille d'avant");

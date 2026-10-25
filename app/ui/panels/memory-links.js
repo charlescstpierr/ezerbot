@@ -10,7 +10,9 @@
     const found = new Map();
     for (const fact of facts || []) {
       const key = conversationOf(fact);
-      if (key) found.set(key, [...(found.get(key) || []), String(fact.fact_id)]);
+      if (!key) continue;
+      if (!found.has(key)) found.set(key, []);
+      found.get(key).push(String(fact.fact_id));
     }
     return [...found.values()].filter((ids) => ids.length > 1);
   }

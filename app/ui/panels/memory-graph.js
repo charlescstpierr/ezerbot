@@ -84,7 +84,7 @@
       const talk = id ? at.get(id).conversation : ""; // les souvenirs d'une même conversation s'allument ensemble, même si le trait de leur chaîne ne les relie pas deux à deux
       const lit = new Set(id ? [id, ...(links.get(id) || []), ...(talk ? graph.nodes.filter((item) => item.conversation === talk).map((item) => item.id) : [])] : []);
       for (const [key, el] of drawn) { el.classList.toggle("is-active", key === id); el.classList.toggle("is-dim", id ? !lit.has(key) : base.has(key)); }
-      for (const [edge, line] of lines) line.classList.toggle("is-dim", id ? edge.from !== id && edge.to !== id : base.has(edge.from) || base.has(edge.to));
+      for (const [edge, line] of lines) line.classList.toggle("is-dim", id ? (edge.kind === "link" ? !(lit.has(edge.from) && lit.has(edge.to)) : edge.from !== id && edge.to !== id) : base.has(edge.from) || base.has(edge.to));
     };
     const add = (item, kind, scope, radius, name, caption) => {
       const el = make("g", { class: `memory-graph-node memory-graph-${kind} is-${scope}`, tabindex: "0", role: "img", "aria-label": name, "data-id": item.id });

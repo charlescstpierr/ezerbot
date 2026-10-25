@@ -217,6 +217,22 @@ def http_json(url: str):
         return json.load(response)
 
 
+def initial_page(endpoint: str) -> dict:
+    targets = http_json(endpoint + "/json/list")
+    page = next((item for item in targets if item.get("type") == "page"), None)
+    if not page:
+        raise SystemExit("Chrome n'a aucune page")
+    if page.get("url", "").startswith("chrome://newtab"):
+        # AXI refuses ambiguous page dumps, including the localized private-tab title's newline.
+        cdp = Cdp(page["webSocketDebuggerUrl"])
+        try:
+            cdp.call("Page.navigate", {"url": "about:blank"})
+        finally:
+            cdp.close()
+        page["url"] = "about:blank"
+    return page
+
+
 def browser_state_path(run: dict) -> Path:
     return Path(run["run_root"]) / "browser.json"
 
@@ -296,10 +312,7 @@ def ensure_headless(run: dict, *, headed: bool = False) -> dict:
         "height": 780,
     }
     save_browser(run, state)
-    targets = http_json(f"http://127.0.0.1:{port}/json/list")
-    page = next((item for item in targets if item.get("type") == "page"), None)
-    if not page:
-        raise SystemExit("Chrome n'a aucune page")
+    page = initial_page(f"http://127.0.0.1:{port}")
     state["page_id"] = page["id"]
     state["page_url"] = page.get("url", "")
     save_browser(run, state)

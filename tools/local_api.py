@@ -146,6 +146,7 @@ def launch_isolated_chrome(profile, log):
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
                 with opener.open(endpoint + "/json/version", timeout=2) as response:
                     ws_url = json.load(response)["webSocketDebuggerUrl"]
+                driver.initial_page(endpoint)
                 return process, endpoint, ws_url
             except (OSError, ValueError, KeyError, IndexError):
                 time.sleep(0.05)

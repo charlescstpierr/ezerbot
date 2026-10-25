@@ -10,21 +10,19 @@ import subprocess
 import sys
 
 import schema
+from observation import PreparationFailure, category, empty_attempt, inspect_attempt
 
 TOOLS = Path(__file__).resolve().parent
 ROOT = Path(os.environ['I557_ROOT']).resolve()
 OUT = Path(os.environ['I557_EVIDENCE']).resolve()
-OUT.mkdir(parents=True, exist_ok=True)
-HOME = OUT / 'fixture-home'
-HOME.mkdir(exist_ok=True)
-ENV = {
-    'PATH': os.environ['PATH'], 'HOME': str(HOME),
-    'CARGO_HOME': os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')),
-    'RUSTUP_HOME': os.environ.get('RUSTUP_HOME', str(Path.home() / '.rustup')),
-    'CARGO_BUILD_JOBS': '3', 'CARGO_TERM_COLOR': 'never',
-    'I557_ROOT': str(ROOT), 'I557_EVIDENCE': str(OUT),
-}
-GATE = [sys.executable, str(TOOLS / 'gate.py'), str(OUT / 'cargo.lock')]
+ENV = {}
+
+def gate(seconds, label, command):
+    return [sys.executable, str(TOOLS / 'gate.py'), str(OUT / 'cargo.lock'), seconds, str(OUT / (label + '-gate.json')), *command]
+
+def checkpoint(state):
+    schema.receipt(state)
+    (OUT / 'state.json').write_bytes(schema.encoded(state))
 
 def private(command, name, env=ENV, cwd=ROOT):
     with (OUT / (name + '.private')).open('wb') as log:
@@ -37,12 +35,35 @@ def git(*args):
 def source_hashes():
     return {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in schema.SOURCES if (ROOT / name).exists()}
 
-def machine():
+def machine(state):
     def output(command, name):
-        assert private(command, name) == 0
+        code = private(command, name)
+        if name == 'cargo-version':
+            path = OUT / 'cargo-version-gate.json'
+            if not path.is_file() or path.is_symlink():
+                state['preparation_return_code'] = code
+                raise PreparationFailure('gate_missing')
+            try:
+                data = json.loads(path.read_text())
+                schema.gate_entry(data)
+            except (ValueError, OSError, AssertionError, TypeError):
+                state['preparation_return_code'] = code
+                raise PreparationFailure('gate_invalid') from None
+            state['machine_gate'] = data
+            checkpoint(state)
+            if data['wrapper_return_code'] != code:
+                state['preparation_return_code'] = code
+                raise PreparationFailure('gate_incomplete')
+        if code != 0:
+            state['preparation_return_code'] = code
+            if name == 'cargo-version' and data['reason'] != 'completed':
+                state['preparation_error_type'] = data['error_category']
+                state['preparation_errno'] = data['errno']
+                raise PreparationFailure(data['reason'])
+            raise PreparationFailure('machine_failed')
         return (OUT / (name + '.private')).read_text().strip()
     rustc_rows = re.findall(r'^rustc ([0-9]+\.[0-9]+\.[0-9]+) \([0-9a-f]+ [0-9-]+\)$', output(['rustc', '--version'], 'rustc-version'), re.MULTILINE)
-    cargo = re.fullmatch(r'cargo ([0-9]+\.[0-9]+\.[0-9]+) \([0-9a-f]+ [0-9-]+\)', output([*GATE, '120', 'cargo', '--version'], 'cargo-version'))
+    cargo = re.fullmatch(r'cargo ([0-9]+\.[0-9]+\.[0-9]+) \([0-9a-f]+ [0-9-]+\)', output(gate('120', 'cargo-version', ['cargo', '--version']), 'cargo-version'))
     assert len(rustc_rows) == 1 and cargo
     result = dict(architecture=platform.machine(), os_version=platform.mac_ver()[0],
                   image_os=os.environ['ImageOS'], image_version=os.environ['ImageVersion'],
@@ -51,13 +72,33 @@ def machine():
     schema.machine(result)
     return result
 
-def measure(label, binary=None, cargo_profile=None):
-    command = [*GATE, '1800', 'cargo', 'test', '-p', 'grokbot-wrapper', '--test', 'chat_reliability', '--message-format=json', schema.TEST, '--', '--exact', '--nocapture']
+def measure(state, label, binary=None, cargo_profile=None):
+    command = gate('1800', label, ['cargo', 'test', '-p', 'grokbot-wrapper', '--test', 'chat_reliability', '--message-format=json', schema.TEST, '--', '--exact', '--nocapture'])
     if binary is not None:
-        command = [*GATE, '120', str(binary), schema.TEST, '--exact', '--nocapture']
-    status = private([sys.executable, str(TOOLS / 'run.py'), label, *command], label + '-runner')
-    raw = json.loads((OUT / (label + '.json')).read_text())
+        command = gate('120', label, [str(binary), schema.TEST, '--exact', '--nocapture'])
+    entry = empty_attempt(label)
+    state['entry_receipts'].append(entry)
+    checkpoint(state)
+    try:
+        status = private([sys.executable, str(TOOLS / 'run.py'), label, *command], label + '-runner')
+        entry['wrapper_return_code'] = status
+    except OSError as error:
+        entry['reason'] = 'wrapper_spawn_failed'
+        entry['error_category'], entry['errno'] = category(error)
+        checkpoint(state)
+        raise PreparationFailure(entry['reason']) from None
+    inspect_attempt(OUT, entry)
+    checkpoint(state)
+    if entry['reason'] != 'completed':
+        raise PreparationFailure(entry['reason'])
+    try:
+        raw = json.loads((OUT / (label + '.json')).read_text())
+    except (OSError, ValueError):
+        entry['reason'] = 'metadata_invalid'
+        raise PreparationFailure(entry['reason']) from None
     assert raw['head'] == schema.SUBJECT and status == raw['exit_code']
+    assert entry['runner']['head'] == raw['head'] and entry['runner']['patch_sha256'] == raw['patch_sha256']
+    assert entry['runner']['load_before'] == raw['load_before']
     text = (OUT / (label + '.log')).read_text()
     summaries = re.findall(r'^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; ([0-9]+) filtered out; finished in ([0-9.]+)s$', text, re.MULTILINE)
     assert len(summaries) == 1
@@ -95,13 +136,30 @@ def measure(label, binary=None, cargo_profile=None):
     return result, path
 
 def main():
-    state = dict(schema_version=1, workflow_sha=os.environ['I557_WORKFLOW_SHA'], subject_sha=schema.SUBJECT,
+    OUT.mkdir(parents=True, exist_ok=True)
+    state = dict(schema_version=2, workflow_sha=os.environ['I557_WORKFLOW_SHA'], subject_sha=schema.SUBJECT,
                  patch_sha256=schema.PATCH_SHA, run_id=int(os.environ['I557_RUN_ID']), attempt=int(os.environ['I557_ATTEMPT']),
                  machine=None, configurations=[], source_restored=False, measurement_valid=False, product_failed=False,
-                 preparation_failed=False, stage='prepare', preparation_return_code=None, preparation_error_type=None)
+                 preparation_failed=False, stage='prepare', preparation_return_code=None, preparation_error_type=None,
+                 preparation_reason='pending', preparation_errno=None, machine_gate=None, entry_load=None, entry_receipts=[],
+                 apply_check=dict(status='not_run', return_code=None, subject_sha=None, patch_sha256=None))
+    checkpoint(state)
     originals = {}
     applied = False
     try:
+        state['entry_load'] = list(os.getloadavg())
+        checkpoint(state)
+        fixture_home = OUT / 'fixture-home'
+        fixture_home.mkdir(exist_ok=True)
+        ENV.update(PATH=os.environ['PATH'], HOME=str(fixture_home),
+                   CARGO_HOME=os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')),
+                   RUSTUP_HOME=os.environ.get('RUSTUP_HOME', str(Path.home() / '.rustup')),
+                   CARGO_BUILD_JOBS='3', CARGO_TERM_COLOR='never', I557_ROOT=str(ROOT), I557_EVIDENCE=str(OUT))
+        if state['entry_load'][1] >= 20:
+            state['preparation_return_code'] = 20
+            raise PreparationFailure('load_gate_closed')
+        state['stage'] = 'provenance'
+        checkpoint(state)
         assert os.environ['I557_ATTEMPT'] == '1'
         assert git('rev-parse', 'HEAD').decode().strip() == schema.SUBJECT
         assert not git('status', '--porcelain')
@@ -109,9 +167,20 @@ def main():
         patch = TOOLS / 'instrumentation-v2.patch'
         assert hashlib.sha256(patch.read_bytes()).hexdigest() == schema.PATCH_SHA
         originals = {name: (ROOT / name).read_bytes() for name in schema.SOURCES if (ROOT / name).exists()}
-        state['machine'] = machine()
+        state['stage'] = 'apply_check'
+        state['apply_check'].update(subject_sha=git('rev-parse', 'HEAD').decode().strip(), patch_sha256=hashlib.sha256(patch.read_bytes()).hexdigest())
+        checkpoint(state)
+        code = private(['git', 'apply', '--check', str(patch)], 'apply-check')
+        state['apply_check'].update(status='passed' if code == 0 else 'failed', return_code=code)
+        checkpoint(state)
+        if code != 0:
+            state['preparation_return_code'] = code
+            raise PreparationFailure('apply_check_failed')
+        state['stage'] = 'machine'
+        checkpoint(state)
+        state['machine'] = machine(state)
         state['stage'] = 'baseline'
-        result, executable = measure(schema.LABELS[0])
+        result, executable = measure(state, schema.LABELS[0])
         assert result['source_diff_sha256'] == hashlib.sha256(b'').hexdigest()
         state['configurations'].append(result)
         baseline = OUT / 'baseline-executable'
@@ -119,13 +188,12 @@ def main():
         baseline.chmod(0o700)
         assert hashlib.sha256(baseline.read_bytes()).hexdigest() == result['binary_sha256']
         state['stage'] = 'apply'
-        assert private(['git', 'apply', '--check', str(patch)], 'apply-check') == 0
         assert private(['git', 'apply', str(patch)], 'apply') == 0
         applied = True
         assert set(git('diff', '--name-only').decode().splitlines()) == set(schema.SOURCES)-{'crates/domain/src/i557.rs'}
         assert git('ls-files', '--others', '--exclude-standard').decode().splitlines() == ['crates/domain/src/i557.rs']
         state['stage'] = 'trace'
-        result, _ = measure(schema.LABELS[1])
+        result, _ = measure(state, schema.LABELS[1])
         assert result['source_diff_sha256'] != hashlib.sha256(b'').hexdigest()
         state['configurations'].append(result)
         state['stage'] = 'analysis'
@@ -138,21 +206,20 @@ def main():
         assert not git('status', '--porcelain')
         state['source_restored'] = True
         state['stage'] = 'control'
-        result, _ = measure(schema.LABELS[2], baseline, state['configurations'][0]['cargo_profile'])
+        result, _ = measure(state, schema.LABELS[2], baseline, state['configurations'][0]['cargo_profile'])
         state['configurations'].append(result)
         assert result['binary_sha256'] == state['configurations'][0]['binary_sha256']
         assert result['sources_sha256'] == state['configurations'][0]['sources_sha256']
-        state.update(stage='complete', measurement_valid=True)
+        state.update(stage='complete', measurement_valid=True, preparation_reason='completed')
     except Exception as error:
         state['preparation_failed'] = True
-        name = type(error).__name__
-        state['preparation_error_type'] = name if name in ['AssertionError', 'FileNotFoundError', 'CalledProcessError', 'JSONDecodeError', 'KeyError', 'OSError', 'ValueError'] else 'Other'
-        label = {'baseline': schema.LABELS[0], 'trace': schema.LABELS[1], 'control': schema.LABELS[2]}.get(state['stage'])
-        if label is not None and (OUT / (label + '.json')).exists():
-            data = json.loads((OUT / (label + '.json')).read_text())
-            code = data.get('exit_code')
-            if type(code) is int and 0 <= code <= 255:
-                state['preparation_return_code'] = code
+        state['preparation_reason'] = error.reason if isinstance(error, PreparationFailure) else 'unexpected_preparation'
+        if not isinstance(error, PreparationFailure) and state['stage'] in ['provenance', 'machine']:
+            state['preparation_reason'] = 'provenance_mismatch' if state['stage'] == 'provenance' else 'machine_failed'
+        if not isinstance(error, PreparationFailure):
+            state['preparation_error_type'], state['preparation_errno'] = category(error)
+        if state['entry_receipts']:
+            state['preparation_return_code'] = state['entry_receipts'][-1]['wrapper_return_code']
     finally:
         if applied:
             for name, data in originals.items():
@@ -162,8 +229,7 @@ def main():
                 sensor.unlink()
         state['source_restored'] = not bool(git('status', '--porcelain'))
         state['product_failed'] = any(c['return_code'] != 0 for c in state['configurations'])
-        schema.receipt(state)
-        (OUT / 'state.json').write_bytes(schema.encoded(state))
+        checkpoint(state)
     if not state['source_restored']:
         raise SystemExit('I557 restoration_failed')
     assert private([sys.executable, str(TOOLS / 'export.py'), str(OUT), os.environ['I557_GITLEAKS']], 'export', env=ENV) == 0, 'I557 export_failed'

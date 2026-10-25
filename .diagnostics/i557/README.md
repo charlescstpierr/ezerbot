@@ -10,6 +10,8 @@ Les logs bruts, exécutables, fichiers d'auth factices et diagnostics d'erreurs 
 
 Le fichier `receipt.json` distingue résultat produit, préparation et validité de la collecte. `finalize.py` remet le job en échec pour tout rouge, même si l'export a réussi. Le succès du job ne représente jamais un workspace vert.
 
+Le reçu version 2 conserve la charge d'entrée et le résultat de `git apply --check` avant toute compilation. Chaque lancement écrit un reçu fermé avant ses gardes. Le contrôleur conserve le code du wrapper, les reçus du lanceur et du verrou, ainsi que la présence des pièces attendues. Une pièce absente arrête la préparation avec sa raison initiale. Les erreurs de lancement exportent seulement une catégorie fermée et un errno borné. Le premier job rouge reste inchangé et sa cause initiale demeure inconnue.
+
 Le capteur et ses limites sont conservés. Les maxima seq décrivent le vecteur retenu sans prouver individuellement tous ses membres. Les intervalles COMMIT chevauchés restent ambigus. La collecte ajoute des horloges, allocations et écritures de fin de thread. Un job dédié ne recrée pas automatiquement la charge des anciens runs workspace. Sans saut supérieur à 300 ms, l'attribution reste inconnue.
 
 Les pins officiels checkout v4.2.2 et upload-artifact v4.6.2 ont été relus via leurs refs Git. Le scanner Gitleaks 8.30.1 Darwin ARM64 est contrôlé par le SHA-256 du manifeste officiel. Le label runner n'est pas une image historique figée, comme le précise la [documentation GitHub des runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).

@@ -3343,18 +3343,7 @@ mod tests {
     fn a_return_sent_after_a_cancelled_sign_in_on_a_connection_it_accepted_is_answered() {
         use std::io::Read;
         use std::net::TcpStream;
-        struct Scratch(PathBuf);
-        impl Drop for Scratch {
-            fn drop(&mut self) {
-                let _ = fs::remove_dir_all(&self.0);
-            }
-        }
-        let scratch = Scratch(std::env::temp_dir().join(format!(
-            "ezerbot-signin-{}-{}",
-            std::process::id(),
-            random_token(8)
-        )));
-        fs::create_dir_all(&scratch.0).unwrap();
+        let scratch = grokbot_test_support::TestDir::new("ezerbot-signin");
         // Nothing is exchanged: the sign-in is cancelled before its return.
         let base = "http://127.0.0.1:9";
         let endpoints = Endpoints {
@@ -3365,8 +3354,7 @@ mod tests {
             issuer: base.to_owned(),
             api: format!("{base}/v1"),
         };
-        let provider =
-            Provider::with_endpoints(&scratch.0.join("ezerbot.sqlite"), endpoints, false);
+        let provider = Provider::with_endpoints(&scratch.join("ezerbot.sqlite"), endpoints, false);
         let query = parse_query(&provider.start_signin().unwrap());
         let port: u16 = query["redirect_uri"]
             .trim_end_matches(CALLBACK_PATH)

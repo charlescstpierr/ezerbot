@@ -26,17 +26,18 @@ async function holders(root, end) {
     throw new Error(`profile-holder inspection failed code=${e.code} signal=${e.signal} killed=${e.killed} stderrBytes=${(e.stderr || '').length}`);
   }
 }
-async function inventory(root, browser) {
-  const { stdout } = await exec('ps', ['-axww', '-o', 'pid=,ppid=,stat=,command='], { timeout: 3000 });
-  const rows = stdout.split('\n').map(s => s.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/)).filter(Boolean)
-    .map(([, p, pp, state, command]) => ({ pid: +p, parent: +pp, state, command }));
+async function inventory(root, browser, known = []) {
+  const { stdout } = await exec('ps', ['-axww', '-o', 'pid=,ppid=,stat=,lstart=,command='], { timeout: 3000, env: { ...process.env, LC_ALL: 'C' } });
+  const rows = stdout.split('\n').map(s => s.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\w+\s+\w+\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/)).filter(Boolean)
+    .map(([, p, pp, state, started, command]) => ({ pid: +p, parent: +pp, state, started, command }));
   const found = new Set([browser]);
+  for (const r of rows) if (known.some(k => k.pid === r.pid && k.started === r.started)) found.add(r.pid);
   for (let i = 0; i < rows.length; i++) for (const r of rows) if (r.pid !== process.pid && r.pid !== invokingParent && (found.has(r.parent) || r.command.includes(root))) found.add(r.pid);
-  return rows.filter(r => found.has(r.pid)).map(r => ({ pid: r.pid, parent: r.parent, state: r.state, type: r.command.match(/--type=([^ ]+)/)?.[1] || 'browser', crashpad: /crashpad/i.test(r.command) }));
+  return rows.filter(r => found.has(r.pid)).map(r => ({ pid: r.pid, parent: r.parent, state: r.state, started: r.started, type: r.command.match(/--type=([^ ]+)/)?.[1] || 'browser', crashpad: /crashpad/i.test(r.command) }));
 }
 async function guard() {
   const root = process.argv[3], mode = process.argv[4];
-  let child, closed, finished = false;
+  let child, closed, finished = false, known = [];
   process.on('disconnect', async () => {
     if (finished) return;
     finished = true;
@@ -49,7 +50,7 @@ async function guard() {
       result.childClosed = true;
       await bounds(async end => (await holders(root, end)).length === 0);
       result.remaining = await holders(root, Date.now() + 10000);
-      result.after = await inventory(root, child.pid);
+      result.after = await inventory(root, child.pid, known);
       assert.equal(result.after.filter(r => !r.state.startsWith('Z')).length, 0, 'writers remain after shell closes');
       rmSync(root, { recursive: true });
       result.removals = 1; result.ok = true;
@@ -65,7 +66,9 @@ async function guard() {
   const port = Number(readFileSync(join(root, 'DevToolsActivePort'), 'utf8').split('\n')[0]);
   const targets = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(3000) }).then(r=>r.json());
   assert.ok(targets.some(t => t.type === 'page'));
-  process.send({ browser: child.pid, before: await inventory(root, child.pid), holders: await holders(root, Date.now() + 10000) });
+  known = await inventory(root, child.pid);
+  assert.ok(known.some(r => r.pid === child.pid), 'process inventory must include the owned browser');
+  process.send({ browser: child.pid, before: known, holders: await holders(root, Date.now() + 10000) });
 }
 async function runner() {
   const owner = fork(__filename, ['guard', process.argv[3], process.argv[4]], { detached: true, stdio: ['ignore','ignore','inherit','ipc'], env: process.env });

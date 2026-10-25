@@ -7,6 +7,7 @@ const { test } = require("node:test");
 const vm = require("node:vm");
 
 const appSource = readFileSync(`${__dirname}/app.js`, "utf8");
+const pagesSource = readFileSync(`${__dirname}/panels/pages.js`, "utf8");
 const pageSource = readFileSync(`${__dirname}/index.html`, "utf8");
 const SUITE = "SUITE À GARDER DANS LE PREMIER FIL";
 
@@ -82,6 +83,12 @@ class Element {
     this.parentElement = null;
   }
   contains(node) { return node === this || this.childNodes.some((child) => child.contains?.(node)); }
+  insertBefore(node, before) {
+    if (node.parentElement) node.remove();
+    node.parentElement = this;
+    const index = this.childNodes.indexOf(before);
+    if (index < 0) this.childNodes.push(node); else this.childNodes.splice(index, 0, node);
+  }
   setAttribute(name, value) {
     const key = String(name).toLowerCase();
     this.attributes[key] = String(value);
@@ -249,6 +256,7 @@ function boot() {
     createElementNS: (_ns, tag) => new Element(tag, document),
     createTextNode: (text) => ({ textContent: String(text), parentElement: null, contains: () => false }),
     getElementById(id) { return document.ids.get(id) || null; },
+    getSelection: () => selection,
     addEventListener(type, handler) { (document.listeners[type] ||= []).push(handler); },
     querySelectorAll: (selector) => queryAll(document, selector),
     querySelector: (selector) => queryAll(document, selector)[0] || null,
@@ -260,6 +268,13 @@ function boot() {
   Object.defineProperty(document, "children", { get: () => [document.documentElement] });
   parsePage(document);
 
+  const selection = {
+    rangeCount: 0, isCollapsed: true, text: "", range: null,
+    getRangeAt() { return this.range; },
+    toString() { return this.text; },
+    removeAllRanges() { this.rangeCount = 0; this.isCollapsed = true; this.text = ""; this.range = null; this.fire(); },
+    fire() { for (const handler of document.listeners.selectionchange || []) handler(); },
+  };
   const storage = new Map();
   const localStorage = {
     getItem: (key) => storage.has(key) ? storage.get(key) : null,
@@ -277,9 +292,16 @@ function boot() {
     provider: { connected: false, signin: "idle", backend: "sharing", models: [], connections: {} },
     state_revision: 1,
   };
+  const sent = [];
+  let pageDetail = null;
+  let threadOptions = null;
   let holdCreate = null;
   let failCreate = false;
   let createWaiting = null;
+  let holdSend = null;
+  let sendWaiting = null;
+  let sendStatus = null;
+  let conversationSerial = 0;
   const realSetTimeout = setTimeout;
   const realClearTimeout = clearTimeout;
   function relaxedTimeout(handler, delay, ...args) {
@@ -288,12 +310,14 @@ function boot() {
     return timer;
   }
   function json(data, status = 200) {
-    return { ok: status >= 200 && status < 300, status, async json() { return data; } };
+    const snapshot = structuredClone(data);
+    return { ok: status >= 200 && status < 300, status, async json() { return structuredClone(snapshot); } };
   }
   async function fetch(path, options = {}) {
     const url = String(path);
     const body = options.body ? JSON.parse(options.body) : undefined;
     if (url === "/api/state") return json(state);
+    if (url === `/api/pages/${pageDetail?.id}`) return json({ page: pageDetail });
     if (url === "/api/ping") return json({ revision: state.state_revision });
     if (url === "/api/preferences") return json({ preferences: { ...state.preferences, ...body } });
     if (url === "/api/conversations") {
@@ -301,7 +325,7 @@ function boot() {
       if (holdCreate) await holdCreate;
       if (failCreate) return json({ error: "Création refusée pour le test" }, 503);
       const conversation = {
-        id: `conv-${state.conversations.length + 1}`, bot_id: body.bot_id, title: "Nouvelle conversation",
+        id: `conv-${++conversationSerial}`, bot_id: body.bot_id, title: "Nouvelle conversation",
         messages: [], kind: "direct", updated_at: Date.now(), favorite: false, member_ids: [body.bot_id],
       };
       state.conversations.unshift(conversation);
@@ -309,11 +333,18 @@ function boot() {
       return json({ conversation });
     }
     if (url === "/api/send") {
+      sent.push(body);
+      sendWaiting?.();
+      if (holdSend) await holdSend;
+      if (sendStatus || body.page_anchor?.passage === "REFUSÉ") {
+        return json({ error: "Ce passage n’apparaît pas dans le texte affiché de la Page." }, sendStatus || 400);
+      }
       const conversation = state.conversations.find((item) => item.id === body.conversation_id);
       conversation.messages.push({ id: body.message_id, role: "user", body: body.body, state: "accepted", created_at: new Date().toISOString() });
       state.state_revision += 1;
       return json({ conversation: structuredClone(conversation) });
     }
+    if (url === "/api/messages/resend") return json({ error: "Message introuvable." }, 404);
     return json({ error: `unexpected ${url}` }, 500);
   }
 
@@ -339,7 +370,7 @@ function boot() {
       revealPendingApproval() {},
       teachPrompt: "",
       searchableMessageText: (message) => message.body || "",
-      renderThread() {},
+      renderThread(_host, options) { threadOptions = options; },
       exportMessage: (message) => message,
       mountInput(host, options) {
         const model = { doc: docOf("") };
@@ -381,7 +412,10 @@ function boot() {
   vm.createContext(context);
   vm.runInContext(appSource, context);
   return {
-    window, document, storage, state,
+    window, document, storage, state, sent, context,
+    servePage(detail) { pageDetail = detail; },
+    refuseSend(status) { sendStatus = status; },
+    thread: () => threadOptions,
     composer: () => composer,
     type(text) { composer.api.value = text; composer.onInput(); },
     cmdN() {
@@ -398,6 +432,15 @@ function boot() {
         release() { holdCreate = null; failCreate = false; release(); },
         fail() { failCreate = true; holdCreate = null; release(); },
       };
+    },
+    // Retient la réponse du prochain /api/send : le serveur a reçu le message, l'accusé n'est pas encore revenu.
+    gateSend() {
+      let release;
+      holdSend = new Promise((resolve) => { release = resolve; });
+      let opened;
+      const waiting = new Promise((resolve) => { opened = resolve; });
+      sendWaiting = () => { sendWaiting = null; opened(); };
+      return { waiting, release() { holdSend = null; release(); } };
     },
   };
 }
@@ -580,4 +623,215 @@ test("short composer names stay whole and a maximal name ellipsizes only when th
   choose(longName);
   assert.equal(label().textContent, longName);
   assert.equal(label().className, "composer-bot-name");
+});
+
+// Ouvre la Page « Trois forfaits » dans le premier fil, avec app.js et le panneau Pages réels.
+async function quotedPage(orphan = false) {
+  const app = boot();
+  await ready(app);
+  app.type("Bonjour");
+  await app.document.getElementById("composer-form").requestSubmit();
+  const conversation = app.state.conversations[0];
+  if (orphan) { app.state.conversations.length = 0; await ready(app); }
+  const detail = {
+    id: "page_forfaits", bot_id: "grokbot", title: "Trois forfaits", status: "ready", diagnostic: null, source_version: "c".repeat(64), preview: "ConfortREFUSÉ",
+    document: { states: [], view: { type: "element", tag: "table", children: [
+      { type: "element", tag: "tr", children: [{ type: "element", tag: "td", children: [{ type: "text", text: "Confort" }] }] },
+    ] } },
+  };
+  app.servePage(detail);
+  app.state.pages = { by_bot: { grokbot: [{ id: detail.id, bot_id: "grokbot", conversation_id: conversation.id, title: detail.title, status: "ready" }] } };
+  vm.runInContext(pagesSource, app.context);
+  await ready(app);
+  const doc = app.document;
+  if (orphan) { doc.querySelector(".page-link").click(); await new Promise((resolve) => setImmediate(resolve)); }
+  const cell = doc.querySelector(".page-canvas td");
+  const comment = doc.querySelector(".page-comment");
+  const chip = doc.querySelector(".gb-quote-chip");
+  const select = (text) => {
+    const selection = doc.getSelection();
+    selection.rangeCount = 1; selection.isCollapsed = false; selection.text = text;
+    selection.range = { startContainer: cell, endContainer: cell, getBoundingClientRect: () => ({ left: 30, top: 90, right: 90, bottom: 110, width: 60, height: 20 }) };
+    selection.fire();
+  };
+  const sendWith = async (text) => {
+    app.type(text);
+    await doc.getElementById("composer-form").requestSubmit();
+    for (const thread of app.state.conversations) thread.messages = thread.messages.filter((message) => message.state !== "queued");
+  };
+  return { app, doc, comment, chip, select, sendWith, detail };
+}
+
+test("l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce", async () => {
+  const { app, comment, chip, select, sendWith } = await quotedPage();
+  select("Confort");
+  assert.equal(comment.hidden, false);
+  comment.click();
+  assert.equal(chip.hidden, false);
+  await sendWith("Passe-le à 21 €");
+  assert.deepEqual(JSON.parse(JSON.stringify(app.sent.at(-1).page_anchor)), { page_id: "page_forfaits", source_version: "c".repeat(64), passage: "Confort" });
+  assert.equal(chip.hidden, true, "la puce part avec le message");
+
+  select("Confort");
+  comment.click();
+  chip.querySelector(".gb-quote-remove").click();
+  await sendWith("Sans citation");
+  assert.equal(app.sent.at(-1).body, "Sans citation");
+  assert.equal("page_anchor" in app.sent.at(-1), false);
+
+  select("REFUSÉ");
+  comment.click();
+  await sendWith("Mal citée");
+  assert.equal(app.sent.at(-1).page_anchor.passage, "REFUSÉ");
+  assert.equal(chip.hidden, false, "un refus du moteur garde la puce pour corriger");
+
+  // Un suivi de sous-tâche part par /api/delegation/send, sans ancre : pas de citation proposée ni gardée.
+  app.state.conversations[0].kind = "task";
+  await ready(app);
+  assert.equal(chip.hidden, true);
+  select("Confort");
+  assert.equal(comment.hidden, true);
+});
+
+// Course : l'accusé d'un envoi lent ne doit retirer que la citation partie avec lui, même quand une nouvelle citation
+// du même passage a été posée entre-temps (la croix, puis « Commenter » à nouveau).
+test("l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre", async () => {
+  const { app, doc, comment, chip, select, sendWith } = await quotedPage();
+  const anchor = { page_id: "page_forfaits", source_version: "c".repeat(64), passage: "Confort" };
+  select("Confort");
+  comment.click();
+  const gate = app.gateSend();
+  app.type("Premier");
+  const first = doc.getElementById("composer-form").requestSubmit();
+  await gate.waiting;
+  assert.deepEqual(structuredClone(app.sent.at(-1).page_anchor), anchor, "le premier message part avec la première citation");
+  chip.querySelector(".gb-quote-remove").click();
+  assert.equal(chip.hidden, true);
+  select("Confort");
+  comment.click();
+  assert.equal(chip.hidden, false, "la nouvelle citation est posée pendant l’envoi");
+  app.type("Deuxième");
+  gate.release();
+  await first;
+  for (const thread of app.state.conversations) thread.messages = thread.messages.filter((message) => message.state !== "queued");
+  assert.equal(app.composer().api.value, "Deuxième", "le brouillon tapé pendant l’envoi reste");
+  assert.equal(chip.hidden, false, "l’accusé du premier envoi ne retire pas la nouvelle citation");
+  await sendWith("Deuxième");
+  assert.equal(app.sent.at(-1).body, "Deuxième");
+  assert.deepEqual(structuredClone(app.sent.at(-1).page_anchor), anchor, "le deuxième message part avec la nouvelle citation");
+  assert.equal(chip.hidden, true, "la nouvelle citation part avec le deuxième message");
+});
+
+// Après un redémarrage, la carte pendingSends est vide : seule l'ancre enregistrée dans le fil peut la rendre au renvoi.
+async function savedAnchoredMessage(state) {
+  const saved = { page_id: "page_forfaits", source_version: "d".repeat(64), passage: "Confort" };
+  const conversation = state.conversations[0];
+  conversation.messages = [{
+    id: "ancre-enregistree", role: "user", body: "Passe-le à 21 €", state: "queued", created_at: new Date().toISOString(),
+    payload: { page_anchor: { ...saved, title: "Trois forfaits" } },
+  }];
+  state.state_revision += 1;
+  return saved;
+}
+
+test("« Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file", async () => {
+  const app = boot();
+  await ready(app);
+  app.type("Bonjour");
+  await app.document.getElementById("composer-form").requestSubmit();
+  const saved = await savedAnchoredMessage(app.state);
+  await ready(app);
+  const message = app.thread().messages.find((item) => item.id === "ancre-enregistree");
+  assert.ok(message, "le message en file est dans le fil");
+  app.sent.length = 0;
+  await app.thread().onRetry(message);
+  const body = app.sent.at(-1);
+  assert.equal(body.message_id, "ancre-enregistree");
+  assert.deepEqual(structuredClone(body.page_anchor), saved);
+});
+
+test("le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée", async () => {
+  const app = boot();
+  await ready(app);
+  app.type("Bonjour");
+  await app.document.getElementById("composer-form").requestSubmit();
+  const saved = await savedAnchoredMessage(app.state);
+  app.state.conversations[0].messages[0].state = "refused";
+  await ready(app);
+  const message = app.thread().messages.find((item) => item.id === "ancre-enregistree");
+  app.sent.length = 0;
+  await app.thread().onResend(message);
+  assert.deepEqual(structuredClone(app.sent.at(-1).page_anchor), saved);
+});
+
+
+test("r11 une citation orpheline revient après création puis refus 400 et repart avec son ancre", async () => {
+  const { app, comment, chip, select, sendWith } = await quotedPage(true);
+  select("Confort"); comment.click();
+  app.refuseSend(400);
+  await sendWith("Corrige ce prix");
+  assert.equal(app.sent.at(-1).conversation_id, "conv-2", "le fil créé diffère du fil d’origine supprimé");
+  assert.equal(app.composer().api.value, "Corrige ce prix");
+  assert.equal(chip.hidden, false, "la citation accompagne le brouillon récupéré");
+  const anchor = structuredClone(app.sent.at(-1).page_anchor);
+  app.refuseSend(null);
+  await sendWith("Nouvel essai");
+  assert.deepEqual(structuredClone(app.sent.at(-1).page_anchor), anchor);
+  assert.equal(chip.hidden, true);
+});
+
+for (const edit of ["remove", "same", "other"]) test(`r11 refus ancien après ${edit} de citation`, async () => {
+  const { app, comment, select, doc, chip, sendWith } = await quotedPage();
+  select("Confort"); comment.click();
+  const gate = app.gateSend(); app.refuseSend(400);
+  app.type("Première demande");
+  const pending = doc.getElementById("composer-form").requestSubmit();
+  await gate.waiting;
+  chip.querySelector(".gb-quote-remove").click();
+  if (edit !== "remove") { select(edit === "same" ? "Confort" : "REFUSÉ"); comment.click(); }
+  gate.release(); await pending;
+  assert.equal(chip.hidden, edit === "remove");
+  if (edit !== "remove") assert.ok(chip.textContent.includes(edit === "same" ? "Confort" : "REFUSÉ"));
+  app.refuseSend(null);
+  await sendWith("Nouvel essai");
+  assert.equal(app.sent.at(-1).page_anchor?.passage, edit === "remove" ? undefined : edit === "same" ? "Confort" : "REFUSÉ");
+});
+
+test("r11 un passage disparu ne revient pas et son avertissement reste visible après le refus", async () => {
+  const { app, comment, select, doc, chip, detail } = await quotedPage();
+  select("Confort"); comment.click();
+  const gate = app.gateSend(); app.refuseSend(400);
+  app.type("À retoucher");
+  const pending = doc.getElementById("composer-form").requestSubmit();
+  await gate.waiting;
+  detail.preview = "Texte remplacé";
+  gate.release(); await pending;
+  assert.equal(chip.hidden, true);
+  assert.match(doc.getElementById("toast").textContent, /citation.*passage n’apparaît plus/);
+});
+
+for (const passage of [null, "Confort", "Con"]) test(`r12 citation ${passage ?? "retirée"} pendant création puis refus 400`, async () => {
+  const { app, doc, comment, chip, select } = await quotedPage(true);
+  select("Confort"); comment.click();
+  const creation = app.gateCreation();
+  app.refuseSend(400);
+  app.type("Corrige ce prix");
+  const pending = doc.getElementById("composer-form").requestSubmit();
+  await creation.waiting;
+  chip.querySelector(".gb-quote-remove").click();
+  if (passage) { select(passage); comment.click(); }
+  creation.release();
+  await pending;
+  assert.equal(app.sent.at(-1).conversation_id, "conv-2");
+  assert.equal(app.sent.at(-1).page_anchor.passage, "Confort", "le premier envoi garde sa citation capturée");
+  assert.equal(app.composer().api.value, "Corrige ce prix");
+  assert.equal(chip.hidden, !passage, "le refus respecte la citation choisie pendant la création");
+  if (passage) assert.ok(chip.textContent.includes(`« ${passage} »`));
+  app.refuseSend(null);
+  await doc.getElementById("composer-form").requestSubmit();
+  assert.equal(app.sent.at(-1).body, "Corrige ce prix");
+  assert.deepEqual(structuredClone(app.sent.at(-1).page_anchor), passage ? {
+    page_id: "page_forfaits", source_version: "c".repeat(64), passage,
+  } : undefined, "le réessai utilise la nouvelle citation, jamais l’ancienne");
+  assert.equal(chip.hidden, true);
 });

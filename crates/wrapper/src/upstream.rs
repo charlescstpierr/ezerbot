@@ -78,7 +78,6 @@ pub(crate) struct Timing {
     pub(crate) input_chars: usize,
 }
 
-/// Empreinte opaque d'un tour : les 16 premiers caractères hexadécimaux de sha256(id).
 pub(crate) fn turn_digest(id: &str) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(id.as_bytes()))[..16].to_owned()

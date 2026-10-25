@@ -189,7 +189,7 @@ fn entry(at_ms: i64, tokens: Value, tools: Vec<(&str, Option<i64>, &str, &str)>)
         .collect();
     (
         at_ms,
-        json!({"at_ms":at_ms,"bot_id":"grokbot","source":"chat","turn":"0123456789abcdef","model":"gpt-test","effort":null,"status":"finished","turn_end":"finished","error_kind":null,"duration_ms":1500,"model_calls":2,"tool_calls":tools.len(),"tokens":tokens,"tools":tools}).to_string(),
+        json!({"at_ms":at_ms,"bot_id":"grokbot","source":"chat","turn":"0123456789abcdef","model":"gpt-test","effort":null,"status":"finished","error_kind":null,"duration_ms":1500,"model_calls":2,"tool_calls":tools.len(),"tokens":tokens,"tools":tools}).to_string(),
     )
 }
 fn seed(f: &Fixture, rows: &[(i64, String)]) {

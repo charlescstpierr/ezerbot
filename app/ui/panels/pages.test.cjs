@@ -438,3 +438,24 @@ test("un titre nouvellement masqué remplace aussi la valeur du champ focalisé"
   await panels.panel.onState(panels.state, ctxOf("fil"));
   assert.equal(input.value,"[...]");
 });
+
+
+test("une réponse rename ancienne ne réexpose pas un document masqué par un poll plus récent", async () => {
+  const privateValue = "CANARI_RENAME_RACE_281";
+  const document = { states: [], view: { type: "element", tag: "article", children: [{ type: "text", text: privateValue }] } };
+  const page = { id: "page_rename_race", title: "Avant", status: "ready", source_version: "v1", document };
+  const { panels, main, use } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  const normalApi = panels.api;
+  let completeRename;
+  panels.api = (path, body) => path === "/api/pages/rename" ? new Promise((resolve) => { completeRename = resolve; }) : normalApi(path,body);
+  const input = descendants(main).find((element) => element.tagName === "input");
+  input.value = "Après";
+  const rename = input.listeners.change();
+  use({ ...page, document: JSON.parse(JSON.stringify(document).replaceAll(privateValue,"[...]")) });
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(canvasOf(main).textContent,"[...]");
+  completeRename({ page: { ...page, title: "Après" } });
+  await rename;
+  assert.equal(canvasOf(main).textContent,"[...]");
+});

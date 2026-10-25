@@ -107,29 +107,40 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
             byte_length: generated.bytes.len(),
             pages: generated.pages,
         };
-        ctx.connection.execute(
-            "INSERT INTO attachments_generated VALUES (?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
-            params![
-                file.id,
-                serde_json::to_string(&file).map_err(|_| ApiError::new(
-                    500,
-                    "Le document généré n’a pas pu être enregistré."
-                ))?,
-                generated.bytes,
-                generated.preview,
-                ctx.now_ms
-            ],
-        )?;
-        super::livrables::record(
-            ctx.connection,
-            ctx,
-            &call.call_id,
-            "document",
-            &file.id,
-            &file.name,
-            &file.preview_url,
-        )?;
-        Ok(json!(file))
+        ctx.connection
+            .execute_batch("SAVEPOINT wrapper_generated_tool")?;
+        let stored = (|| -> Result<Value, ApiError> {
+            ctx.connection.execute(
+                "INSERT INTO attachments_generated VALUES (?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
+                params![
+                    file.id,
+                    serde_json::to_string(&file).map_err(|_| ApiError::new(
+                        500,
+                        "Le document généré n’a pas pu être enregistré."
+                    ))?,
+                    generated.bytes,
+                    generated.preview,
+                    ctx.now_ms
+                ],
+            )?;
+            super::livrables::record(
+                ctx.connection,
+                ctx,
+                &call.call_id,
+                "document",
+                &file.id,
+                &file.name,
+                &file.preview_url,
+            )?;
+            Ok(json!(file))
+        })();
+        if stored.is_err() {
+            ctx.connection
+                .execute_batch("ROLLBACK TO wrapper_generated_tool")?;
+        }
+        ctx.connection
+            .execute_batch("RELEASE wrapper_generated_tool")?;
+        stored
     })();
     Some(outcome(result))
 }
@@ -511,14 +522,18 @@ pub fn routes(
                     })?;
                 // The name comes from the bot: a secret learned since is masked in it, never in
                 // the folder, which may hold the account name.
-                let mut name =
-                    super::engine::redaction_patterns(&app.connection)?.text(&file.name)?;
-                if !name.ends_with(&format!(".{}", file.format)) {
-                    name = format!("{name}.{}", file.format);
-                }
-                Ok(ApiResponse::Json(
-                    json!({"path": home.join("Desktop").join(name)}),
-                ))
+                super::disclosure::read(&app.connection, |patterns| {
+                    let mut name = patterns.text(&file.name);
+                    if !name.ends_with(&format!(".{}", file.format)) {
+                        name = format!("{name}.{}", file.format);
+                    }
+                    if patterns.text(&name) != name {
+                        return Err(super::disclosure::refused());
+                    }
+                    Ok(ApiResponse::Json(
+                        json!({"path": home.join("Desktop").join(name)}),
+                    ))
+                })
             })());
         }
         if let Some(id) = path

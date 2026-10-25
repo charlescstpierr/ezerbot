@@ -919,9 +919,15 @@ fn rendered_page(page: &Value, chosen: Option<&str>) -> String {
             return Some((state.to_owned(), value));
         }
         if node["type"] == "map" {
-            return node["items"].as_array()?.iter().find_map(|row| click(&node["node"], row));
+            return node["items"]
+                .as_array()?
+                .iter()
+                .find_map(|row| click(&node["node"], row));
         }
-        node["children"].as_array()?.iter().find_map(|child| click(child, row))
+        node["children"]
+            .as_array()?
+            .iter()
+            .find_map(|child| click(child, row))
     }
     fn render(node: &Value, states: &Value, row: &Value) -> String {
         match node["type"].as_str().unwrap_or("") {
@@ -1216,7 +1222,10 @@ fn r5_state_and_the_historical_card_mask_a_late_private_value() {
 #[test]
 fn r5_conversation_mutations_mask_the_same_historical_cards_as_state() {
     let (mut f, chat) = leaky();
-    let output = f.post("/api/conversations/update", json!({"id":chat,"title":"Renommée"}));
+    let output = f.post(
+        "/api/conversations/update",
+        json!({"id":chat,"title":"Renommée"}),
+    );
     assert!(!output.to_string().contains(LEAK));
 }
 
@@ -1228,7 +1237,20 @@ fn r5_masked_historical_id_cannot_resurrect_a_deleted_document_as_unknown() {
     f.db().execute("UPDATE engine_run_events SET payload=json_set(payload,'$.outcome.output.id','[...]') WHERE kind='tool_result' AND json_extract(payload,'$.outcome.output.id') IS NOT NULL", []).unwrap();
     f.post("/api/conversations/delete", json!({"id":chat}));
     f.before_the_migration();
-    assert!(f.list("").is_empty(), "migration lost the deleted origin of a masked result");
+    assert!(
+        f.list("").is_empty(),
+        "migration lost the deleted origin of a masked result"
+    );
+    let kept: i64 = f
+        .db()
+        .query_row("SELECT count(*) FROM attachments_generated", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        kept, 1,
+        "uncertain provenance must not authorize erasing the file"
+    );
 }
 
 #[test]
@@ -1236,10 +1258,12 @@ fn r5_real_old_page_schema_migrates_without_entry_id() {
     let mut f = Fixture::new();
     let chat = f.chat("alpha");
     f.page(&chat, "p1", "ancien.page.tsx", "Ancien");
-    f.db().execute_batch("ALTER TABLE bot_pages DROP COLUMN entry_id").unwrap();
+    f.db()
+        .execute_batch("ALTER TABLE bot_pages DROP COLUMN entry_id")
+        .unwrap();
     f.before_the_migration();
     let items = f.list("");
-    assert_eq!(items.len(),1);
+    assert_eq!(items.len(), 1);
     assert!(items[0]["entry_id"].as_str().is_some());
     f.opens(&items[0]);
 }
@@ -1250,9 +1274,17 @@ fn r5_private_envelope_whitespace_does_not_escape_title_trim() {
     let chat = f.chat("alpha");
     let secret = "  synthetic-spaces-281  ";
     f.page(&chat, "p1", "espaces.page.tsx", secret);
-    vault(&f,"SITE_SPACES_TEST","Formulaire de site privé", &json!({"values":{"password":secret}}).to_string());
-    let output = f.app.api("GET","/api/livrables",b"").unwrap();
-    assert!(!output.to_string().contains(secret.trim()), "title trimming exposed the significant private content");
+    vault(
+        &f,
+        "SITE_SPACES_TEST",
+        "Formulaire de site privé",
+        &json!({"values":{"password":secret}}).to_string(),
+    );
+    let output = f.app.api("GET", "/api/livrables", b"").unwrap();
+    assert!(
+        !output.to_string().contains(secret.trim()),
+        "title trimming exposed the significant private content"
+    );
 }
 
 #[test]
@@ -1260,14 +1292,22 @@ fn r5_page_integer_cannot_expose_a_private_value_after_javascript_rounding() {
     let mut f = Fixture::new();
     let chat = f.chat("alpha");
     let source = "export default function Page() { const rows = [[9007199254740993]]; return (<article>{rows.map((row) => (<p>{row[0]}</p>))}</article>); }";
-    f.call(&chat,"p1","write_page",json!({"name":"entier.page.tsx","title":"Entier","source":source}));
+    f.call(
+        &chat,
+        "p1",
+        "write_page",
+        json!({"name":"entier.page.tsx","title":"Entier","source":source}),
+    );
     let id = f.list("")[0]["id"].as_str().unwrap().to_owned();
-    vault(&f,"INTEGER_TEST","Secret synthétique","9007199254740992");
-    match f.app.api("GET",&format!("/api/pages/{id}"),b"") {
+    vault(&f, "INTEGER_TEST", "Secret synthétique", "9007199254740992");
+    match f.app.api("GET", &format!("/api/pages/{id}"), b"") {
         Err(e) => assert!(!e.message.contains("9007199254740992")),
         Ok(page) => {
-            let text = rendered_page(&page["page"]["document"],None);
-            assert!(!text.contains("9007199254740993"), "this integer rounds to a private value in JavaScript");
+            let text = rendered_page(&page["page"]["document"], None);
+            assert!(
+                !text.contains("9007199254740993"),
+                "this integer rounds to a private value in JavaScript"
+            );
             assert!(!text.contains("9007199254740992"));
         }
     }
@@ -1279,16 +1319,36 @@ fn r5_vault_unavailable_after_rename_commit_is_a_closed_error() {
     let id = f.list("type=page")[0]["id"].as_str().unwrap().to_owned();
     let path = f.path.with_extension("secrets.json");
     let saved = f.path.with_extension("secrets.saved");
-    std::fs::rename(&path,&saved).unwrap();
+    std::fs::rename(&path, &saved).unwrap();
     std::fs::create_dir(&path).unwrap();
-    let response = f.app.api("POST","/api/pages/rename",json!({"id":id,"title":format!("Après {LEAK}")}).to_string().as_bytes());
+    let response = f.app.api(
+        "POST",
+        "/api/pages/rename",
+        json!({"id":id,"title":format!("Après {LEAK}")})
+            .to_string()
+            .as_bytes(),
+    );
     let error = response.unwrap_err();
     assert!(!error.message.contains(LEAK));
-    let title: String = f.db().query_row("SELECT title FROM bot_pages WHERE id=?1",[&id],|r|r.get(0)).unwrap();
-    assert_eq!(title,format!("Après {LEAK}"), "the commit happened; the failure concerns emission only");
+    let title: String = f
+        .db()
+        .query_row("SELECT title FROM bot_pages WHERE id=?1", [&id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        title,
+        format!("Après {LEAK}"),
+        "the commit happened; the failure concerns emission only"
+    );
     std::fs::remove_dir(&path).unwrap();
-    std::fs::rename(&saved,&path).unwrap();
-    assert!(!f.app.api("GET",&format!("/api/pages/{id}"),b"").unwrap().to_string().contains(LEAK));
+    std::fs::rename(&saved, &path).unwrap();
+    assert!(!f
+        .app
+        .api("GET", &format!("/api/pages/{id}"), b"")
+        .unwrap()
+        .to_string()
+        .contains(LEAK));
 }
 
 #[test]
@@ -1296,11 +1356,13 @@ fn r5_record_failure_does_not_publish_a_livrable() {
     let mut f = Fixture::new();
     let chat = f.chat("alpha");
     f.db().execute_batch("CREATE TRIGGER reject_livrable BEFORE INSERT ON wrapper_livrables BEGIN SELECT RAISE(ABORT,'synthetic failure'); END").unwrap();
-    f.document(&chat,"d1","Refusé","md");
+    f.document(&chat, "d1", "Refusé", "md");
     assert!(f.list("").is_empty());
     let statuses: Vec<String> = f.db().prepare("SELECT json_extract(payload,'$.outcome.status') FROM engine_run_events WHERE kind='tool_result'").unwrap().query_map([],|r|r.get(0)).unwrap().map(Result::unwrap).collect();
     assert!(!statuses.contains(&"done".to_owned()));
-    f.db().execute_batch("DROP TRIGGER reject_livrable").unwrap();
+    f.db()
+        .execute_batch("DROP TRIGGER reject_livrable")
+        .unwrap();
     f.before_the_migration();
     assert!(f.list("").is_empty());
 }

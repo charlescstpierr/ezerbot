@@ -3,6 +3,7 @@
 //! the bot can rewrite the file. There is no public address.
 pub(super) mod anchors;
 mod compile;
+mod privacy;
 
 use super::{priority, write_transaction, Context};
 use crate::{parse, ApiError, ApiResponse, App};
@@ -481,10 +482,11 @@ fn revert(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
         previous.ok_or_else(|| ApiError::new(400, "Cette Page n’a pas de version d’avant."))?;
     let compiled = compile::compile(&previous);
     if let Err(error) = &compiled {
-        return Err(ApiError::new(
-            400,
-            format!("{}. Rien n’a été modifié.", error.text()),
-        ));
+        let message = format!("{}. Rien n’a été modifié.", error.text());
+        drop(tx);
+        return super::disclosure::read(&app.connection, |patterns| {
+            Err(ApiError::new(400, patterns.text(&message)))
+        });
     }
     let key = PageKey {
         id: &input.id,
@@ -518,7 +520,26 @@ fn read(app: &App, id: &str) -> Result<Value, ApiError> {
 /// What a route sends out: a secret the vault learned since the bot wrote the Page is hidden,
 /// as in the thread.
 fn masked(conn: &Connection, page: Value) -> Result<Value, ApiError> {
-    Ok(super::engine::redaction_patterns(conn)?.value(&page)?)
+    super::disclosure::read(conn, |patterns| {
+        for field in [
+            "id",
+            "bot_id",
+            "conversation_id",
+            "source_version",
+            "status",
+        ] {
+            patterns.identity(&page["page"][field])?;
+        }
+        let mut value = patterns.value(&page)?;
+        if let Some(document) = value
+            .get_mut("page")
+            .and_then(|p| p.get_mut("document"))
+            .filter(|d| !d.is_null())
+        {
+            privacy::protect(document, patterns)?;
+        }
+        patterns.value(&value)
+    })
 }
 
 struct PageRecord {

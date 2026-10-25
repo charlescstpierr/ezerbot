@@ -8,6 +8,7 @@
   let selectedId = null;
   let pinnedId = null;
   let loadedKey = null;
+  let loadedDocumentKey = null;
   let paintedSignature = null;
   let orphan = null;
   let lastState = null;
@@ -259,8 +260,11 @@
 
   function remember(page) {
     const key = sourceKey(page);
-    if (loadedKey !== key) {
+    const documentKey = page.document && !pastCap(page.document.view, 1) ? JSON.stringify(page.document) : null;
+    const changed = loadedKey !== key || loadedDocumentKey !== documentKey;
+    if (changed) {
       loadedKey = key;
+      loadedDocumentKey = documentKey;
       viewState = {};
       const states = page.document && page.document.states;
       if (Array.isArray(states)) {
@@ -271,7 +275,7 @@
     if (document.activeElement !== shell.input) shell.input.value = page.title || "";
     // Un état identique (le fil se rafraîchit toutes les 200 ms pendant une réponse) ne reconstruit pas le DOM :
     // le focus clavier et la sélection de texte restent en place.
-    if (paintedSignature !== signature(page)) paintCanvas(page);
+    if (changed || paintedSignature !== signature(page)) paintCanvas(page);
   }
 
   async function load(summary) {
@@ -304,7 +308,10 @@
     try {
       const result = await host.api("/api/pages/rename", { id, title });
       const next = result && result.page && result.page.title ? result.page.title : title;
-      if (detail && detail.id === id) detail.title = next;
+      if (detail && detail.id === id && result && result.page) {
+        generation++;
+        remember(result.page);
+      }
       const link = [...shell.list.children].find((item) => item.dataset && item.dataset.pageId === id);
       if (link) link.textContent = next;
     } catch (error) {
@@ -318,6 +325,7 @@
     selectedId = null;
     detail = null;
     loadedKey = null;
+    loadedDocumentKey = null;
     paintedSignature = null;
     full = false;
     shell.stage.hidden = true;

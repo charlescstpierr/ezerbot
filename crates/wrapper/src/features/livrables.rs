@@ -101,9 +101,19 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
            AND bot_pages.entry_id IS NULL",
         [],
     )?;
+    // A masked historical ID leaves the origin of unmatched files ambiguous.
+    // Keep those files as storage roots, but never relabel them as public unknowns.
     conn.execute(
         "INSERT OR IGNORE INTO wrapper_livrables
-         SELECT 'inconnu:'||g.id, NULL, 'document', g.id, COALESCE(json_extract(g.record,'$.name'), g.id),
+         SELECT CASE WHEN EXISTS (
+             SELECT 1 FROM engine_run_events e
+             JOIN engine_run_events c ON c.run_id=e.run_id AND c.kind='tool_call'
+                  AND json_extract(c.payload,'$.call_id')=json_extract(e.payload,'$.call_id')
+             WHERE e.kind='tool_result' AND json_extract(e.payload,'$.outcome.status')='done'
+               AND json_extract(c.payload,'$.name')='create_document'
+               AND NOT EXISTS (SELECT 1 FROM attachments_generated known WHERE known.id=json_extract(e.payload,'$.outcome.output.id'))
+         ) THEN 'nonattribue:' ELSE 'inconnu:' END||g.id,
+                NULL, 'document', g.id, COALESCE(json_extract(g.record,'$.name'), g.id),
                 NULL, NULL, '/api/generated/'||g.id||'/preview', g.created_at
          FROM attachments_generated g
          WHERE NOT EXISTS (SELECT 1 FROM wrapper_livrables l WHERE l.ref=g.id)",
@@ -127,9 +137,15 @@ pub fn record(
     title: &str,
     open_url: &str,
 ) -> Result<(), ApiError> {
-    let Ok(card) = super::images::tool_message_id(ctx, call_id) else {
+    if ctx.run_id.is_none() {
         return Ok(());
-    };
+    }
+    let card = super::images::tool_message_id(ctx, call_id).map_err(|_| {
+        ApiError::new(
+            409,
+            "La création ne peut pas être reliée à sa conversation.",
+        )
+    })?;
     conn.execute(
         "INSERT INTO wrapper_livrables VALUES (?1,?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT DO NOTHING",
         params![
@@ -156,7 +172,7 @@ FROM (
     FROM bot_pages WHERE status='ready'
     UNION ALL
     SELECT kind, ref, title, bot_id, conversation_id, created_at, open_url, entry_id
-    FROM wrapper_livrables
+    FROM wrapper_livrables WHERE key NOT GLOB 'nonattribue:*'
 ) x
 LEFT JOIN wrapper_bots b ON b.account_id=?1 AND b.id=x.bot_id
 LEFT JOIN wrapper_conversations c ON c.account_id=?1 AND c.id=x.conversation_id
@@ -216,22 +232,40 @@ pub fn routes(
             }))
         })?;
         let livrables = json!({"livrables": rows.collect::<rusqlite::Result<Vec<Value>>>()?});
-        // Titles come from the bot: a secret registered since is masked, as in the thread.
-        let mut livrables =
-            super::engine::redaction_patterns(&app.connection)?.value(&livrables)?;
-        // An image is titled by its whole description, cut only now: a cut made before the
-        // mask would show the first characters of a secret.
-        for item in livrables["livrables"].as_array_mut().into_iter().flatten() {
-            if item["type"] == "image" {
-                let title: String = item["title"]
-                    .as_str()
-                    .unwrap_or("")
-                    .chars()
-                    .take(80)
-                    .collect();
-                item["title"] = Value::String(title);
+        super::disclosure::read(&app.connection, |patterns| {
+            for item in livrables["livrables"]
+                .as_array()
+                .ok_or_else(super::disclosure::refused)?
+            {
+                for key in [
+                    "type",
+                    "id",
+                    "bot_id",
+                    "conversation_id",
+                    "date",
+                    "open_url",
+                    "entry_id",
+                ] {
+                    patterns.identity(&item[key])?;
+                }
             }
-        }
-        Ok(ApiResponse::Json(livrables))
+            let mut output = patterns.value(&livrables)?;
+            for item in output
+                .get_mut("livrables")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(super::disclosure::refused)?
+            {
+                if item["type"] == "image" {
+                    let title: String = item["title"]
+                        .as_str()
+                        .unwrap_or("")
+                        .chars()
+                        .take(80)
+                        .collect();
+                    item["title"] = Value::String(title);
+                }
+            }
+            Ok(ApiResponse::Json(patterns.value(&output)?))
+        })
     })())
 }

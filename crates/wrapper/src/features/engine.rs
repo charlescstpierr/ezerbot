@@ -1390,7 +1390,11 @@ fn drive_owned(
     for _ in 0..4 {
         let result = run_loop::run(conn, gateway, services, id);
         let run = store::required(conn, id)?;
-        if run.status.is_terminal() || run.status.is_suspended() || services.is_interrupted() {
+        if run.status.is_terminal() {
+            let _ = super::turns::record(conn, id);
+            return Ok(());
+        }
+        if run.status.is_suspended() || services.is_interrupted() {
             return Ok(());
         }
         if run.status == RunStatus::Interrupted
@@ -1430,7 +1434,7 @@ fn fail_host(
     services: &mut dyn RunServices,
     id: &str,
 ) -> grokbot_engine::contracts::Result<()> {
-    run_loop::with_run_events(conn, services, id, |conn, _| {
+    let failed = run_loop::with_run_events(conn, services, id, |conn, _| {
         let mut run = store::required(conn, id)?;
         if run.status.is_terminal() {
             return Ok(());
@@ -1453,7 +1457,11 @@ fn fail_host(
             &json!({"failed":true,"reason":"local_service_unavailable"}),
         )?;
         Ok(())
-    })
+    });
+    if failed.is_ok() {
+        let _ = super::turns::record(conn, id);
+    }
+    failed
 }
 
 struct Services<'a> {

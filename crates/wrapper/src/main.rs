@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -248,12 +248,14 @@ struct Options {
     port: u16,
     db: PathBuf,
     routine_wake: bool,
+    turns_summary: Option<String>,
 }
 
 fn options() -> Result<Option<Options>, String> {
     let mut args = std::env::args().skip(1);
     let mut port = 0;
     let mut routine_wake = false;
+    let mut turns_summary = None;
     let mut db = default_database_path();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -265,11 +267,17 @@ fn options() -> Result<Option<Options>, String> {
                     .parse()
                     .map_err(|_| "Port invalide.")?;
             }
+            "--turns-summary" => {
+                turns_summary = Some(
+                    args.next()
+                        .ok_or("--turns-summary attend un jour AAAA-MM-JJ.")?,
+                );
+            }
             "--db" => {
                 db = args.next().ok_or("--db attend un chemin SQLite.")?.into();
             }
             "--help" | "-h" => {
-                println!("grokbot-wrapper [--port 0] [--db chemin.sqlite] [--routine-wake]\nApplication locale, transport simulé. Écoute exclusivement 127.0.0.1.");
+                println!("grokbot-wrapper [--port 0] [--db chemin.sqlite] [--routine-wake] [--turns-summary AAAA-MM-JJ]\nApplication locale, transport simulé. Écoute exclusivement 127.0.0.1.\n--turns-summary imprime le résumé du journal des tours de ce jour (heure locale) et sort.");
                 return Ok(None);
             }
             _ => return Err(format!("Argument inconnu : {arg}")),
@@ -279,6 +287,7 @@ fn options() -> Result<Option<Options>, String> {
         port,
         db,
         routine_wake,
+        turns_summary,
     }))
 }
 
@@ -1060,9 +1069,24 @@ mod fake_tests {
     }
 }
 
+fn turns_summary(db: &Path, day: &str) -> Result<(), String> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(|error| format!("Base illisible ({}) : {error}", db.display()))?;
+    conn.busy_timeout(Duration::from_secs(3))
+        .map_err(|e| e.to_string())?;
+    grokbot_wrapper::features::turns::migrate(&conn).map_err(|e| e.message)?;
+    let summary = grokbot_wrapper::features::turns::summary(&conn, day).map_err(|e| e.message)?;
+    println!("{summary}");
+    Ok(())
+}
+
 fn main() {
     let result = match options() {
-        Ok(Some(options)) => serve(options).map_err(|error| error.to_string()),
+        Ok(Some(options)) => match options.turns_summary.as_deref() {
+            Some(day) => turns_summary(&options.db, day),
+            None => serve(options).map_err(|error| error.to_string()),
+        },
         Ok(None) => Ok(()),
         Err(error) => Err(error),
     };

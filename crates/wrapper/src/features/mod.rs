@@ -122,6 +122,7 @@ pub mod templates;
 pub mod threads;
 pub mod topic_memory;
 pub mod topics;
+pub mod turns;
 pub mod updates;
 pub mod usage;
 pub mod voice;
@@ -181,6 +182,7 @@ registry!(
     mcp,
     storage,
     usage,
+    turns,
     notifications,
     iphone,
     floating,

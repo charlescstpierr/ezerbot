@@ -78,6 +78,12 @@ pub(crate) struct Timing {
     pub(crate) input_chars: usize,
 }
 
+/// Empreinte opaque d'un tour : les 16 premiers caractères hexadécimaux de sha256(id).
+pub(crate) fn turn_digest(id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(id.as_bytes()))[..16].to_owned()
+}
+
 /// Per-attempt status only: opaque local turn digest, HTTP integer and a local
 /// fixed code. No prompt, generated text, credentials or upstream headers.
 pub(crate) fn turn(
@@ -87,8 +93,6 @@ pub(crate) fn turn(
     code: &'static str,
     timing: Option<&Timing>,
 ) {
-    use sha2::{Digest, Sha256};
-    let digest = format!("{:x}", Sha256::digest(id.as_bytes()));
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -106,7 +110,7 @@ pub(crate) fn turn(
         &directory.join("logs/engine.log"),
         &format!(
             "[{timestamp}] upstream turn={} status={status} code={code}{timing}\n",
-            &digest[..16]
+            turn_digest(id)
         ),
     );
 }

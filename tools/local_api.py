@@ -124,16 +124,21 @@ def _browser_module():
 
 def launch_isolated_chrome(profile, log):
     profile = Path(profile)
-    profile.mkdir(parents=True, exist_ok=True)
     driver = _browser_module()
+    if profile.is_symlink() or (profile.exists() and not profile.is_dir()):
+        raise LocalApiError("Isolated Chrome profile must be a private directory")
+    home = profile.parent / "chrome-home"
+    environment = driver.chrome_environment(home)
+    profile.mkdir(mode=0o700, exist_ok=True)
     process = subprocess.Popen([
         driver.chrome_binary(), "--headless=new", "--disable-gpu", "--no-sandbox",
         "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
         "--disable-extensions", "--incognito", "--use-mock-keychain", "--password-store=basic",
         "--disable-breakpad", "--disable-crash-reporter", f"--user-data-dir={profile}",
+        f"--crash-dumps-dir={home / 'crashpad'}",
         "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
         "--window-size=1140,780",
-    ], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+    ], stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=environment)
     try:
         deadline = time.monotonic() + 20
         port_file = profile / "DevToolsActivePort"

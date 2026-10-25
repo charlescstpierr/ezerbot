@@ -30,6 +30,7 @@ from verify_lib import (
     LOGIN_HOME,
     assert_created_home,
     assert_created_run_root,
+    chrome_environment,
     identity_matches,
     load_browser,
     load_run,
@@ -217,6 +218,41 @@ def http_json(url: str):
         return json.load(response)
 
 
+def debugger_url(value: str, port: int, path: str) -> str:
+    try:
+        parsed = urlparse(value)
+        valid = (
+            parsed.scheme == "ws"
+            and parsed.hostname in ("127.0.0.1", "localhost")
+            and parsed.port == port
+            and parsed.username is None
+            and parsed.password is None
+            and not (parsed.query or parsed.fragment)
+            and parsed.path.startswith(path)
+            and bool(parsed.path[len(path):])
+            and "/" not in parsed.path[len(path):]
+        )
+    except (TypeError, ValueError, AttributeError):
+        valid = False
+    if not valid:
+        raise SystemExit("refus: endpoint CDP invalide pour ce navigateur")
+    return value
+
+
+def browser_websocket(state: dict) -> str:
+    port = state.get("debug_port")
+    if type(port) is not int or not 0 < port < 65536:
+        raise SystemExit("refus: port CDP invalide")
+    expected = state.get("browser_ws_url")
+    if "browser_ws_url" in state:
+        debugger_url(expected, port, "/devtools/browser/")
+    version = http_json(f"http://127.0.0.1:{port}/json/version")
+    endpoint = debugger_url(version.get("webSocketDebuggerUrl"), port, "/devtools/browser/")
+    if expected and urlparse(expected).path != urlparse(endpoint).path:
+        raise SystemExit("refus: la génération du navigateur CDP a changé")
+    return endpoint
+
+
 def initial_page(endpoint: str) -> dict:
     targets = http_json(endpoint + "/json/list")
     page = next((item for item in targets if item.get("type") == "page"), None)
@@ -251,10 +287,14 @@ def ensure_headless(run: dict, *, headed: bool = False) -> dict:
             raise SystemExit("une autre session Chrome occupe déjà ce run")
         if state.get("chrome_pid") and identity_matches(int(state["chrome_pid"]), state.get("identity")):
             return state
-    profile = Path(run["home"]) / "chrome-profile"
-    profile.mkdir(parents=True, exist_ok=True)
+    home = Path(run["home"])
+    profile = home / "chrome-profile"
+    if profile.is_symlink() or (profile.exists() and not profile.is_dir()):
+        raise SystemExit("refus: le profil Chrome doit être un répertoire privé")
+    environment = chrome_environment(home)
+    profile.mkdir(mode=0o700, exist_ok=True)
+    profile.chmod(0o700)
     log_path = Path(run["run_root"]) / "chrome.log"
-    log = log_path.open("ab")
     binary = chrome_binary()
     # One token for the profile: a split --user-data-dir plus a URL is two
     # headless targets on Chrome 156 and the process exits. No initial URL;
@@ -273,17 +313,20 @@ def ensure_headless(run: dict, *, headed: bool = False) -> dict:
         "--use-mock-keychain",
         "--password-store=basic",
         f"--user-data-dir={profile}",
+        f"--crash-dumps-dir={Path(run['home']) / 'crashpad'}",
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
         "--window-size=1140,780",
     ]
-    process = subprocess.Popen(
-        command,
-        stdout=log,
-        stderr=log,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    with log_path.open("ab") as log:
+        process = subprocess.Popen(
+            command,
+            stdout=log,
+            stderr=log,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            env=environment,
+        )
     port_file = profile / "DevToolsActivePort"
     deadline = time.time() + 20
     while time.time() < deadline:
@@ -313,28 +356,97 @@ def ensure_headless(run: dict, *, headed: bool = False) -> dict:
         "height": 780,
     }
     save_browser(run, state)
+    state["browser_ws_url"] = browser_websocket(state)
+    save_browser(run, state)
     page = initial_page(f"http://127.0.0.1:{port}")
+    browser = Cdp(state["browser_ws_url"])
+    try:
+        targets = browser.call("Target.getTargets").get("targetInfos", [])
+        target = next((item for item in targets if item.get("targetId") == page["id"] and item.get("type") == "page"), None)
+        if target is None:
+            raise SystemExit("la page initiale Chrome n'est plus disponible")
+        if target.get("browserContextId"):
+            state["browser_context_id"] = target["browserContextId"]
+    finally:
+        browser.close()
     state["page_id"] = page["id"]
     state["page_url"] = page.get("url", "")
     save_browser(run, state)
     return state
 
 
+class BrowserPages:
+    def __init__(self, state: dict):
+        self.state = state
+        self.context = state.get("browser_context_id")
+        if "browser_context_id" in state and (not isinstance(self.context, str) or not self.context):
+            raise SystemExit("refus: contexte Chrome invalide")
+        self.cdp = Cdp(browser_websocket(state))
+
+    def close(self) -> None:
+        self.cdp.close()
+
+    def pages(self) -> list[dict]:
+        targets = self.cdp.call("Target.getTargets").get("targetInfos", [])
+        pages = [
+            item for item in targets
+            if item.get("type") == "page"
+            and item.get("browserContextId") in ((None, "") if self.context is None else (self.context,))
+        ]
+        if self.context is not None:
+            contexts = self.cdp.call("Target.getBrowserContexts").get("browserContextIds", [])
+            if self.context not in contexts and not pages:
+                raise SystemExit("le contexte Chrome de ce run n'est plus disponible")
+        return pages
+
+    def require_page(self, page_id: str | None = None) -> dict:
+        selected = self.state.get("page_id") if page_id is None else page_id
+        for page in self.pages():
+            if selected and page.get("targetId") == selected:
+                return page
+        raise SystemExit("page Chrome absente du contexte de ce run")
+
+    def page_ws(self, page_id: str | None = None) -> str:
+        page = self.require_page(page_id)
+        targets = http_json(f"http://127.0.0.1:{self.state['debug_port']}/json/list")
+        for item in targets:
+            if item.get("type") == "page" and item.get("id") == page["targetId"]:
+                endpoint = debugger_url(item.get("webSocketDebuggerUrl"), self.state["debug_port"], "/devtools/page/")
+                if urlparse(endpoint).path != f"/devtools/page/{page['targetId']}":
+                    raise SystemExit("refus: endpoint CDP d'une autre page")
+                self.require_page(page["targetId"])
+                return endpoint
+        raise SystemExit("page Chrome sans endpoint CDP")
+
+    def connect(self, page_id: str | None = None) -> Cdp:
+        return Cdp(self.page_ws(page_id))
+
+    def create_page(self) -> str:
+        self.pages()
+        params = {"url": "about:blank"}
+        if self.context is not None:
+            params["browserContextId"] = self.context
+        page_id = self.cdp.call("Target.createTarget", params).get("targetId")
+        if not isinstance(page_id, str) or not page_id:
+            raise SystemExit("Chrome n'a pas créé de page")
+        self.require_page(page_id)
+        return page_id
+
+    def close_page(self, page_id: str) -> None:
+        self.require_page(page_id)
+        if not self.cdp.call("Target.closeTarget", {"targetId": page_id}).get("success"):
+            raise SystemExit("Chrome n'a pas fermé la page")
+        if self.state.get("page_id") == page_id:
+            self.state.pop("page_id", None)
+            self.state.pop("page_url", None)
+
+
 def page_ws(state: dict) -> str:
-    targets = http_json(f"http://127.0.0.1:{state['debug_port']}/json/list")
-    page_id = state.get("page_id")
-    for item in targets:
-        if item.get("type") == "page" and item.get("id") == page_id and item.get("webSocketDebuggerUrl"):
-            return item["webSocketDebuggerUrl"]
-    for item in targets:
-        if item.get("type") == "page" and item.get("webSocketDebuggerUrl"):
-            state["page_id"] = item["id"]
-            return item["webSocketDebuggerUrl"]
-    raise SystemExit("page Chrome introuvable")
-
-
-def connect(state: dict) -> Cdp:
-    return Cdp(page_ws(state))
+    pages = BrowserPages(state)
+    try:
+        return pages.page_ws()
+    finally:
+        pages.close()
 
 
 def prepare(cdp: Cdp) -> None:
@@ -378,15 +490,32 @@ def apply_metrics(cdp: Cdp, state: dict) -> None:
 
 
 def command_resize(cdp: Cdp, state: dict, width: int, height: int) -> None:
-    state["width"] = width
-    state["height"] = height
-    apply_metrics(cdp, state)
+    apply_metrics(cdp, {**state, "width": width, "height": height})
+    state.update({"width": width, "height": height})
 
 
-def command_open(cdp: Cdp, url: str) -> None:
-    if not url.startswith("http://127.0.0.1:"):
-        raise SystemExit("refus: navigation hors du wrapper de bouclage")
-    cdp.call("Page.navigate", {"url": url})
+def require_wrapper_url(url: str, wrapper_url: str) -> None:
+    origins = []
+    try:
+        for value in (url, wrapper_url):
+            if not isinstance(value, str) or any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value):
+                raise ValueError("URL invalide")
+            parsed = urlparse(value)
+            if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1"
+                    or parsed.username is not None or parsed.password is not None
+                    or parsed.port is None or not 0 < parsed.port < 65536):
+                raise ValueError("origine invalide")
+            origins.append((parsed.scheme, parsed.hostname, parsed.port))
+    except (TypeError, ValueError, AttributeError) as error:
+        raise SystemExit("refus: navigation hors de l'origine exacte du wrapper") from error
+    if origins[0] != origins[1]:
+        raise SystemExit("refus: navigation hors de l'origine exacte du wrapper")
+
+
+def command_open(cdp: Cdp, url: str, wrapper_url: str) -> None:
+    require_wrapper_url(url, wrapper_url)
+    if cdp.call("Page.navigate", {"url": url}).get("errorText"):
+        raise SystemExit("la navigation Chrome a échoué")
     expression = """() => ({
       state: document.readyState,
       href: location.href,
@@ -428,16 +557,6 @@ def command_screenshot(cdp: Cdp, state: dict, path: Path) -> None:
     path.write_bytes(base64.b64decode(result["data"]))
 
 
-def command_pages(state: dict) -> None:
-    targets = http_json(f"http://127.0.0.1:{state['debug_port']}/json/list")
-    current = state.get("page_id")
-    for item in targets:
-        if item.get("type") != "page":
-            continue
-        selected = "true" if item.get("id") == current else "false"
-        print(f"{item.get('id')},{item.get('url','')},{selected}")
-
-
 def run_axi(run: dict, arguments: list[str]) -> None:
     root = assert_created_run_root(require_absolute(run.get("run_root"), "run_root"), run)
     assert_created_home(require_absolute(run.get("home"), "HOME"), root)
@@ -472,36 +591,78 @@ def run_axi(run: dict, arguments: list[str]) -> None:
 def run_headless(run: dict, arguments: list[str]) -> None:
     if not arguments:
         raise SystemExit("commande navigateur manquante")
-    state = ensure_headless(run)
     name = arguments[0]
-    cdp = connect(state)
+    arity = {"open": (1, 2), "eval": (2, 2), "resize": (3, 3), "screenshot": (2, 2),
+             "pages": (1, 1), "selectpage": (2, 2), "newpage": (2, 2), "closepage": (2, 2)}
+    if name not in arity:
+        raise SystemExit(f"commande inconnue: {name}")
+    minimum, maximum = arity[name]
+    if not minimum <= len(arguments) <= maximum:
+        raise SystemExit("arguments de commande navigateur invalides")
+    if name in ("open", "newpage"):
+        url = arguments[1] if len(arguments) > 1 else run["url"]
+        require_wrapper_url(url, run["url"])
+    if name == "resize":
+        try:
+            width, height = int(arguments[1]), int(arguments[2])
+        except ValueError as error:
+            raise SystemExit("dimensions Chrome invalides") from error
+        if width <= 0 or height <= 0:
+            raise SystemExit("dimensions Chrome invalides")
+    state = load_browser(run)
+    if not state:
+        raise SystemExit("Chrome de ce run n'est plus disponible")
+    if not os.environ.get("CHROME_DEVTOOLS_AXI_SESSION") or state.get("session") != session_id():
+        raise SystemExit("refus: une autre session Chrome occupe ce run")
+    if state.get("session_signature") != run.get("session_signature"):
+        raise SystemExit("refus: le navigateur n'appartient pas à ce run")
+    for pid, identity, message in (
+        (state.get("chrome_pid"), state.get("identity"), "Chrome de ce run n'est plus disponible"),
+        (run.get("auth_pid"), run.get("auth_identity"), "le transport authentifié de ce run n'est plus disponible"),
+    ):
+        if type(pid) is not int or pid <= 0 or not identity_matches(pid, identity):
+            raise SystemExit(message)
+    pages = BrowserPages(state)
     try:
-        prepare(cdp)
-        if name != "resize":
-            apply_metrics(cdp, state)
-        if name == "open":
-            command_open(cdp, arguments[1] if len(arguments) > 1 else run["url"])
-        elif name == "newpage":
-            command_open(cdp, arguments[1])
-        elif name == "resize":
-            command_resize(cdp, state, int(arguments[1]), int(arguments[2]))
-            save_browser(run, state)
-        elif name == "screenshot":
-            command_screenshot(cdp, state, Path(arguments[1]))
-        elif name == "eval":
-            command_eval(cdp, arguments[1])
-        elif name == "pages":
-            command_pages(state)
+        if name == "pages":
+            for item in pages.pages():
+                selected = "true" if item.get("targetId") == state.get("page_id") else "false"
+                print(f"{item['targetId']},{item.get('url','')},{selected}")
         elif name == "selectpage":
-            state["page_id"] = arguments[1]
-            save_browser(run, state)
+            page = pages.require_page(arguments[1])
+            state.update({"page_id": page["targetId"], "page_url": page.get("url", "")})
         elif name == "closepage":
-            cdp.call("Target.closeTarget", {"targetId": arguments[1]})
+            pages.close_page(arguments[1])
         else:
-            raise SystemExit(f"commande inconnue: {name}")
-    finally:
-        cdp.close()
+            created = pages.create_page() if name == "newpage" else None
+            cdp = None
+            try:
+                cdp = pages.connect(created)
+                prepare(cdp)
+                if name != "resize":
+                    apply_metrics(cdp, state)
+                if name in ("open", "newpage"):
+                    command_open(cdp, url, run["url"])
+                    state.update({"page_id": created or state["page_id"], "page_url": url})
+                elif name == "resize":
+                    command_resize(cdp, state, width, height)
+                elif name == "screenshot":
+                    command_screenshot(cdp, state, Path(arguments[1]))
+                elif name == "eval":
+                    command_eval(cdp, arguments[1])
+            except BaseException:
+                if created:
+                    try:
+                        pages.close_page(created)
+                    except (Exception, SystemExit):
+                        pass
+                raise
+            finally:
+                if cdp is not None:
+                    cdp.close()
         save_browser(run, state)
+    finally:
+        pages.close()
 
 
 def main() -> None:

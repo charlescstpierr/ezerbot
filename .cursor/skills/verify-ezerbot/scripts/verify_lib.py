@@ -119,6 +119,45 @@ def assert_throwaway(path: Path, label: str) -> Path:
     return path
 
 
+def chrome_environment(home: Path) -> dict[str, str]:
+    home = Path(home)
+    assert_throwaway(home, "HOME Chrome")
+    if not home.is_absolute() or (home.exists() and not home.is_dir()) or home.is_symlink():
+        raise SystemExit("refus: HOME Chrome doit être un répertoire privé absolu")
+    resolved = home.resolve()
+    try:
+        relative = resolved.relative_to(Path(tempfile.gettempdir()).resolve())
+    except ValueError:
+        raise SystemExit("refus: HOME Chrome doit rester sous TMPDIR") from None
+    if not relative.parts:
+        raise SystemExit("refus: TMPDIR lui-même n'est pas un HOME Chrome")
+    directories = {name: home / name for name in
+                   ("tmp", "xdg-config", "xdg-cache", "xdg-data", "crashpad")}
+    for directory in directories.values():
+        if directory.is_symlink() or directory.resolve().parent != resolved:
+            raise SystemExit("refus: un chemin de données Chrome sort de son HOME")
+        if directory.exists() and not directory.is_dir():
+            raise SystemExit("refus: un chemin de données Chrome n'est pas un répertoire")
+    home.mkdir(mode=0o700, exist_ok=True)
+    home.chmod(0o700)
+    for directory in directories.values():
+        directory.mkdir(mode=0o700, exist_ok=True)
+        directory.chmod(0o700)
+    environment = {
+        "PATH": os.defpath,
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "HOME": str(home),
+        "CFFIXED_USER_HOME": str(home),
+        "TMPDIR": str(directories["tmp"]),
+        "XDG_CONFIG_HOME": str(directories["xdg-config"]),
+        "XDG_CACHE_HOME": str(directories["xdg-cache"]),
+        "XDG_DATA_HOME": str(directories["xdg-data"]),
+    }
+    if os.environ.get("DISPLAY"):
+        environment["DISPLAY"] = os.environ["DISPLAY"]
+    return environment
+
+
 def assert_outside_repo(path: Path, label: str) -> Path:
     repo = repo_root().resolve()
     try:

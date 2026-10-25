@@ -1999,6 +1999,7 @@ mod tests {
         let directory = grokbot_test_support::TestDir::new("engine-checkpoints");
         let path = directory.join("engine.sqlite");
         let conn = setup(Connection::open(&path)?, false, RunBudgets::default())?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.busy_timeout(Duration::ZERO)?;
         let observer = Connection::open(&path)?;
         observer.busy_timeout(Duration::ZERO)?;
@@ -2025,8 +2026,7 @@ mod tests {
         control.resume();
         control.expect(RunEventPoint::BeforeCommit)?;
         let error = Transaction::new_unchecked(&observer, TransactionBehavior::Immediate)
-            .err()
-            .expect("writer must remain locked before COMMIT");
+            .expect_err("writer must remain locked before COMMIT");
         assert_eq!(
             error.sqlite_error_code(),
             Some(rusqlite::ErrorCode::DatabaseBusy)

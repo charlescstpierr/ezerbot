@@ -26,56 +26,100 @@ const AVERAGED_PASSAGES: u32 = 10;
 const MIN_USED_PERCENT: f64 = 5.0;
 const MIN_LOCAL_TOKENS: u64 = 50_000;
 
-/// The signed-in Codex account and since when this app has seen it; the finished passages whose run
-/// sent usage, kept as they happen so that the latest of them are found without reading the ones that
+/// The signed-in Codex account and since when this app has seen it; the finished passages that were
+/// measured, kept as they happen so that the latest of them are found without reading the ones that
 /// sent none; indexes that let a routine's runs of the week and the local tokens of a window be
-/// found without reading history. A passage enters the list once it is both finished and measured,
-/// whichever of the two comes last.
-pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS wrapper_routine_cost_account (
+/// found without reading history. A passage is measured when a run of its delegation tree sent usage.
+/// It enters the list once it is both finished and measured, whichever of the two comes last, and
+/// whichever of its runs, usage or links to its subtasks was written last.
+const ACCOUNT_AND_INDEXES: &str = "CREATE TABLE IF NOT EXISTS wrapper_routine_cost_account (
     id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, since INTEGER NOT NULL
 ); CREATE TABLE IF NOT EXISTS wrapper_measured_passages (
     routine_id TEXT NOT NULL, scheduled_at_utc INTEGER NOT NULL, occurrence_id TEXT NOT NULL,
     PRIMARY KEY(routine_id, scheduled_at_utc DESC, occurrence_id DESC)
 ) WITHOUT ROWID;
-CREATE TRIGGER IF NOT EXISTS wrapper_measured_passages_done_insert
-    AFTER INSERT ON scheduler_occurrences WHEN NEW.status='done'
-BEGIN INSERT OR IGNORE INTO wrapper_measured_passages
-    SELECT NEW.routine_id, NEW.scheduled_at_utc, NEW.occurrence_id
-    WHERE EXISTS (SELECT 1 FROM engine_response_usage WHERE run_id=NEW.run_id); END;
-CREATE TRIGGER IF NOT EXISTS wrapper_measured_passages_done_update
-    AFTER UPDATE OF status ON scheduler_occurrences WHEN NEW.status='done' AND OLD.status!='done'
-BEGIN INSERT OR IGNORE INTO wrapper_measured_passages
-    SELECT NEW.routine_id, NEW.scheduled_at_utc, NEW.occurrence_id
-    WHERE EXISTS (SELECT 1 FROM engine_response_usage WHERE run_id=NEW.run_id); END;
-CREATE TRIGGER IF NOT EXISTS wrapper_measured_passages_usage
-    AFTER INSERT ON engine_response_usage
-BEGIN INSERT OR IGNORE INTO wrapper_measured_passages
-    SELECT routine_id, scheduled_at_utc, occurrence_id FROM scheduler_occurrences
-    WHERE run_id=NEW.run_id AND status='done'; END;
+CREATE TRIGGER IF NOT EXISTS wrapper_measured_passages_deleted
+    AFTER DELETE ON scheduler_occurrences
+BEGIN DELETE FROM wrapper_measured_passages WHERE routine_id=OLD.routine_id
+    AND scheduled_at_utc=OLD.scheduled_at_utc AND occurrence_id=OLD.occurrence_id; END;
 CREATE INDEX IF NOT EXISTS wrapper_engine_runs_started
     ON engine_runs(json_extract(record,'$.started_at'));
 CREATE INDEX IF NOT EXISTS wrapper_engine_runs_thread_started
     ON engine_runs(conversation_id, json_extract(record,'$.started_at'));";
 
-/// Creates the tables, triggers and indexes of [`SCHEMA`]; the list of measured passages is filled
+/// What a change makes newly true: the finished passages whose run is `above` or is that run (SQL
+/// expression) and that have usage in `below` or its subtasks. The same statement serves every
+/// change, so that none of the orders in which a passage ends, spawns and is measured is missed.
+/// The unary plus keeps the search on `run_id`: `status` alone would read every finished passage.
+fn list_measured(above: &str, below: &str) -> String {
+    format!(
+        "INSERT OR IGNORE INTO wrapper_measured_passages
+         SELECT routine_id, scheduled_at_utc, occurrence_id FROM scheduler_occurrences
+         WHERE +status='done' AND run_id IN (WITH RECURSIVE up(id) AS (SELECT {above} UNION
+                SELECT d.parent_run_id FROM delegation_graph d JOIN up ON d.child_run_id=up.id)
+                SELECT id FROM up)
+           AND EXISTS (SELECT 1 FROM engine_response_usage WHERE run_id IN (
+                WITH RECURSIVE down(id) AS (SELECT {below} UNION
+                SELECT d.child_run_id FROM delegation_graph d JOIN down ON d.parent_run_id=down.id
+                WHERE d.child_run_id IS NOT NULL) SELECT id FROM down));"
+    )
+}
+
+/// Creates the tables, triggers and indexes of the cost; the list of measured passages is filled
 /// from the history once, in the same transaction that creates it.
 pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
+    grokbot_delegation::graph::migrate(conn)?;
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='wrapper_measured_passages')",
         [],
         |r| r.get(0),
     )?;
-    conn.execute_batch("SAVEPOINT routine_cost_schema")?;
-    let created = conn.execute_batch(SCHEMA).and_then(|()| {
-        if exists {
-            return Ok(());
-        }
-        conn.execute_batch(
-            "INSERT OR IGNORE INTO wrapper_measured_passages
-             SELECT routine_id, scheduled_at_utc, occurrence_id FROM scheduler_occurrences
-             WHERE status='done' AND run_id IN (SELECT run_id FROM engine_response_usage)",
+    let triggers = [
+        ("scheduler_occurrences", "AFTER INSERT", "NEW.status='done'", "NEW.run_id", "NEW.run_id"),
+        (
+            "scheduler_occurrences",
+            "AFTER UPDATE OF status",
+            "NEW.status='done' AND OLD.status!='done'",
+            "NEW.run_id",
+            "NEW.run_id",
+        ),
+        ("engine_response_usage", "AFTER INSERT", "1", "NEW.run_id", "NEW.run_id"),
+        ("delegation_graph", "AFTER INSERT", "NEW.child_run_id IS NOT NULL", "NEW.parent_run_id", "NEW.child_run_id"),
+        (
+            "delegation_graph",
+            "AFTER UPDATE OF child_run_id",
+            "NEW.child_run_id IS NOT NULL",
+            "NEW.parent_run_id",
+            "NEW.child_run_id",
+        ),
+    ]
+    .map(|(table, event, when, above, below)| {
+        format!(
+            "CREATE TRIGGER IF NOT EXISTS wrapper_measured_{table}_{n} {event} ON {table} WHEN {when} BEGIN {} END;",
+            list_measured(above, below),
+            n = event.replace(' ', "_").to_lowercase(),
         )
-    });
+    })
+    .concat();
+    conn.execute_batch("SAVEPOINT routine_cost_schema")?;
+    let created = conn
+        .execute_batch(ACCOUNT_AND_INDEXES)
+        .and_then(|()| conn.execute_batch(&triggers))
+        .and_then(|()| {
+            if exists {
+                return Ok(());
+            }
+            conn.execute_batch(
+                "WITH RECURSIVE tree(occurrence_id, run_id) AS (
+                    SELECT occurrence_id, run_id FROM scheduler_occurrences WHERE status='done'
+                    UNION SELECT t.occurrence_id, d.child_run_id FROM tree t
+                    JOIN delegation_graph d ON d.parent_run_id=t.run_id WHERE d.child_run_id IS NOT NULL)
+                 INSERT OR IGNORE INTO wrapper_measured_passages
+                 SELECT routine_id, scheduled_at_utc, occurrence_id FROM scheduler_occurrences
+                 WHERE occurrence_id IN (SELECT t.occurrence_id FROM tree t
+                    JOIN engine_response_usage u ON u.run_id=t.run_id)",
+            )
+        });
     conn.execute_batch(if created.is_ok() {
         "RELEASE routine_cost_schema"
     } else {
@@ -352,6 +396,33 @@ mod tests {
                 .collect();
             assert!(scans.is_empty(), "{scans:?} in {details:?}");
         }
+    }
+
+    /// A change to history must not read it either: the statement behind every trigger searches
+    /// the passages by the run it was told about.
+    #[test]
+    fn listing_measured_passages_searches_by_run_and_never_scans_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        grokbot_engine::store::migrate(&conn).unwrap();
+        grokbot_delegation::graph::migrate(&conn).unwrap();
+        grokbot_scheduler::migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        let mut plan = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                list_measured("'a'", "'b'")
+            ))
+            .unwrap();
+        let details: Vec<String> = plan
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let reads_history: Vec<_> = details
+            .iter()
+            .filter(|d| d.contains("scheduler_occurrences") && !d.contains("(run_id=?)"))
+            .collect();
+        assert!(reads_history.is_empty(), "{reads_history:?} in {details:?}");
     }
 
     const NOW: i64 = 2_000_000_000_000;

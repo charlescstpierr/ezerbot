@@ -157,7 +157,10 @@ impl Provider {
     /// Explicit refresh test uses the app's own grant in the network worker.
     /// It never exposes credentials, changes accounts, or waits on the UI thread.
     pub(crate) fn test_connection_with_refresh(&self, refresh: bool) {
-        let session = self.session();
+        let session = Session {
+            notes_account: false,
+            ..self.session()
+        };
         if !session.connected() {
             *lock(&session.inner.probe) = json!({"state":"unavailable", "message":"Aucun compte connecté. Connectez votre compte ChatGPT ci-dessus."});
             return;

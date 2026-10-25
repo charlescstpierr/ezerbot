@@ -238,8 +238,16 @@ struct Task {
     trials: [Behaviour; 3],
 }
 
-fn summary_has(observed: &Observed, needle: &str) -> bool {
-    matches!(&observed.status, DelegationStatus::Done { result, .. } if result.contains(needle))
+/// La valeur attendue doit être un mot entier du résumé : `13 fichiers` ne vaut pas `3 fichiers`.
+fn summary_has(observed: &Observed, value: &str) -> bool {
+    let DelegationStatus::Done { result, .. } = &observed.status else {
+        return false;
+    };
+    result.match_indices(value).any(|(start, _)| {
+        let before = result[..start].chars().next_back();
+        let after = result[start + value.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
 }
 
 fn call(name: &str, args: Value) -> Value {
@@ -369,6 +377,8 @@ const LOOPBACK: &str = "http://127.0.0.1:";
 struct Outcome {
     trial: Trial,
     observed: Observed,
+    /// Garde l'espace de l'essai tant que le test lit son état final.
+    _dir: grokbot_test_support::TestDir,
     /// Cartes d'approbation levées par l'enfant (celles du lancement en fond ne comptent pas).
     cards: usize,
 }
@@ -602,6 +612,7 @@ fn run_trial(task: &Task, behaviour: Behaviour, index: usize) -> Outcome {
             tokens,
         },
         observed,
+        _dir: dir,
         cards,
     }
 }
@@ -674,6 +685,32 @@ fn calculator_counts_only_completed_and_correct_and_survives_degenerate_input() 
     assert_eq!(free.successes_per_million_tokens(), 0.0, "zéro token");
     let empty = report(&[]).to_string();
     assert!(empty.contains("taux de réussite : 0,0 % (0/0)"), "{empty}");
+}
+
+#[test]
+fn summary_graders_reject_a_neighbouring_value() {
+    let observed = |summary: &str| Observed {
+        status: DelegationStatus::Done {
+            result: summary.into(),
+            captures: vec![],
+        },
+        space: PathBuf::new(),
+        facts: vec![],
+    };
+    let grade = |task: usize, summary: &str| (CORPUS[task].grade)(&observed(summary));
+    assert!(grade(0, "17 × 23 = 391."));
+    assert!(!grade(0, "17 × 23 = 3910"));
+    assert!(grade(1, "Le code est 7B42."));
+    assert!(!grade(1, "Le code est 7B421."));
+    assert!(grade(4, "3 fichiers"));
+    assert!(!grade(4, "13 fichiers"));
+    assert!(!(CORPUS[0].grade)(&Observed {
+        status: DelegationStatus::Failed {
+            reason: "Terminé : 391.".into()
+        },
+        space: PathBuf::new(),
+        facts: vec![],
+    }));
 }
 
 #[test]

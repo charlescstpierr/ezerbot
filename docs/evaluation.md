@@ -67,11 +67,11 @@ Cinq tâches factices dans un registre (`CORPUS`), chacune avec son script de fa
 
 | Tâche | Consigne | Correcteur |
 | --- | --- | --- |
-| `produit` | calculer 17 × 23 | le résumé contient `391` |
-| `lecture` | lire `donnees.txt` (`code=7B42`) dans un dossier accordé et donner le code | le résumé contient `7B42` |
+| `produit` | calculer 17 × 23 | le résumé contient `391` comme mot entier |
+| `lecture` | lire `donnees.txt` (`code=7B42`) dans un dossier accordé et donner le code | le résumé contient `7B42` comme mot entier |
 | `fichier` | créer `rapport.txt` contenant exactement `OK` | le fichier existe avec le contenu `OK` |
 | `memoire` | retenir que la réunion d’équipe est le mardi | le bot enfant a un fait actif « La réunion d’équipe est le mardi. » |
-| `dossier` | compter les `.txt` de `inventaire/` (3 fichiers) | le résumé contient `3 fichiers` |
+| `dossier` | compter les `.txt` de `inventaire/` (3 fichiers) | le résumé contient `3 fichiers` comme mots entiers (`13 fichiers` est faux) |
 
 Chaque tâche est rejouée trois fois. Le « bruit » est un `Behaviour` : la politique du faux modèle (et de la personne qui approuve) pour cet essai. `Solve` fait la tâche et appelle `complete_task` ; `WrongAnswer` termine avec une mauvaise valeur ; `TextOnly` répond en texte libre sans `complete_task` ; `Denied` refuse la carte d’approbation d’écriture, puis le faux modèle prétend quand même avoir réussi.
 

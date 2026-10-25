@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
 
 const shipped = (file) => readFileSync(new URL(`../../ui/${file}`, import.meta.url), "utf8");
@@ -32,4 +32,14 @@ test("KaTeX n’existe qu’une fois parmi les fichiers servis, dans chat-math.j
   assert.equal(shipped("chat-math.js").startsWith("var GrokbotMath="), true, "chat-math.js sets window.GrokbotMath");
   assert.match(shipped("chat.css"), /\.katex \.katex-version:after\{content:"0\.16\.47"/);
   assert.equal(has(shipped("chat-math.js"), "0.16.47"), true, "KaTeX JS matches the CSS");
+});
+
+test("chat.css n’embarque aucune police : chaque face KaTeX pointe vers son woff2 servi sous /katex/", () => {
+  const css = shipped("chat.css");
+  assert.equal(has(css, "data:font"), false, "inlined font in chat.css");
+  const faces = css.match(/@font-face\{[^}]*\}/g);
+  const sources = faces.map((face) => face.match(/src:([^;}]*)/)[1]);
+  const fonts = readdirSync(new URL("../../ui/katex/", import.meta.url)).sort();
+  assert.equal(fonts.length, 20);
+  assert.deepEqual(sources.map((source) => source.match(/^url\(\/katex\/(KaTeX_[\w-]+\.woff2)\)format\("woff2"\)$/)?.[1]).sort(), fonts);
 });

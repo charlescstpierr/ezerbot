@@ -15,6 +15,7 @@ mod signature;
 const HTML: &str = "text/html; charset=utf-8";
 const JS: &str = "text/javascript; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
+const WOFF2: &str = "font/woff2";
 
 /// A served static file. `gzip` is computed by build.rs and kept only when it is
 /// smaller than `identity`.
@@ -74,13 +75,15 @@ macro_rules! asset {
             ))),
         }
     };
-    ($path:literal, $type:expr, png $name:literal) => {
+    ($path:literal, $type:expr, raw $folder:literal $name:literal) => {
         Asset {
             path: $path,
             content_type: $type,
             identity: include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../app/web/public/",
+                "/../../app/",
+                $folder,
+                "/",
                 $name
             )),
             gzip: None,
@@ -108,8 +111,28 @@ static ASSETS: &[Asset] = &[
     asset!("/iphone.css", CSS, ui "iphone.css"),
     asset!("/sw.js", JS, public "sw.js"),
     asset!("/manifest.webmanifest", "application/manifest+json", public "manifest.webmanifest"),
-    asset!("/icon-192.png", "image/png", png "icon-192.png"),
-    asset!("/icon-512.png", "image/png", png "icon-512.png"),
+    asset!("/icon-192.png", "image/png", raw "web/public" "icon-192.png"),
+    asset!("/icon-512.png", "image/png", raw "web/public" "icon-512.png"),
+    asset!("/katex/KaTeX_AMS-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_AMS-Regular.woff2"),
+    asset!("/katex/KaTeX_Caligraphic-Bold.woff2", WOFF2, raw "ui/katex" "KaTeX_Caligraphic-Bold.woff2"),
+    asset!("/katex/KaTeX_Caligraphic-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Caligraphic-Regular.woff2"),
+    asset!("/katex/KaTeX_Fraktur-Bold.woff2", WOFF2, raw "ui/katex" "KaTeX_Fraktur-Bold.woff2"),
+    asset!("/katex/KaTeX_Fraktur-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Fraktur-Regular.woff2"),
+    asset!("/katex/KaTeX_Main-Bold.woff2", WOFF2, raw "ui/katex" "KaTeX_Main-Bold.woff2"),
+    asset!("/katex/KaTeX_Main-BoldItalic.woff2", WOFF2, raw "ui/katex" "KaTeX_Main-BoldItalic.woff2"),
+    asset!("/katex/KaTeX_Main-Italic.woff2", WOFF2, raw "ui/katex" "KaTeX_Main-Italic.woff2"),
+    asset!("/katex/KaTeX_Main-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Main-Regular.woff2"),
+    asset!("/katex/KaTeX_Math-BoldItalic.woff2", WOFF2, raw "ui/katex" "KaTeX_Math-BoldItalic.woff2"),
+    asset!("/katex/KaTeX_Math-Italic.woff2", WOFF2, raw "ui/katex" "KaTeX_Math-Italic.woff2"),
+    asset!("/katex/KaTeX_SansSerif-Bold.woff2", WOFF2, raw "ui/katex" "KaTeX_SansSerif-Bold.woff2"),
+    asset!("/katex/KaTeX_SansSerif-Italic.woff2", WOFF2, raw "ui/katex" "KaTeX_SansSerif-Italic.woff2"),
+    asset!("/katex/KaTeX_SansSerif-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_SansSerif-Regular.woff2"),
+    asset!("/katex/KaTeX_Script-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Script-Regular.woff2"),
+    asset!("/katex/KaTeX_Size1-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Size1-Regular.woff2"),
+    asset!("/katex/KaTeX_Size2-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Size2-Regular.woff2"),
+    asset!("/katex/KaTeX_Size3-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Size3-Regular.woff2"),
+    asset!("/katex/KaTeX_Size4-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Size4-Regular.woff2"),
+    asset!("/katex/KaTeX_Typewriter-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Typewriter-Regular.woff2"),
 ];
 
 /// Whether an Accept-Encoding value allows gzip. An explicit gzip entry wins
@@ -836,6 +859,26 @@ mod asset_tests {
                 "/icon-512.png",
                 "/iphone.css",
                 "/iphone.js",
+                "/katex/KaTeX_AMS-Regular.woff2",
+                "/katex/KaTeX_Caligraphic-Bold.woff2",
+                "/katex/KaTeX_Caligraphic-Regular.woff2",
+                "/katex/KaTeX_Fraktur-Bold.woff2",
+                "/katex/KaTeX_Fraktur-Regular.woff2",
+                "/katex/KaTeX_Main-Bold.woff2",
+                "/katex/KaTeX_Main-BoldItalic.woff2",
+                "/katex/KaTeX_Main-Italic.woff2",
+                "/katex/KaTeX_Main-Regular.woff2",
+                "/katex/KaTeX_Math-BoldItalic.woff2",
+                "/katex/KaTeX_Math-Italic.woff2",
+                "/katex/KaTeX_SansSerif-Bold.woff2",
+                "/katex/KaTeX_SansSerif-Italic.woff2",
+                "/katex/KaTeX_SansSerif-Regular.woff2",
+                "/katex/KaTeX_Script-Regular.woff2",
+                "/katex/KaTeX_Size1-Regular.woff2",
+                "/katex/KaTeX_Size2-Regular.woff2",
+                "/katex/KaTeX_Size3-Regular.woff2",
+                "/katex/KaTeX_Size4-Regular.woff2",
+                "/katex/KaTeX_Typewriter-Regular.woff2",
                 "/manifest.webmanifest",
                 "/mascot.css",
                 "/mascot.js",

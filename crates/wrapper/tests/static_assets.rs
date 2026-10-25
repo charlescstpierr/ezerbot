@@ -227,14 +227,24 @@ fn every_path_the_service_worker_precaches_is_served_and_unlisted_ones_are_not()
         "/../../app/web/public/sw.js"
     ))
     .unwrap();
-    let list = script
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("const ASSETS = ["))
-        .and_then(|rest| rest.split_once(']'))
-        .expect("ASSETS array in sw.js")
-        .0;
-    let precached: Vec<&str> = list.split('"').skip(1).step_by(2).collect();
-    assert!(precached.len() >= 10, "{precached:?}");
+    let list = |name: &str| {
+        let prefix = format!("const {name} = [");
+        script
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(prefix.as_str()))
+            .and_then(|rest| rest.split_once(']'))
+            .unwrap_or_else(|| panic!("{name} array in sw.js"))
+            .0
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .collect::<Vec<_>>()
+    };
+    let shell = list("ASSETS");
+    let on_demand = list("ON_DEMAND");
+    assert!(shell.len() >= 10, "{shell:?}");
+    assert!(on_demand.len() >= 20, "{on_demand:?}");
+    let precached: Vec<&str> = shell.into_iter().chain(on_demand).collect();
     for path in &precached {
         assert_eq!(host.get(path, None).status, 200, "{path}");
         assert_eq!(host.get(path, Some("gzip")).status, 200, "{path}");
@@ -244,6 +254,8 @@ fn every_path_the_service_worker_precaches_is_served_and_unlisted_ones_are_not()
         "/panels/x.js",
         "/../Cargo.toml",
         "/katex/",
+        "/katex/KaTeX_Main-Regular.woff",
+        "/katex/KaTeX_Main-Regular.ttf",
         "/index.html",
         "/gzip/ui/app.js.gz",
         "/app.js/",

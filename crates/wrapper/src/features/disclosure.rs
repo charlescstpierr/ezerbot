@@ -46,8 +46,13 @@ pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
     Ok(())
 }
 
+type Fingerprints = BTreeMap<usize, BTreeMap<Vec<u8>, BTreeSet<Vec<u8>>>>;
 #[derive(Clone, Default, PartialEq, Eq)]
-pub(super) struct Patterns(BTreeMap<usize, BTreeMap<Vec<u8>, BTreeSet<Vec<u8>>>>);
+pub(super) struct Patterns {
+    known: Fingerprints,
+    active: BTreeSet<String>,
+    retired: Fingerprints,
+}
 impl Patterns {
     fn current(conn: &Connection) -> Result<Self, ApiError> {
         let path = conn.path().ok_or_else(refused)?;
@@ -59,8 +64,9 @@ impl Patterns {
             for variant in [&value, value.trim(), &encoded[1..encoded.len() - 1]] {
                 let normalized: String = variant.nfd().collect();
                 if normalized.encode_utf16().count() >= 6 && normalized.len() > MASK.len() {
+                    result.active.insert(normalized.clone());
                     result
-                        .0
+                        .known
                         .entry(normalized.len())
                         .or_default()
                         .entry(
@@ -86,7 +92,7 @@ impl Patterns {
             ))
         })? {
             let (length, digest, filter) = pair?;
-            all.0
+            all.known
                 .entry(length)
                 .or_default()
                 .entry(filter)
@@ -95,11 +101,11 @@ impl Patterns {
         }
         drop(query);
         let mut missing = Vec::new();
-        for (length, filters) in &self.0 {
+        for (length, filters) in &self.known {
             for (filter, digests) in filters {
                 for digest in digests {
                     if !all
-                        .0
+                        .known
                         .get(length)
                         .and_then(|known| known.get(filter))
                         .is_some_and(|known| known.contains(digest))
@@ -113,7 +119,7 @@ impl Patterns {
             let tx = conn.unchecked_transaction()?;
             for (length, filter, digest) in missing {
                 tx.execute("INSERT OR IGNORE INTO wrapper_disclosure_patterns(length,digest,filter) VALUES (?1,?2,?3)", rusqlite::params![length,digest,filter])?;
-                all.0
+                all.known
                     .entry(length)
                     .or_default()
                     .entry(filter.clone())
@@ -122,15 +128,41 @@ impl Patterns {
             }
             tx.commit()?;
         }
+        all.active = self.active.clone();
+        all.retired = all.known.clone();
+        for (length, filters) in &self.known {
+            if let Some(retired) = all.retired.get_mut(length) {
+                for (filter, digests) in filters {
+                    if let Some(known) = retired.get_mut(filter) {
+                        known.retain(|digest| !digests.contains(digest));
+                    }
+                }
+                retired.retain(|_, digests| !digests.is_empty());
+            }
+        }
+        all.retired.retain(|_, filters| !filters.is_empty());
         Ok(all)
     }
     pub(super) fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.known.is_empty()
     }
     pub(super) fn ranges(&self, normalized_nfd: &str) -> Vec<Range<usize>> {
         let mut ranges: Vec<Range<usize>> = Vec::new();
+        for pattern in &self.active {
+            let mut offset = 0;
+            while let Some(relative) = normalized_nfd[offset..].find(pattern) {
+                let start = offset + relative;
+                ranges.push(start..start + pattern.len());
+                offset = start
+                    + normalized_nfd[start..]
+                        .chars()
+                        .next()
+                        .expect("nonempty pattern")
+                        .len_utf8();
+            }
+        }
         let bytes = normalized_nfd.as_bytes();
-        for (length, filters) in &self.0 {
+        for (length, filters) in &self.retired {
             if *length > bytes.len() {
                 continue;
             }
@@ -244,7 +276,7 @@ pub(super) fn read<T>(
             render(&all).map_err(|error| ApiError::new(error.status, all.text(&error.message)));
         let remembered: usize = conn.query_row(COUNT_PATTERNS, [], |r| r.get(0))?;
         let captured: usize = all
-            .0
+            .known
             .values()
             .flat_map(BTreeMap::values)
             .map(BTreeSet::len)
@@ -358,7 +390,9 @@ mod tests {
         vault
             .set("HASH_COST_TEST", "Secret synthétique", &"a".repeat(1280))
             .unwrap();
-        let patterns = Patterns::current(&conn).unwrap();
+        Patterns::current(&conn).unwrap().remember(&conn).unwrap();
+        vault.remove("HASH_COST_TEST").unwrap();
+        let patterns = Patterns::current(&conn).unwrap().remember(&conn).unwrap();
         let text = "b".repeat(8192);
         VERIFIED_BYTES.with(|count| count.set(0));
         assert_eq!(patterns.text(&text), text);

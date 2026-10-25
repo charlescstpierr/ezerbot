@@ -205,7 +205,7 @@ def main() -> None:
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "GROKBOT_FAKE_OPENAI": base,
         }
-        if args.sphere not in ("images", "images-reference", "pages", "reponse-fil", "taches-de-fond", "approbation-tardive", "approbation-rappel", "mode-yolo", "sources-citees", "souvenirs-rappeles"):
+        if args.sphere not in ("images", "images-reference", "pages", "reponse-fil", "taches-de-fond", "approbation-tardive", "approbation-rappel", "mode-yolo", "sources-citees", "souvenirs-rappeles", "rien-a-signaler"):
             # Les builds de debug ouvrent la session factice eux-mêmes (le jeton écrit ci-dessus n'est plus lu).
             # Les sphères images, images-reference, pages, reponse-fil, taches-de-fond, approbation-tardive, approbation-rappel et sources-citees gardent le faux OpenAI du run : lui seul sait répondre à un dessin,
             # écrire une Page, citer le message parent d'un sous-fil, lancer une tâche de fond, demander une commande protégée puis en rendre le résultat, ou citer des sources numérotées.

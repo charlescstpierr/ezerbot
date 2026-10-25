@@ -282,8 +282,9 @@ pub struct ToolCall {
     /// The gateway preserves invalid/truncated/non-object JSON as Value::String(raw).
     /// Such strings carry the original provider argument text for faithful replay.
     /// Before check_approval or request_approval, the loop rejects non-object
-    /// arguments with a per-call Failed outcome ("invalid arguments"), retaining
-    /// the call ID and continuing the turn without asking the user to approve it.
+    /// or schema-nonconforming arguments (internal tools) with a per-call Failed
+    /// outcome ("invalid arguments", or the schema errors), retaining the call ID
+    /// and continuing the turn without asking the user to approve it.
     pub arguments: Value,
 }
 

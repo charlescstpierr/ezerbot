@@ -1156,12 +1156,15 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<crate::Message> 
         notice: None,
     })
 }
+/// Offered to the model only in a routine pass (`engine::tools_for_run`).
+pub(super) const QUIET_TOOL: &str = "rien_a_signaler";
 pub fn tools() -> Vec<ToolSpec> {
     let properties = json!({"name":{"type":"string"},"prompt":{"type":"string"},"body":{"type":"object"},"schedule":{"type":"string"},"trigger":{"type":"object"},"time_zone":{"type":"string"}});
     vec![
         ToolSpec { name:"routine_clock".into(),description:"Get the current UTC milliseconds, detected local IANA timezone and local datetime before calculating a routine date or one-shot at. Call only when scheduling needs the clock; it is not permanent chat context.".into(),schema:json!({"type":"object","properties":{},"additionalProperties":false}),requires_approval:false },
         ToolSpec { name:"create_routine".into(), description:"Create a paused, untrusted routine for this bot. Use prompt or a pinned skill body, and schedule or trigger. The executable body must fit the complete 2000-character conversational preview. Call routine_clock before calculating a one-shot at or a date; use its detected local_time_zone unless the user specified another. Ask the user in the returned principal conversation to confirm before enabling; creation is NOT activation.".into(), schema:json!({"type":"object","properties":properties,"required":["name"],"additionalProperties":false}), requires_approval:false },
         ToolSpec { name:"update_routine".into(), description:"Edit this bot's routine with its modified_at and schedule_version tokens. Call routine_clock before calculating a one-shot at or date. Pauses it and requires a new conversational confirmation before activation; the executable body must fit the complete 2000-character preview.".into(), schema:json!({"type":"object","properties":{ "routine_id":{"type":"string"},"modified_at":{"type":"integer"},"schedule_version":{"type":"integer"},"name":{"type":"string"},"prompt":{"type":"string"},"body":{"type":"object"},"schedule":{"type":"string"},"trigger":{"type":"object"},"time_zone":{"type":"string"}},"required":["routine_id","modified_at","schedule_version"],"additionalProperties":false}), requires_approval:false },
+        ToolSpec { name:QUIET_TOOL.into(),description:"Signale que ce passage de routine n'a rien de neuf à dire : aucune notification, aucun message non lu, et le passage est noté « Rien à signaler » dans l'historique. À toi de le dire par cet appel : un texte comme « rien à signaler » ne compte pas. Si tu as un résultat, n'appelle pas cet outil. Appelle-le avant complete_task.".into(),schema:json!({"type":"object","properties":{},"additionalProperties":false}),requires_approval:false },
         ToolSpec { name:"enable_routine".into(), description:"Omit confirm (or use false) to ask/reuse a confirmation question in the principal chat. Only after the user affirms that question, call with confirm:true. The host derives the current user turn itself and verifies consent for the unchanged routine; never invent a message ID. Generic yes/ok applies only to the first user turn after the latest pending question. Each user turn can authorize only one routine; for homonymous routines use the exact routine ID. Later activation must name an unambiguous routine or its exact ID. No separate approval card is used.".into(), schema:json!({"type":"object","properties":{"routine_id":{"type":"string"},"confirm":{"type":"boolean"}},"required":["routine_id"],"additionalProperties":false}), requires_approval:false },
     ]
 }
@@ -1312,7 +1315,37 @@ fn confirmed_enable(ctx: &Context<'_>, input: Enable) -> Result<Routine, ApiErro
     )?;
     Ok(routine::get(ctx.connection, &r.routine_id)?.expect("enabled routine exists"))
 }
+/// The call is the only signal: the occurrence is flagged, and the notification outbox
+/// reads that flag. Whatever the bot writes afterwards does not undo it.
+fn nothing_to_report(ctx: &Context<'_>) -> ToolOutcome {
+    let flagged = || -> Result<(), ApiError> {
+        let run = store::required(
+            ctx.connection,
+            ctx.run_id
+                .ok_or_else(|| ApiError::new(409, "Aucun passage de routine en cours."))?,
+        )?;
+        let Trigger::Occurrence { occurrence_id } = &run.trigger else {
+            return Err(ApiError::new(
+                409,
+                "Cet outil n'existe que dans un passage de routine.",
+            ));
+        };
+        occurrences::mark_quiet(ctx.connection, occurrence_id, &run.run_id)
+            .map_err(|_| ApiError::new(409, "Ce passage n'est plus en cours."))
+    };
+    match flagged() {
+        Ok(()) => ToolOutcome::Done {
+            output: json!({"status":"noté","message":"Passage noté « Rien à signaler » : aucune notification. Termine avec complete_task."}),
+        },
+        Err(error) => ToolOutcome::Failed {
+            reason: error.message,
+        },
+    }
+}
 pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
+    if call.name == QUIET_TOOL {
+        return Some(nothing_to_report(ctx));
+    }
     if !matches!(
         call.name.as_str(),
         "create_routine" | "update_routine" | "enable_routine" | "routine_clock"

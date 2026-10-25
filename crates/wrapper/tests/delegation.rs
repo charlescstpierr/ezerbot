@@ -368,9 +368,6 @@ fn failed_last_delegate_waits_for_its_admitted_sibling() {
     let mut context = args("child");
     context["selected_context"]["entry_ids"] = json!(["unreadable-entry"]);
     invalid.push(context);
-    let mut schema = args("child");
-    schema["unknown"] = json!(true);
-    invalid.push(schema);
     for bad in invalid {
         let mut f = Fixture::new(true);
         let c = f.conversation();
@@ -412,11 +409,22 @@ fn failed_last_delegate_waits_for_its_admitted_sibling() {
 
 #[test]
 fn non_object_last_delegate_cannot_own_the_batch_wait() {
+    last_delegate_cannot_own_the_batch_wait(json!([1]), "invalid arguments");
+}
+
+#[test]
+fn schema_invalid_last_delegate_cannot_own_the_batch_wait() {
+    let mut unknown = args("child");
+    unknown["unknown"] = json!(true);
+    last_delegate_cannot_own_the_batch_wait(unknown, "/unknown");
+}
+
+fn last_delegate_cannot_own_the_batch_wait(invalid: Value, reason: &str) {
     let mut f = Fixture::new(true);
     let c = f.conversation();
     f.events(vec![
         call("d1", "delegate", args("child")),
-        call("d2", "delegate", json!([1])),
+        call("d2", "delegate", invalid),
         completed(),
     ]);
     f.send(&c, "invalid-args", "Delegate work");
@@ -439,7 +447,7 @@ fn non_object_last_delegate_cannot_own_the_batch_wait() {
         .last()
         .unwrap()
         .to_string();
-    assert!(body.contains("Verified child summary") && body.contains("invalid arguments"));
+    assert!(body.contains("Verified child summary") && body.contains(reason));
     assert!(matches!(
         graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
         DelegationStatus::Done { .. }
@@ -4180,7 +4188,7 @@ mod captures {
             call(
                 "learn",
                 "remember",
-                json!({"text":secret,"sensitive":true}),
+                json!({"text":secret,"sensitive":true,"source":"model_inferred"}),
             ),
             call(
                 "finish-child",
@@ -4227,7 +4235,11 @@ mod captures {
         let (_, edge) = f.begin(&c, "oubli-resume", args("child"));
         let secret = "Allergique aux kumquats mauves.";
         f.events(vec![
-            call("learn", "remember", json!({"text":secret,"sensitive":true})),
+            call(
+                "learn",
+                "remember",
+                json!({"text":secret,"sensitive":true,"source":"model_inferred"}),
+            ),
             call(
                 "finish-child",
                 "complete_task",

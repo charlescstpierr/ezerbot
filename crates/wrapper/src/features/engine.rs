@@ -1276,6 +1276,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
             &run.run_id,
             0,
             "signin_required",
+            None,
         );
         return Ok(());
     }

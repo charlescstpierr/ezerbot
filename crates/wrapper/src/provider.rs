@@ -1692,6 +1692,7 @@ impl Session {
             "oauth",
             200,
             "token_refresh_saved",
+            None,
         );
         if self.inner.codex {
             codex::update_profile(&mut credentials, &tokens)?;

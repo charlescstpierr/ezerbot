@@ -157,6 +157,7 @@ pub fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: &AtomicBool) -> ToolO
         run_id,
         status,
         "image",
+        None,
     );
     match result {
         Ok(bytes) => store(ctx, call, &bytes, aspect, cancel),

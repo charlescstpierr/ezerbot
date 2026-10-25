@@ -124,10 +124,16 @@ fn by_run<V>(
 fn events(connection: &Connection) -> Option<HashMap<String, Rc<Vec<RunEvent>>>> {
     let all = rows(
         connection,
+        // Only what the projection shows: the latest attempt of each message, in a conversation
+        // that is not deleted. Any other run is read by `store::events` if it is asked for.
         "SELECT e.run_id, e.seq, e.kind, e.payload FROM engine_run_events e
          JOIN engine_runs r ON r.run_id = e.run_id
-         WHERE r.trigger_kind = 'user_message' ORDER BY e.run_id, e.seq",
-        &[],
+         JOIN wrapper_conversations c ON c.account_id = ?1 AND c.id = r.conversation_id AND c.deleted = 0
+         WHERE r.trigger_kind = 'user_message'
+           AND r.attempt = (SELECT MAX(m.attempt) FROM engine_runs m
+                            WHERE m.trigger_kind = 'user_message' AND m.trigger_ref = r.trigger_ref)
+         ORDER BY e.run_id, e.seq",
+        &[&crate::ACCOUNT],
         |row| row.get::<_, String>(0),
         |row| {
             Ok((

@@ -602,6 +602,18 @@ impl Drop for App {
         features::routines::depart(&self.feature_context());
         // Quitter l’app tue les groupes encore suivis. Le redémarrage ne les relance pas.
         features::local::shutdown(&self.connection, &self.db_path);
+        // Les fils de fond (tour du moteur, sonde de connexion, suivis) ne doivent plus rien
+        // écrire dans le dossier de l'application une fois celle-ci détruite (#463). Seules les
+        // versions de développement et de test retiennent leurs fils : la version livrée n'attend
+        // rien, l'arrêt de l'application ne change pas. L'attente est bornée et échoue clairement.
+        #[cfg(debug_assertions)]
+        if let Err(message) = self.provider.wait_for_background_work() {
+            if std::thread::panicking() {
+                eprintln!("{message}");
+            } else {
+                panic!("{message}");
+            }
+        }
     }
 }
 

@@ -248,6 +248,28 @@ impl Provider {
     ) -> Result<(), String> {
         self.primary.wait_background_within(limit)
     }
+    /// Lance un fil de fond lié à cette connexion : en développement et en test, la destruction
+    /// de l'`App` l'attend (voir `Session::spawn_background`). Dans la version livrée, c'est un
+    /// `thread::spawn` détaché.
+    pub(crate) fn spawn_background(&self, work: impl FnOnce() + Send + 'static) {
+        self.primary.spawn_background(work);
+    }
+    pub(crate) fn try_spawn_background(
+        &self,
+        name: &str,
+        work: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<()> {
+        self.primary.try_spawn_background(name, work)
+    }
+    /// Comme `spawn_background`, pour un fil qui attend un événement externe et finit quand
+    /// `stop` est levé.
+    pub(crate) fn spawn_background_stoppable(
+        &self,
+        stop: Arc<AtomicBool>,
+        work: impl FnOnce() + Send + 'static,
+    ) {
+        self.primary.spawn_background_stoppable(stop, work);
+    }
     pub fn start_signin(&self) -> Result<String, Failure> {
         self.session().start_signin()
     }

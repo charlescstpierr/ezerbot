@@ -7,6 +7,10 @@
 use super::*;
 use std::{
     io::Read,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 pub(in super::super) mod comment;
@@ -193,10 +197,14 @@ pub(super) fn begin(ctx: &Context<'_>, server: &Server, m: Manifest) -> Result<V
     let provider = ctx.provider.clone();
     let server = server.clone();
     let deadline = Instant::now() + Duration::from_secs(lifetime);
-    std::thread::spawn(move || {
+    // Détruire l'App lève `stop` : l'attente de l'autorisation finit sans rien écrire (#463).
+    let stop = Arc::new(AtomicBool::new(false));
+    let waiting = stop.clone();
+    ctx.provider.spawn_background_stoppable(stop, move || {
         // Never print provider errors, codes or token bodies.
         let _ = wait_for_authorization(
             &path, &provider, &server, m, generation, &client, &device, interval, deadline,
+            &waiting,
         );
     });
     #[cfg(target_os = "macos")]
@@ -229,6 +237,7 @@ fn wait_for_authorization(
     device: &str,
     mut interval: u64,
     deadline: Instant,
+    stop: &AtomicBool,
 ) -> Result<(), ApiError> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(4))?;
@@ -256,12 +265,12 @@ fn wait_for_authorization(
     loop {
         let resume = Instant::now() + pace(interval);
         while Instant::now() < resume.min(deadline) {
-            if !current() {
+            if stop.load(Ordering::SeqCst) || !current() {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        if !current() {
+        if stop.load(Ordering::SeqCst) || !current() {
             return Ok(());
         }
         if Instant::now() >= deadline {

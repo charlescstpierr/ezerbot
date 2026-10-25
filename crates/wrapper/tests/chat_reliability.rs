@@ -264,6 +264,8 @@ struct Fixture {
     provider: Provider,
     app: App,
     chat: String,
+    // Déclaré après l'App : supprimé après elle (et après ses fils de fond, qu'elle attend).
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new(signed: bool) -> Self {
@@ -277,14 +279,8 @@ impl Fixture {
         fixture
     }
     fn with_deadline(signed: bool, deadline: Duration) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "ezerbot-reliable-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = dir.join("app.sqlite");
+        let guard = grokbot_test_support::TestDir::new("ezerbot-reliable");
+        let db = guard.join("app.sqlite");
         let fake = Fake::new();
         if signed {
             save_token(&db, false);
@@ -311,6 +307,7 @@ impl Fixture {
             provider,
             app,
             chat,
+            _dir: guard,
         }
     }
     fn send(&mut self, fault: Fault) {
@@ -339,11 +336,6 @@ impl Fixture {
     fn settled(&mut self) -> Value {
         until(|| !self.reply().is_null() && self.reply()["state"] != "streaming");
         self.reply()
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.db.parent().unwrap());
     }
 }
 fn save_token(db: &std::path::Path, expired: bool) {

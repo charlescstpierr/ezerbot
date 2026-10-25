@@ -8,6 +8,7 @@ pub mod context;
 pub mod contracts;
 pub mod model;
 pub mod run_loop;
+pub mod schema;
 pub mod store;
 
 pub fn migrate(conn: &rusqlite::Connection) -> contracts::Result<()> {

@@ -357,7 +357,14 @@ textarea.text-input:disabled {
 .gb-source-open:hover, .gb-source-close:hover { background: var(--soft); }
 .gb-source-open:focus-visible, .gb-source-close:focus-visible, .gb-sources summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .gb-source-problem { flex-basis: 100%; color: var(--warning-text); font-size: 11.5px; line-height: 1.45; }
-.gb-sources { margin-top: 10px; font-size: 12px; }
+.gb-provenance { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 8px; margin-top: 10px; }
+.gb-provenance:empty { display: none; }
+.gb-sources { font-size: 12px; }
+.gb-sources[open] { flex: 1 1 100%; }
+.gb-memory-used { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--soft); color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+.gb-memory-used svg { width: 13px; height: 13px; flex: 0 0 auto; }
+.gb-memory-used:hover { color: var(--text); }
+.gb-memory-used:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .gb-sources summary { display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px 4px 6px; border: 1px solid var(--line); border-radius: 999px; background: var(--soft); color: var(--muted); list-style: none; cursor: pointer; user-select: none; }
 .gb-sources summary::-webkit-details-marker { display: none; }
 .gb-sources summary:hover { color: var(--text); }

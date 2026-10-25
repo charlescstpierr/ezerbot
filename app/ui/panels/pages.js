@@ -146,8 +146,10 @@
     return Boolean(thread && thread.bot_id && detail && detail.bot_id && thread.bot_id !== detail.bot_id);
   }
 
-  // Le moteur vérifie le passage dans le texte affiché de la Page à l'état initial, en ignorant les blancs.
-  const blanks = (text) => String(text).replace(/\p{White_Space}+/gu, "");
+  // Le moteur vérifie le passage dans le texte affiché de la Page à l'état initial, chaque suite de blancs (Unicode
+  // White_Space) réduite à un espace : la même règle que `collapsed` dans anchors.rs. Un blanc au milieu d'un mot, ou
+  // absent entre deux cellules (l'aperçu en met un à chaque frontière de bloc), ne passe pas.
+  const collapsed = (text) => String(text).split(/\p{White_Space}+/u).filter(Boolean).join(" ");
 
   // Le passage est le texte sélectionné, rogné comme le moteur le rogne ; la sélection doit tenir toute dans le canevas.
   function selectedPassage() {
@@ -159,7 +161,7 @@
     const passage = selection.toString().replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
     if (!passage || [...passage].length > passageLimit) return null;
     // Un texte changé par l'état interactif de la Page (« Offre choisie : Confort ») n'est pas dans l'aperçu que le moteur contrôle.
-    if (!blanks(detail.preview || "").includes(blanks(passage))) return null;
+    if (!collapsed(detail.preview || "").includes(collapsed(passage))) return null;
     const target = range.getBoundingClientRect();
     const view = shell.canvas.getBoundingClientRect();
     if (target.bottom < view.top || target.top > view.bottom) return null;

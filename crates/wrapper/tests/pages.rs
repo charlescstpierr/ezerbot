@@ -702,7 +702,11 @@ fn the_preview_marks_each_cell_and_block_and_keeps_inline_text_glued() {
     f.write("ecrit", source);
     let preview = f.page()["preview"].as_str().unwrap().to_owned();
     let words: Vec<_> = preview.split_whitespace().collect();
-    assert_eq!(words.join(" "), "Forfaits Confort 19 € Confort 21 €", "{preview:?}");
+    assert_eq!(
+        words.join(" "),
+        "Forfaits Confort 19 € Confort 21 €",
+        "{preview:?}"
+    );
     assert!(!preview.contains("Confort19"), "{preview:?}");
     assert!(preview.contains("Confort 21 €"), "{preview:?}");
 }
@@ -723,17 +727,29 @@ fn a_page_stored_with_the_old_glued_preview_is_rebuilt_when_the_app_opens() {
         .unwrap();
     let chat = f.chat.clone();
     let error = f
-        .send_in(&chat, "colle", Some(Fixture::anchor(&page, "Confort\t19 €")))
+        .send_in(
+            &chat,
+            "colle",
+            Some(Fixture::anchor(&page, "Confort\t19 €")),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("n’apparaît pas"), "{error}");
     f.reopen();
     assert_eq!(f.page()["preview"], current.as_str());
     f.answer(None);
-    f.send_in(&chat, "rebati", Some(Fixture::anchor(&page, "Confort\t19 €")))
-        .unwrap();
+    f.send_in(
+        &chat,
+        "rebati",
+        Some(Fixture::anchor(&page, "Confort\t19 €")),
+    )
+    .unwrap();
     f.finish("rebati");
     f.reopen();
-    assert_eq!(f.page()["preview"], current.as_str(), "une deuxième ouverture ne change rien");
+    assert_eq!(
+        f.page()["preview"],
+        current.as_str(),
+        "une deuxième ouverture ne change rien"
+    );
 }
 
 #[test]
@@ -742,8 +758,12 @@ fn a_two_cell_anchor_survives_a_restart_and_its_resend_unchanged() {
     let page = f.page();
     f.answer(None);
     let chat = f.chat.clone();
-    f.send_in(&chat, "cellules", Some(Fixture::anchor(&page, "Confort\t19 €")))
-        .unwrap();
+    f.send_in(
+        &chat,
+        "cellules",
+        Some(Fixture::anchor(&page, "Confort\t19 €")),
+    )
+    .unwrap();
     f.finish("cellules");
     let kept = f.page()["anchors"].clone();
     f.reopen();

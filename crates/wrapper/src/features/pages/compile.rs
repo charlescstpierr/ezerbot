@@ -944,7 +944,11 @@ fn preview_node(
                 }
             }
         }
-        Node::Element { children, .. } => {
+        Node::Element { tag, children, .. } => {
+            let block = is_block(tag);
+            if block {
+                push_text(out, BREAK)?;
+            }
             for child in children {
                 let next = if nests(child) {
                     if depth >= MAX_DEPTH {
@@ -956,9 +960,24 @@ fn preview_node(
                 };
                 preview_node(child, row, states, out, next, remaining_visits)?;
             }
+            if block {
+                push_text(out, BREAK)?;
+            }
         }
     }
     Ok(())
+}
+
+/// Written where the browser starts a new line or cell (a tab or a line break in a selection) so that
+/// the preview, once its blanks are collapsed, reads like what Charles selects: "Confort 19 €",
+/// never "Confort19 €". Inline elements stay glued to their text, as on screen. The breaks count in
+/// the same text budget, so this side refuses a Page at most earlier than the one in pages.js.
+const BREAK: &str = " ";
+
+/// The tags `ALLOWED` lets through that the browser shows inline; every other one is a block, a
+/// row, a cell or a list item.
+fn is_block(tag: &str) -> bool {
+    !matches!(tag, "button" | "em" | "span" | "strong")
 }
 
 fn value_nests(value: &Value) -> bool {
@@ -1330,14 +1349,16 @@ mod tests {
             .expect("une Page valide")
             .preview
         };
+        // Each block opens and closes with one `BREAK`; the inline elements and the blanks of a line stay as written,
+        // and the newlines between two tags add no text of their own.
         assert_eq!(
             page("<p><strong>Plan</strong> <em>Premium</em></p>"),
-            "Plan Premium"
+            " Plan Premium "
         );
-        assert_eq!(page("<p>{prenom} {nom}</p>"), "Ada Lovelace");
+        assert_eq!(page("<p>{prenom} {nom}</p>"), " Ada Lovelace ");
         assert_eq!(
             page("<div>\n  <p>{prenom}</p>\n  <p>{nom}</p>\n</div>"),
-            "AdaLovelace"
+            "  Ada  Lovelace  "
         );
     }
 

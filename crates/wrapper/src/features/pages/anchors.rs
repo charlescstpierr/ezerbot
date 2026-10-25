@@ -68,10 +68,16 @@ pub fn check_resend(
     Ok(())
 }
 
-/// Le texte affiché colle les nœuds sans séparateur, alors qu'une sélection sur plusieurs cellules ou
-/// paragraphes en porte (tabulations, retours) : on compare sans aucun blanc, le passage reste stocké tel qu'envoyé.
-fn squeezed(text: &str) -> String {
-    text.chars().filter(|c| !c.is_whitespace()).collect()
+/// Une sélection sur plusieurs cellules ou paragraphes porte des tabulations et des retours à la ligne,
+/// l'aperçu un espace à chaque frontière de bloc (`compile::BREAK`) : on compare les deux avec chaque suite
+/// de blancs (propriété Unicode White_Space) réduite à un seul espace, comme `collapsed` dans
+/// app/ui/panels/pages.js. Un blanc au milieu d'un mot, ou un blanc absent entre deux cellules, ne passe donc
+/// pas. Le passage reste stocké tel qu'envoyé.
+fn collapsed(text: &str) -> String {
+    text.split(char::is_whitespace)
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Refuse sans rien écrire ; l'appelant garde le message dans la même transaction.
@@ -120,7 +126,7 @@ pub fn record(
             "Une ancre de Page ne peut viser que le bot propriétaire de la Page : ne mentionnez pas d’autre bot.",
         ));
     }
-    if !squeezed(&shown).contains(&squeezed(passage)) {
+    if !collapsed(&shown).contains(&collapsed(passage)) {
         return Err(ApiError::new(
             400,
             "Ce passage n’apparaît pas dans le texte affiché de la Page.",
@@ -292,7 +298,7 @@ fn source_lines(source: &str, passage: &str) -> Vec<(usize, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{for_message, migrate, source_lines, squeezed};
+    use super::{collapsed, for_message, migrate, source_lines};
     use rusqlite::Connection;
 
     fn bench() -> Connection {
@@ -341,11 +347,15 @@ mod tests {
     }
 
     #[test]
-    fn squeezing_ignores_every_kind_of_blank() {
+    fn collapsing_reduces_every_run_of_blanks_to_one_space() {
         assert_eq!(
-            squeezed("Forfait B\t19 €\n\u{a0}Famille"),
-            "ForfaitB19€Famille"
+            collapsed("Forfait B\t19 €\n\u{a0}Famille"),
+            "Forfait B 19 € Famille"
         );
+        assert_eq!(collapsed("  a \r\n\t\u{2003}b  "), "a b");
+        assert_eq!(collapsed("Con fort"), "Con fort");
+        assert_ne!(collapsed("Con fort"), collapsed("Confort"));
+        assert_eq!(collapsed(" \t"), "");
     }
 
     #[test]

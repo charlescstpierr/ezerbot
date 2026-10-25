@@ -87,7 +87,15 @@ fn is_text_asset(path: &std::path::Path) -> bool {
     )
 }
 
+/// Brotli 11 takes seconds on the large bundles and every edit under app/ui reruns this
+/// script, so a file whose bytes match the copy kept from the last run is not recompressed.
+/// The copy is written last: an interrupted run never leaves stale variants behind it.
+/// New compression settings reach unchanged files only after `cargo clean -p grokbot-wrapper`.
 fn write_variants(output: &std::path::Path, relative: &str, bytes: &[u8]) {
+    let source = output.join("source").join(relative);
+    if fs::read(&source).is_ok_and(|previous| previous == bytes) {
+        return;
+    }
     let mut gzip = gzip(bytes);
     let mut smallest = bytes.len();
     if gzip.len() < smallest {
@@ -101,6 +109,9 @@ fn write_variants(output: &std::path::Path, relative: &str, bytes: &[u8]) {
     }
     write_variant(output, "gzip", "gz", relative, &gzip);
     write_variant(output, "brotli", "br", relative, &brotli);
+    fs::create_dir_all(source.parent().expect("source directory"))
+        .expect("create source directory");
+    fs::write(source, bytes).expect("write source copy");
 }
 
 fn gzip(bytes: &[u8]) -> Vec<u8> {

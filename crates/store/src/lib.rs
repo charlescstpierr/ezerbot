@@ -359,6 +359,22 @@ impl SessionStore {
         Ok(self.read_journal()?.0.export_committed())
     }
 
+    /// Plus haute génération enregistrée pour le compte, sans relire les soumissions.
+    pub fn latest_generation(&self) -> Result<Option<AccountGeneration>, StoreError> {
+        let latest: Option<i64> = self.connection.query_row(
+            "SELECT MAX(generation) FROM submissions WHERE account_id = ?1",
+            params![self.account_id.as_str()],
+            |row| row.get(0),
+        )?;
+        latest
+            .map(|generation| {
+                u64::try_from(generation)
+                    .map(AccountGeneration)
+                    .map_err(|_| StoreError::Invalid("génération négative".into()))
+            })
+            .transpose()
+    }
+
     fn check_origin(&self, account: &AccountId, path: &Path) -> Result<(), StoreError> {
         if account != &self.account_id {
             return Err(StoreError::AccountMismatch);
@@ -719,6 +735,37 @@ mod tests {
         save_fixture_journal(&mut store_alice, &Journal::new()).unwrap();
         assert!(store_alice.list_submissions().unwrap().is_empty());
         assert_eq!(store_bob.list_submissions().unwrap()[0].body, "bob-body");
+    }
+
+    #[test]
+    fn la_derniere_generation_est_celle_du_compte() {
+        let db = TestDatabase::new("latest-generation");
+        let alice = must_id(AccountId::new("alice"));
+        let bob = must_id(AccountId::new("bob"));
+        let mut store_alice = open_store(&db.0, &alice).unwrap();
+        let mut store_bob = open_store(&db.0, &bob).unwrap();
+        assert_eq!(store_alice.latest_generation().unwrap(), None);
+        for (store, account, generation) in
+            [(&mut store_alice, &alice, 4), (&mut store_bob, &bob, 9)]
+        {
+            let mut journal = journal_for(account, "first", "corps");
+            journal
+                .adopt_generation(&AuthenticatedActor {
+                    account_id: account.clone(),
+                    generation: AccountGeneration(generation),
+                    team_id: None,
+                })
+                .unwrap();
+            save_fixture_journal(store, &journal).unwrap();
+        }
+        assert_eq!(
+            store_alice.latest_generation().unwrap(),
+            Some(AccountGeneration(4))
+        );
+        assert_eq!(
+            store_bob.latest_generation().unwrap(),
+            Some(AccountGeneration(9))
+        );
     }
 
     #[test]

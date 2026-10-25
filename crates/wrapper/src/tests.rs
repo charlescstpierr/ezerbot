@@ -2292,8 +2292,12 @@ fn a_state_read_projects_the_history_like_a_conversation_read_message_by_message
     let mut app = App::open(&db.0).unwrap();
     let chat = conversation(&mut app);
     let other = conversation(&mut app);
+    let gone = conversation(&mut app);
+    let lost = conversation(&mut app);
     seed_attachments(&app);
     for (conversation, message) in [
+        (&gone, "m6"),
+        (&lost, "m7"),
         (&chat, "m1"),
         (&chat, "m2"),
         (&chat, "m3"),
@@ -2321,6 +2325,7 @@ fn a_state_read_projects_the_history_like_a_conversation_read_message_by_message
             .to_owned()
     };
     let (run1, run2) = (run_of(&mut app, "m1"), run_of(&mut app, "m2"));
+    let run5 = run_of(&mut app, "m5");
     {
         let tx = super::features::write_transaction(&app.connection).unwrap();
         grokbot_attachments::staging::link_attachments(&tx, &chat, "m1", &["image-a".into()])
@@ -2337,10 +2342,70 @@ fn a_state_read_projects_the_history_like_a_conversation_read_message_by_message
         .unwrap();
         // A meeting summary is not shown as a message of its own.
         tx.execute("INSERT INTO wrapper_meetings(id,conversation_id,title,status,created_at,message_id) VALUES ('meeting-1',?1,'Réunion','ready',1,'m4')", [&chat]).unwrap();
+        let document =
+            grokbot_attachments::documents::prepare(&tx, "note.txt", b"Bonjour").unwrap();
+        grokbot_attachments::documents::save(&tx, &document).unwrap();
+        grokbot_attachments::documents::link(&tx, &chat, "m3", std::slice::from_ref(&document.id))
+            .unwrap();
+        tx.execute("INSERT INTO memory_facts(fact_id,bot_id,scope,text,provenance,learned_at,status,sensitive) VALUES ('fact-1','grokbot','private','Un souvenir','test',1,'active',0)", []).unwrap();
+        tx.execute(
+            "INSERT INTO memory_recalled(run_id,fact_id) VALUES (?1,'fact-1')",
+            [&run1],
+        )
+        .unwrap();
+        // A retry: the second attempt of m5 is the one shown, with its own events and errors.
+        tx.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) SELECT 'retry-run',bot_id,conversation_id,trigger_kind,trigger_ref,2,status,json_set(record,'$.run_id','retry-run','$.trigger.attempt',2) FROM engine_runs WHERE run_id=?1", [&run5]).unwrap();
+        tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model,notice) SELECT 'retry-run',input_json,live,model,'Deuxième essai' FROM wrapper_engine_runs WHERE run_id=?1", [&run5]).unwrap();
+        tx.execute("INSERT INTO engine_run_events(run_id,seq,kind,payload) SELECT 'retry-run',seq,kind,payload FROM engine_run_events WHERE run_id=?1", [&run5]).unwrap();
+        // A task run of a routine is projected as a card of its own: no user message started it.
+        tx.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) SELECT 'task-run',bot_id,conversation_id,'occurrence','occ-1',0,status,json_set(record,'$.run_id','task-run','$.kind','task','$.trigger',json('{\"kind\":\"occurrence\",\"occurrence_id\":\"occ-1\"}')) FROM engine_runs WHERE run_id=?1", [&run1]).unwrap();
+        tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model,notice) SELECT 'task-run',input_json,live,model,'Tâche' FROM wrapper_engine_runs WHERE run_id=?1", [&run1]).unwrap();
+        tx.execute("INSERT INTO engine_run_events(run_id,seq,kind,payload) SELECT 'task-run',seq,kind,payload FROM engine_run_events WHERE run_id=?1", [&run1]).unwrap();
+        tx.execute("INSERT INTO wrapper_run_sources(run_id,n,key,kind,title) VALUES ('task-run',1,'k2','web','Source de la tâche')", []).unwrap();
+        tx.execute("INSERT INTO engine_response_usage(run_id,response,input_tokens,output_tokens,cached_input_tokens) VALUES ('task-run',1,3,2,0)", []).unwrap();
+        super::features::conversations::append_entry(&tx, &chat, "engine_reply", "task-run", 5)
+            .unwrap();
+        tx.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) SELECT 'delegated-run',bot_id,conversation_id,'delegation','delegation-1',0,status,json_set(record,'$.run_id','delegated-run','$.kind','task','$.trigger',json('{\"kind\":\"delegation\",\"delegation_id\":\"delegation-1\"}')) FROM engine_runs WHERE run_id=?1", [&run1]).unwrap();
+        tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model,notice) SELECT 'delegated-run',input_json,live,model,'Délégation' FROM wrapper_engine_runs WHERE run_id=?1", [&run1]).unwrap();
+        tx.execute("INSERT INTO engine_run_events(run_id,seq,kind,payload) SELECT 'delegated-run',seq,kind,payload FROM engine_run_events WHERE run_id=?1", [&run1]).unwrap();
+        tx.execute(
+            "INSERT INTO memory_recalled(run_id,fact_id) VALUES ('delegated-run','fact-1')",
+            [],
+        )
+        .unwrap();
+        super::features::conversations::append_entry(
+            &tx,
+            &chat,
+            "engine_reply",
+            "delegated-run",
+            6,
+        )
+        .unwrap();
+        // The rows of a deleted conversation are not read for the projection.
+        tx.execute("INSERT INTO wrapper_run_sources(run_id,n,key,kind,title) SELECT run_id,1,'k3','web','Supprimée' FROM engine_runs WHERE conversation_id=?1", [&gone]).unwrap();
         tx.commit().unwrap();
     }
+    post(&mut app, "/api/conversations/delete", json!({"id": gone})).unwrap();
+    // A conversation without row of its own is shown as a recovered one.
+    app.connection
+        .execute("DELETE FROM wrapper_conversations WHERE id = ?1", [&lost])
+        .unwrap();
     let state = app.api("GET", "/api/state", b"").unwrap();
-    for id in [&chat, &other] {
+    assert!(state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|c| c["id"] != gone));
+    assert_eq!(
+        state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == lost)
+            .unwrap()["title"],
+        "Conversation récupérée"
+    );
+    for id in [&chat, &other, &lost] {
         let alone = serde_json::to_value(app.conversation(id).unwrap().unwrap()).unwrap();
         let listed = state["conversations"]
             .as_array()
@@ -2377,10 +2442,65 @@ fn a_state_read_projects_the_history_like_a_conversation_read_message_by_message
     );
     assert_eq!(find("reply-m2").unwrap()["notice"], "À noter");
     assert!(find("m4").is_none() && find("reply-m4").is_none());
-    assert!(find("m3").unwrap()["attachments"]
+    assert!(find("reply-m3").unwrap()["attachments"]
         .as_array()
         .unwrap()
         .is_empty());
     assert_eq!(find("m3").unwrap()["payload"]["mentions"], json!([]));
     assert!(find("reply-m3").unwrap()["payload"]["usage"].is_null());
+    assert_eq!(find("m3").unwrap()["attachments"][0]["name"], "note.txt");
+    assert_eq!(
+        find("reply-m1").unwrap()["payload"]["recalled_fact_ids"],
+        json!(["fact-1"])
+    );
+    assert_eq!(
+        find("reply-task-run").unwrap()["payload"]["sources"][0]["titre"],
+        "Source de la tâche"
+    );
+    assert_eq!(
+        find("reply-task-run").unwrap()["payload"]["usage"]["input_tokens"],
+        3
+    );
+    assert_eq!(
+        find("reply-delegated-run").unwrap()["payload"]["recalled_fact_ids"],
+        json!(["fact-1"])
+    );
+    let retried = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == other)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "reply-m5")
+        .unwrap()
+        .clone();
+    assert_eq!(retried["payload"]["run_id"], "retry-run");
+    assert_eq!(retried["notice"], "Deuxième essai");
+}
+
+/// An event `store::events` cannot decode fails the read of its run, as it did before the lookups
+/// were batched: the state reports the error of the conversation read, not a different one.
+#[test]
+fn an_undecodable_event_fails_a_state_read_like_a_conversation_read() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let chat = conversation(&mut app);
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id": chat, "message_id": "m1", "body": "Question"}),
+    )
+    .unwrap();
+    app.connection
+        .execute(
+            "INSERT INTO engine_run_events(run_id,seq,kind,payload) SELECT run_id,1000,'pas_un_evenement','{}' FROM engine_runs",
+            [],
+        )
+        .unwrap();
+    let alone = app.conversation(&chat).map(|_| ()).unwrap_err();
+    let state = app.api("GET", "/api/state", b"").unwrap_err();
+    assert_eq!((state.status, state.message), (alone.status, alone.message));
 }

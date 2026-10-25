@@ -19,6 +19,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, title TEXT NOT NULL,
         status TEXT NOT NULL, transcript TEXT NOT NULL DEFAULT '', duration_ms INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL, expires_at INTEGER, audio BLOB, message_id TEXT);
+        CREATE INDEX IF NOT EXISTS wrapper_meetings_message ON wrapper_meetings(conversation_id, message_id);
         CREATE TABLE IF NOT EXISTS wrapper_meeting_settings (id INTEGER PRIMARY KEY CHECK(id=1), audio_days INTEGER NOT NULL);
         INSERT OR IGNORE INTO wrapper_meeting_settings VALUES (1,7);
         UPDATE wrapper_meetings SET status='interrupted',audio=NULL,expires_at=NULL WHERE status='recording';")?;

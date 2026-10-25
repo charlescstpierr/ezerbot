@@ -56,6 +56,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         ended_at INTEGER, summary TEXT NOT NULL DEFAULT '', explanation TEXT NOT NULL DEFAULT '',
         keep_images INTEGER NOT NULL DEFAULT 0, message_id TEXT, request_id TEXT,
         skill_id TEXT, notice TEXT NOT NULL DEFAULT '');
+        CREATE INDEX IF NOT EXISTS wrapper_demonstrations_message ON wrapper_demonstrations(conversation_id, message_id);
         CREATE TABLE IF NOT EXISTS wrapper_demonstration_images (
         demonstration_id TEXT NOT NULL, position INTEGER NOT NULL, image TEXT NOT NULL,
         PRIMARY KEY(demonstration_id,position));",

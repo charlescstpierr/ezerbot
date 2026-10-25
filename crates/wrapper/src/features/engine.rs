@@ -2880,7 +2880,7 @@ pub fn reply(
     conversation: &str,
     message: &str,
 ) -> Result<Option<Message>, ApiError> {
-    let latest = match crate::projection_hints::user_run(&format!("{conversation}/{message}")) {
+    let latest = match crate::projection_hints::user_run(conversation, message) {
         crate::projection_hints::Known::Row(run) => Some(run),
         crate::projection_hints::Known::Absent => None,
         crate::projection_hints::Known::Unknown => {

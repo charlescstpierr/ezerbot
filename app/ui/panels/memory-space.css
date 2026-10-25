@@ -19,3 +19,9 @@
 .memory-space-chip { max-width: 100%; padding: 2px 8px; border-radius: 999px; background: var(--soft); color: var(--text); font-size: 11.5px; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .memory-space-date { font-size: 11.5px; color: var(--muted); }
 .memory-space-empty { margin: 0; padding: 18px; font-size: 12px; line-height: 1.6; color: var(--muted); border: 1px dashed var(--line); border-radius: 9px; }
+/* « N souvenirs utilisés » : le bandeau qui dit d'où l'on vient et ce que la réponse a rappelé. */
+.memory-space-used { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); }
+.memory-space-used[hidden] { display: none; }
+.memory-space-used p { flex: 1 1 240px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--text); }
+.memory-space-used .memory-space-used-problem { flex-basis: 100%; color: var(--danger-text); }
+.memory-space-used-actions { display: flex; flex-wrap: wrap; gap: 8px; }

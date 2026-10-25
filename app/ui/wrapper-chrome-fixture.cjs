@@ -12,6 +12,7 @@ const { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSyn
 const { tmpdir } = require("node:os");
 const { basename, dirname, isAbsolute, join } = require("node:path");
 const { chromeBinary } = require("./chrome-binary.cjs");
+const { LaunchIdentity, connectCdp } = require("./local-api-client.cjs");
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -136,35 +137,6 @@ function debuggingPort(directory, chrome) {
   })();
 }
 
-function connectCdp(url) {
-  const ws = new WebSocket(url);
-  const pending = new Map();
-  let next = 0;
-  ws.addEventListener("message", (event) => {
-    const message = JSON.parse(String(event.data));
-    if (!message.id || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
-    pending.delete(message.id);
-    if (message.error) reject(new Error(message.error.message));
-    else resolve(message.result || {});
-  });
-  return new Promise((resolve, reject) => {
-    ws.addEventListener("open", () => resolve({
-      send(method, params = {}) {
-        return new Promise((resolveSend, rejectSend) => {
-          const id = ++next;
-          pending.set(id, { resolve: resolveSend, reject: rejectSend });
-          ws.send(JSON.stringify({ id, method, params }));
-        });
-      },
-      close() { ws.close(); },
-    }));
-    ws.addEventListener("error", () => reject(new Error("devtools websocket failed")));
-  });
-}
-
-// Each request gets only the time left, so a debugging port that accepts and never answers fails
-// at the bound like a page that never opens.
 async function pageTarget(port, ms = 10000) {
   const deadline = Date.now() + ms;
   const message = "chrome did not open a page target";
@@ -226,11 +198,11 @@ function watchChild(name, child, details = () => "") {
 // command runs.
 const HOLD = 'IFS= read -r go <&3 && [ "$go" = go ] || exit 1; exec "$0" "$@" 3<&-';
 
-function spawnGroup(command, args, options = {}, register = () => {}) {
+function spawnGroup(command, args, options = {}, register = () => {}, start = spawn) {
   const stdio = typeof options.stdio === "string" ? [options.stdio, options.stdio, options.stdio] : [...(options.stdio || [])];
   while (stdio.length < 3) stdio.push(undefined);
   stdio[3] = "pipe";
-  const child = spawn("/bin/sh", ["-c", HOLD, command, ...args], { ...options, stdio, detached: true });
+  const child = start("/bin/sh", ["-c", HOLD, command, ...args], { ...options, stdio, detached: true });
   const hold = child.stdio[3];
   hold?.on("error", () => {});
   const go = () => hold?.end("go\n");
@@ -507,6 +479,7 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
   writeFakeSession(dbDir);
 
   let stderr = "";
+  const identity = new LaunchIdentity();
   const wrapper = spawnGroup(binary, ["--port", "0", "--db", join(dbDir, "app.sqlite")], {
     env: {
       PATH: process.env.PATH,
@@ -517,7 +490,7 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
       GROKBOT_FAKE_OPENAI: openai.base,
     },
     stdio: ["ignore", "pipe", "pipe"],
-  }, (pid) => guard.register("wrapper", pid));
+  }, (pid) => guard.register("wrapper", pid), identity.spawn.bind(identity));
   processes.wrapper = wrapper;
   wrapper.stderr.on("data", (chunk) => { if (stderr.length < 4000) stderr += chunk; });
   const details = () => (stderr ? `: ${stderr}` : "");
@@ -530,6 +503,11 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
     "--no-sandbox",
     "--disable-gpu",
     "--disable-dev-shm-usage",
+    "--incognito",
+    "--use-mock-keychain",
+    "--password-store=basic",
+    "--disable-breakpad",
+    "--disable-crash-reporter",
     "--remote-allow-origins=*",
     "--remote-debugging-port=0",
     `--user-data-dir=${join(chromeDir, "profile")}`,
@@ -548,7 +526,7 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
       const late = `${path} did not answer in time${details()}`;
       return beforeDeadline((async () => {
         const signal = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
-        const response = await fetch(`${url}${path}`, body === undefined ? { headers, signal } : { method: "POST", headers, signal, body: JSON.stringify(body) });
+        const response = await identity.fetch(`${url}${path}`, body === undefined ? { headers, signal } : { method: "POST", headers, signal, body: JSON.stringify(body) });
         const text = await response.text();
         if (!response.ok) throw new Error(`${path} ${response.status}: ${text}${details()}`);
         return JSON.parse(text);
@@ -580,6 +558,7 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
       }
       return result.result.value;
     };
+    watches.push(await identity.authenticateBrowser(cdp, url));
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     await cdp.send("Page.navigate", { url });

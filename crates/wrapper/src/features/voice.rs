@@ -35,6 +35,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         audio BLOB NOT NULL, created_at INTEGER NOT NULL, words TEXT NOT NULL DEFAULT '[]');
         CREATE TABLE IF NOT EXISTS wrapper_voice_microphone (id INTEGER PRIMARY KEY CHECK(id=1), microphone TEXT NOT NULL);
         INSERT OR IGNORE INTO wrapper_voice_microphone VALUES(1,'');
+        CREATE INDEX IF NOT EXISTS wrapper_voice_memos_message ON wrapper_voice_memos(conversation_id, message_id);
         CREATE TABLE IF NOT EXISTS wrapper_dictation_language (id INTEGER PRIMARY KEY CHECK(id=1), language TEXT NOT NULL);
         INSERT OR IGNORE INTO wrapper_dictation_language VALUES(1,'');",
     )?;

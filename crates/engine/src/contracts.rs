@@ -282,8 +282,9 @@ pub struct ToolCall {
     /// The gateway preserves invalid/truncated/non-object JSON as Value::String(raw).
     /// Such strings carry the original provider argument text for faithful replay.
     /// Before check_approval or request_approval, the loop rejects non-object
-    /// arguments with a per-call Failed outcome ("invalid arguments"), retaining
-    /// the call ID and continuing the turn without asking the user to approve it.
+    /// or schema-nonconforming arguments (internal tools) with a per-call Failed
+    /// outcome ("invalid arguments", or the schema errors), retaining the call ID
+    /// and continuing the turn without asking the user to approve it.
     pub arguments: Value,
 }
 
@@ -300,6 +301,30 @@ pub enum ToolOutcome {
     Done { output: Value },
     Failed { reason: String },
     Suspend { cause: SuspendCause },
+}
+
+/// Classe fixe d'un appel d'outil réglé, pour le journal local : jamais le texte de la raison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCode {
+    Ok,
+    Failed,
+    InvalidArguments,
+    UnknownTool,
+    FollowUpPending,
+    ApprovalDenied,
+    ApprovalPending,
+    Uncertain,
+    NotExecuted,
+}
+
+impl ToolCode {
+    pub fn of(outcome: &ToolOutcome) -> Self {
+        match outcome {
+            ToolOutcome::Done { .. } | ToolOutcome::Suspend { .. } => Self::Ok,
+            ToolOutcome::Failed { .. } => Self::Failed,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,3 +1,4 @@
+import { localResourceURL } from "./local-resource.js";
 import { useEffect, useRef, useState } from "react";
 import { formatAttachmentSize } from "./attachment-presentation.js";
 import { documentToolView } from "./generated-presentation.js";
@@ -39,7 +40,7 @@ function PreviewDialog({ file, onClose }) {
   useEffect(() => { dialog.current.showModal(); }, []);
   return <dialog className="gb-file-save gb-file-zoom" ref={dialog} onClose={onClose} aria-label={`Aperçu : ${file.name}`}>
     <div className="gb-local-header"><strong>{file.name}</strong><button type="button" className="gb-retry" autoFocus onClick={onClose}>Fermer</button></div>
-    <div className={`gb-file-zoom-content${file.format === "svg" ? " gb-file-zoom-diagram" : ""}`}><img src={file.preview_url} alt={`Aperçu agrandi : ${file.name}`} /></div>
+    <div className={`gb-file-zoom-content${file.format === "svg" ? " gb-file-zoom-diagram" : ""}`}><img src={localResourceURL(file.preview_url)} alt={`Aperçu agrandi : ${file.name}`} /></div>
   </dialog>;
 }
 
@@ -65,7 +66,7 @@ export function GeneratedDocument({ file, message }) {
   return <article className="gb-message gb-engine-card gb-generated-file" data-message-id={message.id} data-card-kind="generated-document">
     <div className="gb-file-heading"><strong title={file.name}>{file.name}</strong><span>Document créé</span></div>
     <p className="gb-file-metadata">{file.format.toUpperCase()} · {formatAttachmentSize(file.byte_length)}{file.format === "pptx" && ` · ${file.pages} diapositive${file.pages > 1 ? "s" : ""}`}{file.format === "pdf" && ` · ${file.pages} page${file.pages > 1 ? "s" : ""}`}</p>
-    {previewError ? <p className="gb-file-hint">Aperçu indisponible. Le fichier peut toujours être ouvert ou enregistré.</p> : <button type="button" className={`gb-file-preview-button${["csv", "xlsx"].includes(file.format) ? " gb-file-preview-table" : ""}`} onClick={() => setZoom(true)} aria-label={`Agrandir l’aperçu de ${file.name}`}><img className={`gb-file-preview${file.format === "svg" ? " gb-file-diagram" : ""}`} src={file.preview_url} alt={file.format === "svg" ? `Diagramme : ${file.name}` : `Aperçu du document : ${file.name}`} onError={() => setPreviewError(true)} /></button>}
+    {previewError ? <p className="gb-file-hint">Aperçu indisponible. Le fichier peut toujours être ouvert ou enregistré.</p> : <button type="button" className={`gb-file-preview-button${["csv", "xlsx"].includes(file.format) ? " gb-file-preview-table" : ""}`} onClick={() => setZoom(true)} aria-label={`Agrandir l’aperçu de ${file.name}`}><img className={`gb-file-preview${file.format === "svg" ? " gb-file-diagram" : ""}`} src={localResourceURL(file.preview_url)} alt={file.format === "svg" ? `Diagramme : ${file.name}` : `Aperçu du document : ${file.name}`} onError={() => setPreviewError(true)} /></button>}
     <div className="gb-file-actions"><button type="button" className="gb-retry gb-retry-primary" disabled={pending} onClick={() => act("open")}>Ouvrir</button><button type="button" className="gb-retry" disabled={pending} onClick={() => act("reveal")}>Afficher dans le Finder</button><button type="button" className="gb-retry" disabled={pending} onClick={() => { setError(""); setSaving(true); }}>Enregistrer sous…</button></div>
     <p className="gb-file-hint">Conservé dans le stockage d’Ezerbot. Les actions sur le Mac nécessitent votre approbation.</p>
     {error && !saving && <p className="gb-file-error" role="alert">{error}</p>}

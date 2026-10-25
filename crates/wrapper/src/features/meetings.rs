@@ -19,6 +19,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, title TEXT NOT NULL,
         status TEXT NOT NULL, transcript TEXT NOT NULL DEFAULT '', duration_ms INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL, expires_at INTEGER, audio BLOB, message_id TEXT);
+        CREATE INDEX IF NOT EXISTS wrapper_meetings_message ON wrapper_meetings(conversation_id, message_id);
         CREATE TABLE IF NOT EXISTS wrapper_meeting_settings (id INTEGER PRIMARY KEY CHECK(id=1), audio_days INTEGER NOT NULL);
         INSERT OR IGNORE INTO wrapper_meeting_settings VALUES (1,7);
         UPDATE wrapper_meetings SET status='interrupted',audio=NULL,expires_at=NULL WHERE status='recording';")?;
@@ -80,6 +81,9 @@ pub fn state(ctx: &Context<'_>) -> Value {
     json!({"max_seconds":MAX_SECONDS,"audio_days":days,"interrupted":interrupted,"debug_fake":cfg!(debug_assertions)})
 }
 pub fn is_summary(conn: &Connection, conversation: &str, message: &str) -> Result<bool, ApiError> {
+    if crate::projection_hints::no_meeting(conversation, message) {
+        return Ok(false);
+    }
     Ok(conn
         .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM wrapper_meetings WHERE conversation_id=?1 AND message_id=?2)",

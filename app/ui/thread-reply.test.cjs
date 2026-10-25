@@ -273,7 +273,7 @@ async function boot() {
   for (let attempt = 0; attempt < 20 && document.getElementById("conversation-title").textContent !== "Capitales"; attempt += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
-  return { document, calls, parent, get threadProps() { return threadProps; } };
+  return { document, calls, parent, window, get threadProps() { return threadProps; } };
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -312,4 +312,18 @@ test("un message refusé par le moteur n’ouvre pas de fil et l’annonce", asy
   assert.equal(app.document.getElementById("conversation-title").textContent, "Capitales");
   assert.equal(app.document.getElementById("thread-banner").hidden, true);
   assert.equal(app.document.getElementById("toast").textContent, "Message introuvable.");
+});
+
+test("« N souvenirs utilisés » : l'écran Mémoire reçoit la conversation affichée et la réponse cliquée, sous-fil compris", async () => {
+  const app = await boot();
+  const asked = [];
+  const plain = (value) => JSON.parse(JSON.stringify(value)); // objets nés dans le contexte de app.js
+  assert.deepEqual(plain(app.threadProps.onOpenMemory(["f1"], app.parent)), { ok: false, message: "L’écran Mémoire n’est pas disponible ici." }, "sans écran Mémoire (iPhone distant), la raison est dite");
+  app.window.EzerbotMemorySpace = { openWith: (ids, origin) => { asked.push([ids, origin]); return { ok: true }; } };
+  assert.deepEqual(app.threadProps.onOpenMemory(["f1", "f2"], app.parent), { ok: true });
+  app.threadProps.onThread(app.parent);
+  await settle();
+  assert.equal(app.document.getElementById("conversation-title").textContent, "Fil : La capitale précise est Ottawa.");
+  app.threadProps.onOpenMemory(["f3"], { id: "reply-sub" });
+  assert.deepEqual(plain(asked), [[["f1", "f2"], { conversationId: "main", messageId: "reply-q" }], [["f3"], { conversationId: "sub", messageId: "reply-sub" }]], "le retour vise le fil où la pastille a été cliquée");
 });

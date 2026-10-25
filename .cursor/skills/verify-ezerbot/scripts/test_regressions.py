@@ -90,7 +90,7 @@ class EvalJsonTests(unittest.TestCase):
 
 
 class AxiSessionTests(unittest.TestCase):
-    def test_cleanup_stops_only_the_verify_ezerbot_session(self) -> None:
+    def test_legacy_cleanup_does_not_stop_an_unattributed_axi_session(self) -> None:
         evidence = Path(tempfile.mkdtemp(prefix="cleanup-evidence-"))
         run_root, home, signature = launch.allocate_run_root(evidence)
         log = Path(tempfile.mkdtemp(prefix="axi-log-")) / "calls"
@@ -100,14 +100,11 @@ class AxiSessionTests(unittest.TestCase):
         fake.write_text(
             "#!/bin/sh\n"
             'printf "%s %s\\n" "$CHROME_DEVTOOLS_AXI_SESSION" "$*" >> "$AXI_LOG"\n'
-            'if [ "$CHROME_DEVTOOLS_AXI_SESSION" != "verify-ezerbot" ] || [ "$1" != "stop" ]; then\n'
-            '  rm -rf "$OTHER_SESSION_DIR"\n'
-            "  exit 3\n"
-            "fi\n"
             "exit 0\n"
         )
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
         record = {"home": str(home), "run_root": str(run_root), "cleaned": False, **signature}
+        record.pop("session_signature")
         (evidence / "run.json").write_text(json.dumps(record))
         try:
             result = run_cleanup(
@@ -122,11 +119,9 @@ class AxiSessionTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(run_root.exists())
             self.assertTrue((other / "sentinel").is_file(), "une autre session axi a été touchée")
-            calls = log.read_text().splitlines()
-            self.assertEqual(calls, ["verify-ezerbot stop"])
+            self.assertFalse(log.exists())
             cleanup = json.loads((evidence / "cleanup.json").read_text())
-            self.assertEqual(cleanup["killed"]["axi"]["session"], "verify-ezerbot")
-            self.assertEqual(cleanup["killed"]["axi"]["result"], "arrete")
+            self.assertEqual(cleanup["killed"]["axi"]["result"], "non-attribuee")
         finally:
             import shutil
 

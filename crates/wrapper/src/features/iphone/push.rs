@@ -331,6 +331,7 @@ fn send(conn: &Connection, job: &Job) -> Result<(), (bool, String)> {
 mod tests {
     use super::*;
     /// GROKBOT_FAKE_PUSH and BUSY are process-wide: one fake-push scenario at a time.
+    #[cfg(debug_assertions)]
     static FAKE_PUSH: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[test]
     fn hkdf_matches_rfc5869_sha256_test_case_one() {
@@ -423,6 +424,7 @@ mod tests {
         assert!(!endpoint_allowed("http://169.254.169.254/latest"));
     }
     /// Opens an RFC 8291 packet the way the phone does.
+    #[cfg(debug_assertions)]
     fn open_packet(private: agreement::EphemeralPrivateKey, auth: &[u8], packet: &[u8]) -> Vec<u8> {
         let public = private.compute_public_key().unwrap();
         let mut info = b"WebPush: info\0".to_vec();

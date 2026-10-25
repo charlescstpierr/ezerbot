@@ -2,6 +2,7 @@
 // follows symlinks and never sets file.symlink, so this drives the real control.
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
+const { LaunchIdentity, connectCdp } = require("./local-api-client.cjs");
 const { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
@@ -26,33 +27,6 @@ function debuggingPort(directory, chrome) {
     }
     throw new Error("chrome did not open a debugging port");
   })();
-}
-
-function connectCdp(url) {
-  const ws = new WebSocket(url);
-  const pending = new Map();
-  let next = 0;
-  ws.addEventListener("message", (event) => {
-    const message = JSON.parse(String(event.data));
-    if (!message.id || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
-    pending.delete(message.id);
-    if (message.error) reject(new Error(message.error.message));
-    else resolve(message.result || {});
-  });
-  return new Promise((resolve, reject) => {
-    ws.addEventListener("open", () => resolve({
-      send(method, params = {}) {
-        return new Promise((resolveSend, rejectSend) => {
-          const id = ++next;
-          pending.set(id, { resolve: resolveSend, reject: rejectSend });
-          ws.send(JSON.stringify({ id, method, params }));
-        });
-      },
-      close() { ws.close(); },
-    }));
-    ws.addEventListener("error", () => reject(new Error("devtools websocket failed")));
-  });
 }
 
 async function pageTarget(port) {
@@ -118,7 +92,8 @@ test("Importer un dossier skips a real symlink whose target is outside the folde
   symlinkSync(outside, join(chosen, "echappe"));
 
   const binary = join(__dirname, "../../target/debug/grokbot-wrapper");
-  const child = spawn(binary, ["--port", "0", "--db", join(dbDir, "app.sqlite")], {
+  const identity = new LaunchIdentity();
+  const child = identity.spawn(binary, ["--port", "0", "--db", join(dbDir, "app.sqlite")], {
     env: { ...process.env, HOME: dbDir, CFFIXED_USER_HOME: dbDir },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -127,6 +102,7 @@ test("Importer un dossier skips a real symlink whose target is outside the folde
   const wrapperWatch = watchChild("grokbot-wrapper", child, () => (stderr ? `: ${stderr}` : ""));
   let chrome;
   let chromeWatch;
+  let authentication;
   // Registered before anything can fail, and run by node:test when the test ends for any
   // reason, including the test timeout, where the awaited body never reaches a `finally`.
   t.after(() => {
@@ -136,13 +112,18 @@ test("Importer un dossier skips a real symlink whose target is outside the folde
     if (chrome && chrome.exitCode === null && chrome.signalCode === null) chrome.kill("SIGKILL");
   });
   // Every wait below ends early, with a clear message, if either process fails or exits.
-  const whileRunning = (work) => Promise.race([work, wrapperWatch.failed, ...(chromeWatch ? [chromeWatch.failed] : [])]);
+  const whileRunning = (work) => Promise.race([work, wrapperWatch.failed, ...(chromeWatch ? [chromeWatch.failed] : []), ...(authentication ? [authentication.failed] : [])]);
   const chromeDir = mkdtempSync(join(tmpdir(), "grokbot-folder-chrome-"));
   chrome = spawn(chromeBinary(), [
     "--headless=new",
     "--no-sandbox",
     "--disable-gpu",
     "--disable-dev-shm-usage",
+    "--incognito",
+    "--use-mock-keychain",
+    "--password-store=basic",
+    "--disable-breakpad",
+    "--disable-crash-reporter",
     "--remote-allow-origins=*",
     "--remote-debugging-port=0",
     `--user-data-dir=${join(chromeDir, "profile")}`,
@@ -158,7 +139,7 @@ test("Importer un dossier skips a real symlink whose target is outside the folde
       "Content-Type": "application/json",
       "X-Grokbot-Request": "local",
     };
-    const granted = await fetch(`${url}/api/local/folders/add`, {
+    const granted = await identity.fetch(`${url}/api/local/folders/add`, {
       method: "POST",
       headers,
       body: JSON.stringify({ path: chosen }),
@@ -175,6 +156,7 @@ test("Importer un dossier skips a real symlink whose target is outside the folde
       if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
       return result.result.value;
     };
+    authentication = await identity.authenticateBrowser(cdp, url);
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     await cdp.send("Page.navigate", { url });
@@ -238,9 +220,9 @@ test("Importer un dossier skips a real symlink whose target is outside the folde
     assert.equal(editor.includes(secret), false);
     assert.equal(editor.includes("annexe interne"), true);
 
-    const skills = await fetch(`${url}/api/skills?bot_id=grokbot`).then((response) => response.json());
+    const skills = await identity.fetch(`${url}/api/skills?bot_id=grokbot`).then((response) => response.json());
     const skillId = skills.skills[0].skill_id;
-    const versions = await fetch(`${url}/api/skills/versions`, {
+    const versions = await identity.fetch(`${url}/api/skills/versions`, {
       method: "POST",
       headers,
       body: JSON.stringify({ bot_id: "grokbot", skill_id: skillId }),

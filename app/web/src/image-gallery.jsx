@@ -1,3 +1,4 @@
+import { localResourceURL } from "./local-resource.js";
 import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { documentIconPaths, formatAttachmentSize } from "./attachment-presentation.js";
@@ -58,7 +59,7 @@ export function ImageViewer({ images, index, onIndex, onClose }) {
         {images.length > 1 && <button type="button" className="gb-image-nav" aria-label="Image précédente" onClick={() => onIndex(galleryKey("ArrowLeft", index, images.length))}><ChevronLeft /></button>}
         {broken
           ? <p className="gb-image-missing" role="alert">Image non disponible</p>
-          : <img src={image.url} alt={image.caption} onError={() => setBroken(true)} />}
+          : <img src={localResourceURL(image.url)} alt={image.caption} onError={() => setBroken(true)} />}
         {images.length > 1 && <button type="button" className="gb-image-nav" aria-label="Image suivante" onClick={() => onIndex(galleryKey("ArrowRight", index, images.length))}><ChevronRight /></button>}
       </div>
       <figcaption className="gb-image-caption">{image.caption}</figcaption>
@@ -102,7 +103,7 @@ function VoiceMemo({ attachment, message, memoSpeed }) {
   return (
     <div className="gb-voice-memo">
       <strong>Mémo vocal · {Math.ceil((attachment.duration_ms || 0) / 1000)} s</strong>
-      <audio ref={audio} controls preload="metadata" src={`/api/voice/audio/${encodeURIComponent(id)}`} aria-label="Écouter le mémo vocal" onLoadedMetadata={() => playerFor().apply()} />
+      <audio ref={audio} controls preload="metadata" src={localResourceURL(`/api/voice/audio/${encodeURIComponent(id)}`)} aria-label="Écouter le mémo vocal" onLoadedMetadata={() => playerFor().apply()} />
       <label className="gb-memo-speed">
         <span>Vitesse</span>
         <input type="text" inputMode="decimal" value={text} aria-label="Vitesse de lecture du mémo, de 0,5 à 2" aria-invalid={refusal ? "true" : undefined} data-speed={speed}
@@ -158,7 +159,7 @@ export function MessageAttachments({ message, align = "end", markdown = false, o
         <div className="gb-image-grid" data-count={count} aria-label="Images du message">
           {images.map((image, imageIndex) => (
             <button key={`${image.id}-${imageIndex}`} type="button" className="gb-image-cell" aria-label={`Agrandir : ${image.caption}`} onClick={() => setIndex(imageIndex)}>
-              <img src={image.url} alt={image.caption} loading="lazy" />
+              <img src={localResourceURL(image.url)} alt={image.caption} loading="lazy" />
             </button>
           ))}
         </div>

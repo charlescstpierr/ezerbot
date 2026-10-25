@@ -1,6 +1,6 @@
 //! Notification policy + durable outbox, without opening Cocoa or a network socket.
 use grokbot_engine::{
-    contracts::{with_tx, RunBudgets, RunKind, Trigger, TurnEnd},
+    contracts::{with_tx, RunBudgets, RunKind, TaskStatus, Trigger, TurnEnd},
     model::{self, Run, RunStatus},
 };
 use grokbot_wrapper::App;
@@ -738,4 +738,241 @@ fn an_approval_decided_or_expired_before_the_delay_sends_no_reminder() {
         )
         .unwrap();
     assert_eq!(f.poll(false, false)["deliveries"], json!([]));
+}
+
+/// A sub-task tree under a routine pass (#286): `root` is the run of the occurrence, the
+/// chain below it is `depth` levels deep, every sub-task done.
+fn subtasks(f: &Fixture, root: &str, depth: usize) {
+    let mut parent = root.to_owned();
+    for level in 1..=depth {
+        let child = format!("{root}-sub{level}");
+        f.reply(&child);
+        f.conn.execute("INSERT INTO delegation_graph VALUES (?1,?2,?3,'grokbot','other',?4,NULL,NULL,'{}',?5)", params![child, parent, root, level, json!({"status":"done"}).to_string()]).unwrap();
+        parent = child;
+    }
+}
+/// The routine and sub-task notifications; the runs standing in for them make replies of no interest here.
+fn ids(f: &mut Fixture) -> Vec<String> {
+    let mut ids: Vec<String> = f.get()["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap().to_owned())
+        .filter(|id| !id.starts_with("reply:"))
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn a_quiet_pass_silences_its_sub_tasks_at_every_level_and_a_loud_one_does_not() {
+    let mut f = Fixture::new();
+    f.reply("quiet-run");
+    f.reply("loud-run");
+    f.routine("quiet", "done", Some("quiet-run"));
+    f.routine("loud", "done", Some("loud-run"));
+    f.conn
+        .execute(
+            "UPDATE scheduler_occurrences SET quiet=1 WHERE occurrence_id='quiet'",
+            [],
+        )
+        .unwrap();
+    subtasks(&f, "quiet-run", 2);
+    subtasks(&f, "loud-run", 2);
+    assert_eq!(
+        ids(&mut f),
+        [
+            "delegation:loud-run-sub1",
+            "delegation:loud-run-sub2",
+            "routine:loud"
+        ]
+    );
+}
+
+#[test]
+fn a_failure_still_notifies_under_a_quiet_pass() {
+    let mut f = Fixture::new();
+    f.reply("run");
+    f.routine("failed-after-quiet", "failed", Some("run"));
+    f.conn
+        .execute("UPDATE scheduler_occurrences SET quiet=1", [])
+        .unwrap();
+    subtasks(&f, "run", 1);
+    assert_eq!(
+        ids(&mut f),
+        ["delegation:run-sub1", "routine:failed-after-quiet"]
+    );
+}
+
+impl Fixture {
+    /// A finished run of `trigger` without a user message, so it never makes a reply notification.
+    fn run(&self, id: &str, trigger: Trigger) {
+        let chat = matches!(trigger, Trigger::UserMessage { .. });
+        with_tx(&self.conn, |conn| {
+            model::start(
+                conn,
+                &Run {
+                    run_id: id.into(),
+                    bot_id: "grokbot".into(),
+                    conversation_id: self.conversation.clone(),
+                    trigger,
+                    kind: if chat { RunKind::Chat } else { RunKind::Task },
+                    status: RunStatus::Running,
+                    task_status: (!chat).then_some(TaskStatus::Working),
+                    turn_end: None,
+                    budgets: RunBudgets::default(),
+                    started_at: 1000,
+                },
+            )?;
+            let mut run = grokbot_engine::store::required(conn, id)?;
+            run.status = RunStatus::Finished;
+            run.turn_end = Some(TurnEnd::Finished);
+            grokbot_engine::store::save(conn, &run)
+        })
+        .unwrap();
+    }
+    /// A tree rooted at `root`, `depth` sub-tasks deep, every sub-task already done.
+    fn finished_subtasks(&self, root: &str, depth: usize) {
+        let mut parent = root.to_owned();
+        for level in 1..=depth {
+            let child = format!("{root}-sub{level}");
+            self.run(
+                &child,
+                Trigger::Delegation {
+                    delegation_id: child.clone(),
+                },
+            );
+            self.conn.execute("INSERT INTO delegation_graph VALUES (?1,?2,?3,'grokbot','other',?4,?1,NULL,'{}',?5)", params![child, parent, root, level, json!({"status":"done"}).to_string()]).unwrap();
+            parent = child;
+        }
+    }
+    /// A routine pass still running (#286) whose sub-tasks, `depth` levels deep, already finished.
+    fn running_pass(&self, occurrence: &str, depth: usize) {
+        let root = format!("{occurrence}-run");
+        self.run(
+            &root,
+            Trigger::Occurrence {
+                occurrence_id: occurrence.into(),
+            },
+        );
+        self.routine(occurrence, "running", Some(&root));
+        self.finished_subtasks(&root, depth);
+    }
+    fn set_pass(&self, occurrence: &str, status: &str, quiet: bool) {
+        self.conn
+            .execute(
+                "UPDATE scheduler_occurrences SET status=?2,quiet=?3 WHERE occurrence_id=?1",
+                params![occurrence, status, quiet],
+            )
+            .unwrap();
+    }
+    /// What the Mac sees on one poll: the banners delivered and the unread count.
+    fn noise(&mut self) -> (Value, Value) {
+        let polled = self.poll(false, false);
+        (polled["deliveries"].clone(), polled["unread"].clone())
+    }
+}
+
+#[test]
+fn a_sub_task_finished_while_a_quiet_pass_runs_never_notifies() {
+    let mut f = Fixture::new();
+    f.settings(json!({"enabled":true}));
+    f.running_pass("one", 1);
+    f.running_pass("two", 2);
+    assert_eq!(f.noise(), (json!([]), json!(0)), "poll while running");
+    f.set_pass("one", "running", true);
+    f.set_pass("two", "running", true);
+    assert_eq!(
+        f.noise(),
+        (json!([]), json!(0)),
+        "poll after rien_a_signaler"
+    );
+    f.set_pass("one", "done", true);
+    f.set_pass("two", "done", true);
+    assert_eq!(f.noise(), (json!([]), json!(0)), "poll after done");
+    f.restart();
+    let inbox = f.get();
+    assert_eq!(
+        (inbox["unread"].clone(), inbox["items"].clone()),
+        (json!(0), json!([]))
+    );
+}
+
+#[test]
+fn without_quiet_the_sub_tasks_notify_once_the_pass_is_over() {
+    let mut f = Fixture::new();
+    f.settings(json!({"enabled":true}));
+    f.running_pass("one", 1);
+    f.running_pass("two", 2);
+    assert_eq!(f.noise(), (json!([]), json!(0)), "deferred while running");
+    f.set_pass("one", "done", false);
+    f.set_pass("two", "done", false);
+    assert_eq!(f.noise().1, 5);
+    assert_eq!(
+        ids(&mut f),
+        [
+            "delegation:one-run-sub1",
+            "delegation:two-run-sub1",
+            "delegation:two-run-sub2",
+            "routine:one",
+            "routine:two"
+        ]
+    );
+}
+
+#[test]
+fn a_delegation_outside_a_routine_still_notifies_at_once() {
+    let mut f = Fixture::new();
+    f.settings(json!({"enabled":true}));
+    f.run(
+        "chat",
+        Trigger::UserMessage {
+            message_id: format!("{}/hello", f.conversation),
+            attempt: 0,
+        },
+    );
+    f.finished_subtasks("chat", 1);
+    let (deliveries, unread) = f.noise();
+    assert_eq!(unread, 1);
+    assert_eq!(deliveries[0]["id"], "delegation:chat-sub1");
+    assert_eq!(deliveries[0]["title"], "Sous-tâche terminée");
+}
+
+#[test]
+fn a_pass_that_fails_after_its_sub_tasks_finished_notifies_the_failure() {
+    let mut f = Fixture::new();
+    f.running_pass("quiet", 1);
+    f.running_pass("loud", 1);
+    f.set_pass("quiet", "running", true);
+    assert_eq!(ids(&mut f), Vec::<String>::new(), "nothing while running");
+    f.set_pass("quiet", "failed", true);
+    f.set_pass("loud", "failed", false);
+    assert_eq!(
+        ids(&mut f),
+        [
+            "delegation:loud-run-sub1",
+            "delegation:quiet-run-sub1",
+            "routine:loud",
+            "routine:quiet"
+        ]
+    );
+    let inbox = f.get();
+    let failures = inbox["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["title"] == "Échec de la routine")
+        .count();
+    assert_eq!(failures, 2);
+}
+
+#[test]
+fn a_request_waiting_on_charles_during_a_quiet_pass_still_notifies() {
+    let mut f = Fixture::new();
+    f.running_pass("pass", 1);
+    f.set_pass("pass", "running", true);
+    f.request("ask", "approval");
+    assert_eq!(ids(&mut f), ["input:ask"]);
+    f.set_pass("pass", "done", true);
+    assert_eq!(ids(&mut f), ["input:ask"]);
 }

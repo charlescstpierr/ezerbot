@@ -1120,7 +1120,12 @@ fn host_action_response(
 pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Result<(), ApiError> {
     ctx.provider.cancel_run(&run.run_id);
     let mut services = Services::new(ctx)?;
+    let ended = store::get(ctx.connection, &run.run_id)?.is_some_and(|r| r.status.is_terminal());
     run_loop::cancel(ctx.connection, &mut services, &run.run_id, end)?;
+    // Un tour suspendu n'a plus de worker pour l'écrire au journal.
+    if !ended {
+        let _ = super::turns::record(ctx.connection, &run.run_id);
+    }
     Ok(())
 }
 pub fn tick(ctx: &super::Context<'_>) {
@@ -1391,6 +1396,9 @@ fn drive_owned(
         let result = run_loop::run(conn, gateway, services, id);
         let run = store::required(conn, id)?;
         if run.status.is_terminal() || run.status.is_suspended() || services.is_interrupted() {
+            if run.status.is_terminal() {
+                let _ = super::turns::record(conn, id);
+            }
             return Ok(());
         }
         if run.status == RunStatus::Interrupted
@@ -1453,6 +1461,9 @@ fn fail_host(
             &json!({"failed":true,"reason":"local_service_unavailable"}),
         )?;
         Ok(())
+    })
+    .inspect(|_| {
+        let _ = super::turns::record(conn, id);
     })
 }
 
@@ -1634,6 +1645,10 @@ impl RunServices for Services<'_> {
             .filter(|s| {
                 !super::screen::is_tool(&s.name)
                     || super::screen::enabled(self.connection, &run.bot_id)
+            })
+            .filter(|s| {
+                s.name != super::routines::QUIET_TOOL
+                    || matches!(run.trigger, Trigger::Occurrence { .. })
             })
             .map(gated)
             .collect()
@@ -2810,7 +2825,10 @@ fn projected_parts_with(
     Ok(parts)
 }
 fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiError> {
-    let events = store::events(conn, &run.run_id, 0)?;
+    let events = match crate::projection_hints::events_of(&run.run_id) {
+        Some(events) => events,
+        None => std::rc::Rc::new(store::events(conn, &run.run_id, 0)?),
+    };
     let sources = super::sources::registry(conn, &run.run_id)?;
     // One vault read for the whole reply, after what it masks. Under the hold of a state
     // read, the one read of the whole projection (#377).
@@ -2818,9 +2836,15 @@ fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiErr
     let parts = projected_parts_with(run, &events, &secrets)?;
     let body: String = parts.iter().map(|part| part.body.as_str()).collect();
     let citations = super::sources::citations_in(&sources, &body);
-    let mut metadata: (Option<String>, Option<String>, Option<String>) = conn
-        .prepare_cached("SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1")?
-        .query_row([&run.run_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    let mut metadata: (Option<String>, Option<String>, Option<String>) =
+        match crate::projection_hints::run_metadata(&run.run_id) {
+            Some(metadata) => metadata,
+            None => conn
+                .prepare_cached(
+                    "SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1",
+                )?
+                .query_row([&run.run_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?,
+        };
     if context_budget_failed(conn, run)? {
         metadata.0 = Some(CONTEXT_TOO_LARGE.into());
         metadata.1 = Some("context_budget".into());
@@ -2833,6 +2857,11 @@ fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiErr
         RunStatus::Cancelled => ("stopped", None),
         _ => ("echoed", None),
     };
+    let usage = match crate::projection_hints::usage(&run.run_id) {
+        crate::projection_hints::Known::Row(usage) => Some(usage),
+        crate::projection_hints::Known::Absent => None,
+        crate::projection_hints::Known::Unknown => store::token_usage(conn, &run.run_id)?,
+    };
     Ok(Message {
         id,
         role: "assistant",
@@ -2843,7 +2872,7 @@ fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiErr
         error_kind: metadata.1,
         notice: metadata.2,
         kind: "message".into(),
-        payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":store::token_usage(conn, &run.run_id)?,
+        payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":usage,
             "sources":secrets.value(&json!(sources))?,"citations":citations,
             "recalled_fact_ids":super::memory::recalled_ids(conn, &run.run_id)?}),
         attachments: vec![],
@@ -2866,10 +2895,14 @@ pub fn reply(
     conversation: &str,
     message: &str,
 ) -> Result<Option<Message>, ApiError> {
-    let Some(run) =
-        store::latest_run_for_trigger(ctx.connection, &user_trigger(conversation, message, 0))?
-            .filter(|r| r.conversation_id == conversation)
-    else {
+    let latest = match crate::projection_hints::user_run(conversation, message) {
+        crate::projection_hints::Known::Row(run) => Some(run),
+        crate::projection_hints::Known::Absent => None,
+        crate::projection_hints::Known::Unknown => {
+            store::latest_run_for_trigger(ctx.connection, &user_trigger(conversation, message, 0))?
+        }
+    };
+    let Some(run) = latest.filter(|r| r.conversation_id == conversation) else {
         return Ok(None);
     };
     Ok(Some(run_reply(

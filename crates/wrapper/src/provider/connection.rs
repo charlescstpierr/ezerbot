@@ -126,8 +126,8 @@ impl Provider {
     pub(crate) fn simulation_allowed(&self) -> bool {
         cfg!(debug_assertions) && self.primary.inner.simulation.load(Ordering::SeqCst)
     }
-    /// Debug-only local fake control; never changes production deadlines.
-    #[cfg(debug_assertions)]
+    /// Local fake control for development and tests; never changes production deadlines.
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
     pub fn configure_fake_chat(&self, timeout: Duration, simulation: bool) {
         self.configure_fake_deadlines(timeout, timeout, timeout * 5);
         let session = &self.primary;
@@ -137,7 +137,7 @@ impl Provider {
     }
     /// Loopback only. A test can keep the production overall deadline while
     /// shortening the read timeout that ureq must actually apply.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
     pub fn configure_fake_deadlines(&self, first: Duration, stall: Duration, total: Duration) {
         let session = &self.primary;
         if session.inner.endpoints.api.starts_with("http://127.0.0.1:") {
@@ -234,19 +234,19 @@ impl Provider {
     /// connexion, catalogue de modèles, quota, lecteur d'un tour, attente du retour OAuth), pour
     /// que le dossier de la fixture ne soit plus écrit quand le test le supprime. L'attente est
     /// bornée : `Err` nomme alors le fil qui ne finit pas. Absent de la version livrée.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
     #[doc(hidden)]
     pub fn wait_for_background_work(&self) -> Result<(), String> {
         self.primary.wait_background()
     }
     /// Pour les tests : combien d'attentes de fils de fond ont commencé sur cette connexion.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
     #[doc(hidden)]
     pub fn background_waits_started(&self) -> usize {
         self.primary.inner.waits_started.load(Ordering::SeqCst)
     }
     /// Comme `wait_for_background_work`, avec une borne choisie (essai de la borne elle-même).
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
     #[doc(hidden)]
     pub fn wait_for_background_work_within(
         &self,
@@ -430,6 +430,86 @@ impl Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fake_controls_leave_remote_deadlines_and_simulation_unchanged() {
+        let directory = grokbot_test_support::TestDir::new("ezerbot-remote-fake-controls");
+        let db = directory.join("workspace.sqlite");
+        for endpoints in [Endpoints::default(), Endpoints::codex()] {
+            let provider = Provider::with_backends(&db, Endpoints::default(), endpoints, false);
+            let before = *lock(&provider.primary.inner.deadlines);
+            let before = (before.first, before.stall, before.total);
+            let simulation = provider.primary.inner.simulation.load(Ordering::SeqCst);
+
+            provider.configure_fake_deadlines(
+                Duration::from_millis(7),
+                Duration::from_millis(11),
+                Duration::from_millis(13),
+            );
+            let actual = *lock(&provider.primary.inner.deadlines);
+            assert_eq!((actual.first, actual.stall, actual.total), before);
+            assert_eq!(
+                provider.primary.inner.simulation.load(Ordering::SeqCst),
+                simulation
+            );
+
+            provider.configure_fake_chat(Duration::from_millis(17), !simulation);
+            let actual = *lock(&provider.primary.inner.deadlines);
+            assert_eq!((actual.first, actual.stall, actual.total), before);
+            assert_eq!(
+                provider.primary.inner.simulation.load(Ordering::SeqCst),
+                simulation
+            );
+        }
+    }
+
+    #[test]
+    fn fake_controls_apply_requested_loopback_deadlines() {
+        let directory = grokbot_test_support::TestDir::new("ezerbot-loopback-fake-controls");
+        let provider = Provider::with_endpoints(
+            &directory.join("workspace.sqlite"),
+            Endpoints {
+                api: "http://127.0.0.1:9/v1".into(),
+                ..Endpoints::default()
+            },
+            false,
+        );
+        let timeout = Duration::from_millis(17);
+        provider.configure_fake_chat(timeout, false);
+        let actual = *lock(&provider.primary.inner.deadlines);
+        assert_eq!(
+            (actual.first, actual.stall, actual.total),
+            (timeout, timeout, timeout * 5)
+        );
+        assert!(!provider.primary.inner.simulation.load(Ordering::SeqCst));
+
+        let first = Duration::from_millis(7);
+        let stall = Duration::from_millis(11);
+        let total = Duration::from_millis(13);
+        provider.configure_fake_deadlines(first, stall, total);
+        let actual = *lock(&provider.primary.inner.deadlines);
+        assert_eq!(
+            (actual.first, actual.stall, actual.total),
+            (first, stall, total)
+        );
+        assert!(!provider.primary.inner.simulation.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn fake_chat_cannot_authorize_simulation_without_debug_assertions() {
+        let directory = grokbot_test_support::TestDir::new("ezerbot-fake-simulation-gate");
+        let provider = Provider::with_endpoints(
+            &directory.join("workspace.sqlite"),
+            Endpoints {
+                api: "http://127.0.0.1:9/v1".into(),
+                ..Endpoints::default()
+            },
+            false,
+        );
+        provider.configure_fake_chat(Duration::from_millis(17), true);
+        assert!(provider.primary.inner.simulation.load(Ordering::SeqCst));
+        assert_eq!(provider.simulation_allowed(), cfg!(debug_assertions));
+    }
 
     #[test]
     fn codex_image_fallback_and_retired_selection_use_supported_default_only() {

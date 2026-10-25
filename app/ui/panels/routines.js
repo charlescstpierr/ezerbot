@@ -27,6 +27,18 @@
   };
   const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const aliases = { "@hourly": "0 * * * *", "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@weekly": "0 0 * * 0", "@monthly": "0 0 1 * *", "@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *" };
+  const rhythms = [["15m", "Toutes les 15 min", "@every 15m", 900000], ["30m", "Toutes les 30 min", "@every 30m", 1800000], ["1h", "Toutes les 1 h", "@every 1h", 3600000], ["2h", "Toutes les 2 h", "@every 2h", 7200000], ["4h", "Toutes les 4 h", "@every 4h", 14400000], ["daily", "1 fois par jour", "@every 24h", 86400000]];
+  const nonnegative = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
+  const number = (value) => new Intl.NumberFormat("fr", { maximumFractionDigits: 1 }).format(value).replace(/[\u00a0\u202f]/g, " ");
+  function cronValues(field, min, max, sunday = false) {
+    const result = new Set();
+    for (const item of field.split(",")) {
+      const [range, stepText] = item.split("/"), step = Number(stepText || 1);
+      const [from, to] = range === "*" ? [min, max] : range.includes("-") ? range.split("-").map(Number) : [Number(range), stepText ? max : Number(range)];
+      for (let n = from; n <= to; n += step) result.add(sunday && n === 7 ? 0 : n);
+    }
+    return [...result].sort((a, b) => a - b);
+  }
   function validZone(zone) {
     try { new Intl.DateTimeFormat("fr", { timeZone: zone }).format(); }
     catch { throw new Error(`Fuseau IANA inconnu : ${zone || "(vide)"}.`); }
@@ -91,22 +103,13 @@
     });
     // Mirror scheduler::cron::describe_fr, including expansion of lists/steps
     // and DOM OR DOW. This remains a description, never a next-run oracle.
-    const values = (field, min, max, sunday = false) => {
-      const result = new Set();
-      for (const item of field.split(",")) {
-        const [range, stepText] = item.split("/"), step = Number(stepText || 1);
-        const [from, to] = range === "*" ? [min, max] : range.includes("-") ? range.split("-").map(Number) : [Number(range), stepText ? max : Number(range)];
-        for (let n = from; n <= to; n += step) result.add(sunday && n === 7 ? 0 : n);
-      }
-      return [...result].sort((a, b) => a - b);
-    };
     const join = (items) => items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} et ${items.at(-1)}`;
     const [minute, hour, dom, month, dow] = fields;
-    const minutes = values(minute, 0, 59), hours = values(hour, 0, 23), weekdays = values(dow, 0, 7, true);
+    const minutes = cronValues(minute, 0, 59), hours = cronValues(hour, 0, 23), weekdays = cronValues(dow, 0, 7, true);
     const time = minutes.length === 1 && hours.length === 1 ? `à ${String(hours[0]).padStart(2, "0")}:${String(minutes[0]).padStart(2, "0")}` : minutes.length === 60 && hours.length === 24 ? "à chaque minute" : hours.length === 24 ? `à chaque heure, aux minutes ${minutes.join(", ")}` : `aux heures ${hours.join(", ")} et aux minutes ${minutes.join(", ")}`;
     const dayNames = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"];
     const week = weekdays.join(",") === "1,2,3,4,5" ? "du lundi au vendredi" : join(weekdays.map((n) => `le ${dayNames[n]}`));
-    const calendarDays = values(dom, 1, 31), ranges = [], ordinal = (n) => n === 1 ? "1er" : String(n);
+    const calendarDays = cronValues(dom, 1, 31), ranges = [], ordinal = (n) => n === 1 ? "1er" : String(n);
     for (let i = 0; i < calendarDays.length; i++) {
       let end = i;
       while (calendarDays[end + 1] === calendarDays[end] + 1) end++;
@@ -117,8 +120,48 @@
     const monthDays = `${join(ranges)} du mois`;
     const days = dom !== "*" && dow !== "*" ? `${monthDays} OU ${week}` : dom !== "*" ? monthDays : dow !== "*" ? week : "tous les jours";
     const monthNames = ["", "janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
-    const months = month === "*" ? "" : `, en ${join(values(month, 1, 12).map((n) => monthNames[n]))}`;
+    const months = month === "*" ? "" : `, en ${join(cronValues(month, 1, 12).map((n) => monthNames[n]))}`;
     return { trigger: { kind: "cron", expression: text, time_zone: null }, zone, text: `${days[0].toUpperCase()}${days.slice(1)} ${time}${months}` };
+  }
+  function regularInterval(trigger, zone) {
+    if (trigger?.kind === "every") return Number.isSafeInteger(trigger.interval_ms) && trigger.interval_ms >= 60000 && (trigger.phase_ms == null || (Number.isSafeInteger(trigger.phase_ms) && trigger.phase_ms >= 0 && trigger.phase_ms < trigger.interval_ms)) ? trigger.interval_ms : null;
+    if (trigger?.kind !== "cron") return null;
+    try {
+      const [minute, hour, ...days] = schedule(trigger.expression, trigger.time_zone || zone).trigger.expression.split(" ");
+      if (days.some((part) => part !== "*")) return null;
+      const slots = cronValues(hour, 0, 23).flatMap((h) => cronValues(minute, 0, 59).map((m) => h * 60 + m));
+      const interval = 1440 / slots.length;
+      return slots.every((slot, i) => ((slots[(i + 1) % slots.length] - slot + 1440) % 1440 || 1440) === interval) ? interval * 60000 : null;
+    } catch { return null; }
+  }
+  const rhythmOf = (trigger, zone) => trigger?.kind === "every" && trigger.phase_ms != null ? "custom" : rhythms.find(([, , , ms]) => ms === regularInterval(trigger, zone))?.[0] || "custom";
+  const eventTrigger = (trigger) => ["webhook", "mail", "github", "calendar"].includes(trigger?.kind) || (trigger?.kind === "group" && trigger.members.some((member) => eventTrigger(member.trigger)));
+  function projectedCost(cost, trigger, enabled, changed, zone) {
+    if (!changed || cost?.state !== "measured" || !nonnegative(cost.average_tokens)) return cost;
+    const interval = trigger?.kind === "every" ? regularInterval(trigger, zone) : null, event = eventTrigger(trigger);
+    const runs = !trigger || event ? null : !enabled ? 0 : interval && (7 * 86400000) % interval === 0 ? 7 * 86400000 / interval : null;
+    const tokens = runs === null ? null : cost.average_tokens * runs;
+    const forecast = nonnegative(tokens) ? { state: "estimated", runs_next_7d: runs, tokens_per_day: tokens / 7, tokens_next_7d: tokens } : { state: "impossible", reason: event ? "event_trigger" : "schedule_unusable" };
+    const oldTokens = cost.forecast?.tokens_next_7d, share = cost.quota_share;
+    const percent = share?.state === "estimated" && nonnegative(share.percent) && nonnegative(oldTokens) && oldTokens > 0 && nonnegative(tokens) ? share.percent * tokens / oldTokens : null;
+    return { ...cost, forecast, quota_share: nonnegative(percent) ? { state: "estimated", percent } : { state: "unknown", reason: share?.state === "estimated" ? "forecast_changed" : share?.reason } };
+  }
+  function renderCost(target, cost) {
+    target.replaceChildren();
+    if (!cost || cost.state === "no_measure_yet") { target.append(node("p", "routines-note", "Le coût s'affichera après le premier réveil.")); return; }
+    if (cost.state !== "measured" || !nonnegative(cost.average_tokens)) { target.append(node("p", "routines-note", "Coût moyen indisponible. La prévision attend une moyenne mesurée.")); return; }
+    const lines = [`${number(cost.average_tokens)} tokens par réveil en moyenne.`];
+    if (nonnegative(cost.tokens_7d)) lines.push(`${number(cost.tokens_7d)} tokens mesurés sur les 7 derniers jours.`);
+    const forecast = cost.forecast;
+    if (forecast?.state === "estimated" && nonnegative(forecast.tokens_per_day)) {
+      lines.push(`≈ ${number(forecast.tokens_per_day)} tokens par jour.`);
+      if (nonnegative(forecast.tokens_next_7d)) lines.push(`≈ ${number(forecast.tokens_next_7d)} tokens sur les 7 prochains jours.`);
+    } else lines.push(forecast?.reason === "event_trigger" ? "Prévision impossible : le nombre de réveils dépend des événements reçus." : "Prévision impossible : ce rythme ne permet pas d’estimer les prochains réveils.");
+    const share = cost.quota_share, percent = share?.state === "estimated" && nonnegative(share.percent) ? share.percent : null;
+    if (percent !== null) lines.push(`≈ ${number(percent)} % du quota hebdo Codex.`);
+    else if (share?.reason === "forecast_changed") lines.push("La part du quota ne peut pas être recalculée pour ce rythme.");
+    target.append(node("p", "routines-note", lines.join("\n")));
+    if (percent !== null && percent > 20) target.append(node("p", "routines-warning", "Ce rythme peut consommer une grande part de votre quota."));
   }
   // A calendar trigger counts no clock: the zone of the routine says nothing about when it starts.
   const scheduleLabel = (parsed) => ["every", "github", "calendar"].includes(parsed.trigger.kind) ? parsed.text : `${parsed.text} (${parsed.zone})`;
@@ -397,6 +440,7 @@
     for (const item of list) {
       const r = item.routine, row = node("article", "routines-row"); row.dataset.routineId = r.routine_id;
       row.append(node("h3", "", r.name), node("p", "routines-state", r.enabled ? "Active" : "En pause"), node("p", "routines-note", describe(r)));
+      const cost = node("div", "routines-cost"); renderCost(cost, r.cost); row.append(cost);
       if (item.queue?.waiting > 0) {
         const waiting = node("p", "routines-note", `${item.queue.waiting} ${item.queue.waiting > 1 ? "occurrences" : "occurrence"} en attente · prochaine prévue ${date(item.queue.next_at, r.time_zone)}`);
         waiting.dataset.queue = String(item.queue.waiting); waiting.setAttribute("role", "status"); row.append(waiting);
@@ -472,8 +516,14 @@
     const mode = field("Déclencheur", "select");
     for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"], ["webhook", "Webhook · appel HTTPS avec jeton Bearer"], ["mail", "Courriel · un nouveau message de la boîte Gmail connectée"], ["github", "GitHub · événements d’un dépôt"], ["calendar", "Calendrier · un événement de l’agenda Google connecté"], ["group", "Groupe · part dès que l’un de ses déclencheurs part"]]) { const opt = node("option", "", label); opt.value = value; mode.append(opt); }
     mode.value = ["once", "webhook", "mail", "github", "calendar", "group"].includes(r?.trigger.kind) ? r.trigger.kind : "schedule";
+    const rhythm = field("Réveil", "select");
+    for (const [value, label] of [...rhythms, ["custom", "Personnalisé"]]) { const option = node("option", "", label); option.value = value; rhythm.append(option); }
+    rhythm.value = r ? rhythmOf(r.trigger, r.time_zone) : "daily";
+    const cost = node("div", "routines-cost"); cost.setAttribute("aria-live", "polite"); fields.append(cost);
     const expression = field("Cron (5 champs), alias ou @every");
     expression.value = r?.trigger.kind === "cron" ? r.trigger.expression : r?.trigger.kind === "every" ? `@every ${r.trigger.interval_ms}ms${r.trigger.phase_ms === null || r.trigger.phase_ms === undefined ? "" : `/${r.trigger.phase_ms}ms`}` : "0 9 * * *";
+    const originalExpression = expression.value, originalRhythm = rhythm.value;
+    let selectedRhythm = rhythm.value;
     const once = field("Date et heure UTC"); once.type = "datetime-local"; once.step = "0.001";
     once.value = r?.trigger.kind === "once" ? new Date(r.trigger.at).toISOString().slice(0, -1) : "";
     // A start is the case a user comes for; a routine already on the calendar keeps the cases it had.
@@ -576,17 +626,26 @@
       return simple(mode.value, expression.value, once.value, ["mail", "calendar"].includes(mode.value) && r?.trigger.kind === mode.value, github.read(), r?.trigger.kind === "github" && mode.value === "github" && sameGithub(github.read(), r.trigger), ticked(calendarBoxes));
     }
     function update() {
+      if (selectedRhythm !== rhythm.value) {
+        const picked = rhythms.find(([key]) => key === rhythm.value);
+        if (picked) expression.value = rhythm.value === originalRhythm ? originalExpression : picked[2];
+        selectedRhythm = rhythm.value;
+      }
       prompt.parentElement.hidden = kind.value !== "inline_prompt";
       skill.parentElement.hidden = version.parentElement.hidden = skillHint.hidden = kind.value !== "skill_invocation";
       if (mode.value === "group" && !rows.length) { addRow({ kind: "schedule", expression: "0 9 * * *", once: "" }); addRow({ kind: "webhook", expression: "0 9 * * *", once: "" }); renderRows(); }
-      expression.parentElement.hidden = mode.value !== "schedule"; once.parentElement.hidden = mode.value !== "once"; zone.parentElement.hidden = ["webhook", "mail", "github", "calendar"].includes(mode.value); groupBox.hidden = mode.value !== "group";
+      rhythm.parentElement.hidden = mode.value !== "schedule"; expression.parentElement.hidden = mode.value !== "schedule" || rhythm.value !== "custom"; once.parentElement.hidden = mode.value !== "once"; zone.parentElement.hidden = ["webhook", "mail", "github", "calendar"].includes(mode.value); groupBox.hidden = mode.value !== "group";
       for (const box of calendarBoxes) box.parentElement.hidden = mode.value !== "calendar";
       github.repo.parentElement.hidden = github.box.hidden = githubNote.hidden = mode.value !== "github";
       for (const row of rows) { row.expression.parentElement.hidden = row.value.kind !== "schedule"; row.once.parentElement.hidden = row.value.kind !== "once"; row.github.repo.parentElement.hidden = row.github.box.hidden = row.value.kind !== "github"; for (const box of row.boxes) box.parentElement.hidden = row.value.kind !== "calendar"; }
-      try { const p = parsed(); preview.textContent = scheduleLabel(p); preview.classList.remove("routines-error"); }
-      catch (error) { preview.textContent = error.message; preview.classList.add("routines-error"); }
+      try {
+        const p = parsed(); preview.textContent = scheduleLabel(p); preview.classList.remove("routines-error");
+        const values = baseline(), changed = resume || triggerFields.some((key) => values[key] !== initial[key]);
+        renderCost(cost, projectedCost(r?.cost, p.trigger, resume || (r ? r.enabled : enabled.checked), changed, p.zone));
+      } catch (error) { preview.textContent = error.message; preview.classList.add("routines-error"); renderCost(cost, projectedCost(r?.cost, null, false, true, zone.value)); }
     }
     const baseline = () => ({ name: name.value, kind: kind.value, prompt: prompt.value, skill: skill.value, version: version.value, mode: mode.value, expression: expression.value, once: once.value, cases: ticked(calendarBoxes).join(), zone: zone.value, github: JSON.stringify(github.read()), group: JSON.stringify(rows.map((row) => [row.id, row.value])) });
+    const triggerFields = ["mode", "expression", "once", "cases", "zone", "github", "group"];
     const initial = baseline();
     form.addEventListener("input", update); form.addEventListener("change", update); update();
     const actions = node("div", "routines-actions");
@@ -607,7 +666,7 @@
               payload.body = { kind: "skill_invocation", skill_id: skill.value.trim(), version: Number(version.value) };
             }
           }
-          if (!r || ["mode", "expression", "once", "cases", "zone", "github", "group"].some((key) => values[key] !== initial[key])) { payload.trigger = p.trigger; payload.time_zone = p.zone; }
+          if (!r || triggerFields.some((key) => values[key] !== initial[key])) { payload.trigger = p.trigger; payload.time_zone = p.zone; }
           if (r) Object.assign(payload, { routine_id: r.routine_id, modified_at: r.modified_at, schedule_version: r.schedule_version });
           else payload.enabled = enabled.checked;
           if (r && Object.keys(payload).length === 4) { back(); return; }
@@ -804,7 +863,7 @@
       const labels = { pending: "En attente", running: "En cours / en attente d’une réponse", done: "Terminée", missed: "Manquée", failed: "Échec / tâche inachevée" };
       // An agenda start is a dated slot: its planned time is the one the event began at, and a late one says it was caught up.
       const calendarNote = (t) => { const named = t.fuseau || r.time_zone; return t.cas === "commence" ? `${t.label} · ${t.compte ? `${t.compte} · ` : ""}${t.cas} · ${t.titre} · prévu le ${date(o.scheduled_at_utc, named)} · ${named}${t.received_at - t.debut_ms > 120000 ? " · rattrapé" : ""}` : `${t.label} · ${t.compte ? `${t.compte} · ` : ""}${t.cas} · ${t.titre} · vu le ${date(t.received_at, r.time_zone)} · ${r.time_zone}`; };
-      row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", o.trigger?.kind === "calendar" ? calendarNote(o.trigger) : o.trigger?.kind === "webhook" ? `${o.trigger.label} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : o.trigger?.kind === "mail" ? `${o.trigger.label} · ${o.trigger.compte ? `${o.trigger.compte} · ` : ""}${o.trigger.expediteur} · ${o.trigger.objet} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : o.trigger?.kind === "github" ? `${o.trigger.label} · ${o.trigger.event_label} · ${o.trigger.repo}${o.trigger.number ? ` #${o.trigger.number}` : ""}${o.trigger.title ? ` · ${o.trigger.title}` : ""} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : `${o.trigger?.kind === "schedule" ? `${o.trigger.label}${o.trigger.description ? ` (${o.trigger.description})` : ""} · ` : ""}${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`));
+      row.append(node("strong", "", o.quiet && o.status.status === "done" ? "Rien à signaler" : labels[o.status.status] || o.status.status), node("p", "routines-note", o.trigger?.kind === "calendar" ? calendarNote(o.trigger) : o.trigger?.kind === "webhook" ? `${o.trigger.label} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : o.trigger?.kind === "mail" ? `${o.trigger.label} · ${o.trigger.compte ? `${o.trigger.compte} · ` : ""}${o.trigger.expediteur} · ${o.trigger.objet} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : o.trigger?.kind === "github" ? `${o.trigger.label} · ${o.trigger.event_label} · ${o.trigger.repo}${o.trigger.number ? ` #${o.trigger.number}` : ""}${o.trigger.title ? ` · ${o.trigger.title}` : ""} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : `${o.trigger?.kind === "schedule" ? `${o.trigger.label}${o.trigger.description ? ` (${o.trigger.description})` : ""} · ` : ""}${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`));
       if (o.status.reason) row.append(node("p", "routines-error", frenchError({ message: o.status.reason }, true)));
       if (o.conversation_id) {
         const result = button("Voir le résultat de cette exécution", () => openThread(o.conversation_id, o.message_id));

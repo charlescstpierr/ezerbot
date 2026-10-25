@@ -1,0 +1,498 @@
+//! What a routine costs in tokens, never in money: what its passages measurably used and what
+//! its schedule promises over 7 days.
+//!
+//! Returned as `routine.cost` (unknown is `null` or an explicit state, never a zero; there
+//! is no price or dollar field):
+//! `{state, average_tokens, average_sample, tokens_7d,
+//!   forecast:{state, reason, runs_next_7d, tokens_per_day, tokens_next_7d},
+//!   quota_share:{state, reason}}`
+//! - `state`: `measured`, or `no_measure_yet` (no finished, measured passage).
+//! - `forecast.state`: `estimated`, `impossible` (`reason`: `event_trigger`,
+//!   `schedule_unusable`) or `no_measure_yet`.
+//! - `quota_share`: always `unknown` (`reason`: `quota_not_attributed`), without a number. The
+//!   tokens measured here may have been sent for another Codex account than the one whose weekly
+//!   quota is read, as long as no response notes its account.
+use crate::ApiError;
+use grokbot_scheduler::{occurrences, routine::Routine};
+use rusqlite::Connection;
+use serde_json::{json, Value};
+
+const WEEK_MS: i64 = 7 * 86_400_000;
+/// Latest finished, measured passages the average is taken over.
+const AVERAGED_PASSAGES: u32 = 10;
+
+/// The finished passages that were measured, kept as they happen so that the latest of them are
+/// found without reading the ones that sent none, and an index that lets a routine's runs of the
+/// week be found without reading history. A passage is measured when a run of its delegation tree
+/// sent usage. It enters the list once it is both finished and measured, whichever of the two comes
+/// last, and whichever of its runs, usage or links to its subtasks was written last.
+const LIST_AND_INDEX: &str = "CREATE TABLE IF NOT EXISTS wrapper_measured_passages (
+    routine_id TEXT NOT NULL, scheduled_at_utc INTEGER NOT NULL, occurrence_id TEXT NOT NULL,
+    PRIMARY KEY(routine_id, scheduled_at_utc DESC, occurrence_id DESC)
+) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS wrapper_measured_passages_deleted
+    AFTER DELETE ON scheduler_occurrences
+BEGIN DELETE FROM wrapper_measured_passages WHERE routine_id=OLD.routine_id
+    AND scheduled_at_utc=OLD.scheduled_at_utc AND occurrence_id=OLD.occurrence_id; END;
+CREATE INDEX IF NOT EXISTS wrapper_engine_runs_thread_started
+    ON engine_runs(conversation_id, json_extract(record,'$.started_at'));";
+
+/// What a change makes newly true: the finished passages whose run is `above` or is that run (SQL
+/// expression) and that have usage in `below` or its subtasks. The same statement serves every
+/// change, so that none of the orders in which a passage ends, spawns and is measured is missed.
+/// The unary plus keeps the search on `run_id`: `status` alone would read every finished passage.
+fn list_measured(above: &str, below: &str) -> String {
+    format!(
+        "INSERT OR IGNORE INTO wrapper_measured_passages
+         SELECT routine_id, scheduled_at_utc, occurrence_id FROM scheduler_occurrences
+         WHERE +status='done' AND run_id IN (WITH RECURSIVE up(id) AS (SELECT {above} UNION
+                SELECT d.parent_run_id FROM delegation_graph d JOIN up ON d.child_run_id=up.id)
+                SELECT id FROM up)
+           AND EXISTS (SELECT 1 FROM engine_response_usage WHERE run_id IN (
+                WITH RECURSIVE down(id) AS (SELECT {below} UNION
+                SELECT d.child_run_id FROM delegation_graph d JOIN down ON d.parent_run_id=down.id
+                WHERE d.child_run_id IS NOT NULL) SELECT id FROM down));"
+    )
+}
+
+/// Creates the tables, triggers and indexes of the cost; the list of measured passages is filled
+/// from the history once, in the same transaction that creates it.
+pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
+    grokbot_delegation::graph::migrate(conn)?;
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='wrapper_measured_passages')",
+        [],
+        |r| r.get(0),
+    )?;
+    let triggers = [
+        ("scheduler_occurrences", "AFTER INSERT", "NEW.status='done'", "NEW.run_id", "NEW.run_id"),
+        (
+            "scheduler_occurrences",
+            "AFTER UPDATE OF status",
+            "NEW.status='done' AND OLD.status!='done'",
+            "NEW.run_id",
+            "NEW.run_id",
+        ),
+        ("engine_response_usage", "AFTER INSERT", "1", "NEW.run_id", "NEW.run_id"),
+        ("delegation_graph", "AFTER INSERT", "NEW.child_run_id IS NOT NULL", "NEW.parent_run_id", "NEW.child_run_id"),
+        (
+            "delegation_graph",
+            "AFTER UPDATE OF child_run_id",
+            "NEW.child_run_id IS NOT NULL",
+            "NEW.parent_run_id",
+            "NEW.child_run_id",
+        ),
+    ]
+    .map(|(table, event, when, above, below)| {
+        format!(
+            "CREATE TRIGGER IF NOT EXISTS wrapper_measured_{table}_{n} {event} ON {table} WHEN {when} BEGIN {} END;",
+            list_measured(above, below),
+            n = event.replace(' ', "_").to_lowercase(),
+        )
+    })
+    .concat();
+    conn.execute_batch("SAVEPOINT routine_cost_schema")?;
+    let created = conn
+        .execute_batch(LIST_AND_INDEX)
+        .and_then(|()| conn.execute_batch(&triggers))
+        .and_then(|()| {
+            if exists {
+                return Ok(());
+            }
+            conn.execute_batch(
+                "WITH RECURSIVE tree(occurrence_id, run_id) AS (
+                    SELECT occurrence_id, run_id FROM scheduler_occurrences WHERE status='done'
+                    UNION SELECT t.occurrence_id, d.child_run_id FROM tree t
+                    JOIN delegation_graph d ON d.parent_run_id=t.run_id WHERE d.child_run_id IS NOT NULL)
+                 INSERT OR IGNORE INTO wrapper_measured_passages
+                 SELECT routine_id, scheduled_at_utc, occurrence_id FROM scheduler_occurrences
+                 WHERE occurrence_id IN (SELECT t.occurrence_id FROM tree t
+                    JOIN engine_response_usage u ON u.run_id=t.run_id)",
+            )
+        });
+    conn.execute_batch(if created.is_ok() {
+        "RELEASE routine_cost_schema"
+    } else {
+        "ROLLBACK TO routine_cost_schema; RELEASE routine_cost_schema"
+    })?;
+    Ok(created?)
+}
+
+/// A passage is its run plus every run below it in the delegation graph, each counted once.
+/// `?1` routine, `?2` start of the week (in ms), `?3` passages averaged, `?4` the routine's thread.
+/// The averaged passages are the latest of the routine's measured list; the week's are those whose
+/// run started in it, whatever slot they were owed for. Both reads go through indexes, so old
+/// history is not read.
+const PASSAGES: &str = "WITH RECURSIVE recent(id) AS (
+        SELECT occurrence_id FROM wrapper_measured_passages WHERE routine_id=?1
+        ORDER BY scheduled_at_utc DESC, occurrence_id DESC LIMIT ?3),
+     tree(occurrence_id, root, run_id) AS (
+        SELECT o.occurrence_id, o.run_id, o.run_id FROM engine_runs r
+        JOIN scheduler_occurrences o ON o.run_id=r.run_id
+        WHERE r.conversation_id=?4 AND json_extract(r.record,'$.started_at')>=?2
+          AND o.routine_id=?1
+        UNION
+        SELECT occurrence_id, run_id, run_id FROM scheduler_occurrences
+        WHERE occurrence_id IN recent
+        UNION
+        SELECT t.occurrence_id, t.root, d.child_run_id FROM tree t
+        JOIN delegation_graph d ON d.parent_run_id=t.run_id
+        WHERE d.child_run_id IS NOT NULL)
+     SELECT t.occurrence_id IN recent, json_extract(r.record,'$.started_at'),
+            SUM(u.input_tokens+u.output_tokens)
+     FROM tree t
+     JOIN engine_runs r ON r.run_id=t.root
+     LEFT JOIN engine_response_usage u ON u.run_id=t.run_id
+     GROUP BY t.occurrence_id";
+/// What the passages measured: `week` is `None` when no run of the week sent usage.
+struct Measured {
+    average: Option<u64>,
+    sample: u64,
+    week: Option<u64>,
+    week_passages: u64,
+}
+
+pub(super) fn of(conn: &Connection, routine: &Routine, now_ms: u64) -> Result<Value, ApiError> {
+    let now_ms = i64::try_from(now_ms).unwrap_or(i64::MAX);
+    let Measured {
+        average,
+        sample,
+        week,
+        week_passages,
+    } = measured(conn, routine, now_ms)?;
+    let quota_share = json!({"state":"unknown","reason":"quota_not_attributed"});
+    let Some(average) = average else {
+        return Ok(json!({
+            "state":"no_measure_yet","average_tokens":null,"average_sample":0,"tokens_7d":week,
+            "forecast":{"state":"no_measure_yet","reason":null,"runs_next_7d":null,"tokens_per_day":null,"tokens_next_7d":null},
+            "quota_share":quota_share,
+        }));
+    };
+    let forecast = match runs_next_7d(conn, routine, now_ms) {
+        Ok(runs) => {
+            let tokens = average * runs;
+            json!({"state":"estimated","reason":null,"runs_next_7d":runs,
+                "tokens_per_day":(tokens + 3) / 7,"tokens_next_7d":tokens})
+        }
+        Err(reason) => {
+            json!({"state":"impossible","reason":reason,"runs_next_7d":null,"tokens_per_day":null,"tokens_next_7d":null})
+        }
+    };
+    Ok(json!({
+        "state":"measured","average_tokens":average,"average_sample":sample,"tokens_7d":week.or((week_passages == 0).then_some(0)),
+        "forecast":forecast,"quota_share":quota_share,
+    }))
+}
+
+/// Average of the latest finished, measured passages and the tokens of the week's. A passage
+/// whose run sent no usage is unknown, not zero.
+fn measured(conn: &Connection, routine: &Routine, now_ms: i64) -> Result<Measured, ApiError> {
+    let mut query = conn.prepare(PASSAGES)?;
+    let since = now_ms.saturating_sub(WEEK_MS);
+    let rows = query.query_map(
+        rusqlite::params![
+            routine.routine_id,
+            since,
+            AVERAGED_PASSAGES,
+            routine.conversation_id
+        ],
+        |r| {
+            Ok((
+                r.get::<_, bool>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<u64>>(2)?,
+            ))
+        },
+    )?;
+    let (mut recent, mut sum, mut week, mut week_passages) = (0_u64, 0_u64, None::<u64>, 0_u64);
+    for row in rows {
+        let (is_recent, started, tokens) = row?;
+        if is_recent {
+            recent += 1;
+            sum += tokens.unwrap_or(0);
+        }
+        if started >= since {
+            week_passages += 1;
+            week = tokens.map(|tokens| week.unwrap_or(0) + tokens).or(week);
+        }
+    }
+    Ok(Measured {
+        average: (recent > 0).then(|| (sum + recent / 2) / recent),
+        sample: recent,
+        week,
+        week_passages,
+    })
+}
+
+/// Passages the scheduler plans in the next 7 days: its own `next_after` walk on each trigger.
+fn runs_next_7d(conn: &Connection, routine: &Routine, now_ms: i64) -> Result<u64, &'static str> {
+    if routine.trigger.has_delivered() {
+        return Err("event_trigger");
+    }
+    occurrences::planned(conn, routine, now_ms, WEEK_MS)
+        .ok()
+        .flatten()
+        .ok_or("schedule_unusable")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
+
+    /// A read must not grow with old history: every table the query touches is searched
+    /// through an index, none is scanned.
+    #[test]
+    fn reads_search_by_index_and_never_scan_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        grokbot_engine::store::migrate(&conn).unwrap();
+        grokbot_delegation::graph::migrate(&conn).unwrap();
+        grokbot_scheduler::migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        let mut plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {PASSAGES}"))
+            .unwrap();
+        let details: Vec<String> = plan
+            .query_map([0_i64; 4], |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        // Only the recursive tree is scanned.
+        let scans: Vec<_> = details
+            .iter()
+            .filter(|d| d.starts_with("SCAN") && d.as_str() != "SCAN t")
+            .collect();
+        assert!(scans.is_empty(), "{scans:?} in {details:?}");
+    }
+
+    /// A change to history must not read it either: the statement behind every trigger searches
+    /// the passages by the run it was told about.
+    #[test]
+    fn listing_measured_passages_searches_by_run_and_never_scans_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        grokbot_engine::store::migrate(&conn).unwrap();
+        grokbot_delegation::graph::migrate(&conn).unwrap();
+        grokbot_scheduler::migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        let mut plan = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                list_measured("'a'", "'b'")
+            ))
+            .unwrap();
+        let details: Vec<String> = plan
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let reads_history: Vec<_> = details
+            .iter()
+            .filter(|d| d.contains("scheduler_occurrences") && !d.contains("(run_id=?)"))
+            .collect();
+        assert!(reads_history.is_empty(), "{reads_history:?} in {details:?}");
+    }
+
+    const NOW: i64 = 2_000_000_000_000;
+    /// Written threshold for the whole read of one routine, instructions.
+    const READ_STEPS: u64 = 5_000;
+
+    /// Routine `r1`, every 30 minutes, whose cursor is just behind `NOW`.
+    fn create_routine(conn: &Connection) {
+        grokbot_scheduler::routine::create(
+            conn,
+            &Routine {
+                routine_id: "r1".into(),
+                bot_id: "b".into(),
+                conversation_id: "c1".into(),
+                name: "R".into(),
+                body: grokbot_scheduler::routine::RoutineBody::InlinePrompt { prompt: "p".into() },
+                trigger: grokbot_scheduler::cron::Schedule::Every {
+                    interval_ms: 1_800_000,
+                    phase_ms: None,
+                },
+                time_zone: "UTC".into(),
+                enabled: true,
+                origin: grokbot_scheduler::routine::Origin::User,
+                untrusted: false,
+                schedule_version: 0,
+                modified_at: 0,
+                last_served_at: None,
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE scheduler_routines SET materialized_after=?1",
+            [NOW - 1_800_000],
+        )
+        .unwrap();
+    }
+
+    /// Five recent passages, each with a subtask, and `old` finished and `old` missed ones long ago.
+    fn history(old: i64) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        grokbot_engine::store::migrate(&conn).unwrap();
+        grokbot_delegation::graph::migrate(&conn).unwrap();
+        grokbot_scheduler::migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        create_routine(&conn);
+        let counted = "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<?1-1)";
+        for (prefix, at, count) in [("old", 1_000_000_i64, old), ("new", NOW - 3_600_000, 5)] {
+            conn.execute(
+                &format!("{counted} INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record)
+                 SELECT ?2||i,'b','c1','occurrence',?2||i,0,'finished',json_object('started_at',?3+i*1000) FROM n"),
+                rusqlite::params![count, prefix, at],
+            ).unwrap();
+            conn.execute(
+                &format!("{counted} INSERT INTO engine_response_usage(run_id,response,input_tokens,output_tokens,cached_input_tokens)
+                 SELECT ?2||i,1,10,5,0 FROM n"),
+                rusqlite::params![count, prefix],
+            ).unwrap();
+            conn.execute(
+                &format!("{counted} INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,run_id,slot_key)
+                 SELECT ?2||i,'r1',1,?3+i*1000,'done',?2||i,?2||i FROM n"),
+                rusqlite::params![count, prefix, at],
+            ).unwrap();
+        }
+        conn.execute(
+            &format!("{counted} INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,slot_key)
+             SELECT 'missed'||i,'r1',1,500+i*1000,'missed','missed'||i FROM n"),
+            [old],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record)
+             SELECT 'child'||i,'b','c2','delegation','child'||i,0,'finished',json_object('started_at',?1) FROM (SELECT 0 i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4)",
+            [NOW - 3_600_000],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO engine_response_usage(run_id,response,input_tokens,output_tokens,cached_input_tokens) SELECT run_id,1,10,5,0 FROM engine_runs WHERE run_id LIKE 'child%'",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO delegation_graph(id,parent_run_id,root_run_id,parent_bot,child_bot,depth,child_run_id,conversation_id,selected_context,status)
+             SELECT 'edge'||i,'new'||i,'new'||i,'b','b',1,'child'||i,NULL,'{}','{}' FROM (SELECT 0 i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4)",
+            [],
+        ).unwrap();
+        conn
+    }
+
+    /// The measured list holds a passage once it is finished and measured, whichever comes last,
+    /// and is filled from the history when it is first created.
+    #[test]
+    fn a_passage_is_listed_once_it_is_finished_and_measured_in_either_order() {
+        let conn = Connection::open_in_memory().unwrap();
+        grokbot_engine::store::migrate(&conn).unwrap();
+        grokbot_delegation::graph::migrate(&conn).unwrap();
+        grokbot_scheduler::migrate(&conn).unwrap();
+        create_routine(&conn);
+        let run = |id: &str| {
+            conn.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) VALUES (?1,'b','c1','occurrence',?1,0,'finished','{}')", [id]).unwrap();
+        };
+        let occurrence = |id: &str, status: &str| {
+            conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,run_id,slot_key) VALUES (?1,'r1',1,1000,?2,?1,?1)", [id, status]).unwrap();
+        };
+        let usage = |id: &str| {
+            conn.execute(
+                "INSERT INTO engine_response_usage(run_id,response,input_tokens,output_tokens,cached_input_tokens) VALUES (?1,1,10,5,0)",
+                [id],
+            )
+            .unwrap();
+        };
+        let listed = || -> Vec<String> {
+            conn.prepare(
+                "SELECT occurrence_id FROM wrapper_measured_passages ORDER BY occurrence_id",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        // History from before the list existed: finished and measured, finished only, measured only.
+        for (id, status, measured) in [
+            ("old-ok", "done", true),
+            ("old-blind", "done", false),
+            ("old-running", "running", true),
+        ] {
+            run(id);
+            occurrence(id, status);
+            if measured {
+                usage(id);
+            }
+        }
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(listed(), ["old-ok"]);
+        // Finished, then measured.
+        run("late-usage");
+        occurrence("late-usage", "done");
+        assert_eq!(listed(), ["old-ok"]);
+        usage("late-usage");
+        // Measured, then finished.
+        conn.execute(
+            "UPDATE scheduler_occurrences SET status='done' WHERE occurrence_id='old-running'",
+            [],
+        )
+        .unwrap();
+        run("late-done");
+        occurrence("late-done", "running");
+        usage("late-done");
+        assert_eq!(listed(), ["late-usage", "old-ok", "old-running"]);
+        conn.execute(
+            "UPDATE scheduler_occurrences SET status='done' WHERE occurrence_id='late-done'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            listed(),
+            ["late-done", "late-usage", "old-ok", "old-running"]
+        );
+    }
+
+    /// SQLite instructions the whole read of a routine's cost takes (the routine, its passages and
+    /// the schedule's cursors), counted one by one by a progress handler on the connection.
+    /// `blind`: no passage sent usage, so there is nothing to average.
+    fn read_steps(old: i64, blind: bool) -> u64 {
+        let conn = history(old);
+        if blind {
+            conn.execute_batch(
+                "DELETE FROM engine_response_usage; DELETE FROM wrapper_measured_passages",
+            )
+            .unwrap();
+        }
+        let steps = Arc::new(AtomicU64::new(0));
+        let counted = steps.clone();
+        conn.progress_handler(
+            1,
+            Some(move || {
+                counted.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        let routine = grokbot_scheduler::routine::get(&conn, "r1")
+            .unwrap()
+            .unwrap();
+        let cost = of(&conn, &routine, NOW as u64).unwrap();
+        if blind {
+            assert_eq!(cost["state"], "no_measure_yet", "{cost}");
+        } else {
+            assert_eq!(cost["state"], "measured", "{cost}");
+            assert_eq!(cost["forecast"]["state"], "estimated", "{cost}");
+        }
+        steps.load(Ordering::Relaxed)
+    }
+
+    /// A routine's cost is read on every GET: ten times the old history must not cost ten times
+    /// the work, whether its passages sent usage or not. The whole read stays under `READ_STEPS`.
+    #[test]
+    fn old_history_ten_times_larger_costs_about_the_same_for_the_whole_read() {
+        for blind in [false, true] {
+            let (read, read_10x) = (read_steps(1500, blind), read_steps(15_000, blind));
+            eprintln!("VMSTEPS whole read, blind={blind}: {read} -> {read_10x}");
+            assert!(read_10x <= read + read / 10, "{read} -> {read_10x}");
+            assert!(read_10x < READ_STEPS, "{read_10x}");
+        }
+    }
+}

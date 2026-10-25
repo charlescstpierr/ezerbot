@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 TOOLS = Path(__file__).resolve().parent
@@ -56,13 +57,26 @@ class CompleteSuiteTests(unittest.TestCase):
             root = Path(directory)
             for folder in ("tools", "docs", "crates/sample/src", "app/web/src", "app/ui", "bin"):
                 (root / folder).mkdir(parents=True)
+            (root / "probe.py").write_text("""import importlib.util, os, sys
+from types import SimpleNamespace
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('runner', 'tools/run-complete-suite.py')
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+free = 19 if os.environ.get('SUITE_CASE') == 'low-disk' else 40
+with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free=free * 1024**3)):
+    sys.exit(runner.main())
+""")
             for name in ("run-complete-suite.py", "suite-platform-inventory.py"):
                 shutil.copy(TOOLS / name, root / "tools" / name)
             (root / "Cargo.lock").write_text("fixture")
             for name in ("app/web/src/sample.test.js", "app/ui/sample.test.cjs"):
                 (root / name).write_text("fixture\n")
-            (root / "crates/sample/src/lib.rs").write_text('#[cfg(target_os = "macos")] mod platform;\n#[test] fn sample() {}')
+            (root / "crates/sample/src/lib.rs").write_text('#[cfg(target_os = "macos")] mod platform;\n#[cfg(not(target_os = "macos"))] mod outer;\n#[test] fn sample() {}')
             (root / "crates/sample/src/platform.rs").write_text("#[test] fn covered() {}")
+            (root / "crates/sample/src/outer.rs").write_text('#[cfg(target_os = "macos")] mod child;')
+            (root / "crates/sample/src/outer").mkdir()
+            (root / "crates/sample/src/outer/child.rs").write_text("#[test] fn unreachable() {}")
             baseline = dict.fromkeys(("absent", "partial", "runtime_branches", "ignored"), [])
             baseline["absent"] = ["crates/sample/src/platform.rs::covered"]
             (root / "docs/suite-platform-baseline.json").write_text(json.dumps(baseline))
@@ -71,12 +85,12 @@ class CompleteSuiteTests(unittest.TestCase):
                 (root / "bin" / tool).chmod(0o755)
             for args in (("init", "--quiet"), ("add", "."), ("-c", "user.name=Suite fixture", "-c", "user.email=suite@example.invalid", "commit", "--quiet", "-m", "fixture")):
                 subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
-            for case in ("green", "rust-error", "node-error", "compile-error", "npm-error", "unexpected-skip", "dirty-lock"):
+            for case in ("green", "rust-error", "node-error", "compile-error", "npm-error", "unexpected-skip", "low-disk", "bad-metadata", "dirty-lock"):
                 with self.subTest(case=case):
                     output = root / "reports" / case / "result.json"
                     env = {**os.environ, "PATH": str(root / "bin") + os.pathsep + os.environ["PATH"], "SUITE_CASE": case,
-                           "GITHUB_SHA": "", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "RUSTC_WRAPPER": ""}
-                    process = subprocess.run([sys.executable, str(root / "tools/run-complete-suite.py"), "--output", str(output)], cwd=root, env=env, capture_output=True, text=True)
+                           "GITHUB_SHA": "", "GITHUB_RUN_ID": "PRIVATE_SENTINEL" if case == "bad-metadata" else "123", "GITHUB_RUN_ATTEMPT": "1", "RUSTC_WRAPPER": ""}
+                    process = subprocess.run([sys.executable, str(root / "probe.py"), "--output", str(output)], cwd=root, env=env, capture_output=True, text=True)
                     report = json.loads(output.read_text())
                     shutil.copy(output, LOGS / (case + ".json"))
                     self.assertEqual(report["status"], "vert" if case == "green" else "rouge")
@@ -92,6 +106,9 @@ class CompleteSuiteTests(unittest.TestCase):
                         self.assertIn("web:app/web/src/sample.test.js:1", report["failures"])
                     if case == "dirty-lock":
                         self.assertIn("runner:tracked-tree-changed", report["failures"])
+                    if case == "low-disk":
+                        self.assertIn("rust:insufficient-disk", report["failures"])
+                        self.assertIsNone(report["phases"]["rust"]["exit_code"])
 
     def test_inventory_tracks_ancestry_and_ignores_literals(self):
         spec = importlib.util.spec_from_file_location("inventory", TOOLS / "suite-platform-inventory.py")
@@ -114,6 +131,25 @@ class CompleteSuiteTests(unittest.TestCase):
         self.assertEqual(unreachable["absent"], [])
         with self.assertRaises(ValueError):
             module.source_inventory("macro.rs", '#[cfg(target_os = "macos")] #[tokio::test] async fn hidden() {}')
+
+    def test_inventory_follows_transitive_module_platforms(self):
+        spec = importlib.util.spec_from_file_location("inventory", TOOLS / "suite-platform-inventory.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for directory in ("src", "tests/support"):
+            for predicate, expected in (('target_os="macos"', 1), ('not(target_os="linux")', 1), ('not(target_os="macos")', 0)):
+                with self.subTest(directory=directory, predicate=predicate):
+                    prefix = "crates/sample/" + directory + "/"
+                    sources = {
+                        prefix + ("lib.rs" if directory == "src" else "mod.rs"): "#[cfg(" + predicate + ")] mod platform;",
+                        prefix + "platform.rs": '#[cfg(target_os="macos")] mod child;',
+                        prefix + "platform/child.rs": "mod leaf;",
+                        prefix + "platform/child/leaf.rs": "#[test] fn covered() {}",
+                    }
+                    def read(command, **kwargs):
+                        return "\n".join(sources) if command[1] == "ls-tree" else sources[command[-1].split(":", 1)[1]]
+                    with patch.object(module.subprocess, "check_output", side_effect=read):
+                        self.assertEqual(len(module.inventory()["absent"]), expected)
 
 
 if __name__ == "__main__":

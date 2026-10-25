@@ -52,11 +52,11 @@ def cfg(expression, macos):
     text = "".join(expression)
     if text in ("test", "debug_assertions", "unix"):
         return True
-    if text == 'target_os="macos"':
+    if text in ('target_os="macos"', 'target_vendor="apple"'):
         return macos
     if text == 'target_os="linux"':
         return not macos
-    if text == "windows":
+    if text in ("windows", 'target_os="windows"'):
         return False
     if expression and expression[0] in ("all", "any", "not") and expression[1] == "(":
         arguments, start, depth = [], 2, 0
@@ -74,6 +74,10 @@ def cfg(expression, macos):
             return not values[0]
         return all(values) if expression[0] == "all" else any(values)
     raise ValueError("unsupported platform cfg: " + text)
+
+
+def platform_cfg(expression):
+    return any(word in ("windows", "unix") or word.startswith("target_") for word in expression)
 
 
 def source_inventory(path, source, inherited=None):
@@ -101,9 +105,9 @@ def source_inventory(path, source, inherited=None):
         attributes.append((index, values[opening + 1:end], target, inner))
     spans = [(0, len(values), *inherited)] if inherited else []
     for index, attribute, target, inner in attributes:
-        if attribute[0] == "cfg_attr" and ('"macos"' in attribute or "ignore" in attribute):
+        if attribute[0] == "cfg_attr" and (platform_cfg(attribute) or "ignore" in attribute):
             raise ValueError("unsupported platform or ignore cfg_attr")
-        if attribute[:2] != ["cfg", "("] or '"macos"' not in attribute:
+        if attribute[:2] != ["cfg", "("] or not platform_cfg(attribute):
             continue
         linux, macos = cfg(attribute[2:-1], False), cfg(attribute[2:-1], True)
         if inner:
@@ -124,9 +128,11 @@ def source_inventory(path, source, inherited=None):
         if value == "mod" and values[index + 2] in ("{", ";"):
             if values[index + 2] == "{":
                 modules.append((index, pairs[index + 2], values[index + 1]))
-            elif state(index) != (True, True):
+            else:
                 if any(body[0] == "path" and destination <= index <= destination + 5 for _, body, destination, _ in attributes):
-                    raise ValueError("unsupported #[path] on platform-gated module")
+                    if state(index) != (True, True):
+                        raise ValueError("unsupported #[path] on platform-gated module")
+                    continue
                 names = [name for begin, finish, name in modules if begin < index < finish]
                 external.append((names + [values[index + 1]], state(index)))
     result = {key: [] for key in ("absent", "partial", "runtime_branches", "ignored")}
@@ -154,7 +160,7 @@ def source_inventory(path, source, inherited=None):
             for index in range(opening + 1, end - 2):
                 if values[index:index + 3] == ["cfg", "!", "("]:
                     expression = values[index + 3:pairs[index + 2]]
-                    if '"macos"' in expression and cfg(expression, False) != cfg(expression, True):
+                    if platform_cfg(expression) and cfg(expression, False) != cfg(expression, True):
                         result["runtime_branches"].append(identity)
                         break
         if any(body[0] == "ignore" and destination == target for _, body, destination, _ in attributes):
@@ -172,9 +178,6 @@ def inventory(ref="HEAD"):
         sources[path] = subprocess.check_output(["git", "show", f"{ref}:{path}"], text=True, cwd=root)
     def read(path, gate=None):
         source = sources[path]
-        if not any(word in source for word in ("macos", "ignore")):
-            if gate is None:
-                return {}, []
         try:
             report, external = source_inventory(path, source, gate)
         except ValueError as error:
@@ -182,10 +185,15 @@ def inventory(ref="HEAD"):
         children = []
         for names, child_gate in external:
             file = PurePosixPath(path)
-            base = file.parent if file.stem in ("lib", "main", "mod") or "/tests/" in path else file.with_suffix("")
+            base = file.parent if file.stem in ("lib", "main", "mod") or file.parent.name == "tests" and gate is None else file.with_suffix("")
             module = base.joinpath(*names)
             candidates = [str(module.with_suffix(".rs")), str(module / "mod.rs")]
+            if file.parent.name == "tests" and gate is None and file.stem != "mod":
+                nested = file.with_suffix("").joinpath(*names)
+                candidates.extend((str(nested.with_suffix(".rs")), str(nested / "mod.rs")))
             found = [candidate for candidate in candidates if candidate in sources]
+            if not found and child_gate == (True, True):
+                continue
             if len(found) != 1:
                 raise ValueError(f"{path}: cannot resolve gated module {'::'.join(names)}")
             children.append((found[0], child_gate))
@@ -195,12 +203,12 @@ def inventory(ref="HEAD"):
     pending = [(path, None) for path in sources if path not in descendants]
     while pending:
         path, gate = pending.pop()
-        if path in inherited:
-            if inherited[path] != gate:
-                raise ValueError(f"{path}: conflicting module platform gates")
+        previous = inherited.get(path, (False, False))
+        combined = tuple(before or after for before, after in zip(previous, gate or (True, True)))
+        if path in inherited and previous == combined:
             continue
-        inherited[path] = gate
-        reports[path], children = read(path, gate)
+        inherited[path] = combined
+        reports[path], children = read(path, None if gate is None else combined)
         pending.extend(children)
     if descendants - inherited.keys():
         raise ValueError("unreachable platform module graph")

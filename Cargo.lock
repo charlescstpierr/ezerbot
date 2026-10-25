@@ -578,6 +578,7 @@ dependencies = [
  "grokbot-store",
  "grokbot-submission-journal",
  "grokbot-test-support",
+ "grokbot-wrapper",
  "jiff",
  "jsonwebtoken",
  "nix",

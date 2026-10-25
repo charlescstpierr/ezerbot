@@ -900,6 +900,21 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
     }
 }
 
+fn main() {
+    let result = match options() {
+        Ok(Some(options)) => match options.turns_summary.as_deref() {
+            Some(day) => turns_summary(&options.db, day),
+            None => serve(options).map_err(|error| error.to_string()),
+        },
+        Ok(None) => Ok(()),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        eprintln!("Ezerbot Local : {error}");
+        std::process::exit(1);
+    }
+}
+
 #[cfg(test)]
 mod asset_tests {
     use super::{negotiate, Encoding, ASSETS};
@@ -1073,20 +1088,5 @@ mod fake_tests {
         ] {
             assert!(super::fake_openai_base(value).is_none());
         }
-    }
-}
-
-fn main() {
-    let result = match options() {
-        Ok(Some(options)) => match options.turns_summary.as_deref() {
-            Some(day) => turns_summary(&options.db, day),
-            None => serve(options).map_err(|error| error.to_string()),
-        },
-        Ok(None) => Ok(()),
-        Err(error) => Err(error),
-    };
-    if let Err(error) = result {
-        eprintln!("Ezerbot Local : {error}");
-        std::process::exit(1);
     }
 }

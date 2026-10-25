@@ -3,11 +3,10 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createServer } from "vite";
+import { createTestServer } from "./vite-test-server.js";
 import react from "@vitejs/plugin-react";
 
 const PNG = Uint8Array.from(Buffer.from(
@@ -45,14 +44,7 @@ test("the app menus do not gain a Galerie entry", () => {
   assert.equal(menus.includes("Galerie"), false);
 });
 
-const vite = await createServer({
-  root: fileURLToPath(new URL("..", import.meta.url)),
-  configFile: false,
-  plugins: [react()],
-  server: { middlewareMode: true },
-  logLevel: "error",
-  optimizeDeps: { noDiscovery: true },
-});
+const vite = await createTestServer({ plugins: [react()] });
 after(() => vite.close());
 
 let gallery;

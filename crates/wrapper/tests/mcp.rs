@@ -9,10 +9,7 @@ use grokbot_wrapper::{features, App, Provider};
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
@@ -23,17 +20,12 @@ struct Fixture {
     ai: FakeOpenAi,
     path: PathBuf,
     conversation: String,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir()
-            .join(format!(
-                "mcp-integration-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ))
-            .join("app.sqlite");
+        let guard = grokbot_test_support::TestDir::new("mcp-integration");
+        let path = guard.to_path_buf().join("app.sqlite");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -61,6 +53,7 @@ impl Fixture {
             ai,
             path,
             conversation,
+            _dir: guard,
         }
     }
     fn post(&mut self, path: &str, body: Value) -> Value {
@@ -208,12 +201,6 @@ impl Fixture {
         });
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
-    }
-}
-
 #[test]
 fn a_non_coordinator_group_peer_can_use_once_and_standing_mcp_approvals() {
     let mut f = Fixture::new();

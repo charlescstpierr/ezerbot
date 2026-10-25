@@ -334,6 +334,16 @@ fn label(state: &str) -> &'static str {
     }
 }
 
+/// The install text of the Réunions card, served by `/api/connectors/details`
+/// instead of every `/api/state` (#374).
+pub(super) fn details() -> Value {
+    json!({
+        "id":"reunions",
+        "setup":"Créez une clé d’API dans votre compte Recall.ai, puis collez-la ci-dessous. Elle est conservée dans le coffre local, jamais réaffichée, et ne part que vers Recall.ai.",
+        "source":"https://docs.recall.ai/","license":"Service Recall.ai · aucun logiciel redistribué",
+    })
+}
+
 /// Entrée du catalogue : une carte, un état connecté, une clé dans le coffre.
 pub(super) fn item(ctx: &Context<'_>) -> Result<Value, ApiError> {
     let connected = connected(ctx.connection);
@@ -350,8 +360,6 @@ pub(super) fn item(ctx: &Context<'_>) -> Result<Value, ApiError> {
         "id":"reunions","category":"Réunions","kind":"recall","name":"Réunions",
         "description":"Invitez un bot dans une réunion Google Meet, Zoom ou Microsoft Teams : il transcrit l’appel.",
         "permissions":"Le bot rejoint les réunions dont vous collez le lien, après une carte de consentement à chaque invitation. Il est visible des participants. Le micro du Mac n’est pas utilisé.",
-        "setup":"Créez une clé d’API dans votre compte Recall.ai, puis collez-la ci-dessous. Elle est conservée dans le coffre local, jamais réaffichée, et ne part que vers Recall.ai.",
-        "source":"https://docs.recall.ai/","license":"Service Recall.ai · aucun logiciel redistribué",
         "status":if connected {"connected"} else {"disconnected"},
         "message":Value::Null,"has_key":connected,"consent":CONSENT,
         "meeting":meeting,"server":Value::Null,
@@ -1639,8 +1647,8 @@ mod tests {
 
     #[test]
     fn a_keychain_that_refuses_the_write_leaves_no_fallback_file() {
-        let dir = std::env::temp_dir().join(format!("ezerbot-recall-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-recall");
+        let dir = guard.to_path_buf();
         let file = dir.join("workspace.secrets.json");
         let vault = grokbot_forms::vault::Vault::open_refusing_keychain(&file).unwrap();
         let secret = "recall-key-must-never-reach-a-file-0123456789";

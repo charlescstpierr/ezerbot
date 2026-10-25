@@ -201,7 +201,7 @@ pub fn register(conn: &Connection, run_id: &str, draft: &Draft) -> rusqlite::Res
 
 /// The registry of a run, in numbering order.
 pub fn registry(conn: &Connection, run_id: &str) -> rusqlite::Result<Vec<Value>> {
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT n,kind,title,account,author,date,locator,range,excerpt
          FROM wrapper_run_sources WHERE run_id=?1 ORDER BY n",
     )?;
@@ -365,11 +365,16 @@ pub fn number_context(ctx: &Context<'_>, draft: &Draft) -> Option<i64> {
 
 /// One `[n]` a reply cites, and whether the run has such a source.
 pub fn citations(conn: &Connection, run_id: &str, body: &str) -> rusqlite::Result<Vec<Value>> {
-    let known: Vec<i64> = registry(conn, run_id)?
+    Ok(citations_in(&registry(conn, run_id)?, body))
+}
+
+/// `citations` for a caller that already read the registry of the run.
+pub fn citations_in(registry: &[Value], body: &str) -> Vec<Value> {
+    let known: Vec<i64> = registry
         .iter()
         .filter_map(|source| source["n"].as_i64())
         .collect();
-    Ok(cited(body)
+    cited(body)
         .into_iter()
         .map(|n| {
             if known.contains(&n) {
@@ -378,7 +383,7 @@ pub fn citations(conn: &Connection, run_id: &str, body: &str) -> rusqlite::Resul
                 json!({"n": n, "etat": "introuvable", "libelle": MISSING})
             }
         })
-        .collect())
+        .collect()
 }
 
 /// The numbers a text cites as `[n]` (or `[n, m]`), each once, in order of appearance. Code is

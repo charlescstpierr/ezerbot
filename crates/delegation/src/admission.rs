@@ -777,18 +777,8 @@ mod tests {
     fn concurrent_reservations_cannot_over_admit_and_survive_reopen() {
         use std::sync::{Arc, Barrier};
         // Own a unique scratch directory, never a worktree or shared database.
-        struct Scratch(std::path::PathBuf);
-        impl Drop for Scratch {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let mut random = [0; 16];
-        getrandom::getrandom(&mut random).unwrap();
-        let nonce: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-        let scratch = Scratch(std::env::temp_dir().join(format!("grokbot-delegation-{nonce}")));
-        std::fs::create_dir(&scratch.0).unwrap();
-        let path = scratch.0.join("delegation.sqlite");
+        let scratch = grokbot_test_support::TestDir::new("grokbot-delegation");
+        let path = scratch.join("delegation.sqlite");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL").unwrap();
         graph::migrate(&conn).unwrap();

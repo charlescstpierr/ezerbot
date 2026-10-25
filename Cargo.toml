@@ -16,6 +16,7 @@ members = [
   "crates/scheduler",
   "crates/delegation",
   "crates/attachments",
+  "crates/test-support",
 ]
 
 [workspace.package]
@@ -38,6 +39,7 @@ grokbot-forms = { path = "crates/forms" }
 grokbot-scheduler = { path = "crates/scheduler" }
 grokbot-delegation = { path = "crates/delegation" }
 grokbot-attachments = { path = "crates/attachments" }
+grokbot-test-support = { path = "crates/test-support" }
 grokbot-domain = { path = "crates/domain" }
 grokbot-wire = { path = "crates/wire" }
 grokbot-submission-journal = { path = "crates/submission-journal" }

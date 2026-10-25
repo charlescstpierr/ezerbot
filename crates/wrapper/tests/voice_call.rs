@@ -19,16 +19,12 @@ struct Fixture {
     provider: Provider,
     _server: FakeOpenAi,
     dir: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "voice-call-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("voice-call-test");
+        let dir = guard.to_path_buf();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let provider =
             Provider::with_endpoints(&dir.join("workspace.sqlite"), server.endpoints(), false);
@@ -38,6 +34,7 @@ impl Fixture {
             provider,
             _server: server,
             dir,
+            _dir: guard,
         }
     }
     fn post(&mut self, path: &str, body: Value) -> Value {
@@ -153,12 +150,6 @@ impl Fixture {
         all
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
 #[test]
 fn a_call_fills_a_transcript_that_stays_in_the_thread_marked_voice_call_without_any_audio_file() {
     let mut f = Fixture::new();

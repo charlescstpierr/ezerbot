@@ -22,17 +22,12 @@ struct Fixture {
     provider: Provider,
     server: FakeOpenAi,
     path: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new(live: bool) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir()
-            .join(format!(
-                "grokbot-engine-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ))
-            .join("app.sqlite");
+        let guard = grokbot_test_support::TestDir::new("grokbot-engine");
+        let path = guard.to_path_buf().join("app.sqlite");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         if live {
@@ -52,6 +47,7 @@ impl Fixture {
             provider,
             server,
             path,
+            _dir: guard,
         }
     }
     fn post(&mut self, path: &str, value: Value) -> Value {
@@ -131,11 +127,6 @@ impl Fixture {
         wait("catalogue restored", || {
             self.provider.status()["models_ready"] == true
         });
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 fn call(id: &str, name: &str, args: Value) -> Value {
@@ -1352,6 +1343,39 @@ fn missing_model_fails_instead_of_streaming_forever() {
         .unwrap()
         .contains("modèles"));
     assert_eq!(f.run("no-model").status, RunStatus::Failed);
+}
+
+#[test]
+fn stopping_a_run_that_already_ended_succeeds_without_rewriting_it() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Terminé"}),
+        complete(),
+    ]);
+    f.send(&c, "finished", "Answer");
+    f.done(&c, "finished");
+    wait("finished owner drained", || {
+        f.provider.status()["titling"] == false
+    });
+    let provider = Provider::with_endpoints(&f.path, f.server.endpoints(), false);
+    f.app = App::open_with(&f.path, provider).unwrap();
+    f.send(&c, "failed", "Answer");
+    f.done(&c, "failed");
+    for (m, status) in [
+        ("failed", RunStatus::Failed),
+        ("finished", RunStatus::Finished),
+    ] {
+        let (run, reply) = (f.run(m), f.reply(&c, m));
+        assert_eq!(run.status, status);
+        f.post("/api/stop", json!({"conversation_id":c,"message_id":m}));
+        assert_eq!(f.run(m), run, "{m} run is rewritten by a late stop");
+        assert_eq!(f.reply(&c, m), reply);
+        assert!(!store::events(&f.db(), &run.run_id, 0)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == RunEventKind::Cancelled));
+    }
 }
 
 #[test]

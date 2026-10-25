@@ -12,10 +12,7 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
@@ -30,15 +27,12 @@ struct Fixture {
     server: FakeOpenAi,
     path: PathBuf,
     chat: String,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-yolo-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let guard = grokbot_test_support::TestDir::new("ezerbot-yolo");
+        let root = guard.to_path_buf();
         std::fs::create_dir_all(root.join("data")).unwrap();
         let path = root.join("data/workspace.sqlite");
         let now = SystemTime::now()
@@ -62,6 +56,7 @@ impl Fixture {
             server,
             path,
             chat,
+            _dir: guard,
         }
     }
     fn root(&self) -> PathBuf {
@@ -228,11 +223,6 @@ impl Fixture {
         log.into_iter()
             .filter(|e| e["source"] == "forbidden")
             .collect()
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.root());
     }
 }
 fn now() -> u64 {

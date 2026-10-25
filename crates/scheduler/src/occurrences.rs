@@ -1362,22 +1362,16 @@ mod occurrences_tests {
         assert_eq!(list(&conn, &routine.routine_id).unwrap().len(), 1);
     }
 
-    struct TestDatabase(std::path::PathBuf);
+    /// Chemin de la base, puis le dossier unique qui la contient (supprimé en entier à la fin).
+    struct TestDatabase(
+        std::path::PathBuf,
+        #[allow(dead_code)] grokbot_test_support::TestDir,
+    );
 
     impl TestDatabase {
         fn new() -> Self {
-            let mut bytes = [0; 16];
-            getrandom::getrandom(&mut bytes).unwrap();
-            let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-            Self(std::env::temp_dir().join(format!("grokbot-scheduler-{token}.sqlite")))
-        }
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            for suffix in ["", "-wal", "-shm", "-journal"] {
-                let _ = std::fs::remove_file(format!("{}{suffix}", self.0.display()));
-            }
+            let directory = grokbot_test_support::TestDir::new("grokbot-scheduler");
+            Self(directory.join("scheduler.sqlite"), directory)
         }
     }
 

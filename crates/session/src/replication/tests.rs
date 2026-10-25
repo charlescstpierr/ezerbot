@@ -2,23 +2,15 @@ use super::*;
 use grokbot_domain::{
     AccountGeneration, AccountId, BootId, EntryBody, ServerGeneration, TranscriptUpdate, UpdateKind,
 };
+use grokbot_test_support::TestDir;
 use rusqlite::Connection;
-use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-struct Database(PathBuf);
+struct Database(TestDir);
 
 impl Database {
     fn new() -> Self {
-        static SERIAL: AtomicU64 = AtomicU64::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "grokbot-snapshot-session-{}-{}",
-            std::process::id(),
-            SERIAL.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&directory).unwrap();
-        Self(directory)
+        Self(TestDir::new("grokbot-snapshot-session"))
     }
 
     fn path(&self) -> PathBuf {
@@ -27,12 +19,6 @@ impl Database {
 
     fn session(&self, account: &str) -> SnapshotSession {
         SnapshotSession::open(&self.path(), actor(account), conversation()).unwrap()
-    }
-}
-
-impl Drop for Database {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
     }
 }
 

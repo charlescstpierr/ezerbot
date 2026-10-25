@@ -163,7 +163,7 @@ impl Provider {
             *probe = json!({"state":"running"});
             session.inner.probe_generation.load(Ordering::SeqCst)
         };
-        thread::spawn(move || {
+        self.primary.spawn_background(move || {
             let mut failure = None;
             let mut responded = false;
             let mut visible = false;
@@ -225,6 +225,24 @@ impl Provider {
                 json!({"state":"failed","message":failure.unwrap_or_else(|| "La connexion a été interrompue. Réessayez.".into())})
             };
         });
+    }
+    /// Pour les tests : attend la fin des fils réseau de fond de cette connexion (sonde de
+    /// connexion, catalogue de modèles, quota, lecteur d'un tour, attente du retour OAuth), pour
+    /// que le dossier de la fixture ne soit plus écrit quand le test le supprime. L'attente est
+    /// bornée : `Err` nomme alors le fil qui ne finit pas. Absent de la version livrée.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn wait_for_background_work(&self) -> Result<(), String> {
+        self.primary.wait_background()
+    }
+    /// Comme `wait_for_background_work`, avec une borne choisie (essai de la borne elle-même).
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn wait_for_background_work_within(
+        &self,
+        limit: std::time::Duration,
+    ) -> Result<(), String> {
+        self.primary.wait_background_within(limit)
     }
     pub fn start_signin(&self) -> Result<String, Failure> {
         self.session().start_signin()
@@ -383,9 +401,8 @@ mod tests {
 
     #[test]
     fn codex_image_fallback_and_retired_selection_use_supported_default_only() {
-        let db = std::env::temp_dir()
-            .join(format!("ezerbot-model-selection-{}", new_host_id()))
-            .join("workspace.sqlite");
+        let directory = grokbot_test_support::TestDir::new("ezerbot-model-selection");
+        let db = directory.join("workspace.sqlite");
         let provider =
             Provider::with_backends(&db, Endpoints::default(), Endpoints::codex(), false);
         assert!(provider.accepts_images(codex::DEFAULT_MODEL));

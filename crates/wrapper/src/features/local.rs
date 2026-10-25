@@ -1835,14 +1835,8 @@ mod tests {
     };
     #[test]
     fn admitted_non_individual_authority_cannot_read_app_data_at_the_effect_boundary() {
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-data-boundary-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let guard = grokbot_test_support::TestDir::new("ezerbot-data-boundary");
+        let root = guard.to_path_buf();
         fs::create_dir_all(root.join("data")).unwrap();
         let app = App::open(&root.join("data/workspace.sqlite")).unwrap();
         let protected = root.join("data/identifiants-factices.txt");
@@ -1955,14 +1949,8 @@ mod tests {
 
     #[test]
     fn a_file_swapped_for_a_symlink_is_not_read() {
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-swap-file-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let guard = grokbot_test_support::TestDir::new("ezerbot-swap-file");
+        let root = guard.to_path_buf();
         fs::create_dir_all(root.join("data")).unwrap();
         let folder = root.join("skills");
         fs::create_dir_all(&folder).unwrap();
@@ -1992,11 +1980,8 @@ mod tests {
 
     #[test]
     fn a_nested_directory_swapped_for_a_symlink_does_not_escape_the_grant() {
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-nested-swap-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
+        let guard = grokbot_test_support::TestDir::new("ezerbot-nested-swap");
+        let root = guard.to_path_buf();
         fs::create_dir_all(root.join("data")).unwrap();
         let folder = root.join("skills");
         let nested = folder.join("nested");
@@ -2028,11 +2013,8 @@ mod tests {
 
     #[test]
     fn an_ancestor_swapped_before_the_open_does_not_redirect_the_import() {
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-ancestor-swap-{}-{}",
-            std::process::id(),
-            crate::now()
-        ));
+        let guard = grokbot_test_support::TestDir::new("ezerbot-ancestor-swap");
+        let root = guard.to_path_buf();
         fs::create_dir_all(root.join("data")).unwrap();
         let nested = root.join("granted/nested");
         fs::create_dir_all(nested.join("skill")).unwrap();
@@ -2055,14 +2037,8 @@ mod tests {
 
     #[test]
     fn a_root_replaced_during_the_walk_discards_what_was_read() {
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-swap-root-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let guard = grokbot_test_support::TestDir::new("ezerbot-swap-root");
+        let root = guard.to_path_buf();
         fs::create_dir_all(root.join("data")).unwrap();
         let folder = root.join("skills");
         fs::create_dir_all(&folder).unwrap();
@@ -2199,7 +2175,8 @@ mod tests {
 
     #[test]
     fn file_tools_refuse_the_install_and_keychain_roots_even_when_the_database_is_elsewhere() {
-        let root = std::env::temp_dir().join(format!("ezerbot-roots-{}", std::process::id()));
+        let guard = grokbot_test_support::TestDir::new("ezerbot-roots");
+        let root = guard.to_path_buf();
         let home = root.join("home");
         let install = home.join("Library/Application Support/Grokbot");
         let keychains = home.join("Library/Keychains");

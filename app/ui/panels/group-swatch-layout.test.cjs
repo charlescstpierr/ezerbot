@@ -5,7 +5,7 @@ const { mkdtempSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
-const { chromeBinary } = require("../chrome-binary.cjs");
+const { chromeBinary, freezeHint } = require("../chrome-binary.cjs");
 
 const UI = join(__dirname, "..");
 const COLORS = [
@@ -71,7 +71,8 @@ function measure() {
   const directory = mkdtempSync(join(tmpdir(), "group-swatches-"));
   const file = join(directory, "swatches.html");
   writeFileSync(file, page());
-  const chrome = spawn(chromeBinary(), [
+  const binary = chromeBinary({ dumpDom: true });
+  const chrome = spawn(binary, [
     "--headless=new",
     "--no-sandbox",
     "--disable-gpu",
@@ -87,7 +88,7 @@ function measure() {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       chrome.kill("SIGKILL");
-      reject(new Error("chrome did not report swatch layout"));
+      reject(new Error(`chrome did not report swatch layout${freezeHint(binary)}`));
     }, 20000);
     chrome.stdout.on("data", (chunk) => {
       dom += chunk;

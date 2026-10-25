@@ -244,3 +244,87 @@ fn a_shell_task_started_by_the_turn_during_the_destruction_is_stopped_and_joined
         !group_alive(pgid)
     });
 }
+
+#[test]
+fn a_pending_connector_sign_in_is_ended_by_the_destruction_and_nothing_answers_afterwards() {
+    // Le serveur de jetons n'est jamais contacté : l'adresse n'est qu'un point d'ancrage.
+    std::env::set_var("GROKBOT_FAKE_CONNECTORS", "http://127.0.0.1:9");
+    let mut f = Fixture::new();
+    let run = f.post(
+        "/api/connectors/connect",
+        json!({"id": "calendar", "client_id": "fixture-oauth-client", "client_secret": "fixture-oauth-secret"}),
+    )["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let db = f.db.clone();
+    // Le tour de l'action peut attendre une carte : on la décide, comme un utilisateur.
+    let authorization = {
+        let mut found = None;
+        wait(
+            "connexion du connecteur en attente dans le navigateur",
+            || {
+                f.app.tick_suspended(0);
+                if let Ok(requests) = grokbot_forms::requests::list_for_run(
+                    &rusqlite::Connection::open(&db).unwrap(),
+                    &run,
+                ) {
+                    if let Some(request) = requests.first() {
+                        let body = json!({
+                            "entry_id": request.entry_id,
+                            "conversation_id": request.route.target_conversation_id,
+                            "submission_id": "decide-connect",
+                            "decision": "allow_once",
+                        });
+                        let _ = f.app.api(
+                            "POST",
+                            "/api/approvals/resolve",
+                            body.to_string().as_bytes(),
+                        );
+                    }
+                }
+                found = f.app.api("GET", "/api/state", b"").unwrap()["mcp"]["catalogue"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m["id"] == "calendar" && m["status"] == "authorizing")
+                    .and_then(|m| m["authorization_url"].as_str().map(str::to_owned));
+                found.is_some()
+            },
+        );
+        found.unwrap()
+    };
+    let redirect = url::Url::parse(&authorization)
+        .unwrap()
+        .query_pairs()
+        .find(|(key, _)| key == "redirect_uri")
+        .map(|(_, value)| url::Url::parse(&value).unwrap())
+        .unwrap();
+    let port = redirect.port().unwrap();
+    let phase_before: Option<String> = query(
+        &db,
+        "SELECT phase FROM wrapper_connector_catalogue WHERE id='calendar'",
+    );
+    assert_eq!(phase_before.as_deref(), Some("authorizing"));
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_ok(),
+        "l'écouteur de retour OAuth attend le navigateur"
+    );
+
+    drop(f.app);
+
+    // Le fil du connecteur est fini et joint : plus personne n'écoute, donc plus de retour
+    // tardif possible, et rien n'a écrit la phase (ni retour, ni expiration).
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "l'écouteur de retour OAuth est fermé après la destruction de l'App"
+    );
+    let phase_after: Option<String> = query(
+        &db,
+        "SELECT phase FROM wrapper_connector_catalogue WHERE id='calendar'",
+    );
+    assert_eq!(
+        phase_after, phase_before,
+        "la destruction n'écrit pas la phase"
+    );
+}

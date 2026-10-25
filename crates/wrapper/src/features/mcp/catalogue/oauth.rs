@@ -421,7 +421,10 @@ pub(super) fn begin(
     let server = server.clone();
     #[cfg(target_os = "macos")]
     let authorization_url = url.to_string();
-    std::thread::spawn(move || {
+    // Détruire l'App lève `stop` : l'attente finit sans rien écrire, puis le fil est joint (#463).
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopping = stop.clone();
+    ctx.provider.spawn_background_stoppable(stop, move || {
         let result = (|| -> Result<(), ApiError> {
             let conn = Connection::open(&path)?;
             conn.busy_timeout(Duration::from_secs(4))?;
@@ -434,7 +437,10 @@ pub(super) fn begin(
                 conversation_id: None,
                 run_id: None,
             };
+            // Une fois l'arrêt demandé, la demande n'est plus courante : la boucle sort, aucun
+            // retour n'est traité et l'expiration n'écrit rien.
             let current = || -> bool {
+                !stopping.load(std::sync::atomic::Ordering::SeqCst) &&
                 conn.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_connector_catalogue WHERE server_id=?1 AND generation=?2 AND phase='authorizing')",params![server.id,generation],|r|r.get(0)).unwrap_or(false)
             };
             let deadline = std::time::Instant::now() + Duration::from_secs(300);

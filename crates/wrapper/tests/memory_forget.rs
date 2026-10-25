@@ -673,6 +673,39 @@ fn normalized_duplicate_arguments_are_also_forgotten() {
     }
 }
 
+#[test]
+fn a_refused_call_echoing_the_text_in_json_escapes_is_also_forgotten() {
+    let mut f = Fixture::new();
+    let c = f.conversation("grokbot");
+    let secret = "Allergique aux \"kumquats\".";
+    let escaped = r#"Allergique aux \"kumquats\"."#;
+    let id = f.learn(&c, "learn", secret);
+    f.events(vec![
+        call(
+            "refused",
+            "remember",
+            json!({"text":secret,"sensitive":false}),
+        ),
+        complete(),
+    ]);
+    f.send(&c, "refused", "Retain that again.");
+    let run = f.run("refused").run_id;
+    let refusal = store::events(&f.db(), &run, 0)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == RunEventKind::ToolResult)
+        .unwrap()
+        .payload["outcome"]["reason"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(refusal.contains(escaped), "{refusal}");
+    f.forget("grokbot", &id);
+    for event in store::events(&f.db(), &run, 0).unwrap() {
+        assert!(!contains(&event.payload, secret), "{}", event.payload);
+    }
+}
+
 struct PausedStream {
     api: String,
     gate: Arc<(Mutex<bool>, std::sync::Condvar)>,

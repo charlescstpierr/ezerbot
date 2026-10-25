@@ -46,3 +46,9 @@ grokbot-submission-journal = { path = "crates/submission-journal" }
 grokbot-replica = { path = "crates/replica" }
 grokbot-store = { path = "crates/store" }
 grokbot-session = { path = "crates/session" }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

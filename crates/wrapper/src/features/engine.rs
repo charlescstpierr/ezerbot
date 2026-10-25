@@ -1130,7 +1130,12 @@ fn host_action_response(
 pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Result<(), ApiError> {
     ctx.provider.cancel_run(&run.run_id);
     let mut services = Services::new(ctx)?;
+    let ended = store::get(ctx.connection, &run.run_id)?.is_some_and(|r| r.status.is_terminal());
     run_loop::cancel(ctx.connection, &mut services, &run.run_id, end)?;
+    // Un tour suspendu n'a plus de worker pour l'écrire au journal.
+    if !ended {
+        let _ = super::turns::record(ctx.connection, &run.run_id);
+    }
     Ok(())
 }
 pub fn tick(ctx: &super::Context<'_>) {
@@ -1401,6 +1406,9 @@ fn drive_owned(
         let result = run_loop::run(conn, gateway, services, id);
         let run = store::required(conn, id)?;
         if run.status.is_terminal() || run.status.is_suspended() || services.is_interrupted() {
+            if run.status.is_terminal() {
+                let _ = super::turns::record(conn, id);
+            }
             return Ok(());
         }
         if run.status == RunStatus::Interrupted
@@ -1463,6 +1471,9 @@ fn fail_host(
             &json!({"failed":true,"reason":"local_service_unavailable"}),
         )?;
         Ok(())
+    })
+    .inspect(|_| {
+        let _ = super::turns::record(conn, id);
     })
 }
 
@@ -1644,6 +1655,10 @@ impl RunServices for Services<'_> {
             .filter(|s| {
                 !super::screen::is_tool(&s.name)
                     || super::screen::enabled(self.connection, &run.bot_id)
+            })
+            .filter(|s| {
+                s.name != super::routines::QUIET_TOOL
+                    || matches!(run.trigger, Trigger::Occurrence { .. })
             })
             .map(gated)
             .collect()

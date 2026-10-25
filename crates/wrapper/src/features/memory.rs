@@ -969,6 +969,14 @@ pub(super) fn redact_traces(
             }
         }
     }
+    // A failure reason echoes the call's arguments as JSON, so a text can also sit in
+    // the journal in its escaped spelling.
+    let escaped: Vec<_> = texts
+        .iter()
+        .filter_map(|text| serde_json::to_string(text).ok())
+        .map(|json| json[1..json.len() - 1].to_owned())
+        .collect();
+    texts.extend(escaped);
     let mut covering = BTreeSet::new();
     let mut conversations = BTreeSet::new();
     for fact in &facts {

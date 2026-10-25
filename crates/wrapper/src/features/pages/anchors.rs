@@ -34,7 +34,9 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             state TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             PRIMARY KEY (conversation_id, message_id)
-        );",
+        );
+        CREATE INDEX IF NOT EXISTS wrapper_page_anchors_page
+            ON wrapper_page_anchors(page_id, created_at, message_id);",
     )?;
     Ok(())
 }
@@ -175,15 +177,16 @@ pub fn settle(ctx: &Context<'_>, page_id: &str, source: &str) -> Result<(), ApiE
 
 pub fn list(conn: &Connection, page_id: &str) -> Result<Vec<Value>, ApiError> {
     let mut statement = conn.prepare(
-        "SELECT message_id, passage, state, source_version FROM wrapper_page_anchors
+        "SELECT conversation_id, message_id, passage, state, source_version FROM wrapper_page_anchors
          WHERE page_id = ?1 ORDER BY created_at, message_id",
     )?;
     let rows = statement.query_map([page_id], |row| {
         Ok(json!({
-            "message_id": row.get::<_, String>(0)?,
-            "passage": row.get::<_, String>(1)?,
-            "state": row.get::<_, String>(2)?,
-            "source_version": row.get::<_, String>(3)?,
+            "conversation_id": row.get::<_, String>(0)?,
+            "message_id": row.get::<_, String>(1)?,
+            "passage": row.get::<_, String>(2)?,
+            "state": row.get::<_, String>(3)?,
+            "source_version": row.get::<_, String>(4)?,
         }))
     })?;
     Ok(rows.collect::<Result<_, _>>()?)

@@ -7,10 +7,17 @@ import sys
 import time
 
 import schema
+import host
 from observation import category, write
 
 def execute(root, out, label, command, environment, entry_path):
-    entry = dict(schema_version=1, label=label, stage='entry', reason='pending', load_before=None,
+    return _execute(root, out, label, command, environment, entry_path, ci=False)
+
+def execute_ci(root, out, label, command, environment, entry_path):
+    return _execute(root, out, label, command, environment, entry_path, ci=True)
+
+def _execute(root, out, label, command, environment, entry_path, ci):
+    entry = dict(schema_version=2, execution_context='unverified-ci' if ci else 'mac-local', label=label, stage='entry', reason='pending', load_before=None,
                  wrapper_return_code=None, child_return_code=None, initial_return_code=None,
                  error_category=None, errno=None, head=None, patch_sha256=None, started=False)
     write(entry_path, entry, schema.run_entry)
@@ -26,10 +33,14 @@ def execute(root, out, label, command, environment, entry_path):
         load = os.getloadavg()
         entry['load_before'] = list(load)
         write(entry_path, entry, schema.run_entry)
+        if ci:
+            entry['stage'] = 'host'
+            entry['execution_context'] = host.github_actions(root, out, environment, Path(__file__).resolve().parent)
+            write(entry_path, entry, schema.run_entry)
         if any((out / (label + suffix)).exists() for suffix in ['.log', '.json', '.done']):
             entry['initial_return_code'] = 21
             return finish(21, 'duplicate_label')
-        if load[1] >= 20:
+        if not ci and load[1] >= 20:
             entry['initial_return_code'] = 20
             return finish(20, 'load_gate_closed')
         entry['stage'] = 'provenance'
@@ -46,7 +57,7 @@ def execute(root, out, label, command, environment, entry_path):
         Path(env['TMPDIR']).mkdir(exist_ok=True)
         if label.startswith('trace'):
             env['I557_TRACE_DIR'] = str(out / (label + '-trace'))
-        meta = dict(label=label, command=command, cwd=str(root), head=head, patch_sha256=entry['patch_sha256'],
+        meta = dict(label=label, execution_context=entry['execution_context'], command=command, cwd=str(root), head=head, patch_sha256=entry['patch_sha256'],
                     load_before=list(load), profile='cargo test dev/debug', started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
         (out / (label + '.json')).write_text(json.dumps(meta, indent=2))
         start = time.monotonic()
@@ -88,14 +99,17 @@ def execute(root, out, label, command, environment, entry_path):
             entry['child_return_code'] = entry['initial_return_code'] = proc.wait()
         elif isinstance(error, subprocess.CalledProcessError):
             entry['initial_return_code'] = error.returncode
-        reason = {'precondition': 'precondition_failed', 'provenance': 'provenance_failed',
+        reason = {'host': 'host_context_invalid', 'precondition': 'precondition_failed', 'provenance': 'provenance_failed',
                   'environment': 'environment_failed', 'spawn': 'spawn_failed',
                   'running': 'collection_failed', 'collection': 'collection_failed'}.get(entry['stage'], 'unexpected_preparation')
         return finish(22 if entry['stage'] == 'spawn' else 24, reason, error)
 
 if __name__ == '__main__':
-    root = Path(os.environ['I557_ROOT'])
     out = Path(os.environ['I557_EVIDENCE'])
     label = sys.argv[1]
     assert label in schema.LABELS
-    raise SystemExit(execute(root, out, label, sys.argv[2:], os.environ, out / (label + '-entry.json')))
+    entry = dict(schema_version=2, execution_context='mac-local', label=label, stage='entry', reason='local_runtime_forbidden',
+                 load_before=list(os.getloadavg()), wrapper_return_code=25, child_return_code=None, initial_return_code=25,
+                 error_category=None, errno=None, head=None, patch_sha256=None, started=False)
+    write(out / (label + '-entry.json'), entry, schema.run_entry)
+    raise SystemExit(25)

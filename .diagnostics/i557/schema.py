@@ -11,6 +11,9 @@ PHASES = set('tx_enter begin_enter begin_return operation_return commit_enter tx
 ANALYSIS_KEYS = set('fixture run request words source_bytes commits polls visible gaps gap_ms first_break_demonstrated words_interval_ms emission_to_gateway_ms begin_ms commit_ms filter_refresh_ms wire_send_ms emit_ms api_dispatch_ms log_ms extraction_ms wake_lateness_ms committed_before_api_but_missing_polls worst_gap seq bytes inserted_ns commit_enter_ns committed_ns cumulative_bytes poll wake_ns api_begin_ns api_return_ns dispatcher_ms seq_used text_seq_used committed_seq_before_api durable_bytes_before_api commit_interval_overlaps_api_begin ms from_poll to_poll from_words to_words from_ns to_ns n min median max ns phase a b ok thread index'.split())
 ERROR_TYPES = ['AssertionError', 'FileNotFoundError', 'CalledProcessError', 'JSONDecodeError', 'KeyError', 'OSError', 'ValueError', 'BlockingIOError', 'PermissionError', 'Other']
 REASONS = set('pending completed duplicate_label load_gate_closed precondition_failed provenance_failed environment_failed spawn_failed collection_failed unexpected_preparation lock_failed entry_invalid gate_invalid entry_missing entry_incomplete gate_missing gate_incomplete metadata_missing pieces_missing child_nonzero wrapper_spawn_failed metadata_invalid measurement_receipt_invalid apply_check_failed provenance_mismatch machine_failed'.split())
+REASONS.add('host_context_invalid')
+REASONS.add('local_runtime_forbidden')
+CONTEXTS = ['mac-local', 'github-actions', 'unverified-ci']
 
 def fields(value, names):
     assert type(value) is dict and set(value) == set(names.split()), 'Object fields differ'
@@ -37,9 +40,13 @@ def error_fields(value):
         assert value['errno'] <= 4095
 
 def run_entry(value):
-    fields(value, 'schema_version label stage reason load_before wrapper_return_code child_return_code initial_return_code error_category errno head patch_sha256 started')
-    assert value['schema_version'] == 1 and value['label'] in LABELS
-    assert value['stage'] in ['entry', 'precondition', 'provenance', 'environment', 'spawn', 'running', 'collection', 'finished']
+    names = 'schema_version label stage reason load_before wrapper_return_code child_return_code initial_return_code error_category errno head patch_sha256 started'
+    assert value['schema_version'] in [1, 2] and value['label'] in LABELS
+    if value['schema_version'] == 2:
+        names += ' execution_context'
+        assert value['execution_context'] in CONTEXTS
+    fields(value, names)
+    assert value['stage'] in ['entry', 'precondition', 'host', 'provenance', 'environment', 'spawn', 'running', 'collection', 'finished']
     assert value['reason'] in REASONS
     boolean(value['started'])
     error_fields(value)
@@ -57,6 +64,10 @@ def run_entry(value):
     if value['reason'] == 'completed':
         assert value['stage'] == 'finished' and value['started']
         assert value['wrapper_return_code'] == value['child_return_code'] == value['initial_return_code']
+        if value['schema_version'] == 2:
+            assert value['execution_context'] != 'unverified-ci'
+            if value['execution_context'] == 'mac-local':
+                assert value['load_before'][1] < 20
 
 def gate_entry(value):
     fields(value, 'schema_version stage reason wrapper_return_code child_return_code error_category errno started')
@@ -170,7 +181,11 @@ def machine(value):
     assert value['logical_cpus'] > 0 and value['memory_bytes'] > 0
 
 def configuration(value):
-    fields(value, 'label return_code classification tests visible_count words gaps_ms test_seconds wall_seconds load_before load_after load_samples binary_sha256 source_diff_sha256 sources_sha256 binary_architecture binary_file cargo_profile')
+    names = 'label return_code classification tests visible_count words gaps_ms test_seconds wall_seconds load_before load_after load_samples binary_sha256 source_diff_sha256 sources_sha256 binary_architecture binary_file cargo_profile'
+    if 'execution_context' in value:
+        names += ' execution_context'
+        assert value['execution_context'] == 'github-actions'
+    fields(value, names)
     assert value['label'] in LABELS
     assert type(value['return_code']) is int
     assert value['classification'] in ['passed', 'fluidity_failure']
@@ -192,7 +207,8 @@ def configuration(value):
         assert type(value[key]) is list and len(value[key]) == 3
         for item in value[key]:
             number(item)
-    assert value['load_before'][1] < 20
+    if 'execution_context' not in value:
+        assert value['load_before'][1] < 20
     for sample in value['load_samples']:
         fields(sample, 'seconds load')
         number(sample['seconds'])
@@ -212,9 +228,12 @@ def configuration(value):
 
 def receipt(value):
     names = 'schema_version workflow_sha subject_sha patch_sha256 run_id attempt machine configurations source_restored measurement_valid product_failed preparation_failed stage preparation_return_code preparation_error_type'
-    assert value['schema_version'] in [1, 2]
-    if value['schema_version'] == 2:
+    assert value['schema_version'] in [1, 2, 3]
+    if value['schema_version'] >= 2:
         names += ' entry_load apply_check entry_receipts preparation_reason preparation_errno machine_gate'
+    if value['schema_version'] == 3:
+        names += ' execution_context'
+        assert value['execution_context'] in ['unverified-ci', 'github-actions']
     fields(value, names)
     assert value['subject_sha'] == SUBJECT and value['patch_sha256'] == PATCH_SHA
     digest(value['workflow_sha'], 40)
@@ -227,13 +246,15 @@ def receipt(value):
     for index, item in enumerate(value['configurations']):
         configuration(item)
         assert item['label'] == LABELS[index]
+        if value['schema_version'] < 3:
+            assert 'execution_context' not in item
     for key in ['source_restored', 'measurement_valid', 'product_failed', 'preparation_failed']:
         boolean(value[key])
-    assert value['stage'] in ['prepare', 'provenance', 'apply_check', 'machine', 'baseline', 'apply', 'trace', 'analysis', 'restore', 'control', 'complete']
+    assert value['stage'] in ['prepare', 'host', 'provenance', 'apply_check', 'machine', 'baseline', 'apply', 'trace', 'analysis', 'restore', 'control', 'complete']
     if value['preparation_return_code'] is not None:
         return_code(value['preparation_return_code'])
     assert value['preparation_error_type'] in [None, *ERROR_TYPES]
-    if value['schema_version'] == 2:
+    if value['schema_version'] >= 2:
         assert value['preparation_reason'] in REASONS
         if value['machine_gate'] is not None:
             gate_entry(value['machine_gate'])
@@ -266,15 +287,18 @@ def receipt(value):
             assert entry['runner']['head'] == SUBJECT
             assert entry['runner']['patch_sha256'] == configuration_value['source_diff_sha256']
             assert entry['runner']['load_before'] == configuration_value['load_before']
+            if value['schema_version'] == 3:
+                assert value['execution_context'] == configuration_value['execution_context'] == entry['runner']['execution_context'] == 'github-actions'
     assert value['product_failed'] == any(c['return_code'] != 0 for c in value['configurations'])
     if value['measurement_valid']:
         assert not value['preparation_failed'] and value['source_restored'] and len(value['configurations']) == 3 and value['stage'] == 'complete'
         assert value['preparation_error_type'] is value['preparation_return_code'] is None
-        if value['schema_version'] == 2:
+        if value['schema_version'] >= 2:
             assert value['preparation_reason'] == 'completed' and value['apply_check']['status'] == 'passed'
             assert value['machine_gate']['reason'] == 'completed' and value['machine_gate']['wrapper_return_code'] == 0
             assert len(value['entry_receipts']) == 3 and all(e['reason'] == 'completed' for e in value['entry_receipts'])
-            assert value['entry_load'][1] < 20
+            if value['schema_version'] == 2:
+                assert value['entry_load'][1] < 20
 
 def encoded(value):
     return (json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + '\n').encode('ascii')

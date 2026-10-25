@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 import schema
+import host
 from observation import PreparationFailure, category, empty_attempt, inspect_attempt
 
 TOOLS = Path(__file__).resolve().parent
@@ -80,7 +81,7 @@ def measure(state, label, binary=None, cargo_profile=None):
     state['entry_receipts'].append(entry)
     checkpoint(state)
     try:
-        status = private([sys.executable, str(TOOLS / 'run.py'), label, *command], label + '-runner')
+        status = private([sys.executable, str(TOOLS / 'run-ci.py'), label, *command], label + '-runner')
         entry['wrapper_return_code'] = status
     except OSError as error:
         entry['reason'] = 'wrapper_spawn_failed'
@@ -99,6 +100,7 @@ def measure(state, label, binary=None, cargo_profile=None):
     assert raw['head'] == schema.SUBJECT and status == raw['exit_code']
     assert entry['runner']['head'] == raw['head'] and entry['runner']['patch_sha256'] == raw['patch_sha256']
     assert entry['runner']['load_before'] == raw['load_before']
+    assert entry['runner']['execution_context'] == raw['execution_context'] == 'github-actions'
     text = (OUT / (label + '.log')).read_text()
     summaries = re.findall(r'^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; ([0-9]+) filtered out; finished in ([0-9.]+)s$', text, re.MULTILINE)
     assert len(summaries) == 1
@@ -126,7 +128,7 @@ def measure(state, label, binary=None, cargo_profile=None):
                              debug_assertions=profile['debug_assertions'], overflow_checks=profile['overflow_checks'], test=profile['test'])
     assert private(['file', str(path)], label + '-binary-arch') == 0
     assert re.search(r': Mach-O 64-bit executable arm64\s*$', (OUT / (label + '-binary-arch.private')).read_text())
-    result = dict(label=label, return_code=status, classification='passed' if status == 0 else 'fluidity_failure',
+    result = dict(label=label, execution_context='github-actions', return_code=status, classification='passed' if status == 0 else 'fluidity_failure',
                   tests=tests, visible_count=visible, words=words, gaps_ms=gaps, test_seconds=float(summary[6]),
                   wall_seconds=raw['seconds'], load_before=list(raw['load_before']), load_after=list(raw['load_after']),
                   load_samples=raw['load_samples'], binary_sha256=executable['sha256'],
@@ -137,7 +139,7 @@ def measure(state, label, binary=None, cargo_profile=None):
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    state = dict(schema_version=2, workflow_sha=os.environ['I557_WORKFLOW_SHA'], subject_sha=schema.SUBJECT,
+    state = dict(schema_version=3, execution_context='unverified-ci', workflow_sha=os.environ['I557_WORKFLOW_SHA'], subject_sha=schema.SUBJECT,
                  patch_sha256=schema.PATCH_SHA, run_id=int(os.environ['I557_RUN_ID']), attempt=int(os.environ['I557_ATTEMPT']),
                  machine=None, configurations=[], source_restored=False, measurement_valid=False, product_failed=False,
                  preparation_failed=False, stage='prepare', preparation_return_code=None, preparation_error_type=None,
@@ -155,9 +157,10 @@ def main():
                    CARGO_HOME=os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')),
                    RUSTUP_HOME=os.environ.get('RUSTUP_HOME', str(Path.home() / '.rustup')),
                    CARGO_BUILD_JOBS='3', CARGO_TERM_COLOR='never', I557_ROOT=str(ROOT), I557_EVIDENCE=str(OUT))
-        if state['entry_load'][1] >= 20:
-            state['preparation_return_code'] = 20
-            raise PreparationFailure('load_gate_closed')
+        ENV.update({key: os.environ[key] for key in host.CI_KEYS if key in os.environ})
+        state['stage'] = 'host'
+        checkpoint(state)
+        state['execution_context'] = host.github_actions(ROOT, OUT, os.environ, TOOLS)
         state['stage'] = 'provenance'
         checkpoint(state)
         assert os.environ['I557_ATTEMPT'] == '1'
@@ -214,8 +217,8 @@ def main():
     except Exception as error:
         state['preparation_failed'] = True
         state['preparation_reason'] = error.reason if isinstance(error, PreparationFailure) else 'unexpected_preparation'
-        if not isinstance(error, PreparationFailure) and state['stage'] in ['provenance', 'machine']:
-            state['preparation_reason'] = 'provenance_mismatch' if state['stage'] == 'provenance' else 'machine_failed'
+        if not isinstance(error, PreparationFailure) and state['stage'] in ['host', 'provenance', 'machine']:
+            state['preparation_reason'] = {'host': 'host_context_invalid', 'provenance': 'provenance_mismatch', 'machine': 'machine_failed'}[state['stage']]
         if not isinstance(error, PreparationFailure):
             state['preparation_error_type'], state['preparation_errno'] = category(error)
         if state['entry_receipts']:

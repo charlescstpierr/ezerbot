@@ -2148,14 +2148,17 @@ impl<R: BufRead> BufRead for Cancellable<'_, R> {
 /// Un afflux de connexions locales ne retient pas l'attente : `recv_timeout` rend d'abord une
 /// requête déjà lue, accepte au plus `ACCEPT_BUDGET` connexions par passage et revient à son
 /// échéance, où l'appelant vérifie l'annulation et l'expiration. Au plus `MAX_ACTIVE`
-/// connexions sont lues ou attendent dans la file à la fois ; au-delà, une connexion acceptée
-/// est fermée aussitôt.
+/// connexions sont lues ou attendent dans la file à la fois. Quand toutes les places sont
+/// prises, la plus vieille connexion qui n'a pas livré de requête complète (muette, ou en drain
+/// après un refus) est fermée pour faire place à la nouvelle ; une requête complète n'est
+/// jamais évincée, et une nouvelle connexion sans place attend la sienne au lieu d'être fermée.
 pub(crate) mod loopback {
+    use std::collections::VecDeque;
     use std::io::{self, Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -2173,8 +2176,15 @@ pub(crate) mod loopback {
     const ACCEPT_EVERY: Duration = Duration::from_millis(20);
     /// Connexions acceptées par passage : un navigateur en ouvre au plus 6 par hôte.
     const ACCEPT_BUDGET: usize = 16;
-    /// Connexions lues (un fil chacune) ou en file à la fois ; la file ne peut en contenir plus.
+    /// Connexions lues (un fil chacune) ou en file à la fois, évincées non comptées ; la file
+    /// ne peut en contenir plus.
     const MAX_ACTIVE: usize = 32;
+    /// Fils évincés qui n'ont pas encore rendu leur place : au-delà, plus aucune éviction tant
+    /// qu'ils ne sont pas sortis. Au plus `MAX_ACTIVE + MAX_LEAVING` fils par écouteur.
+    const MAX_LEAVING: usize = 8;
+    /// Une connexion acceptée depuis moins longtemps n'est pas évincée : son fil a le temps de
+    /// lire des en-têtes déjà arrivés, même sous un afflux qui renouvelle ses connexions.
+    const EVICTABLE_AFTER: Duration = Duration::from_millis(100);
 
     /// Une réponse entière, toujours suivie de la fermeture de la connexion.
     pub(crate) struct Reply {
@@ -2224,20 +2234,97 @@ pub(crate) mod loopback {
         }
     }
 
-    /// Une place parmi `MAX_ACTIVE`, rendue à sa destruction.
-    struct Slot(Arc<AtomicUsize>);
+    /// Les places d'un écouteur. Seul son passage d'acceptation les incrémente.
+    #[derive(Default)]
+    struct Places {
+        /// Places tenues : fils de lecture, évincés compris, et requêtes pas encore servies.
+        active: AtomicUsize,
+        /// Fils évincés pas encore sortis. Décrémenté avant que leur place soit rendue.
+        leaving: AtomicUsize,
+    }
+    impl Places {
+        /// Places tenues hors évincés. `active` est lu d'abord : une sortie concurrente
+        /// décrémente `leaving` puis `active`, donc l'estimation n'est jamais trop basse.
+        fn held(&self) -> (usize, usize) {
+            let active = self.active.load(Ordering::SeqCst);
+            let leaving = self.leaving.load(Ordering::SeqCst);
+            (active, active.saturating_sub(leaving))
+        }
+    }
+
+    /// Une place, rendue à sa destruction.
+    struct Slot(Arc<Places>);
     impl Slot {
-        /// Seul le passage d'acceptation prend des places. Refusée, la place rend aussitôt
-        /// l'incrément qu'elle a fait.
-        fn take(active: &Arc<AtomicUsize>) -> Option<Self> {
-            let slot = Self(active.clone());
-            (active.fetch_add(1, Ordering::SeqCst) < MAX_ACTIVE).then_some(slot)
+        fn take(places: &Arc<Places>) -> Self {
+            places.active.fetch_add(1, Ordering::SeqCst);
+            Self(places.clone())
         }
     }
     impl Drop for Slot {
         fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
+            self.0.active.fetch_sub(1, Ordering::SeqCst);
         }
+    }
+
+    /// En-têtes en lecture, ou refus en drain : évinçable.
+    const READING: u8 = 0;
+    /// Requête complète confiée à l'écouteur : jamais évincée.
+    const HANDED: u8 = 1;
+    const EVICTED: u8 = 2;
+    /// Fil sorti sans requête.
+    const OVER: u8 = 3;
+
+    /// Ce que l'écouteur voit d'une connexion lue : une copie de son socket, pour la fermer.
+    struct Watch {
+        stream: TcpStream,
+        accepted: Instant,
+        state: AtomicU8,
+    }
+
+    /// La place d'un fil de lecture. Sa destruction ferme une connexion qui n'a rien livré,
+    /// compte la sortie d'un fil évincé, puis rend la place.
+    struct Reader {
+        watch: Arc<Watch>,
+        slot: Option<Slot>,
+    }
+    impl Reader {
+        /// La place passe à la requête, sauf si l'écouteur vient d'évincer la connexion.
+        fn hand(&mut self) -> Option<Slot> {
+            self.watch
+                .state
+                .compare_exchange(READING, HANDED, Ordering::SeqCst, Ordering::SeqCst)
+                .ok()
+                .and_then(|_| self.slot.take())
+        }
+    }
+    impl Drop for Reader {
+        fn drop(&mut self) {
+            let watch = &self.watch;
+            match watch
+                .state
+                .compare_exchange(READING, OVER, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                // L'écouteur garde une copie du socket : sans cela, le client ne verrait la
+                // fermeture qu'au prochain tri des connexions lues.
+                Ok(_) => {
+                    let _ = watch.stream.shutdown(Shutdown::Both);
+                }
+                Err(EVICTED) => {
+                    if let Some(slot) = &self.slot {
+                        slot.0.leaving.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                Err(_) => {}
+            }
+            drop(self.slot.take());
+        }
+    }
+
+    /// Les connexions lues, de la plus vieille à la plus récente, et celle qui attend une place.
+    #[derive(Default)]
+    struct Admission {
+        readers: VecDeque<Arc<Watch>>,
+        waiting: Option<TcpStream>,
     }
 
     /// Une requête reçue en entier. Servie par `respond`, ou par `gone` à sa destruction.
@@ -2281,7 +2368,8 @@ pub(crate) mod loopback {
         sender: SyncSender<Request>,
         requests: Receiver<Request>,
         gone: Arc<Reply>,
-        active: Arc<AtomicUsize>,
+        places: Arc<Places>,
+        admission: Mutex<Admission>,
     }
     impl Listener {
         pub(crate) fn bind(address: impl ToSocketAddrs, gone: Reply) -> io::Result<Self> {
@@ -2295,7 +2383,8 @@ pub(crate) mod loopback {
                 sender,
                 requests,
                 gone: Arc::new(gone),
-                active: Arc::new(AtomicUsize::new(0)),
+                places: Arc::default(),
+                admission: Mutex::default(),
             })
         }
         pub(crate) fn port(&self) -> u16 {
@@ -2319,33 +2408,113 @@ pub(crate) mod loopback {
             }
         }
         /// Accepte au plus `ACCEPT_BUDGET` connexions, et rien après `deadline`. Une connexion
-        /// sans place parmi `MAX_ACTIVE` est fermée aussitôt.
+        /// qui n'a pas de place attend la sienne, et l'acceptation avec elle.
         fn accept_waiting(&self, deadline: Instant) {
+            let mut admission = self
+                .admission
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             for _ in 0..ACCEPT_BUDGET {
                 if Instant::now() >= deadline {
                     return;
                 }
-                match self.socket.accept() {
-                    Ok((stream, _)) => {
-                        let Some(slot) = Slot::take(&self.active) else {
-                            drop(stream);
-                            continue;
-                        };
-                        let sender = self.sender.clone();
-                        let gone = self.gone.clone();
-                        // Un fil qui ne démarre pas emporte et ferme sa connexion et sa place.
-                        let _ = thread::Builder::new()
-                            .name("retour-oauth".into())
-                            .spawn(move || read_head(stream, &sender, gone, slot));
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
-                        ) => {}
-                    Err(_) => return,
+                let stream = match admission.waiting.take() {
+                    Some(stream) => stream,
+                    None => match self.socket.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
+                            ) =>
+                        {
+                            continue
+                        }
+                        Err(_) => return,
+                    },
+                };
+                if let Err(stream) = self.place(stream, &mut admission.readers) {
+                    admission.waiting = Some(stream);
+                    return;
                 }
             }
+        }
+        /// Donne une place et un fil à `stream`, au besoin en évinçant la plus vieille
+        /// connexion qui n'a rien livré ; la rend si aucune place ne peut se libérer.
+        fn place(
+            &self,
+            stream: TcpStream,
+            readers: &mut VecDeque<Arc<Watch>>,
+        ) -> Result<(), TcpStream> {
+            readers.retain(|watch| watch.state.load(Ordering::SeqCst) == READING);
+            let (active, held) = self.places.held();
+            if active >= MAX_ACTIVE + MAX_LEAVING
+                || (held >= MAX_ACTIVE && !self.evict_oldest(readers))
+            {
+                return Err(stream);
+            }
+            // Sans copie, la connexion ne pourrait être évincée : elle est fermée.
+            let Ok(copy) = stream.try_clone() else {
+                return Ok(());
+            };
+            let watch = Arc::new(Watch {
+                stream: copy,
+                accepted: Instant::now(),
+                state: AtomicU8::new(READING),
+            });
+            readers.push_back(watch.clone());
+            let reader = Reader {
+                watch,
+                slot: Some(Slot::take(&self.places)),
+            };
+            let sender = self.sender.clone();
+            let gone = self.gone.clone();
+            // Un fil qui ne démarre pas emporte et ferme sa connexion et sa place.
+            let _ = thread::Builder::new()
+                .name("retour-oauth".into())
+                .spawn(move || read_head(stream, &sender, gone, reader));
+            Ok(())
+        }
+        /// Ferme la plus vieille connexion qui lit encore ses en-têtes ou jette un refus, si
+        /// elle a au moins `EVICTABLE_AFTER` : son fil, débloqué, sort et rend sa place.
+        fn evict_oldest(&self, readers: &mut VecDeque<Arc<Watch>>) -> bool {
+            if self.places.leaving.load(Ordering::SeqCst) >= MAX_LEAVING {
+                return false;
+            }
+            while let Some(watch) = readers.pop_front() {
+                if watch.accepted.elapsed() < EVICTABLE_AFTER {
+                    readers.push_front(watch);
+                    return false;
+                }
+                // Compté avant la bascule : le fil évincé le décompte en sortant.
+                self.places.leaving.fetch_add(1, Ordering::SeqCst);
+                if watch
+                    .state
+                    .compare_exchange(READING, EVICTED, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let _ = watch.stream.shutdown(Shutdown::Both);
+                    return true;
+                }
+                self.places.leaving.fetch_sub(1, Ordering::SeqCst);
+            }
+            false
+        }
+        #[cfg(test)]
+        fn active(&self) -> usize {
+            self.places.active.load(Ordering::SeqCst)
+        }
+        #[cfg(test)]
+        fn leaving(&self) -> usize {
+            self.places.leaving.load(Ordering::SeqCst)
+        }
+        #[cfg(test)]
+        fn has_waiting(&self) -> bool {
+            self.admission
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .waiting
+                .is_some()
         }
     }
 
@@ -2362,7 +2531,8 @@ pub(crate) mod loopback {
             if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
                 return;
             }
-            match stream.read(&mut chunk) {
+            let read = chunk.len().min(DRAIN_LIMIT - drained);
+            match stream.read(&mut chunk[..read]) {
                 Ok(0) => return,
                 Ok(read) => drained += read,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -2372,12 +2542,13 @@ pub(crate) mod loopback {
     }
 
     /// Lit les en-têtes d'une connexion acceptée en `HEAD_WINDOW` et `HEAD_LIMIT` au plus et
-    /// confie la requête à l'écouteur ; s'il est parti, elle reçoit `gone`.
+    /// confie la requête à l'écouteur ; s'il est parti, elle reçoit `gone`. Une éviction ferme
+    /// le socket : la lecture en cours, ou le drain d'un refus, se termine aussitôt.
     fn read_head(
         mut stream: TcpStream,
         sender: &SyncSender<Request>,
         gone: Arc<Reply>,
-        slot: Slot,
+        mut reader: Reader,
     ) {
         // Sur macOS, la connexion acceptée hérite du mode non bloquant de l'écouteur.
         if stream.set_nonblocking(false).is_err() {
@@ -2410,6 +2581,10 @@ pub(crate) mod loopback {
         let Some((method, url, host)) = parse_head(&head[..end]) else {
             return refuse(stream, 400);
         };
+        // Évincée à l'instant, la connexion est déjà fermée : il n'y a plus personne à servir.
+        let Some(slot) = reader.hand() else {
+            return;
+        };
         let request = Request {
             stream: Some(stream),
             method,
@@ -2419,7 +2594,8 @@ pub(crate) mod loopback {
             _slot: slot,
         };
         // Refusée (écouteur parti), la requête revient ici et sa destruction répond `gone`. La
-        // file ne peut être pleine : chaque requête qu'elle contient tient une place.
+        // file ne peut être pleine : chaque requête qu'elle contient tient une place non
+        // évincée, et il n'y en a que `MAX_ACTIVE`.
         let _ = sender.try_send(request);
     }
 
@@ -2753,6 +2929,270 @@ pub(crate) mod loopback {
                 .unwrap()
                 .starts_with("HTTP/1.1 200 OK\r\n"));
             drop(listener);
+        }
+
+        /// Drives the wait as the OAuth loops do until `done`; no request is expected meanwhile.
+        fn drive_until(listener: &Listener, what: &str, done: impl Fn(&Listener) -> bool) {
+            let started = Instant::now();
+            while !done(listener) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "{what} never happened"
+                );
+                if let Some(request) = listener.recv_timeout(Duration::from_millis(20)) {
+                    panic!("unexpected request {}", request.url());
+                }
+            }
+        }
+
+        /// The first request the wait returns within `bound`, waiting 250 ms at a time.
+        fn wait_for(listener: &Listener, bound: Duration, what: &str) -> Request {
+            let started = Instant::now();
+            loop {
+                if let Some(request) = listener.recv_timeout(Duration::from_millis(250)) {
+                    return request;
+                }
+                assert!(started.elapsed() < bound, "{what}");
+            }
+        }
+
+        /// What the OAuth loops do with a return: 200 when its `state` is the attempt's, 400
+        /// otherwise.
+        fn serve_return(request: Request) {
+            let state = super::super::parse_query(request.url())
+                .get("state")
+                .cloned();
+            let status = if state.as_deref() == Some("s") {
+                200
+            } else {
+                400
+            };
+            request.respond(&Reply::new(status, "ok"));
+        }
+
+        /// Whether the listener closed `stream`, seen from the client without waiting.
+        fn closed(stream: &TcpStream) -> bool {
+            stream.set_nonblocking(true).unwrap();
+            let closed = !matches!(
+                stream.peek(&mut [0]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock
+            );
+            stream.set_nonblocking(false).unwrap();
+            closed
+        }
+
+        #[test]
+        fn a_return_on_a_new_connection_is_served_when_silent_connections_hold_every_place() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let port = listener.port();
+            let silent: Vec<_> = (0..MAX_ACTIVE)
+                .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
+                .collect();
+            drive_until(&listener, "accepting the silent connections", |listener| {
+                listener.active() == MAX_ACTIVE
+            });
+            // Every place is taken; the browser's return comes on a new connection.
+            let mut browser = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            browser.write_all(RETURN).unwrap();
+            let request = wait_for(
+                &listener,
+                Duration::from_secs(5),
+                "the return was never read: silent connections kept every place",
+            );
+            assert_eq!(request.url(), "/auth/callback?code=c&state=s");
+            // The oldest silent connection made room: it is closed, and its thread left.
+            drive_until(&listener, "the evicted thread leaving", |listener| {
+                listener.leaving() == 0 && listener.active() == MAX_ACTIVE
+            });
+            serve_return(request);
+            assert!(read_answer(&mut browser)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 OK\r\n"));
+            let mut oldest = &silent[0];
+            assert_eq!(oldest.read(&mut [0]).unwrap(), 0);
+            let open = silent[1..].iter().filter(|stream| !closed(stream)).count();
+            assert_eq!(open, MAX_ACTIVE - 1);
+        }
+
+        /// A thread opens silent connections without pause and keeps up to `3 × MAX_ACTIVE`
+        /// of them, replacing each one the listener closes.
+        #[test]
+        fn a_return_is_served_while_silent_connections_keep_renewing_every_place() {
+            use std::sync::atomic::AtomicBool;
+            const KEPT: usize = 3 * MAX_ACTIVE;
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let port = listener.port();
+            let stop = Arc::new(AtomicBool::new(false));
+            let flood = {
+                let stop = stop.clone();
+                thread::spawn(move || {
+                    let address = ("127.0.0.1", port)
+                        .to_socket_addrs()
+                        .unwrap()
+                        .next()
+                        .unwrap();
+                    let started = Instant::now();
+                    let (mut kept, mut opened, mut evicted) = (Vec::new(), 0_usize, 0_usize);
+                    while !stop.load(Ordering::SeqCst)
+                        && started.elapsed() < Duration::from_secs(30)
+                    {
+                        let before = kept.len();
+                        kept.retain(|stream| !closed(stream));
+                        evicted += before - kept.len();
+                        if kept.len() >= KEPT {
+                            thread::yield_now();
+                        } else if let Ok(stream) =
+                            TcpStream::connect_timeout(&address, Duration::from_millis(100))
+                        {
+                            opened += 1;
+                            kept.push(stream);
+                        }
+                    }
+                    (opened, evicted)
+                })
+            };
+            drive_until(&listener, "the flood taking every place", |listener| {
+                listener.active() == MAX_ACTIVE
+            });
+            let mut browser = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            browser.write_all(RETURN).unwrap();
+            let (mut most, mut most_read) = (0, 0);
+            let started = Instant::now();
+            let request = loop {
+                let request = listener.recv_timeout(Duration::from_millis(250));
+                let (active, read) = (listener.active(), listener.active() - listener.leaving());
+                most = most.max(active);
+                most_read = most_read.max(read);
+                if let Some(request) = request {
+                    break request;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "the return was never read under the renewing flood"
+                );
+            };
+            let served = started.elapsed();
+            assert_eq!(request.url(), "/auth/callback?code=c&state=s");
+            serve_return(request);
+            stop.store(true, Ordering::SeqCst);
+            let (opened, evicted) = flood.join().unwrap();
+            eprintln!(
+                "renewing flood: {opened} connections, {evicted} closed by the listener, return served after {served:?}, at most {most} places and {most_read} read"
+            );
+            assert!(read_answer(&mut browser)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(opened > KEPT, "the flood opened only {opened} connections");
+            assert!(most_read <= MAX_ACTIVE, "{most_read} connections read");
+            assert!(most <= MAX_ACTIVE + MAX_LEAVING, "{most} places held");
+        }
+
+        #[test]
+        fn a_complete_request_is_never_evicted_and_a_newcomer_waits_for_its_place() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let port = listener.port();
+            let mut clients: Vec<_> = (0..MAX_ACTIVE)
+                .map(|n| {
+                    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                    let head = format!(
+                        "GET /auth/callback?code={n}&state=s HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n"
+                    );
+                    client.write_all(head.as_bytes()).unwrap();
+                    client
+                })
+                .collect();
+            // Every place holds a complete request, being answered.
+            let mut held = Vec::new();
+            while held.len() < MAX_ACTIVE {
+                held.push(wait_for(
+                    &listener,
+                    Duration::from_secs(10),
+                    "a complete request was never read",
+                ));
+            }
+            let mut newcomer = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            newcomer.write_all(RETURN).unwrap();
+            drive_until(&listener, "accepting the newcomer", Listener::has_waiting);
+            // Long enough for any request to be old enough to evict: none is.
+            let deadline = Instant::now() + 3 * EVICTABLE_AFTER;
+            while Instant::now() < deadline {
+                assert!(listener.recv_timeout(Duration::from_millis(20)).is_none());
+            }
+            assert_eq!(listener.active(), MAX_ACTIVE);
+            assert!(clients.iter().all(|client| !closed(client)));
+            for request in held {
+                serve_return(request);
+            }
+            for client in &mut clients {
+                assert!(read_answer(client)
+                    .unwrap()
+                    .starts_with("HTTP/1.1 200 OK\r\n"));
+            }
+            // A place came back: the newcomer is read and served.
+            let request = wait_for(
+                &listener,
+                Duration::from_secs(5),
+                "the newcomer never got a place",
+            );
+            assert_eq!(request.url(), "/auth/callback?code=c&state=s");
+            serve_return(request);
+            assert!(read_answer(&mut newcomer)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 OK\r\n"));
+        }
+
+        #[test]
+        fn every_way_out_of_a_place_gives_it_back() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let port = listener.port();
+            let free = |listener: &Listener| listener.active() == 0;
+            // Served.
+            let mut served = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            served.write_all(RETURN).unwrap();
+            wait_for(&listener, Duration::from_secs(5), "never read").respond(&Reply::new(200, ""));
+            assert!(free(&listener));
+            assert!(read_answer(&mut served)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 "));
+            // Dropped unanswered: it gets `gone`.
+            let mut dropped = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            dropped.write_all(RETURN).unwrap();
+            drop(wait_for(&listener, Duration::from_secs(5), "never read"));
+            assert!(free(&listener));
+            assert!(read_answer(&mut dropped)
+                .unwrap()
+                .starts_with("HTTP/1.1 409 "));
+            // Closed by the client before its head.
+            let early = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            drive_until(&listener, "accepting", |listener| listener.active() == 1);
+            drop(early);
+            drive_until(&listener, "the closed connection leaving", free);
+            // Refused, after the drain.
+            for (head, status) in [
+                (b"GET\r\n\r\n".to_vec(), "400"),
+                (padded_head(HEAD_LIMIT + 1), "431"),
+            ] {
+                let mut refused = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                drive_until(&listener, "accepting", |listener| listener.active() == 1);
+                // Set before the close: macOS refuses socket options on a closed connection.
+                refused
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                refused.write_all(&head).unwrap();
+                refused.shutdown(Shutdown::Write).unwrap();
+                let asking = thread::spawn(move || {
+                    let mut answer = String::new();
+                    refused.read_to_string(&mut answer).unwrap();
+                    answer
+                });
+                drive_until(&listener, "the refused connection leaving", free);
+                let answer = asking.join().unwrap();
+                assert!(
+                    answer.starts_with(&format!("HTTP/1.1 {status} ")),
+                    "{answer}"
+                );
+            }
+            // Evicted: covered by the silent-connections test.
         }
     }
 }

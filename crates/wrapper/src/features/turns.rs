@@ -135,17 +135,18 @@ fn tools_of(conn: &Connection, run_id: &str) -> Result<Vec<Tool>, ApiError> {
         .filter(|e| e.kind == RunEventKind::ToolResult)
         .take(MAX_TOOLS)
         .map(|e| {
-            let code = serde_json::from_value(e.payload["code"].clone()).unwrap_or_else(|_| {
-                // Un résultat d'avant le journal n'a pas de code : on le déduit de son statut.
-                if e.payload["outcome"]["status"] == "failed" {
-                    ToolCode::Failed
-                } else {
-                    ToolCode::Ok
-                }
+            let coded = serde_json::from_value::<ToolCode>(e.payload["code"].clone()).ok();
+            // Un résultat d'avant le journal n'a pas de code : on le déduit de son statut,
+            // sans garder un nom dont rien ne prouve qu'il a été validé.
+            let code = coded.unwrap_or(if e.payload["outcome"]["status"] == "failed" {
+                ToolCode::Failed
+            } else {
+                ToolCode::Ok
             });
             let name = e.payload["call_id"]
                 .as_str()
                 .and_then(|id| names.get(id))
+                .filter(|_| coded.is_some())
                 .map_or("", String::as_str);
             Tool {
                 name: safe_name(name, code),
@@ -209,7 +210,8 @@ pub(crate) fn record(conn: &Connection, run_id: &str) -> Result<(), ApiError> {
     let entry = serde_json::to_string(&turn)
         .map_err(|_| ApiError::new(500, "Entrée du journal illisible."))?;
     conn.execute(
-        "INSERT OR REPLACE INTO wrapper_turn_log(run_id,at_ms,entry) VALUES (?1,?2,?3)",
+        "INSERT INTO wrapper_turn_log(run_id,at_ms,entry) VALUES (?1,?2,?3)
+         ON CONFLICT(run_id) DO NOTHING",
         rusqlite::params![run_id, turn.at_ms, entry],
     )?;
     purge_old(conn, now)?;

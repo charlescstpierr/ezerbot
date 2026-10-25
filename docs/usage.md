@@ -124,11 +124,11 @@ du fournisseur. Elles mesurent l'écart de l'estimation, sans régler
 
 ## Journal des tours
 
-Chaque tour terminé laisse une ligne dans la table `wrapper_turn_log` de la base de l’espace (`run_id`, `at_ms`, `entry`). `entry` est un JSON. Rien n’est envoyé hors du Mac. Réécrire le même tour remplace sa ligne.
+Chaque tour terminé laisse une ligne dans la table `wrapper_turn_log` de la base de l’espace (`run_id`, `at_ms`, `entry`). `entry` est un JSON. Rien n’est envoyé hors du Mac. Un tour n’est écrit qu’une fois : sa première ligne reste, même si on l’arrête ou le régénère ensuite.
 
 Par tour : `at_ms` (fin du tour, en ms), `bot_id`, `source` (chat, routine, group, delegation, bot_to_bot : la même règle que `/api/usage`), `turn` (empreinte de 16 caractères, la même que `turn=` dans `logs/engine.log`), `model`, `effort`, `status` et `turn_end`, `error_kind`, `duration_ms`, `model_calls`, `tool_calls`, `tokens` (`input`, `output`, `cached`, ou `null` si le fournisseur n’a rien mesuré) et `tools`.
 
-Par appel d’outil, dans l’ordre d’exécution : `name`, `started_ms`, `duration_ms`, `result` et `code`. La durée va de l’entrée de l’appel à l’écriture de son résultat. Un appel suspendu pour approbation est chronométré à sa reprise : l’attente humaine n’y est pas. Un appel jamais exécuté ou d’effet incertain n’a ni début ni durée (`null`). Le nom d’un outil MCP est `mcp_<connecteur>_<outil>`. Un nom qui vient du modèle n’est gardé que s’il tient en 64 octets de `A-Z a-z 0-9 _ . -` et si l’appel a été validé (outil existant) ; sinon, et pour un appel `not_executed`, il devient `-`. Un tour arrêté pendant qu’il attend une approbation est journalisé à l’arrêt.
+Par appel d’outil, dans l’ordre d’exécution : `name`, `started_ms`, `duration_ms`, `result` et `code`. La durée va de l’entrée de l’appel à l’écriture de son résultat. Un appel suspendu pour approbation est chronométré à sa reprise : l’attente humaine n’y est pas. Un appel jamais exécuté ou d’effet incertain n’a ni début ni durée (`null`). Le nom d’un outil MCP est `mcp_<connecteur>_<outil>`. Un nom qui vient du modèle n’est gardé que s’il tient en 64 octets de `A-Z a-z 0-9 _ . -` et si l’appel a été validé (outil existant) ; sinon, et pour un appel `not_executed`, il devient `-`. Un résultat sans `code` (tour antérieur au journal) est déduit de son statut (`ok` ou `failed`) et son nom devient `-`. Un tour arrêté pendant qu’il attend une approbation est journalisé à l’arrêt ; une tâche déléguée suspendue, annulée avec son parent, ne l’est pas.
 
 | `code` | `result` |
 | --- | --- |

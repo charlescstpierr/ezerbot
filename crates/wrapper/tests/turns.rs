@@ -321,6 +321,16 @@ fn a_turn_stopped_while_it_waits_for_an_approval_is_logged() {
         json!({"conversation_id":chat,"message_id":"attente"}),
     );
     let turn = f.logged("attente");
+    std::thread::sleep(Duration::from_millis(5));
+    f.post(
+        "/api/stop",
+        json!({"conversation_id":chat,"message_id":"attente"}),
+    );
+    assert_eq!(
+        f.logged("attente")["at_ms"],
+        turn["at_ms"],
+        "un second arrêt ne redate pas le tour"
+    );
     assert_eq!(turn["status"], "cancelled");
     assert_eq!(turn["tools"][0]["code"], "not_executed");
     assert_eq!(turn["tools"][0]["result"], "annulé");

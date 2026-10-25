@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -42,6 +43,26 @@ class AxiOwnershipTests(unittest.TestCase):
             "    path.write_text(json.dumps(sessions))\n"
         )
         self.fake.chmod(0o700)
+        self.fake.write_text(self.fake.read_text().replace(
+            "if sys.argv[1:] == ['stop']:",
+            "barrier = os.environ.get('AXI_BARRIER')\n"
+            "def pause(phase):\n"
+            "    if barrier and os.environ.get('AXI_PHASE') == phase:\n"
+            "        import time\n"
+            "        Path(barrier + '.ready').touch()\n"
+            "        while not Path(barrier + '.release').exists(): time.sleep(0.01)\n"
+            "pause('before')\n"
+            "if sys.argv[1:] == ['stop'] and os.environ.get('AXI_FAIL_STOP'):\n"
+            "    sys.exit(7)\n"
+            "if sys.argv[1:] != ['stop']:\n"
+            "    path = Path(os.environ['AXI_SESSIONS'])\n"
+            "    sessions = json.loads(path.read_text())\n"
+            "    sessions[session] = True\n"
+            "    path.write_text(json.dumps(sessions))\n"
+            "pause('after')\n"
+            "if os.environ.get('AXI_FAIL_COMMAND'): sys.exit(8)\n"
+            "if sys.argv[1:] == ['stop']:"
+        ))
         self.env = os.environ.copy()
         self.env.update({
             "HOME": str(self.directory),
@@ -86,6 +107,149 @@ class AxiOwnershipTests(unittest.TestCase):
     def assert_no_stop(self) -> None:
         self.assertFalse(any(call["args"] == ["stop"] for call in self.calls()))
         self.assertTrue(all(json.loads(self.sessions.read_text()).values()))
+
+    def start_cli(self, script: str, *arguments: str, **environment: str) -> subprocess.Popen:
+        process = subprocess.Popen(
+            ["bash", str(SCRIPTS / script), "--evidence", str(self.evidence), *arguments],
+            env={**self.env, **environment}, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        def finish():
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+        self.addCleanup(finish)
+        return process
+
+    def wait_for(self, predicate) -> None:
+        deadline = time.monotonic() + 10
+        while not predicate():
+            self.assertLess(time.monotonic(), deadline, "barrière non atteinte")
+            time.sleep(0.01)
+
+    def install_barriers(self) -> None:
+        hooks = self.directory / "hooks"
+        hooks.mkdir()
+        (hooks / "sitecustomize.py").write_text('''import fcntl, os, time
+from pathlib import Path
+original_write = Path.write_text
+original_flock = fcntl.flock
+def write(path, *args, **kwargs):
+    barrier = os.environ.get("WRITE_BARRIER")
+    if barrier and path.name.startswith("browser.json"):
+        with path.open("w"):
+            Path(barrier + ".ready").touch()
+            while not Path(barrier + ".release").exists(): time.sleep(0.01)
+    return original_write(path, *args, **kwargs)
+def flock(fd, operation):
+    if operation == fcntl.LOCK_EX:
+        try:
+            return original_flock(fd, operation | fcntl.LOCK_NB)
+        except BlockingIOError:
+            marker = os.environ.get("LOCK_BLOCKED")
+            if marker: Path(marker).touch()
+    return original_flock(fd, operation)
+Path.write_text = write
+fcntl.flock = flock
+''')
+        self.env["PYTHONPATH"] = str(hooks)
+
+    def assert_session_stopped(self) -> None:
+        self.assertEqual(json.loads(self.sessions.read_text()),
+                         {"pm-i545": False, "verify-ezerbot": True, "pm-other": True})
+        self.assertEqual([call["session"] for call in self.calls() if call["args"] == ["stop"]], ["pm-i545"])
+        self.assertEqual((self.evidence / "kept.txt").read_text(), "preuve\n")
+
+    def test_cleanup_during_browser_metadata_publication(self) -> None:
+        self.open_browser()
+        self.install_barriers()
+        barrier = str(self.directory / "write")
+        browser = self.start_cli("browser.sh", "pages", WRITE_BARRIER=barrier)
+        self.wait_for(lambda: Path(barrier + ".ready").exists())
+        blocked = self.directory / "cleanup-blocked"
+        cleanup = self.start_cli("cleanup.sh", LOCK_BLOCKED=str(blocked))
+        try:
+            self.wait_for(lambda: blocked.exists() or cleanup.poll() is not None)
+        finally:
+            Path(barrier + ".release").touch()
+        out, err = browser.communicate(timeout=10)
+        self.assertEqual(browser.returncode, 0, out + err)
+        out, err = cleanup.communicate(timeout=10)
+        self.assertEqual(cleanup.returncode, 0, out + err)
+        self.assert_session_stopped()
+
+    def cleanup_during_axi(self, command: str, phase: str) -> None:
+        if command != "open":
+            self.open_browser()
+        self.install_barriers()
+        barrier = str(self.directory / "axi-barrier")
+        browser = self.start_cli("browser.sh", command, AXI_BARRIER=barrier, AXI_PHASE=phase)
+        self.wait_for(lambda: Path(barrier + ".ready").exists())
+        blocked = self.directory / "cleanup-blocked"
+        cleanup = self.start_cli("cleanup.sh", LOCK_BLOCKED=str(blocked))
+        try:
+            self.wait_for(lambda: blocked.exists() or cleanup.poll() is not None)
+        finally:
+            Path(barrier + ".release").touch()
+        out, err = browser.communicate(timeout=10)
+        self.assertEqual(browser.returncode, 0, out + err)
+        out, err = cleanup.communicate(timeout=10)
+        self.assertEqual(cleanup.returncode, 0, out + err)
+        self.assert_session_stopped()
+        before = self.calls()
+        self.assertNotEqual(self.cli("browser.sh", "open").returncode, 0)
+        self.cleanup()
+        self.assertEqual(self.calls(), before)
+
+    def test_cleanup_before_axi_open_effect(self) -> None:
+        self.cleanup_during_axi("open", "before")
+
+    def test_cleanup_after_axi_open_effect(self) -> None:
+        self.cleanup_during_axi("open", "after")
+
+    def test_cleanup_before_axi_command_effect(self) -> None:
+        self.cleanup_during_axi("pages", "before")
+
+    def test_cleanup_after_axi_command_effect(self) -> None:
+        self.cleanup_during_axi("pages", "after")
+
+    def test_cleanup_blocks_waiting_browser_and_second_cleanup(self) -> None:
+        self.open_browser()
+        self.install_barriers()
+        barrier = str(self.directory / "stop")
+        cleanup = self.start_cli("cleanup.sh", AXI_BARRIER=barrier, AXI_PHASE="before")
+        self.wait_for(lambda: Path(barrier + ".ready").exists())
+        blocked = self.directory / "browser-blocked"
+        browser = self.start_cli("browser.sh", "open", LOCK_BLOCKED=str(blocked))
+        second_blocked = self.directory / "second-blocked"
+        second = self.start_cli("cleanup.sh", LOCK_BLOCKED=str(second_blocked))
+        try:
+            self.wait_for(lambda: blocked.exists() or browser.poll() is not None)
+            self.wait_for(lambda: second_blocked.exists() or second.poll() is not None)
+        finally:
+            Path(barrier + ".release").touch()
+        cleanup.communicate(timeout=10)
+        self.assertEqual(cleanup.returncode, 0)
+        browser.communicate(timeout=10)
+        self.assertNotEqual(browser.returncode, 0)
+        second.communicate(timeout=10)
+        self.assertEqual(second.returncode, 0)
+        self.assert_session_stopped()
+
+    def test_axi_command_failure_remains_attributed(self) -> None:
+        self.assertEqual(self.cli("browser.sh", "open", AXI_FAIL_COMMAND="1").returncode, 8)
+        self.cleanup()
+        self.assert_session_stopped()
+
+    def test_axi_stop_failure_is_retryable_and_blocks_reopening(self) -> None:
+        self.open_browser()
+        result = self.cli("cleanup.sh", AXI_FAIL_STOP="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.run_root.exists())
+        self.assertFalse(json.loads((self.evidence / "run.json").read_text()).get("cleaned", False))
+        self.assertNotEqual(self.cli("browser.sh", "pages").returncode, 0)
+        self.cleanup()
+        self.assertEqual(json.loads(self.sessions.read_text()),
+                         {"pm-i545": False, "verify-ezerbot": True, "pm-other": True})
 
     def test_cleanup_uses_owned_session_after_environment_changes_and_is_idempotent(self) -> None:
         self.open_browser()

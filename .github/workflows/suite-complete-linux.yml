@@ -1,0 +1,58 @@
+name: Suite complète Linux
+
+on:
+  schedule:
+    - cron: '23 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: suite-complete-linux-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  suite:
+    name: suite-complete-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: '3'
+      CARGO_INCREMENTAL: '0'
+      CARGO_TARGET_DIR: target
+      CARGO_TERM_COLOR: never
+      RUSTC_WRAPPER: ''
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Installer le toolchain du dépôt
+        run: rustup show active-toolchain
+      - name: Vérifier le producteur du rapport
+        run: python3 -m unittest discover -s tools -p test_complete_suite.py
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+          key: suite-linux-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            suite-linux-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
+      - name: Exécuter et mesurer la suite
+        run: |
+          df -BG "$GITHUB_WORKSPACE"
+          python3 tools/run-complete-suite.py --output "$RUNNER_TEMP/suite-complete-linux/result.json"
+      - name: Publier uniquement le résultat JSON
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: suite-complete-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/suite-complete-linux/result.json
+          if-no-files-found: error
+          retention-days: 14

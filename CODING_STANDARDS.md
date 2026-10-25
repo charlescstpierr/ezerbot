@@ -22,3 +22,13 @@ node --test app/ui/provider-ui.test.cjs app/ui/panels/*.test.cjs
 ```
 
 `app/web` est un module ESM. Les tests de `app/ui` sont en CommonJS (`.cjs`).
+
+### Chrome des tests d'interface (macOS)
+
+Les tests qui impriment la page avec `--dump-dom` (`voice-controls`, `text-input-contrast`, `voice-icons`, `panels/group-swatch-layout`) utilisent sur macOS une version épinglée de `chrome-headless-shell` (Chrome for Testing), parce que le Chrome complet gèle parfois juste après son démarrage (#438). Installation, une fois par copie du dépôt (idempotente, vérifiée par SHA-256) :
+
+```sh
+node tools/install-chrome-headless-shell.cjs
+```
+
+Le binaire va dans `tools/chrome-headless-shell/<version>/` (ignoré par git) ; la version et les empreintes sont dans `tools/chrome-headless-shell-pin.json`. Sans lui, ces tests retombent sur le Chrome complet : un gel y reste un échec réel (jamais relancé) dont le message dit d'installer le shell. `CHROME_BIN` l'emporte toujours. Les autres tests qui lancent Chrome (`composer-bar`, `voice-call-header`, `skill-folder-import`, `wrapper-chrome-fixture`) pilotent Chrome par le port de débogage et gardent le Chrome complet.

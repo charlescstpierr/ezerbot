@@ -68,6 +68,18 @@ pub fn check_resend(
     Ok(())
 }
 
+/// Une sélection sur plusieurs cellules ou paragraphes porte des tabulations et des retours à la ligne,
+/// l'aperçu un espace à chaque frontière de bloc (`compile::BREAK`) : on compare les deux avec chaque suite
+/// de blancs (propriété Unicode White_Space) réduite à un seul espace, comme `collapsed` dans
+/// app/ui/panels/pages.js. Un blanc au milieu d'un mot, ou un blanc absent entre deux cellules, ne passe donc
+/// pas. Le passage reste stocké tel qu'envoyé.
+fn collapsed(text: &str) -> String {
+    text.split(char::is_whitespace)
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Refuse sans rien écrire ; l'appelant garde le message dans la même transaction.
 pub fn record(
     conn: &Connection,
@@ -114,7 +126,7 @@ pub fn record(
             "Une ancre de Page ne peut viser que le bot propriétaire de la Page : ne mentionnez pas d’autre bot.",
         ));
     }
-    if !shown.contains(passage) {
+    if !collapsed(&shown).contains(&collapsed(passage)) {
         return Err(ApiError::new(
             400,
             "Ce passage n’apparaît pas dans le texte affiché de la Page.",
@@ -175,6 +187,30 @@ pub fn list(conn: &Connection, page_id: &str) -> Result<Vec<Value>, ApiError> {
         }))
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Ce que la bulle du fil montre de l'ancre d'un message : la Page (avec son titre actuel) et le passage cité.
+/// `source_version` permet au client de rejouer le même envoi après un redémarrage.
+/// Une Page qui n'existe plus ne laisse pas de puce : elle n'aurait rien à ouvrir.
+pub fn for_message(conn: &Connection, conversation: &str, message: &str) -> Value {
+    conn.query_row(
+        "SELECT a.page_id, a.passage, p.title, a.source_version FROM wrapper_page_anchors a
+         JOIN bot_pages p ON p.id = a.page_id
+         WHERE a.conversation_id = ?1 AND a.message_id = ?2",
+        params![conversation, message],
+        |row| {
+            Ok(json!({
+                "page_id": row.get::<_, String>(0)?,
+                "passage": row.get::<_, String>(1)?,
+                "title": row.get::<_, String>(2)?,
+                "source_version": row.get::<_, String>(3)?,
+            }))
+        },
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or(Value::Null)
 }
 
 pub fn discard_conversation(conn: &Connection, conversation: &str) -> Result<(), ApiError> {
@@ -262,7 +298,65 @@ fn source_lines(source: &str, passage: &str) -> Vec<(usize, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::source_lines;
+    use super::{collapsed, for_message, migrate, source_lines};
+    use rusqlite::Connection;
+
+    fn bench() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE bot_pages (id TEXT PRIMARY KEY, title TEXT NOT NULL);")
+            .unwrap();
+        migrate(&conn).unwrap();
+        conn
+    }
+
+    fn anchor(conn: &Connection, conversation: &str, message: &str, page: &str, passage: &str) {
+        conn.execute(
+            "INSERT INTO wrapper_page_anchors VALUES (?1, ?2, ?3, ?4, 'v', 'open', 1)",
+            [conversation, message, page, passage],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_thread_anchor_of_a_deleted_page_is_not_exposed() {
+        let conn = bench();
+        conn.execute("INSERT INTO bot_pages VALUES ('p1', 'Trois forfaits')", [])
+            .unwrap();
+        anchor(&conn, "c1", "m1", "p1", "Confort");
+        assert_eq!(
+            for_message(&conn, "c1", "m1"),
+            serde_json::json!({"page_id": "p1", "passage": "Confort", "title": "Trois forfaits", "source_version": "v"})
+        );
+        conn.execute("DELETE FROM bot_pages", []).unwrap();
+        assert_eq!(for_message(&conn, "c1", "m1"), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn two_conversations_sharing_a_message_id_each_see_their_own_anchor() {
+        let conn = bench();
+        conn.execute(
+            "INSERT INTO bot_pages VALUES ('p1', 'Un'), ('p2', 'Deux')",
+            [],
+        )
+        .unwrap();
+        anchor(&conn, "c1", "m", "p1", "gauche");
+        anchor(&conn, "c2", "m", "p2", "droite");
+        assert_eq!(for_message(&conn, "c1", "m")["passage"], "gauche");
+        assert_eq!(for_message(&conn, "c2", "m")["passage"], "droite");
+        assert_eq!(for_message(&conn, "c3", "m"), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn collapsing_reduces_every_run_of_blanks_to_one_space() {
+        assert_eq!(
+            collapsed("Forfait B\t19 €\n\u{a0}Famille"),
+            "Forfait B 19 € Famille"
+        );
+        assert_eq!(collapsed("  a \r\n\t\u{2003}b  "), "a b");
+        assert_eq!(collapsed("Con fort"), "Con fort");
+        assert_ne!(collapsed("Con fort"), collapsed("Confort"));
+        assert_eq!(collapsed(" \t"), "");
+    }
 
     #[test]
     fn lines_carry_their_one_based_number() {

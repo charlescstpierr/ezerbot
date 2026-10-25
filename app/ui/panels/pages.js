@@ -17,6 +17,11 @@
   let full = false;
   let pendingTitle = null;
   let generation = 0;
+  let knownPages = [];
+  let quote = null;
+  let quoteSerial = 0;
+  let candidate = null;
+  const passageLimit = 500;
 
   const node = (tag, className, text) => {
     const el = document.createElement(tag);
@@ -59,15 +64,29 @@
     const diagnostic = node("p", "page-diagnostic");
     diagnostic.hidden = true;
     const canvas = node("div", "page-canvas");
-    stage.append(bar, diagnostic, canvas);
+    const comment = node("button", "secondary-button page-comment", "Commenter");
+    comment.type = "button";
+    comment.hidden = true;
+    stage.append(bar, diagnostic, canvas, comment);
     main.insertBefore(stage, dock);
+    // Au-dessus de la boîte de message : la citation part avec le prochain envoi.
+    const quoteBar = node("div", "gb-quote-chip");
+    quoteBar.hidden = true;
+    const area = document.querySelector(".composer-area") || dock;
+    area.insertBefore(quoteBar, area.firstChild);
+    document.addEventListener("selectionchange", updateComment);
+    canvas.addEventListener("scroll", updateComment);
+    // Cliquer le bouton ne doit pas défaire la sélection avant que le passage soit lu.
+    comment.addEventListener("mousedown", (event) => event.preventDefault());
+    comment.addEventListener("click", startQuote);
+    comment.addEventListener("blur", updateComment);
     input.addEventListener("change", submitRename);
     input.addEventListener("blur", submitRename);
     fullButton.addEventListener("click", () => {
       full = !full;
       applyChrome();
     });
-    shell = { section, list, stage, input, fullButton, diagnostic, canvas, main };
+    shell = { section, list, stage, input, fullButton, diagnostic, canvas, comment, quoteBar, main };
     return shell;
   }
 
@@ -88,6 +107,7 @@
 
   function openPage(page, pages) {
     if (page.conversation_id && conversationExists(page.conversation_id)) {
+      // Refusée, la navigation laisse la Page affichée et sa citation telles quelles.
       if (!host.openConversation(page.conversation_id)) {
         host.notify("Impossible d’ouvrir la conversation de cette Page pendant qu’une réponse est en cours.");
         return;
@@ -99,9 +119,123 @@
       pinnedId = null;
       orphan = { id: page.id, anchor: currentConversationId };
     }
+    if (selectedId !== page.id) { quoteSerial++; clearQuote(); }
     selectedId = page.id;
     paintList(pages);
     load(page);
+  }
+
+  function showPage(id) {
+    const page = knownPages.find((item) => item.id === id);
+    if (!page) {
+      host.notify("Cette Page n’existe plus.");
+      return;
+    }
+    if (selectedId !== page.id || shell.stage.hidden) openPage(page, knownPages);
+    shell.stage.scrollIntoView({ block: "nearest" });
+  }
+
+  // L'envoi d'un suivi de sous-tâche (/api/delegation/send) n'emporte pas d'ancre : on ne propose pas de citer.
+  function inTask() {
+    const conversations = lastState && Array.isArray(lastState.conversations) ? lastState.conversations : [];
+    return conversations.some((conversation) => conversation.id === currentConversationId && conversation.kind === "task");
+  }
+
+  // Une Page d'un autre bot que celui du fil (groupe) est refusée par le moteur (409) : on ne propose pas de citer.
+  function foreignPage() {
+    const conversations = lastState && Array.isArray(lastState.conversations) ? lastState.conversations : [];
+    const thread = conversations.find((conversation) => conversation.id === currentConversationId);
+    return Boolean(thread && thread.bot_id && detail && detail.bot_id && thread.bot_id !== detail.bot_id);
+  }
+
+  // Le moteur vérifie le passage dans le texte affiché de la Page à l'état initial, chaque suite de blancs (Unicode
+  // White_Space) réduite à un espace : la même règle que `collapsed` dans anchors.rs. Un blanc au milieu d'un mot, ou
+  // absent entre deux cellules (l'aperçu en met un à chaque frontière de bloc), ne passe pas.
+  const collapsed = (text) => String(text).split(/\p{White_Space}+/u).filter(Boolean).join(" ");
+
+  // Ce que le moteur accepterait pour la Page affichée maintenant : rien dans une sous-tâche ni pour la Page d'un autre
+  // bot, et un passage rogné comme le moteur le rogne, de 1 à 500 caractères, présent dans l'aperçu. Rejoué au clic, car
+  // la Page peut changer (modification par le bot, autre Page) pendant que « Commenter » garde le focus clavier.
+  function quotable(text) {
+    if (inTask() || !detail || foreignPage() || detail.id !== selectedId || shell.stage.hidden) return null;
+    // Même rognage que `str::trim` de Rust (propriété Unicode White_Space), pas `String.trim`.
+    const passage = String(text).replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+    if (!passage || [...passage].length > passageLimit) return null;
+    // Un texte changé par l'état interactif de la Page (« Offre choisie : Confort ») n'est pas dans l'aperçu que le moteur contrôle.
+    if (!collapsed(detail.preview || "").includes(collapsed(passage))) return null;
+    return passage;
+  }
+
+  // Le passage est le texte sélectionné ; la sélection doit tenir toute dans le canevas.
+  function selectedPassage() {
+    const selection = document.getSelection();
+    if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
+    const range = selection.getRangeAt(0);
+    if (!shell.canvas.contains(range.startContainer) || !shell.canvas.contains(range.endContainer)) return null;
+    const passage = quotable(selection.toString());
+    if (!passage) return null;
+    const target = range.getBoundingClientRect();
+    const view = shell.canvas.getBoundingClientRect();
+    if (target.bottom < view.top || target.top > view.bottom) return null;
+    return { passage, target };
+  }
+
+  function updateComment() {
+    // Tab vers « Commenter » peut défaire la sélection dans certains navigateurs : le bouton reste tant qu’il a le focus.
+    if (!shell || document.activeElement === shell.comment) return;
+    const found = selectedPassage();
+    candidate = found && { passage: found.passage, page_id: detail.id };
+    shell.comment.hidden = !found;
+    if (!found) return;
+    const stage = shell.stage.getBoundingClientRect();
+    const left = found.target.left - stage.left;
+    const top = found.target.bottom - stage.top + 6;
+    shell.comment.style.left = `${Math.max(8, Math.min(left, stage.width - shell.comment.offsetWidth - 8))}px`;
+    shell.comment.style.top = `${Math.max(8, Math.min(top, stage.height - shell.comment.offsetHeight - 8))}px`;
+  }
+
+  function paintQuote() {
+    shell.quoteBar.replaceChildren();
+    shell.quoteBar.hidden = !quote;
+    if (!quote) return;
+    const label = `Page « ${quote.title} » — « ${quote.passage.replace(/\s+/g, " ")} »`;
+    const text = node("span", "gb-quote-text", label);
+    text.setAttribute("title", label);
+    const remove = node("button", "gb-quote-remove");
+    remove.type = "button";
+    remove.setAttribute("aria-label", "Retirer la citation");
+    remove.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>';
+    remove.addEventListener("click", () => { quoteSerial++; clearQuote(); });
+    shell.quoteBar.append(text, remove);
+  }
+
+  function clearQuote() {
+    quote = null;
+    paintQuote();
+  }
+
+  // La puce nomme la Page par son titre actuel : un renommage (ici ou ailleurs) la repeint.
+  function retitleQuote(id, title) {
+    if (!quote || quote.page_id !== id || !title || quote.title === title) return;
+    quote.title = title;
+    paintQuote();
+  }
+
+  function startQuote() {
+    const passage = candidate && detail && candidate.page_id === detail.id ? quotable(candidate.passage) : null;
+    candidate = null;
+    shell.comment.hidden = true;
+    if (!passage) return;
+    quote = { serial: ++quoteSerial, page_id: detail.id, title: detail.title, source_version: detail.source_version, passage };
+    document.getSelection().removeAllRanges();
+    // La boîte de message est cachée en pleine page : on revient au fil pour écrire la demande.
+    if (full) {
+      full = false;
+      applyChrome();
+    }
+    paintQuote();
+    const editor = document.querySelector("#composer-input [contenteditable='true']");
+    if (editor) editor.focus();
   }
 
   function paintList(pages) {
@@ -130,7 +264,7 @@
       pinnedId = null;
       return null;
     }
-    const pinned = pages.find((page) => page.id === pinnedId);
+    const pinned = pages.find((page) => page.id === (quote?.page_id || pinnedId));
     if (pinned && pinned.conversation_id === conversationId) return pinned;
     pinnedId = null;
     return pages.find((page) => page.conversation_id === conversationId) || null;
@@ -268,6 +402,7 @@
       }
     }
     detail = page;
+    retitleQuote(page.id, page.title);
     if (document.activeElement !== shell.input) shell.input.value = page.title || "";
     // Un état identique (le fil se rafraîchit toutes les 200 ms pendant une réponse) ne reconstruit pas le DOM :
     // le focus clavier et la sélection de texte restent en place.
@@ -305,8 +440,11 @@
       const result = await host.api("/api/pages/rename", { id, title });
       const next = result && result.page && result.page.title ? result.page.title : title;
       if (detail && detail.id === id) detail.title = next;
+      retitleQuote(id, next);
       const link = [...shell.list.children].find((item) => item.dataset && item.dataset.pageId === id);
       if (link) link.textContent = next;
+      // La liste se repeint depuis l'état de l'hôte : sans le relire, le repeint suivant remettrait l'ancien titre.
+      try { await host.refresh(); } catch { /* le prochain rafraîchissement relira la liste */ }
     } catch (error) {
       host.notify(error && error.message ? error.message : "Le nom n’a pas pu être enregistré.");
     } finally {
@@ -315,11 +453,14 @@
   }
 
   function hideStage() {
+    generation++;
     selectedId = null;
     detail = null;
     loadedKey = null;
     paintedSignature = null;
     full = false;
+    candidate = null;
+    shell.comment.hidden = true;
     shell.stage.hidden = true;
     shell.canvas.replaceChildren();
     shell.diagnostic.textContent = "";
@@ -334,6 +475,11 @@
     const botId = ctx && ctx.bot && ctx.bot.id;
     const byBot = state && state.pages && state.pages.by_bot ? state.pages.by_bot : {};
     const conversationId = ctx && ctx.conversation ? ctx.conversation.id : null;
+    if (host.busy && !currentConversationId && conversationId && orphan?.anchor === null
+        && quote?.page_id === orphan.id && ctx.conversation.kind !== "task"
+        && ctx.conversation.bot_id === botId && detail?.bot_id === botId) {
+      orphan.anchor = conversationId;
+    }
     currentConversationId = conversationId;
     const pages = Array.isArray(byBot[botId]) ? [...byBot[botId]] : [];
     // Dans un groupe, chaque participant écrit sous son propre identifiant : les Pages du fil comptent, quel que soit l’auteur.
@@ -345,15 +491,55 @@
         }
       }
     }
+    knownPages = pages;
     const chosen = choose(pages, conversationId);
     selectedId = chosen ? chosen.id : null;
+    if (quote && (!chosen || chosen.id !== quote.page_id || inTask() || foreignPage())) clearQuote();
     paintList(pages);
     if (!chosen) {
       hideStage();
       return;
     }
-    await load(chosen);
+    if (host.connected !== false) await load(chosen);
   }
 
-  host.register({ id: "pages", onState });
+  host.register({
+    id: "pages",
+    onState,
+    openPage: showPage,
+    sendExtras: () => quote ? { page_anchor: { page_id: quote.page_id, source_version: quote.source_version, passage: quote.passage } } : {},
+    composer: {
+      // L'accusé ne retire que la citation partie avec ce message, jamais une citation posée depuis, même passage compris.
+      capture: () => quote ? { ...quote } : null,
+      async restore({ captured }, ctx) {
+        if (!captured || captured.serial !== quoteSerial) return;
+        const contextId = ctx.conversation?.id || null;
+        const botId = ctx.bot?.id;
+        const page = knownPages.find((item) => item.id === captured.page_id);
+        const unavailable = (reason) => { clearQuote(); return `La citation n’a pas pu être reprise : ${reason}`; };
+        if (!page) return unavailable("la Page n’est plus disponible dans cette conversation.");
+        let restored;
+        try { restored = (await host.api(`/api/pages/${page.id}`)).page; }
+        catch {
+          if (captured.serial !== quoteSerial || currentConversationId !== contextId) return;
+          return "La citation reste à vérifier : la Page n’a pas pu être relue. Réessayez quand elle sera disponible.";
+        }
+        if (captured.serial !== quoteSerial || currentConversationId !== contextId) return;
+        if (!knownPages.some((item) => item.id === captured.page_id)) return unavailable("la Page n’est plus disponible dans cette conversation.");
+        if (inTask() || restored?.bot_id !== botId) return unavailable("son bot ne correspond plus au brouillon.");
+        if (restored.status !== "ready" || !collapsed(restored.preview || "").includes(collapsed(captured.passage))) {
+          return unavailable("le passage n’apparaît plus dans la Page actuelle. Sélectionnez un nouveau passage.");
+        }
+        orphan = { id: page.id, anchor: contextId };
+        selectedId = page.id;
+        shell.stage.hidden = false;
+        remember(restored);
+        quote = { ...captured, title: restored.title };
+        paintQuote();
+      },
+      onSent({ captured }) {
+        if (quote && captured?.serial === quote.serial) clearQuote();
+      },
+    },
+  });
 })();

@@ -73,7 +73,10 @@
   // botSection may return a cleanup function, called before remount and on dialog close.
   // onState(state, context), onConnection(connected, context), onCardAction(message, action, detail, context); only true claims an action.
   // wantsPolling(context) and sendExtras(context) are synchronous; sendExtras returns extra /api/send fields.
-  // composer: mount(container, context), onFiles(files, event, context), blocked(context), onSent({messageId, extras}, context).
+  // composer: mount(container, context), onFiles(files, event, context), blocked(context), capture(context),
+  // restore({messageId, extras, captured}, context), onSent({messageId, extras, captured}, context). capture runs with sendExtras when a message is submitted; its value
+  // comes back to the same panel as `captured`, so a panel tells what left with this message from what was staged since.
+  // restore runs after a refused draft returns and may return a warning to display.
   // onSent runs once the server holds the message, including unknown/queued states, not on confirmation.
   // onFiles returns false to preserve normal paste/drop. Async uploads call composerChanged() when ready.
   const panelContext = () => ({ state, connected, conversation: currentConversation(), bot: currentBot(), draft: ui.input?.value || "" });
@@ -112,7 +115,7 @@
       if (!pending) continue;
       if (!pending.consumed) {
         pending.consumed = true;
-        for (const panel of panels.values()) panelCall(panel, panel.composer?.onSent, { messageId: message.id, extras: pending.extras });
+        for (const panel of panels.values()) panelCall(panel, panel.composer?.onSent, { messageId: message.id, extras: pending.extras, captured: pending.captured.get(panel.id) });
       }
       if (message.state !== "queued") pendingSends.delete(message.id);
     }
@@ -128,6 +131,11 @@
       }
     }
     return extras;
+  }
+  function captureComposer() {
+    const captured = new Map();
+    for (const panel of panels.values()) if (panel.composer?.capture) captured.set(panel.id, panelCall(panel, panel.composer.capture));
+    return captured;
   }
   function composerFiles(files, event) {
     if (!files?.length) return false;
@@ -1025,6 +1033,7 @@
     onRegenerate: (message) => message.error_kind === "local_connection" ? refresh().catch((error) => notify(error.message)) : generation("/api/regenerate", message.id.replace(/^reply-/, "")),
     onSignIn: () => { void signIn(); },
     onCardAction: cardAction,
+    onOpenPage: (id) => { const pages = panels.get("pages"); if (pages) panelCall(pages, pages.openPage, id); },
     get usageUrl() { return usageUrl(); },
     // « Ouvrir la source » : un lien Google dans le navigateur, un fichier de la bibliothèque dans la fiche du bot.
     async onOpenSource(source, message) {
@@ -1390,6 +1399,7 @@
     const submittedDocument = ui.input.document;
     const body = submittedDraft.trim();
     const extras = structuredClone(sendExtras());
+    const captured = captureComposer();
     let conversation = currentConversation();
     approvalFollow.arm(conversation?.id ?? null, conversation?.messages || [], ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);
     busy = true;
@@ -1398,7 +1408,7 @@
     let messageId;
     let delivered = false;
     const previousDraftKey = draftKey();
-    const restoreDraft = () => {
+    const restoreDraft = async () => {
       const remainder = ui.input.value;
       const remainderDocument = ui.input.document;
       setComposerText(submittedDraft && remainder ? `${submittedDraft}\n${remainder}` : submittedDraft || remainder);
@@ -1406,6 +1416,14 @@
         ? { type: "doc", content: [...submittedDocument.content, ...remainderDocument.content] }
         : submittedDraft ? submittedDocument : remainderDocument;
       saveDraft();
+      for (const panel of panels.values()) {
+        try {
+          const warning = await panel.composer?.restore?.({ messageId, extras, captured: captured.get(panel.id) }, panelContext());
+          if (warning) notify(warning);
+        } catch {
+          notify("La citation n’a pas pu être restaurée. Vérifiez-la avant de réessayer.");
+        }
+      }
     };
     try {
       // Consume only the submitted text, before creation can yield to another edit.
@@ -1421,7 +1439,7 @@
         approvalFollow.bind(conversation.id);
       }
       messageId = crypto.randomUUID();
-      pendingSends.set(messageId, { extras, consumed: false });
+      pendingSends.set(messageId, { extras, captured, consumed: false });
       conversation.messages.push({ ...extras, ...(conversation.kind === "task" ? { payload: { source: "follow_up" } } : {}), id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       removePreference(previousDraftKey);
       removePreference(`${previousDraftKey}.document`);
@@ -1439,8 +1457,8 @@
         try {
           await refresh();
           const savedMessage = currentConversation()?.messages.find((message) => message.id === messageId);
-          if (!savedMessage) { pendingSends.delete(messageId); restoreDraft(); }
           notify(error.message);
+          if (!savedMessage) { pendingSends.delete(messageId); await restoreDraft(); }
         } catch {
           const optimisticMessage = currentConversation()?.messages.find((message) => message.id === messageId);
           const confirmed = optimisticMessage && ["accepted", "echoed"].includes(optimisticMessage.state);
@@ -1450,12 +1468,12 @@
               if (owner) owner.messages = owner.messages.filter((message) => message.id !== messageId);
               pendingSends.delete(messageId);
             } else if (optimisticMessage) optimisticMessage.state = "unknown";
-            restoreDraft();
+            await restoreDraft();
           }
           render();
           showConnectionError(error);
         }
-      } else { restoreDraft(); notify(error.message); }
+      } else { notify(error.message); await restoreDraft(); }
     } finally {
       busy = false;
       submissionActivity = null;
@@ -1487,6 +1505,18 @@
 
   function attachmentIds(message, extras = {}) {
     return extras.attachments || (message.attachments || []).map((item) => typeof item === "string" ? item : item.id || item.attachment_id).filter(Boolean);
+  }
+
+  // Après un rechargement, pendingSends est vide : l'ancre enregistrée avec le message reste celle du premier envoi, que le moteur exige à l'identique.
+  function resendExtras(message) {
+    const pending = pendingSends.get(message.id)?.extras;
+    if (pending) return pending;
+    const anchor = message.payload?.page_anchor;
+    const attachments = attachmentIds(message);
+    return {
+      ...(attachments.length ? { attachments } : {}),
+      ...(anchor ? { page_anchor: { page_id: anchor.page_id, source_version: anchor.source_version, passage: anchor.passage } } : {}),
+    };
   }
 
   async function reactToMessage(message, emoji) {
@@ -1562,7 +1592,7 @@
         response = await api("/api/messages/resend", { conversation_id: conversation.id, message_id: message.id });
       } catch (error) {
         if (error.status !== 404) throw error;
-        const extras = pendingSends.get(message.id)?.extras || {};
+        const extras = resendExtras(message);
         response = await sendRequest(conversation, message.id, message.body, { ...extras, attachments: attachmentIds(message, extras) });
       }
       upsertConversation(response.conversation);
@@ -1598,8 +1628,7 @@
     let delivered = false;
     render();
     try {
-      const response = await sendRequest(conversation, message.id, message.body,
-        pendingSends.get(message.id)?.extras || (message.attachments?.length ? { attachments: message.attachments.map((item) => typeof item === "string" ? item : item.id || item.attachment_id) } : {}));
+      const response = await sendRequest(conversation, message.id, message.body, resendExtras(message));
       upsertConversation(response.conversation);
       delivered = response.conversation.messages.some((item) => item.id === message.id && ["accepted", "echoed"].includes(item.state));
       render();

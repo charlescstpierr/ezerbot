@@ -20,6 +20,7 @@ import { collapseMemoryReceipts } from "./memory-presentation.js";
 import { splitMentionText } from "./mentions.js";
 import { isTeachMessage, isDemonstrationMessage } from "./teach.js";
 import { citeMarkdown, hasSources, textWithSources } from "./sources.js";
+import { PageQuote } from "./page-quote.jsx";
 import { SourcesContext, SourcesLine, citeComponents, citeTags } from "./sources.jsx";
 import { MemoryUsedPill } from "./memory-used.jsx";
 import { signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
@@ -144,7 +145,7 @@ function DelegationInstruction({ message, createMascot, botName }) {
   );
 }
 
-function UserMessage({ message, memoSpeed, busy, onCopy, onRetry, onReact, onThread, onResend, onDelete, menuOpen, onMenuOpenChange }) {
+function UserMessage({ message, memoSpeed, busy, onCopy, onRetry, onReact, onThread, onResend, onDelete, onOpenPage, menuOpen, onMenuOpenChange }) {
   const demonstration = isDemonstrationMessage(message);
   if (isTeachMessage(message) || demonstration) return (
     <article className="gb-message gb-teach-marker" data-message-id={message.id} aria-label={demonstration ? "Apprentissage depuis une démonstration" : "Apprentissage depuis cette conversation"}>
@@ -155,10 +156,12 @@ function UserMessage({ message, memoSpeed, busy, onCopy, onRetry, onReact, onThr
   );
   const followUp = message.payload?.source === "follow_up";
   const menu = messageActions(message, { busy });
+  const anchor = message.payload?.page_anchor || message.page_anchor;
   return (
     <article className="gb-message gb-user" data-message-id={message.id} aria-label={followUp ? "Suivi de votre part" : undefined}>
       <header className="gb-meta"><strong>Vous</strong><Timestamp value={message.created_at} /></header>
       {followUp && <span className="gb-followup-label">Suivi</span>}
+      {anchor && <PageQuote anchor={anchor} onOpenPage={onOpenPage} />}
       {message.body && <div className="gb-bubble" data-find-body>{splitMentionText(message.body, message.payload?.mentions || message.mentions).map((part, index) => part.mention
         ? <span className="gb-mention" key={index} data-bot-mention={part.mention.id} title={part.mention.id === "@everyone" ? "Tous les membres à l’envoi" : `Bot : ${part.mention.id}`}>{part.text}</span>
         : part.text)}</div>}
@@ -297,7 +300,7 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed, onOpenSource, onOpenMemory }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed, onOpenSource, onOpenMemory, onOpenPage }) {
   const [openMenuId, setOpenMenuId] = useState(null);
   const onMenuOpenChange = (messageId, open) => setOpenMenuId((current) => messageMenuOpenId(current, messageId, open));
   const appearance = useAppearance();
@@ -379,7 +382,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThr
           const menuOpen = message.id != null && openMenuId === message.id;
           const onThisMenu = (open) => onMenuOpenChange(message.id, open);
           return message.role === "user"
-            ? <UserMessage key={message.id} message={message} memoSpeed={memoSpeed} busy={busy} onCopy={onCopy} onRetry={onRetry} onReact={onReact} onThread={threadAction} onResend={onResend} onDelete={onDelete} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} />
+            ? <UserMessage key={message.id} message={message} memoSpeed={memoSpeed} busy={busy} onCopy={onCopy} onRetry={onRetry} onReact={onReact} onThread={threadAction} onResend={onResend} onDelete={onDelete} onOpenPage={onOpenPage} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} />
             : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} onRateGood={onRateGood} onRateBad={onRateBad} />;
         })}
         {busy && last?.role === "user" && chatKinds.has(last.kind) && <Typing createMascot={createMascot} botName={botName} />}

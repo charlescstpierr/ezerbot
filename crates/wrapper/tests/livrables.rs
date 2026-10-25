@@ -579,3 +579,112 @@ fn a_secret_registered_after_the_creation_is_masked_in_the_titles() {
     assert!(!body.contains(SECRET), "{body}");
     assert_eq!(f.list("").len(), 3);
 }
+
+const LEAK: &str = "liens-secret-9b2e61d4-test";
+
+/// Un Page et un document dont le titre, le nom et le contenu portent un secret que le coffre
+/// n’apprend qu’après leur création.
+fn leaky() -> (Fixture, String) {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.page(&chat, "p1", "bilan.page.tsx", &format!("Bilan {LEAK}"));
+    f.call(
+        &chat,
+        "d1",
+        "create_document",
+        json!({"name":format!("Rapport-{LEAK}"),"format":"md","content":format!("Le code est {LEAK}")}),
+    );
+    grokbot_forms::vault::Vault::open(&f.path.with_extension("secrets.json"))
+        .unwrap()
+        .set("LIENS_TEST", "Secret de test", LEAK)
+        .unwrap();
+    (f, chat)
+}
+
+fn body(f: &mut Fixture, method: &str, path: &str, payload: Value) -> String {
+    match f
+        .app
+        .api_response(method, path, payload.to_string().as_bytes())
+        .unwrap()
+    {
+        ApiResponse::Json(v) => v.to_string(),
+        ApiResponse::Bytes { body, .. } => String::from_utf8_lossy(&body).into_owned(),
+    }
+}
+
+fn link(f: &mut Fixture, kind: &str) -> String {
+    f.list(&format!("type={kind}"))[0]["open_url"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn opening_a_page_masks_a_secret_registered_since() {
+    let (mut f, _) = leaky();
+    let url = link(&mut f, "page");
+    let text = body(&mut f, "GET", &url, json!(null));
+    assert!(text.contains("Bilan"), "{text}");
+    assert!(!text.contains(LEAK), "{text}");
+}
+
+#[test]
+fn renaming_a_page_masks_a_secret_in_its_answer() {
+    let (mut f, _) = leaky();
+    let id = f.list("type=page")[0]["id"].as_str().unwrap().to_owned();
+    let text = body(
+        &mut f,
+        "POST",
+        "/api/pages/rename",
+        json!({"id": id, "title": format!("Autre {LEAK}")}),
+    );
+    assert!(text.contains("Autre"), "{text}");
+    assert!(!text.contains(LEAK), "{text}");
+}
+
+#[test]
+fn reverting_a_page_masks_a_secret_in_its_answer() {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.page(&chat, "p1", "bilan.page.tsx", &format!("Bilan {LEAK}"));
+    f.call(
+        &chat,
+        "p2",
+        "write_page",
+        json!({"name":"bilan.page.tsx","title":format!("Bilan {LEAK}"),"source":PAGE.replace("Bilan", "Autre")}),
+    );
+    grokbot_forms::vault::Vault::open(&f.path.with_extension("secrets.json"))
+        .unwrap()
+        .set("LIENS_TEST", "Secret de test", LEAK)
+        .unwrap();
+    let id = f.list("type=page")[0]["id"].as_str().unwrap().to_owned();
+    let text = body(&mut f, "POST", "/api/pages/revert", json!({"id": id}));
+    assert!(text.contains("Bilan"), "{text}");
+    assert!(!text.contains(LEAK), "{text}");
+}
+
+#[test]
+fn the_preview_of_a_document_masks_a_secret_registered_since() {
+    let (mut f, _) = leaky();
+    let url = link(&mut f, "document");
+    let text = body(&mut f, "GET", &url, json!(null));
+    assert!(text.contains("<svg"), "{text}");
+    assert!(!text.contains(LEAK), "{text}");
+}
+
+#[test]
+fn the_save_path_of_a_document_masks_a_secret_registered_since() {
+    let (mut f, _) = leaky();
+    let id = f.list("type=document")[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let text = body(
+        &mut f,
+        "GET",
+        &format!("/api/generated/{id}/save-path"),
+        json!(null),
+    );
+    assert!(text.contains("Desktop"), "{text}");
+    assert!(!text.contains(LEAK), "{text}");
+}

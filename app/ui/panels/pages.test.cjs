@@ -700,6 +700,30 @@ test("renommer la Page met le nouveau titre dans la puce de la citation posée",
   assert.equal(h.quoteBar.textContent, "Page « Forfaits 2027 » — « Forfait B »");
 });
 
+test("après un renommage, la liste garde le nouveau titre quand l’hôte repeint avec son état", async () => {
+  const h = await openForfaits();
+  const api = h.panels.api.bind(h.panels);
+  // Le moteur renomme ; l’état de l’hôte (liste « Pages ») ne change qu’avec un rafraîchissement.
+  h.panels.api = async (path, body) => {
+    if (path !== "/api/pages/rename") return api(path, body);
+    h.use({ ...h.current(), title: body.title });
+    return { page: h.current() };
+  };
+  let refreshed = 0;
+  h.panels.refresh = async () => {
+    refreshed += 1;
+    h.panels.state.pages.by_bot.grokbot[0].title = h.current().title;
+    await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  };
+  const rename = descendants(h.main).find((el) => el.tagName === "input");
+  rename.value = "Mes forfaits";
+  rename.listeners.change?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  assert.equal(refreshed, 1);
+  assert.equal(descendants(h.sidebar).find((el) => el.dataset.pageId === "page_forfaits").textContent, "Mes forfaits");
+});
+
 test("« Commenter » gardé au clavier ne cite pas un passage que la Page modifiée entre-temps n’affiche plus", async () => {
   const h = await openForfaits();
   h.select("Forfait B");

@@ -778,9 +778,7 @@ fn drive(ctx: &super::Context<'_>) -> Result<(), ApiError> {
         // Legacy direct replies are paired to their submission, not timeline rows.
         for m in snapshot.iter_mut() {
             if m.role == Role::User && m.text.starts_with("Vous : ") {
-                if let Some(reply) =
-                    super::engine::reply(&local, &conversation, &m.entry_id, vec![])?
-                {
+                if let Some(reply) = super::engine::reply(&local, &conversation, &m.entry_id)? {
                     if reply.state != "streaming" {
                         m.text.push_str(&format!("\n{}", shared_reply(&reply)));
                     }
@@ -949,7 +947,6 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
             error: None,
             error_kind: None,
             notice: None,
-            proposals: vec![],
         });
     }
     if kind != "group_reply" {
@@ -991,7 +988,6 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
             error,
             error_kind: None,
             notice: None,
-            proposals: vec![],
         });
     if status == "cancelled" {
         message.state = "stopped";

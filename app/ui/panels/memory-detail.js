@@ -26,7 +26,8 @@
     const root = node("aside", "memory-detail");
     root.hidden = true;
     root.setAttribute("aria-label", "Détail du souvenir");
-    const stamp = (fact) => JSON.stringify([fact, label.bot(fact), label.scope(fact)]); // un bot renommé change aussi ce que le panneau affiche
+    const related = (fact) => window.EzerbotMemoryLinks?.of(facts() || [], fact) ?? []; // « Lié à » : les souvenirs de la même conversation (memory-links.js)
+    const stamp = (fact) => JSON.stringify([fact, label.bot(fact), label.scope(fact), related(fact).map((item) => [item.fact_id, item.text])]); // un bot renommé ou un souvenir lié qui change modifient aussi ce que le panneau affiche
     const current = () => (facts() || []).find((item) => item.fact_id === id) || null;
     const find = (key) => root.parentElement?.querySelector(`[data-id="${key}"], [data-fact-id="${key}"]`);
     const mark = () => {
@@ -51,7 +52,10 @@
       const fact = current();
       if (!fact) return;
       shown = stamp(fact);
-      const controls = () => [...root.querySelectorAll("h2, button, textarea")], held = controls().indexOf(document.activeElement); // le focus reste sur le même contrôle quand la liste change autour du panneau
+      // Le focus reste sur le même contrôle quand la liste change autour du panneau : on le retrouve par ce qu'il est (balise, classe, libellé ou identifiant du souvenir lié), pas par son rang,
+      // car la section « Lié à » change le nombre de contrôles et un rang décalé tomberait sur un autre bouton, par exemple « Oublier ce souvenir » à la place d'« Annuler ».
+      const controls = () => [...root.querySelectorAll("h2, button, textarea")], identity = (el) => [el.tagName, el.className, el.dataset?.factId ?? el.textContent].join("|");
+      const held = root.contains(document.activeElement) ? identity(document.activeElement) : null;
       const discarding = mode === "discard", editing = mode === "edit" || discarding, confirming = mode === "forget", conversation = fact.provenance?.conversation_id;
       const origin = conversation ? button("Ouvrir la conversation", "memory-detail-link", () => { if (!panels.openConversation?.(conversation)) { problem = "Cette conversation n’existe plus, ou une autre action est en cours."; render("origin"); } }, false) : "Hors conversation";
       const rows = [["Bot", label.bot(fact)], ["Origine", origin], ["Appris le", label.date(fact.learned_at)], ["Provenance", SOURCES[fact.provenance?.source] || "Inconnue"], ["Portée", label.scope(fact)]];
@@ -85,12 +89,13 @@
       const status = node("p", "memory-detail-note", note), alert = node("p", "memory-detail-error", problem);
       status.setAttribute("role", "status");
       alert.setAttribute("role", "alert");
-      root.replaceChildren(head, body, fields, node("p", confirming || discarding ? "memory-detail-warning" : "memory-detail-note", hint), status, alert, actions);
+      const linked = related(fact);
+      root.replaceChildren(head, body, fields, ...(linked.length ? [window.EzerbotMemoryLinks.section(linked, open)] : []), node("p", confirming || discarding ? "memory-detail-warning" : "memory-detail-note", hint), status, alert, actions);
       root.hidden = false;
       root.parentElement.dataset.detail = "open";
       mark();
       ({ title, body, back, edit, ask, origin, keep })[want]?.focus();
-      if (!want) controls()[held]?.focus();
+      if (!want && held !== null) (controls().find((el) => identity(el) === held) || title).focus(); // un contrôle disparu (souvenir lié oublié ou corrigé) : le focus va au titre, il ne se perd pas
     }
     // Après une action, la liste ET l'état partagé de l'application sont relus : un fil en cache afficherait sinon un reçu de mémoire périmé (un texte oublié, des commandes actives).
     // L'échec de cette relecture ne devient pas celui de l'action : le panneau ne l'affiche pas comme une erreur.

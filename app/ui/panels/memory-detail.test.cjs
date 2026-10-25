@@ -29,13 +29,13 @@ const fact = (id, bot, scope, text, source, conversation, extra = {}) => ({ fact
 const FACTS = [fact("f1", "grokbot", "private", "Aime le café <b>noir</b>", "user_stated", "c1"), fact("f2", "chef", "team", "L’équipe déjeune à midi", "model_inferred", null), fact("f3", "chef", "topic", "Le garde-meuble ferme à 18 h", "user_stated", null, { topic_id: "t1", topic_name: "Déménagement" })];
 // `refuse` : le moteur répond à toute action par cette erreur ; `opened` : les fils que l'application sait ouvrir.
 // `lose` : le moteur applique l'action mais la réponse se perd (erreur réseau sans `status`).
-async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFails = false } = {}) {
+async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFails = false, start = FACTS } = {}) {
   const sidebar = new Element("aside"), main = new Element("main"), dock = new Element("div"), bots = new Element("div"), keys = [], registered = [];
   bots.className = "sidebar-bots"; dock.className = "composer-dock"; sidebar.append(bots); main.append(dock);
   const nodes = { sidebar, "conversation-title": new Element("h1"), "workspace-label": new Element("button") };
   const document = { createElement: (tag) => new Element(tag), createElementNS: (_, tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (s) => (s === ".main-panel" ? main : s === "dialog[open]" ? null : dock), addEventListener: (_, action) => keys.push(action), get activeElement() { return Element.active; }, body: new Element("body") };
-  let facts = FACTS.map((item) => ({ ...item })), n = 0;
-  const cache = { seen: null, work: null }, calls = { api: [], opened: [], refresh: 0 }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); }, touch: (id) => { facts = facts.map((item) => (item.fact_id === id ? { ...item, needs_review: true } : item)); } };
+  let facts = start.map((item) => ({ ...item })), n = 0;
+  const cache = { seen: null, work: null }, calls = { api: [], opened: [], refresh: 0 }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); }, add: (item) => { facts = [item, ...facts]; }, touch: (id) => { facts = facts.map((item) => (item.fact_id === id ? { ...item, needs_review: true } : item)); } };
   const panels = {
     register: (panel) => registered.push(panel), leaveConversation() {},
     // L'état partagé de l'application (fils en cache, reçus) : comme app.js, une lecture déjà en vol est partagée, et elle rend l'état tel qu'il était à son départ.
@@ -57,7 +57,7 @@ async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFai
     },
   };
   const context = vm.createContext({ window: { GrokbotPanels: panels }, document, setInterval: () => 0, JSON, Number, String, Date, Promise, Object, Array, Boolean, Math, Set, Map });
-  for (const file of ["memory-detail.js", "memory-filter.js", "memory-graph.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
+  for (const file of ["memory-detail.js", "memory-filter.js", "memory-links.js", "memory-graph.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
   const settle = async () => { for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
   Element.active = null;
   registered[0].onState({ bots: [{ id: "grokbot", name: "Ezerbot" }, { id: "chef", name: "Chef" }], memory_auto: { revision: 1 } }, {});
@@ -636,6 +636,99 @@ test("Échap et Fermer pendant l'envoi ne font rien : la saisie part ou reste, l
   assert.match(h.text("warning"), /Abandonner la modification/, "après l'erreur, Échap redemande");
 });
 
+// Les liens (#265) : même conversation = « Lié à » dans le détail.
+const CHAIN = [fact("l1", "grokbot", "private", "Aime le café noir", "automatic", "c1"), fact("l2", "chef", "team", "Déjeune à midi", "automatic", "c1"), fact("l3", "chef", "topic", "Garde-meuble fermé le soir", "user_stated", "c1", { topic_id: "t1", topic_name: "Déménagement" }), fact("l4", "grokbot", "private", "Préfère le thé le soir", "automatic", "c2"), fact("l5", "grokbot", "private", "Seul, sans conversation", "automatic", null)];
+const linkedTexts = (h) => h.panel().querySelectorAll(".memory-detail-link-item").map((item) => item.textContent);
+test("le détail liste « Lié à » : les autres souvenirs de la même conversation, pas lui-même ni ceux d'ailleurs", async () => {
+  const h = await harness({ start: CHAIN });
+  h.tab("graph");
+  h.point("l1").click();
+  assert.equal(h.panel().querySelector(".memory-detail-links-title").textContent, "Lié à");
+  assert.deepEqual(linkedTexts(h), ["Déjeune à midi", "Garde-meuble fermé le soir"], "un souvenir d'équipe et un souvenir de sujet de la même conversation");
+  for (const id of ["l4", "l5"]) { h.point(id).click(); assert.equal(h.panel().querySelector(".memory-detail-links"), null, `${id} est isolé : pas de section « Lié à »`); }
+});
+test("le graphe dessine un trait fin par lien, et un souvenir plus lié a un point un peu plus gros", async () => {
+  const h = await harness({ start: CHAIN });
+  h.tab("graph");
+  const lines = h.main.querySelectorAll(".memory-graph-edge");
+  assert.equal(lines.filter((line) => line.classes.includes("is-link")).length, 2, "trois souvenirs d'une même conversation : une chaîne de deux traits qui les relie tous");
+  assert.equal(lines.length, 2 + (3 + 5), "deux traits de lien, plus les traits vous → groupe (3) et groupe → souvenir (5)");
+  const r = (id) => Number(h.point(id).querySelector("circle").attributes.r);
+  assert.ok(r("l1") > r("l4") && r("l4") === r("l5"), "lié deux fois > isolés");
+});
+test("au survol d'un point, tous les souvenirs de sa conversation s'allument, les autres s'estompent", async () => {
+  const h = await harness({ start: CHAIN });
+  h.tab("graph");
+  h.point("l1").fire("mouseenter");
+  const dim = (id) => h.point(id).classes.includes("is-dim");
+  assert.deepEqual(["l2", "l3"].map(dim), [false, false], "l3 n'est pas voisin de l1 dans la chaîne tracée, mais il est lié");
+  assert.deepEqual(["l4", "l5"].map(dim), [true, true]);
+  const chain = () => h.main.querySelectorAll(".memory-graph-edge").filter((line) => line.classes.includes("is-link")).map((line) => line.classes.includes("is-dim"));
+  assert.deepEqual(chain(), [false, false], "toute la chaîne de la conversation reste visible, y compris le trait qui ne touche pas l1");
+  h.point("l1").fire("mouseleave");
+  assert.deepEqual(["l2", "l3", "l4", "l5"].map(dim), [false, false, false, false]);
+  h.point("l4").fire("mouseenter");
+  assert.deepEqual(chain(), [true, true], "un souvenir d'une autre conversation estompe les traits de celle-ci");
+});
+test("un souvenir lié qui arrive pendant la confirmation d'oubli ne déplace pas le focus sur « Oublier ce souvenir »", async () => {
+  const h = await harness({ start: CHAIN });
+  h.item("l4").click();
+  h.panel().querySelectorAll("button").find((b) => b.textContent === "Oublier…").click();
+  assert.equal(Element.active.textContent, "Annuler", "après « Oublier… », le focus est sur Annuler");
+  h.panel().querySelectorAll("button").find((b) => b.textContent === "Annuler").click();
+  h.panel().querySelectorAll("button").find((b) => b.textContent === "Oublier…").click();
+  h.net.add(fact("l6", "grokbot", "private", "Autre souvenir de la conversation c2", "automatic", "c2"));
+  h.reload();
+  await h.settle();
+  assert.equal(h.panel().querySelectorAll(".memory-detail-link-item").length, 1, "le souvenir lié est arrivé dans le panneau");
+  assert.equal(Element.active.textContent, "Annuler", "le focus est resté sur Annuler");
+  assert.deepEqual(h.mutations(), [], "rien n'a été oublié");
+});
+const FAR = "Même début de phrase très long pour que deux souvenirs se ressemblent après troncature, vraiment très long";
+test("deux souvenirs liés au texte tronqué identique : le focus reste sur celui qui l'avait, après une relecture", async () => {
+  const start = [fact("m", "grokbot", "private", "Principal", "automatic", "c1"), fact("b", "grokbot", "private", `${FAR} B`, "automatic", "c1"), fact("c", "grokbot", "private", `${FAR} C`, "automatic", "c1")];
+  const h = await harness({ start });
+  h.item("m").click();
+  const items = () => h.panel().querySelectorAll(".memory-detail-link-item");
+  assert.equal(items()[0].textContent, items()[1].textContent, "les deux boutons portent le même libellé");
+  assert.deepEqual(items().map((item) => item.title), [`${FAR} B`, `${FAR} C`], "le titre porte le texte entier");
+  items()[1].focus();
+  assert.equal(Element.active.dataset.factId, "c", "le deuxième bouton est celui du souvenir c");
+  h.net.touch("m");
+  h.reload();
+  await h.settle();
+  assert.equal(Element.active.dataset.factId, "c", "le focus est resté sur le souvenir c, pas sur son jumeau b");
+});
+test("le souvenir lié focalisé disparaît : le focus va au titre du panneau", async () => {
+  const h = await harness({ start: CHAIN });
+  h.item("l1").click();
+  const target = h.panel().querySelectorAll(".memory-detail-link-item")[0];
+  target.focus();
+  h.net.drop(target.dataset.factId);
+  h.reload();
+  await h.settle();
+  assert.equal(Element.active.classes.includes("memory-detail-title"), true);
+});
+test("un clic sur un souvenir lié ouvre ce souvenir dans le panneau", async () => {
+  const h = await harness({ start: CHAIN });
+  h.item("l1").click();
+  h.panel().querySelectorAll(".memory-detail-link-item").find((item) => item.textContent === "Déjeune à midi").click();
+  assert.equal(h.text("text"), "Déjeune à midi");
+  assert.deepEqual(linkedTexts(h), ["Aime le café noir", "Garde-meuble fermé le soir"]);
+});
+test("un texte lié reste du texte, et un souvenir lié oublié ensuite sort de « Lié à » après la relecture", async () => {
+  const h = await harness({ start: [fact("x1", "grokbot", "private", "<b>gras</b>", "automatic", "c1"), fact("x2", "grokbot", "private", "Deuxième", "automatic", "c1"), fact("x3", "grokbot", "private", "Troisième", "automatic", "c1")] });
+  h.item("x2").click();
+  assert.deepEqual(linkedTexts(h), ["<b>gras</b>", "Troisième"]);
+  h.net.drop("x3");
+  h.reload();
+  await h.settle();
+  assert.deepEqual(linkedTexts(h), ["<b>gras</b>"]);
+  h.net.drop("x1");
+  h.reload();
+  await h.settle();
+  assert.equal(h.panel().querySelector(".memory-detail-links"), null, "plus aucun souvenir lié");
+});
 test("styles : jetons seulement, aucun texte sous 11,5 px", () => {
   const css = fs.readFileSync(`${__dirname}/memory-detail.css`, "utf8");
   assert.doesNotMatch(css, /#[0-9a-fA-F]{3,8}\b|rgb\(|hsl\(/);

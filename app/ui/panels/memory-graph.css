@@ -6,6 +6,7 @@
 .memory-graph-tool:hover { border-color: var(--focus); }
 .memory-graph-tool:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .memory-graph-edge { stroke: var(--muted); stroke-opacity: .45; stroke-width: 1; transition: opacity .15s; }
+.memory-graph-edge.is-link { stroke: var(--text); stroke-opacity: .4; stroke-width: .75; stroke-dasharray: 3 3; }
 .memory-graph-node { --tone: var(--text); outline: none; transition: opacity .15s; }
 .memory-graph-node.is-private, .memory-graph-swatch.is-private { --tone: var(--scope-private); }
 .memory-graph-node.is-team, .memory-graph-swatch.is-team { --tone: var(--scope-team); }

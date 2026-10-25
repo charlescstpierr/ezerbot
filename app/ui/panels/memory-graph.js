@@ -1,5 +1,6 @@
 /* Mémoire : vue Graphe. Vous au centre, un groupe par sujet (plus « Personnel » et « Travail »), un point par souvenir.
- * `buildGraph` est pure (données → positions) ; `view` la dessine en SVG. Seuls les liens vous → groupe → souvenir existent. */
+ * `buildGraph` est pure (données → positions) ; `view` la dessine en SVG. Les traits vous → groupe → souvenir sont dans `edges` ;
+ * les liens entre souvenirs d'une même conversation (memory-links.js, dérivés à la lecture) sont dans `links`. */
 (() => {
   "use strict";
   const SVG = "http://www.w3.org/2000/svg", CX = 300, CY = 220, RANK = { private: 0, team: 1, topic: 2 };
@@ -8,7 +9,7 @@
   const scopeOf = (fact) => (fact.scope === "team" || fact.scope === "topic" ? fact.scope : "private");
   function buildGraph(facts, { user = "", bots = [] } = {}) {
     const first = String(user || "").trim().split(/\s+/)[0] || "Vous";
-    const found = new Map();
+    const found = new Map(), related = window.EzerbotMemoryLinks?.counts(facts) ?? new Map();
     for (const fact of facts || []) {
       const scope = scopeOf(fact);
       const id = scope === "topic" ? `topic:${fact.topic_id ?? fact.topic_name ?? ""}` : scope;
@@ -18,7 +19,7 @@
     // Un groupe sans souvenir n'est pas dessiné : une pastille seule ne dirait rien.
     const list = [...found.values()].sort((a, b) => RANK[a.scope] - RANK[b.scope] || a.label.localeCompare(b.label, "fr"));
     const ring = Math.max(130, 24 * list.length);
-    const graph = { center: { id: "user", x: CX, y: CY, label: first, initial: first.charAt(0).toLocaleUpperCase("fr") }, groups: [], nodes: [], edges: [] };
+    const graph = { center: { id: "user", x: CX, y: CY, label: first, initial: first.charAt(0).toLocaleUpperCase("fr") }, groups: [], nodes: [], edges: [], links: (window.EzerbotMemoryLinks?.pairs(facts) ?? []).map(([from, to]) => ({ from, to, kind: "link" })) };
     list.forEach((group, i) => {
       const angle = -Math.PI / 2 + (2 * Math.PI * i) / list.length;
       const gx = CX + ring * Math.cos(angle), gy = CY + ring * Math.sin(angle);
@@ -27,8 +28,8 @@
       group.facts.forEach((fact, j) => {
         // Les souvenirs s'ouvrent en éventail vers l'extérieur, sept par rang.
         const rank = Math.floor(j / 7), size = Math.min(7, group.facts.length - rank * 7), theta = angle + 0.42 * ((j % 7) - (size - 1) / 2), reach = 72 + 20 * rank;
-        const bot = (bots || []).find((item) => item.id === fact.bot_id);
-        graph.nodes.push({ id: String(fact.fact_id), group: group.id, scope: group.scope, bot: bot?.name || "Bot", label: String(fact.text ?? ""), x: round(gx + reach * Math.cos(theta)), y: round(gy + reach * Math.sin(theta)) });
+        const bot = (bots || []).find((item) => item.id === fact.bot_id), links = related.get(String(fact.fact_id)) ?? 0;
+        graph.nodes.push({ id: String(fact.fact_id), group: group.id, scope: group.scope, bot: bot?.name || "Bot", label: String(fact.text ?? ""), links, conversation: window.EzerbotMemoryLinks?.conversationOf(fact) ?? "", r: window.EzerbotMemoryLinks?.radius(links) ?? 6, x: round(gx + reach * Math.cos(theta)), y: round(gy + reach * Math.sin(theta)) });
         graph.edges.push({ from: group.id, to: String(fact.fact_id) });
       });
     });
@@ -66,8 +67,8 @@
     const html = (tag, className, text) => { const el = document.createElement(tag); el.className = className; if (text !== undefined) el.textContent = text; return el; };
     const svg = make("svg", { class: "memory-graph-canvas", role: "group", "aria-label": `Graphe de la mémoire : ${graph.nodes.length} souvenirs, ${graph.groups.length} groupes` });
     const links = new Map(), drawn = new Map(), lines = [];
-    for (const edge of graph.edges) {
-      const line = make("line", { class: "memory-graph-edge" });
+    for (const edge of [...graph.links, ...graph.edges]) { // les liens d'abord : les traits de structure restent par-dessus
+      const line = make("line", { class: edge.kind === "link" ? "memory-graph-edge is-link" : "memory-graph-edge" });
       lines.push([edge, line]);
       for (const [a, b] of [[edge.from, edge.to], [edge.to, edge.from]]) links.set(a, [...(links.get(a) || []), b]);
     }
@@ -80,9 +81,10 @@
       for (const key of [...graph.groups, ...graph.nodes].map((item) => item.id)) if (!keep.has(key)) base.add(key);
     }
     const highlight = (id) => {
-      const lit = new Set(id ? [id, ...(links.get(id) || [])] : []);
+      const talk = id ? at.get(id).conversation : ""; // les souvenirs d'une même conversation s'allument ensemble, même si le trait de leur chaîne ne les relie pas deux à deux
+      const lit = new Set(id ? [id, ...(links.get(id) || []), ...(talk ? graph.nodes.filter((item) => item.conversation === talk).map((item) => item.id) : [])] : []);
       for (const [key, el] of drawn) { el.classList.toggle("is-active", key === id); el.classList.toggle("is-dim", id ? !lit.has(key) : base.has(key)); }
-      for (const [edge, line] of lines) line.classList.toggle("is-dim", id ? edge.from !== id && edge.to !== id : base.has(edge.from) || base.has(edge.to));
+      for (const [edge, line] of lines) line.classList.toggle("is-dim", id ? (edge.kind === "link" ? !(lit.has(edge.from) && lit.has(edge.to)) : edge.from !== id && edge.to !== id) : base.has(edge.from) || base.has(edge.to));
     };
     const add = (item, kind, scope, radius, name, caption) => {
       const el = make("g", { class: `memory-graph-node memory-graph-${kind} is-${scope}`, tabindex: "0", role: "img", "aria-label": name, "data-id": item.id });
@@ -108,7 +110,7 @@
     nodeLayer.append(center,
       ...graph.groups.map((group) => add(group, "group", group.scope, 20, `${group.label}, ${group.count} souvenir${group.count > 1 ? "s" : ""}`, short(group.label))),
       ...graph.nodes.map((node) => {
-        const hit = Boolean(matches?.has(node.id)), el = add(node, "point", node.scope, 6, `${node.bot}, ${SCOPE_LABELS[node.scope]} : ${node.label.slice(0, 120)}`);
+        const hit = Boolean(matches?.has(node.id)), el = add(node, "point", node.scope, node.r, `${node.bot}, ${SCOPE_LABELS[node.scope]} : ${node.label.slice(0, 120)}`);
         el.classList.toggle("is-match", hit);
         if (hit) { // le texte se pose vers l'extérieur de son groupe, loin de l'étiquette du groupe
           const g = at.get(node.group), d = Math.hypot(node.x - g.x, node.y - g.y) || 1, ux = (node.x - g.x) / d, uy = (node.y - g.y) / d, side = Math.abs(ux) > 0.5 ? Math.sign(ux) : 0;

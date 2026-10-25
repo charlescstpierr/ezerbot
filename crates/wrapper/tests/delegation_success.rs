@@ -238,15 +238,20 @@ struct Task {
     trials: [Behaviour; 3],
 }
 
-/// La valeur attendue doit être un mot entier du résumé : `13 fichiers` ne vaut pas `3 fichiers`.
+/// La valeur attendue doit être un mot entier du résumé, sans signe ni décimales collés :
+/// `13 fichiers`, `-391` et `391,5` sont faux.
 fn summary_has(observed: &Observed, value: &str) -> bool {
     let DelegationStatus::Done { result, .. } = &observed.status else {
         return false;
     };
     result.match_indices(value).any(|(start, _)| {
         let before = result[..start].chars().next_back();
-        let after = result[start + value.len()..].chars().next();
-        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+        let mut after = result[start + value.len()..].chars();
+        let glued = match after.next() {
+            Some('.' | ',') => after.next().is_some_and(char::is_alphanumeric),
+            next => next.is_some_and(char::is_alphanumeric),
+        };
+        !before.is_some_and(|c| c.is_alphanumeric() || "-−+.,".contains(c)) && !glued
     })
 }
 
@@ -379,8 +384,10 @@ struct Outcome {
     observed: Observed,
     /// Garde l'espace de l'essai tant que le test lit son état final.
     _dir: grokbot_test_support::TestDir,
-    /// Cartes d'approbation levées par l'enfant (celles du lancement en fond ne comptent pas).
-    cards: usize,
+    /// Cartes de lancement en fond levées par le parent.
+    launch_cards: usize,
+    /// Cartes d'approbation levées par l'enfant.
+    child_cards: usize,
 }
 
 fn post(app: &mut App, path: &str, body: Value) -> Value {
@@ -520,7 +527,7 @@ fn run_trial(task: &Task, behaviour: Behaviour, index: usize) -> Outcome {
     };
     let untouched = snapshot(&space);
     let mut handled = HashSet::new();
-    let mut cards = 0;
+    let (mut launch_cards, mut child_cards) = (0, 0);
     let deadline = Instant::now() + Duration::from_secs(10);
     let edge = loop {
         app.tick(now_ms());
@@ -539,9 +546,10 @@ fn run_trial(task: &Task, behaviour: Behaviour, index: usize) -> Outcome {
                         continue;
                     }
                     let decision = if !is_child {
+                        launch_cards += 1;
                         json!("allow_once")
                     } else {
-                        cards += 1;
+                        child_cards += 1;
                         assert_eq!(
                             snapshot(&space),
                             untouched,
@@ -613,18 +621,19 @@ fn run_trial(task: &Task, behaviour: Behaviour, index: usize) -> Outcome {
         },
         observed,
         _dir: dir,
-        cards,
+        launch_cards,
+        child_cards,
     }
 }
 
-fn run_corpus() -> Vec<Trial> {
+fn run_corpus() -> Vec<Outcome> {
     CORPUS
         .iter()
         .flat_map(|task| {
             task.trials
                 .into_iter()
                 .enumerate()
-                .map(|(index, behaviour)| run_trial(task, behaviour, index).trial)
+                .map(|(index, behaviour)| run_trial(task, behaviour, index))
         })
         .collect()
 }
@@ -700,6 +709,9 @@ fn summary_graders_reject_a_neighbouring_value() {
     let grade = |task: usize, summary: &str| (CORPUS[task].grade)(&observed(summary));
     assert!(grade(0, "17 × 23 = 391."));
     assert!(!grade(0, "17 × 23 = 3910"));
+    assert!(!grade(0, "17 × 23 = -391"));
+    assert!(!grade(0, "17 × 23 = 391,5"));
+    assert!(!grade(0, "17 × 23 = 0.391"));
     assert!(grade(1, "Le code est 7B42."));
     assert!(!grade(1, "Le code est 7B421."));
     assert!(grade(4, "3 fichiers"));
@@ -734,7 +746,7 @@ fn a_task_that_never_calls_complete_task_fails_even_when_its_text_looks_done() {
 fn a_denied_write_leaves_no_file_and_a_false_claim_of_success_is_graded_incorrect() {
     let outcome = run_trial(&CORPUS[2], Behaviour::Denied, 0);
     assert_eq!(
-        outcome.cards, 1,
+        outcome.child_cards, 1,
         "la carte d’approbation de l’écriture est levée"
     );
     assert!(
@@ -751,7 +763,16 @@ fn a_denied_write_leaves_no_file_and_a_false_claim_of_success_is_graded_incorrec
 
 #[test]
 fn full_corpus_replays_five_tasks_three_times_with_exact_tokens_and_report() {
-    let trials = run_corpus();
+    let outcomes = run_corpus();
+    for outcome in &outcomes {
+        assert_eq!(
+            (outcome.launch_cards, outcome.child_cards),
+            (1, usize::from(outcome.trial.task == "fichier")),
+            "le lancement en fond et l’écriture demandent chacun leur carte : {}",
+            outcome.trial.task
+        );
+    }
+    let trials: Vec<Trial> = outcomes.into_iter().map(|outcome| outcome.trial).collect();
     let expected = [
         ("produit", true, true, 350),
         ("produit", true, true, 450),

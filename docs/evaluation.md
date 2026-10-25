@@ -46,7 +46,7 @@ Le [banc F1 de mémoire automatique](memory-auto-evaluation.md) rejoue séparém
 
 ## Réussite des tâches déléguées par tokens dépensés
 
-Le test `crates/wrapper/tests/delegation_success.rs` mesure une tâche déléguée à un sous-bot : combien de tâches **réussissent**, pour combien de tokens. Tout tourne sur le `FakeOpenAi` en boucle locale (même vérification `http://127.0.0.1:` que le lanceur ci-dessus) : aucun compte, aucun réseau, aucun juge-modèle. Aucun réglage n’est modifié : budgets du moteur (12 appels de modèle, 24 appels d’outil, 600 s), descriptions d’outils, modèle et effort de raisonnement restent ceux de production, et les approbations restent demandées.
+Le test `crates/wrapper/tests/delegation_success.rs` mesure une tâche déléguée à un sous-bot : combien de tâches **réussissent**, pour combien de tokens. Tout tourne sur le `FakeOpenAi` en boucle locale (même vérification `http://127.0.0.1:` que le lanceur ci-dessus) : aucun compte, aucun réseau, aucun juge-modèle. Aucun réglage mesuré n’est modifié : budgets du moteur (12 appels de modèle, 24 appels d’outil, 600 s), descriptions d’outils, modèle et effort de raisonnement restent ceux de production. Le harnais règle seulement l’espace de l’essai : mode « Demander avant d’agir » (le mode YOLO, actif par défaut, lèverait les cartes), fichiers activés pour le bot enfant et dossier de l’essai accordé. Les approbations restent demandées : chaque essai doit lever la carte de lancement en fond, et `fichier` celle de l’écriture.
 
 ### Ce qui compte comme un succès
 
@@ -67,7 +67,7 @@ Cinq tâches factices dans un registre (`CORPUS`), chacune avec son script de fa
 
 | Tâche | Consigne | Correcteur |
 | --- | --- | --- |
-| `produit` | calculer 17 × 23 | le résumé contient `391` comme mot entier |
+| `produit` | calculer 17 × 23 | le résumé contient `391` comme mot entier, sans signe ni décimales (`-391`, `391,5` sont faux) |
 | `lecture` | lire `donnees.txt` (`code=7B42`) dans un dossier accordé et donner le code | le résumé contient `7B42` comme mot entier |
 | `fichier` | créer `rapport.txt` contenant exactement `OK` | le fichier existe avec le contenu `OK` |
 | `memoire` | retenir que la réunion d’équipe est le mardi | le bot enfant a un fait actif « La réunion d’équipe est le mardi. » |

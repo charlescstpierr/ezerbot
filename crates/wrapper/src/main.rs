@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -268,10 +268,7 @@ fn options() -> Result<Option<Options>, String> {
                     .map_err(|_| "Port invalide.")?;
             }
             "--turns-summary" => {
-                turns_summary = Some(
-                    args.next()
-                        .ok_or("--turns-summary attend un jour AAAA-MM-JJ.")?,
-                );
+                turns_summary = Some(args.next().ok_or("--turns-summary attend AAAA-MM-JJ.")?);
             }
             "--db" => {
                 db = args.next().ok_or("--db attend un chemin SQLite.")?.into();
@@ -624,6 +621,16 @@ fn leave_on_quit(db: PathBuf) {
             std::process::exit(0);
         }
     });
+}
+
+/// Résumé du journal des tours sur la base ouverte en lecture seule : jamais d'écriture ni de migration.
+fn turns_summary(db: &std::path::Path, day: &str) -> Result<(), String> {
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let conn = rusqlite::Connection::open_with_flags(db, flags)
+        .map_err(|error| format!("Base illisible ({}) : {error}", db.display()))?;
+    let summary = grokbot_wrapper::features::turns::summary(&conn, day).map_err(|e| e.message)?;
+    println!("{summary}");
+    Ok(())
 }
 
 fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1067,15 +1074,6 @@ mod fake_tests {
             assert!(super::fake_openai_base(value).is_none());
         }
     }
-}
-
-fn turns_summary(db: &Path, day: &str) -> Result<(), String> {
-    let conn =
-        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|error| format!("Base illisible ({}) : {error}", db.display()))?;
-    let summary = grokbot_wrapper::features::turns::summary(&conn, day).map_err(|e| e.message)?;
-    println!("{summary}");
-    Ok(())
 }
 
 fn main() {

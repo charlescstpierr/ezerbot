@@ -6,6 +6,7 @@ use grokbot_engine::{
     model::{Run, RunStatus},
     store,
 };
+use grokbot_scheduler::occurrences;
 use grokbot_wrapper::{App, Endpoints, Provider};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -704,6 +705,26 @@ fn a_passage_is_measured_when_any_run_of_its_delegation_tree_sent_usage() {
         )
         .unwrap();
     assert_eq!(average(&mut c), (json!(2250), json!(3)));
+}
+
+#[test]
+fn a_quiet_passage_is_a_finished_measured_passage_like_any_other() {
+    let mut c = Cost::every_30_minutes();
+    c.pass("loud", "done", 2 * 3_600_000, Some(1000));
+    // « Rien à signaler » (#286): the running passage turns quiet, then is done.
+    c.pass("quiet", "running", 3_600_000, Some(3000));
+    occurrences::mark_quiet(&c.conn, "quiet", "quiet").unwrap();
+    occurrences::mark_done(&c.conn, "quiet", "quiet").unwrap();
+    let cost = c.cost();
+    assert_eq!(
+        (
+            &cost["average_tokens"],
+            &cost["average_sample"],
+            &cost["tokens_7d"]
+        ),
+        (&json!(2000), &json!(2), &json!(4000)),
+        "{cost}"
+    );
 }
 
 #[test]

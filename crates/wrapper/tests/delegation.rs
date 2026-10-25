@@ -4103,11 +4103,10 @@ mod captures {
         assert!(image(&mut f, &urls[0]).starts_with(b"\x89PNG"));
         f.post("/api/conversations/delete", json!({"id":thread}));
         f.tick();
-        // The screen pixels are purged with the thread and the card shows no reference at all.
-        assert_eq!(
-            f.app.api_response("GET", &urls[0], &[]).unwrap_err().status,
-            404
-        );
+        // The screen pixels and the attached image are purged with the thread and the card shows no reference at all.
+        for url in &urls {
+            assert_eq!(f.app.api_response("GET", url, &[]).unwrap_err().status, 404);
+        }
         let left: i64 = f
             .db()
             .query_row(

@@ -617,29 +617,19 @@ mod tests {
     };
     use grokbot_replica::{Delta, Replica, Snapshot};
     use grokbot_submission_journal::{Journal, PreparedMessage};
+    use grokbot_test_support::TestDir;
 
     fn must_id<T>(result: Result<T, grokbot_domain::EmptyId>) -> T {
         result.expect("identifiant")
     }
 
-    struct TestDatabase(std::path::PathBuf);
+    /// Chemin de la base, puis le dossier unique qui la contient (supprimé en entier à la fin).
+    struct TestDatabase(std::path::PathBuf, #[allow(dead_code)] TestDir);
 
     impl TestDatabase {
         fn new(name: &str) -> Self {
-            static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let serial = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "grokbot-store-{name}-{}-{serial}.sqlite",
-                std::process::id()
-            ));
-            let _ = fs::remove_file(&path);
-            Self(path)
-        }
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
+            let directory = TestDir::new(&format!("grokbot-store-{name}"));
+            Self(directory.join("store.sqlite"), directory)
         }
     }
 
@@ -1368,12 +1358,8 @@ mod tests {
 
     #[test]
     fn le_journal_survit_a_la_reouverture() {
-        let path = std::env::temp_dir().join(format!(
-            "grokbot-store-journal-{}-{}.sqlite",
-            std::process::id(),
-            "journal"
-        ));
-        let _ = fs::remove_file(&path);
+        let db = TestDatabase::new("journal");
+        let path = db.0.clone();
         let actor = AuthenticatedActor {
             account_id: must_id(AccountId::new("compte")),
             team_id: None,
@@ -1419,17 +1405,12 @@ mod tests {
             loaded.get(&actor.account_id, &conversation, &message),
             journal.get(&actor.account_id, &conversation, &message)
         );
-        let _ = fs::remove_file(&path);
     }
 
     #[test]
     fn la_replique_survit_a_la_reouverture() {
-        let path = std::env::temp_dir().join(format!(
-            "grokbot-store-replica-{}-{}.sqlite",
-            std::process::id(),
-            "replica"
-        ));
-        let _ = fs::remove_file(&path);
+        let db = TestDatabase::new("replica");
+        let path = db.0.clone();
         let conversation = must_id(ConversationId::new("conv"));
         let epoch = ReplicaEpoch {
             boot_id: must_id(BootId::new("boot")),
@@ -1476,6 +1457,5 @@ mod tests {
         let loaded = store.load_replica(&conversation).unwrap();
         assert_eq!(loaded.cursor(), replica.cursor());
         assert_eq!(loaded.export().buffer.len(), 1);
-        let _ = fs::remove_file(&path);
     }
 }

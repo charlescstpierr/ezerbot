@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -23,16 +23,12 @@ struct Fixture {
     dir: PathBuf,
     server: FakeOpenAi,
     provider: Provider,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new(reply: ScriptedResponse) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "ezerbot-usage-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-usage");
+        let dir = guard.to_path_buf();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen {
             quota_reply: Some(reply),
             ..Seen::default()
@@ -62,6 +58,7 @@ impl Fixture {
             dir,
             server,
             provider,
+            _dir: guard,
         }
     }
     fn quota(&self) -> Value {
@@ -73,11 +70,6 @@ impl Fixture {
     }
     fn app(&self) -> App {
         App::open_with(&self.dir.join("app.sqlite"), self.provider.clone()).unwrap()
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 fn valid() -> Value {

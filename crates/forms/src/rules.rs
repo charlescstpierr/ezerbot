@@ -644,13 +644,8 @@ mod tests {
 
     #[test]
     fn rules_core_permission_and_auto_review_config_survive_reopen() {
-        let mut bytes = [0; 8];
-        getrandom::getrandom(&mut bytes).unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "grokbot-rules-{}-{:x}.sqlite",
-            std::process::id(),
-            u64::from_ne_bytes(bytes)
-        ));
+        let directory = grokbot_test_support::TestDir::new("grokbot-rules");
+        let path = directory.join("rules.sqlite");
         let route = route();
         let args = json!({"path": "a"});
         let config = AutoReviewConfig {
@@ -690,7 +685,6 @@ mod tests {
             let conn = Connection::open(&path).unwrap();
             assert_eq!(evaluate(&conn, &route, "write", &args).unwrap(), None);
         }
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -7,12 +7,8 @@ use grokbot_engine::{
 #[test]
 fn queued_actions_cannot_outlive_revoke_or_bind_a_new_lease() {
     let _mac = TEST_MAC.lock().unwrap();
-    let root = std::env::temp_dir().join(format!(
-        "ezerbot-screen-queue-{}-{}",
-        std::process::id(),
-        crate::now()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let guard = grokbot_test_support::TestDir::new("ezerbot-screen-queue");
+    let root = guard.to_path_buf();
     let path = root.join("workspace.sqlite");
     let mut app = App::open(&path).unwrap();
     let chat = app
@@ -117,12 +113,8 @@ fn queued_actions_cannot_outlive_revoke_or_bind_a_new_lease() {
 #[test]
 fn expiry_changes_poll_token_and_cancels_pending_screen_approvals() {
     let _mac = TEST_MAC.lock().unwrap();
-    let root = std::env::temp_dir().join(format!(
-        "ezerbot-screen-expiry-{}-{}",
-        std::process::id(),
-        crate::now()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let guard = grokbot_test_support::TestDir::new("ezerbot-screen-expiry");
+    let root = guard.to_path_buf();
     let path = root.join("workspace.sqlite");
     let mut app = App::open(&path).unwrap();
     let chat = app
@@ -209,12 +201,8 @@ fn expiry_changes_poll_token_and_cancels_pending_screen_approvals() {
 #[test]
 fn idle_reconciliation_does_not_take_a_writer_lock() {
     let _mac = TEST_MAC.lock().unwrap();
-    let root = std::env::temp_dir().join(format!(
-        "ezerbot-screen-idle-{}-{}",
-        std::process::id(),
-        crate::now()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let guard = grokbot_test_support::TestDir::new("ezerbot-screen-idle");
+    let root = guard.to_path_buf();
     let path = root.join("workspace.sqlite");
     let app = App::open(&path).unwrap();
     app.connection.busy_timeout(Duration::ZERO).unwrap();
@@ -233,12 +221,8 @@ fn idle_reconciliation_does_not_take_a_writer_lock() {
 #[test]
 fn approving_inside_the_shell_does_not_invalidate_an_active_permit_but_outside_input_pauses() {
     let _mac = TEST_MAC.lock().unwrap();
-    let root = std::env::temp_dir().join(format!(
-        "ezerbot-screen-input-{}-{}",
-        std::process::id(),
-        crate::now()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let guard = grokbot_test_support::TestDir::new("ezerbot-screen-input");
+    let root = guard.to_path_buf();
     let path = root.join("workspace.sqlite");
     let mut app = App::open(&path).unwrap();
     let chat = app
@@ -285,12 +269,8 @@ fn approving_inside_the_shell_does_not_invalidate_an_active_permit_but_outside_i
 #[test]
 fn a_yolo_gesture_admitted_under_one_session_never_acts_in_its_replacement() {
     let _mac = TEST_MAC.lock().unwrap();
-    let root = std::env::temp_dir().join(format!(
-        "ezerbot-screen-yolo-{}-{}",
-        std::process::id(),
-        crate::now()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let guard = grokbot_test_support::TestDir::new("ezerbot-screen-yolo");
+    let root = guard.to_path_buf();
     let path = root.join("workspace.sqlite");
     // Le Mode YOLO est actif par défaut : aucun réglage Écran n'est nécessaire.
     let mut app = App::open(&path).unwrap();

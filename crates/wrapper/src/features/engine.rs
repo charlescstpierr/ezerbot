@@ -3657,19 +3657,12 @@ mod projection_tests {
         app: App,
         dir: PathBuf,
         run: Run,
+        _dir: grokbot_test_support::TestDir,
     }
     impl Fixture {
         fn new(trigger: Trigger) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "grokbot-card-projection-{}-{:?}-{}",
-                std::process::id(),
-                std::thread::current().id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
+            let guard = grokbot_test_support::TestDir::new("grokbot-card-projection");
+            let dir = guard.to_path_buf();
             let app = App::open(&dir.join("workspace.sqlite")).unwrap();
             app.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
             let mut run = Run {
@@ -3687,7 +3680,12 @@ mod projection_tests {
             model::start(&app.connection, &run).unwrap();
             run = model::set_running_at(&app.connection, &run.run_id, 2).unwrap();
             app.connection.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES ('projection','{}',0,'simulated')", []).unwrap();
-            Self { app, dir, run }
+            Self {
+                app,
+                dir,
+                run,
+                _dir: guard,
+            }
         }
         fn event(&mut self, kind: RunEventKind, payload: Value) -> u64 {
             match kind {
@@ -3710,21 +3708,13 @@ mod projection_tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = self.app.connection.execute_batch("ROLLBACK");
-            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
     #[test]
     fn host_failure_reports_the_journaled_outcome_instead_of_a_down_service() {
-        let dir = std::env::temp_dir().join(format!(
-            "grokbot-host-fail-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("grokbot-host-fail");
+        let dir = guard.to_path_buf();
         let app = App::open(&dir.join("workspace.sqlite")).unwrap();
         let reason = "Action non exécutée : arrêt ou limite de temps avant le démarrage.";
         grokbot_engine::contracts::with_tx(&app.connection, |conn| -> grokbot_engine::contracts::Result<()> {
@@ -3797,7 +3787,6 @@ mod projection_tests {
             store::required(&app.connection, "known").unwrap().status,
             RunStatus::Failed
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

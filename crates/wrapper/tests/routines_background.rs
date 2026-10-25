@@ -9,10 +9,7 @@ use std::{
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen};
@@ -24,16 +21,12 @@ struct Fixture {
     fake: FakeOpenAi,
     binary: PathBuf,
     database: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-routines-bg-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-routines-bg");
+        let root = guard.to_path_buf();
         support::write_codex_session(&root.join("workspace.codex-auth.json"), "routines-bg");
         let fake = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let mut f = Self {
@@ -43,6 +36,7 @@ impl Fixture {
             url: String::new(),
             fake,
             binary: env!("CARGO_BIN_EXE_grokbot-wrapper").into(),
+            _dir: guard,
         };
         f.open();
         f.post("/api/yolo/mode", json!({"mode": "ask"}));
@@ -154,7 +148,6 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.stop();
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 fn now() -> i64 {

@@ -1,13 +1,10 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grokbot_domain::{ConversationId, MessageId};
 use grokbot_session::SubmissionTransport;
 use serde_json::json;
 
 use super::{validate_headers, App};
-
-static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 // Seed only metadata: linking does not read image bytes. This exercises the real
 // attachment core without implementing the downstream upload/thumbnail adapter.
@@ -663,15 +660,14 @@ fn hidden_context_and_tool_probes_use_the_feature_dispatcher() {
     assert!(state["conversations"].is_array());
 }
 
-struct Database(PathBuf);
+/// Chemin de la base, puis le dossier unique qui la contient : `-wal`, `-shm`,
+/// `.secrets.json`, `.lock` et `logs/` y vivent aussi et partent avec lui.
+struct Database(PathBuf, #[allow(dead_code)] grokbot_test_support::TestDir);
 
 impl Database {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!(
-            "grokbot-wrapper-{}-{}.sqlite",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        )))
+        let directory = grokbot_test_support::TestDir::new("grokbot-wrapper");
+        Self(directory.join("workspace.sqlite"), directory)
     }
 }
 
@@ -1130,16 +1126,6 @@ fn existing_wrapper_database_migrates_title_metadata_without_losing_conversation
         send(&mut app, "older", "Titre après migration", false)["conversation"]["title"],
         "Titre après migration"
     );
-}
-
-impl Drop for Database {
-    fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm"] {
-            let mut path = self.0.as_os_str().to_os_string();
-            path.push(suffix);
-            let _ = std::fs::remove_file(PathBuf::from(path));
-        }
-    }
 }
 
 #[test]

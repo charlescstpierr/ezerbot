@@ -5,10 +5,7 @@ use std::{
     io::{BufRead, BufReader},
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen};
@@ -18,16 +15,12 @@ struct Host {
     root: PathBuf,
     url: String,
     server: FakeOpenAi,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Host {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-local-shutdown-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-local-shutdown");
+        let root = guard.to_path_buf();
         support::write_codex_session(&root.join("workspace.codex-auth.json"), "local-shutdown");
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let (child, url) = Self::launch(&root, &server);
@@ -36,6 +29,7 @@ impl Host {
             root,
             url,
             server,
+            _dir: guard,
         };
         host.ready();
         host.post("/api/yolo/mode", json!({"mode": "ask"}));
@@ -119,7 +113,6 @@ impl Drop for Host {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 

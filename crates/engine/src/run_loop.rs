@@ -13,6 +13,7 @@ use crate::contracts::{
     ToolCall, ToolItem, ToolOutcome, ToolSpec, TurnEnd, MAX_CAPTION_CHARACTERS, MAX_CAPTURES,
 };
 use crate::model::{self, invalid, Run, RunStatus};
+use crate::schema;
 use crate::store;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
@@ -140,6 +141,7 @@ pub trait RunServices {
 
 /// Final tool result of a call left waiting for a human decision. It must never
 /// let the model believe the action happened.
+const MAX_ECHOED_ARGUMENTS: usize = 1_000;
 pub const APPROVAL_PENDING_REASON: &str = "En attente d’approbation de Charles : rien n’a été exécuté et cette action n’est pas faite. Continuez tout ce qui ne dépend pas de cet appel, puis dites à la fin quelles actions attendent son accord. N’affirmez jamais qu’elle est faite.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1029,6 +1031,24 @@ fn execute_journaled_external(
     })
 }
 
+fn schema_failure_reason(errors: &[schema::SchemaError], arguments: &Value) -> String {
+    let errors: Vec<_> = errors
+        .iter()
+        .map(|e| {
+            format!(
+                "{} : {}",
+                if e.path.is_empty() { "/" } else { &e.path },
+                e.message
+            )
+        })
+        .collect();
+    format!(
+        "Arguments invalides : {}. Arguments reçus : {}",
+        errors.join(" ; "),
+        schema::truncate_chars(&arguments.to_string(), MAX_ECHOED_ARGUMENTS)
+    )
+}
+
 fn execute(
     conn: &Connection,
     services: &mut dyn RunServices,
@@ -1059,7 +1079,13 @@ fn execute(
             return Err(invalid("run stopped before tool execution"));
         }
         let spec = specs.iter().find(|spec| spec.name == call.name);
-        let valid_arguments = call.arguments.is_object();
+        let schema_errors = match spec {
+            Some(spec) if call.arguments.is_object() => {
+                schema::validate(&spec.schema, &call.arguments)
+            }
+            _ => Vec::new(),
+        };
+        let valid_arguments = call.arguments.is_object() && schema_errors.is_empty();
         let mut authorized_by = None;
         let mut waiting = false;
         let approval = if valid_arguments && spec.is_some_and(|spec| spec.requires_approval) {
@@ -1103,13 +1129,17 @@ fn execute(
         let mut usage = store::budget_usage(conn, run_id, now_ms())?;
         usage.tool_calls += 1;
         store::save_budget_usage(conn, run_id, &usage)?;
-        let outcome = if !valid_arguments {
+        let outcome = if !call.arguments.is_object() {
             ToolOutcome::Failed {
                 reason: if call.name.starts_with("mcp_") {
                     "Arguments MCP invalides : un objet JSON est requis.".into()
                 } else {
                     "invalid arguments".into()
                 },
+            }
+        } else if !valid_arguments {
+            ToolOutcome::Failed {
+                reason: schema_failure_reason(&schema_errors, &call.arguments),
             }
         } else if waiting {
             ToolOutcome::Failed {
@@ -1505,6 +1535,7 @@ mod tests {
         resolved: Option<Value>,
         detach: bool,
         own_captures: Vec<String>,
+        seen_arguments: Vec<Value>,
     }
     impl RunServices for Services {
         fn is_own_capture(&self, _: &Connection, _: &Run, id: &str) -> Result<bool> {
@@ -1534,6 +1565,7 @@ mod tests {
             call: &ToolCall,
         ) -> Result<ToolOutcome> {
             self.calls.push(call.call_id.clone());
+            self.seen_arguments.push(call.arguments.clone());
             conn.execute("INSERT INTO effects VALUES (?1)", [&call.call_id])?;
             if self.cancel_in_tool {
                 self.cancel.store(true, Ordering::SeqCst);
@@ -1746,6 +1778,12 @@ mod tests {
             description: format!("Test tool {name}"),
             schema: json!({"type":"object"}),
             requires_approval,
+        }
+    }
+    fn spec_with_schema(name: &str, requires_approval: bool, schema: Value) -> ToolSpec {
+        ToolSpec {
+            schema,
+            ..spec(name, requires_approval)
         }
     }
     fn database(task: bool, budgets: RunBudgets) -> Result<Connection> {
@@ -2684,6 +2722,120 @@ mod tests {
         }
         assert_eq!(results[2].payload["call_id"], "valid");
         assert_eq!(results[2].payload["outcome"]["status"], "done");
+        Ok(())
+    }
+
+    fn event_schema() -> Value {
+        json!({"type":"object", "required":["title","start"], "additionalProperties":false,
+            "properties":{"title":{"type":"string"}, "start":{"type":"string"},
+                "count":{"type":"integer"}}})
+    }
+    /// Returns the single call's outcome. Nothing is pre-approved, so a call that
+    /// wrongly reached the approval gate would suspend the run and fail the helper.
+    fn run_one_call(
+        requires_approval: bool,
+        schema: Value,
+        arguments: Value,
+    ) -> Result<(Connection, Services, Value)> {
+        let conn = database(true, RunBudgets::default())?;
+        let gateway = Scripted::new(vec![
+            response(vec![call("c1", "work", arguments)]),
+            response(vec![]),
+        ]);
+        let mut services = Services {
+            specs: vec![spec_with_schema("work", requires_approval, schema)],
+            ..Default::default()
+        };
+        assert_eq!(
+            run(&conn, &gateway, &mut services, "run")?,
+            RunProgress::Ended(TurnEnd::Finished)
+        );
+        let outcome = store::events(&conn, "run", 0)?
+            .into_iter()
+            .find(|event| {
+                event.kind == RunEventKind::ToolResult && event.payload["call_id"] == "c1"
+            })
+            .unwrap()
+            .payload["outcome"]
+            .clone();
+        Ok((conn, services, outcome))
+    }
+    fn refusal(arguments: Value, requires_approval: bool) -> Result<String> {
+        let (conn, services, outcome) = run_one_call(requires_approval, event_schema(), arguments)?;
+        assert_eq!(outcome["status"], "failed");
+        assert!(services.calls.is_empty());
+        assert_eq!(count(&conn, "effects"), 0);
+        assert_eq!(services.approval_calls, 0);
+        assert_eq!(services.approval_requests, 0);
+        assert_eq!(store::budget_usage(&conn, "run", now_ms())?.tool_calls, 1);
+        Ok(outcome["reason"].as_str().unwrap().to_owned())
+    }
+
+    #[test]
+    fn a_missing_required_field_fails_the_call_before_the_tool() -> Result<()> {
+        let reason = refusal(json!({"title":"Dentiste"}), false)?;
+        assert!(reason.contains("/start"), "{reason}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_wrong_type_cites_the_path_the_expected_type_and_the_received_value() -> Result<()> {
+        let reason = refusal(json!({"title":"a", "start":"b", "count":"abc"}), false)?;
+        for cited in ["/count", "nombre entier", "\"abc\""] {
+            assert!(reason.contains(cited), "{cited} in {reason}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_approval_tool_with_invalid_arguments_never_raises_an_approval_card() -> Result<()> {
+        refusal(json!({"title":"a"}), true)?;
+        Ok(())
+    }
+
+    #[test]
+    fn every_error_is_listed_in_the_same_failure_and_only_the_echo_is_cut() -> Result<()> {
+        let reason = refusal(json!({"title":1, "extra":"x".repeat(2_000)}), false)?;
+        for path in ["/title", "/start", "/extra"] {
+            assert!(reason.contains(path), "{path} in {reason}");
+        }
+        assert!(
+            reason.ends_with('…') && reason.chars().count() < 1_400,
+            "{reason}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn valid_arguments_reach_the_tool_unchanged() -> Result<()> {
+        let arguments = json!({"title":"Dentiste é", "start":"2026-10-26T14:00", "count":3});
+        let (_, services, outcome) = run_one_call(false, event_schema(), arguments.clone())?;
+        assert_eq!(outcome["status"], "done");
+        assert_eq!(
+            serde_json::to_string(&services.seen_arguments[0])?,
+            serde_json::to_string(&arguments)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn keywords_outside_the_supported_subset_never_refuse_a_call() -> Result<()> {
+        let schema = json!({"type":"object", "oneOf":[{"required":["a"]}, {"required":["b"]}],
+            "properties":{"a":{"$ref":"#/definitions/a"}, "b":{"type":"string", "pattern":"^x"}}});
+        let (_, services, outcome) = run_one_call(false, schema, json!({"b":"y"}))?;
+        assert_eq!(outcome["status"], "done");
+        assert_eq!(services.calls, ["c1"]);
+        Ok(())
+    }
+
+    #[test]
+    fn engine_builtin_tool_schemas_use_only_supported_keywords() -> Result<()> {
+        let conn = database(true, RunBudgets::default())?;
+        let run = store::required(&conn, "run")?;
+        for spec in tool_specs(&Services::default(), &run) {
+            let unsupported = crate::schema::unsupported_keywords(&spec.schema);
+            assert!(unsupported.is_empty(), "{}: {unsupported:?}", spec.name);
+        }
         Ok(())
     }
 

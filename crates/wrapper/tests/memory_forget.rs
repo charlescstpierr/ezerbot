@@ -346,7 +346,7 @@ fn extending_correction_forgets_added_detail_in_cards_and_requests() {
         call(
             "extend",
             "correct_fact",
-            json!({"fact_id":old,"text":extended,"sensitive":null}),
+            json!({"fact_id":old,"text":extended,"source":"model_inferred","sensitive":null}),
         ),
         complete(),
     ]);
@@ -378,7 +378,7 @@ fn extending_correction_invalidates_summary_of_echo_in_another_conversation() {
         call(
             "extend",
             "correct_fact",
-            json!({"fact_id":old,"text":extended,"sensitive":null}),
+            json!({"fact_id":old,"text":extended,"source":"model_inferred","sensitive":null}),
         ),
         complete(),
     ]);
@@ -416,7 +416,7 @@ fn every_correction_provenance_and_descendant_is_invalidated() {
         call(
             "correct",
             "correct_fact",
-            json!({"fact_id":old,"text":"Second version of a durable inference.","sensitive":null}),
+            json!({"fact_id":old,"text":"Second version of a durable inference.","source":"model_inferred","sensitive":null}),
         ),
         complete(),
     ]);
@@ -539,7 +539,7 @@ fn task_content_is_redacted_without_changing_task_protocol() {
         call(
             "remember-task",
             "remember",
-            json!({"text":secret,"sensitive":true}),
+            json!({"text":secret,"sensitive":true,"source":"model_inferred"}),
         ),
         call(
             "finish",
@@ -590,7 +590,7 @@ fn opaque_reasoning_is_discarded_with_forgotten_memory() {
     let opaque = "ENC-REASONING-ABOUT-PEANUTS";
     f.events(vec![
         json!({"type":"response.output_item.done", "item":{"type":"reasoning", "id":"rs-private", "encrypted_content":opaque, "summary":[]}}),
-        call("remember-private", "remember", json!({"text":secret,"sensitive":true})),
+        call("remember-private", "remember", json!({"text":secret,"sensitive":true,"source":"model_inferred"})),
         complete(),
     ]);
     f.send(&c, "learn-opaque", "Retain the relevant inference.");
@@ -623,7 +623,7 @@ fn failed_normalized_alias_is_also_forgotten() {
         call(
             "failed-duplicate",
             "remember",
-            json!({"text":alias,"sensitive":true}),
+            json!({"text":alias,"sensitive":true,"source":"model_inferred"}),
         ),
         complete(),
     ]);
@@ -653,7 +653,7 @@ fn normalized_duplicate_arguments_are_also_forgotten() {
         call(
             "duplicate",
             "remember",
-            json!({"text":alias,"sensitive":false}),
+            json!({"text":alias,"sensitive":false,"source":"model_inferred"}),
         ),
         complete(),
     ]);

@@ -527,46 +527,45 @@ fn launch(
 ) -> Result<(), ApiError> {
     let fallback_db = db.clone();
     let fallback_job = job.clone();
-    let result = std::thread::Builder::new()
-        .name("image-precaption".into())
-        .spawn(move || {
-            let (send, receive) = std::sync::mpsc::sync_channel(1);
-            // Keep the slot through both network and terminal DB persistence.
-            // An expired monitor cannot release a still-live HTTP worker's slot.
-            let slot = Arc::new(slot);
-            let worker_slot = Arc::clone(&slot);
-            let worker_db = db.clone();
-            let worker = std::thread::Builder::new()
-                .name("image-vision".into())
-                .spawn(move || {
-                    let _slot = worker_slot;
-                    let _ = send.send(vision(&provider, &worker_db, &attachment, request));
-                });
-            let remaining = job
-                .claim
-                .started_at
-                .saturating_add(precaption::CAPTION_DEADLINE_MS as i64)
-                .saturating_sub(now() as i64)
-                .max(0) as u64;
-            let status = if worker.is_err() {
-                CaptionStatus::Failed {
-                    reason: "Préparation indisponible.".into(),
-                }
-            } else {
-                receive
-                    .recv_timeout(Duration::from_millis(remaining))
-                    .unwrap_or_else(|_| CaptionStatus::Failed {
-                        reason: "Délai de prédescription dépassé.".into(),
-                    })
-            };
-            // The network worker never writes SQLite. A timeout drops its receiver,
-            // so even a late HTTP success cannot overwrite a new lease or its backoff.
-            if let Ok(conn) = Connection::open(&db) {
-                let _ = conn.busy_timeout(Duration::from_secs(3));
-                let _ = finish_job(&conn, &job, &status);
+    let tracker = provider.clone();
+    let result = tracker.try_spawn_background("image-precaption", move || {
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        // Keep the slot through both network and terminal DB persistence.
+        // An expired monitor cannot release a still-live HTTP worker's slot.
+        let slot = Arc::new(slot);
+        let worker_slot = Arc::clone(&slot);
+        let worker_db = db.clone();
+        let worker = provider
+            .clone()
+            .try_spawn_background("image-vision", move || {
+                let _slot = worker_slot;
+                let _ = send.send(vision(&provider, &worker_db, &attachment, request));
+            });
+        let remaining = job
+            .claim
+            .started_at
+            .saturating_add(precaption::CAPTION_DEADLINE_MS as i64)
+            .saturating_sub(now() as i64)
+            .max(0) as u64;
+        let status = if worker.is_err() {
+            CaptionStatus::Failed {
+                reason: "Préparation indisponible.".into(),
             }
-            drop(slot);
-        });
+        } else {
+            receive
+                .recv_timeout(Duration::from_millis(remaining))
+                .unwrap_or_else(|_| CaptionStatus::Failed {
+                    reason: "Délai de prédescription dépassé.".into(),
+                })
+        };
+        // The network worker never writes SQLite. A timeout drops its receiver,
+        // so even a late HTTP success cannot overwrite a new lease or its backoff.
+        if let Ok(conn) = Connection::open(&db) {
+            let _ = conn.busy_timeout(Duration::from_secs(3));
+            let _ = finish_job(&conn, &job, &status);
+        }
+        drop(slot);
+    });
     if result.is_err() {
         // Tick can also recover this job after restart; do not leave it Pending
         // merely because the OS refused to create the completion thread.

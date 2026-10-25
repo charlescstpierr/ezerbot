@@ -28,9 +28,17 @@ from verify_lib import (
     MAC_AXI,
     MAC_CHROME,
     LOGIN_HOME,
+    assert_created_home,
+    assert_created_run_root,
     identity_matches,
+    load_browser,
     load_run,
+    owns_axi_session,
     proc_identity,
+    require_absolute,
+    run_session,
+    run_lock,
+    save_json,
     session_id,
 )
 
@@ -213,16 +221,8 @@ def browser_state_path(run: dict) -> Path:
     return Path(run["run_root"]) / "browser.json"
 
 
-def load_browser(run: dict) -> dict | None:
-    path = browser_state_path(run)
-    if not path.is_file():
-        return None
-    return json.loads(path.read_text())
-
-
 def save_browser(run: dict, state: dict) -> None:
-    path = browser_state_path(run)
-    path.write_text(json.dumps(state, indent=2) + "\n")
+    save_json(browser_state_path(run), state)
 
 
 def ensure_headless(run: dict) -> dict:
@@ -420,12 +420,24 @@ def command_pages(state: dict) -> None:
         print(f"{item.get('id')},{item.get('url','')},{selected}")
 
 
-def run_axi(arguments: list[str]) -> None:
-    if not os.environ.get("CHROME_DEVTOOLS_AXI_SESSION"):
-        raise SystemExit("CHROME_DEVTOOLS_AXI_SESSION est obligatoire")
+def run_axi(run: dict, arguments: list[str]) -> None:
+    root = assert_created_run_root(require_absolute(run.get("run_root"), "run_root"), run)
+    assert_created_home(require_absolute(run.get("home"), "HOME"), root)
+    session = run_session(run)
+    if not session or os.environ.get("CHROME_DEVTOOLS_AXI_SESSION") != session:
+        raise SystemExit("refus: la session axi ne correspond pas à la session signée du run")
+    if str(Path.home()) != run["axi_home"]:
+        raise SystemExit("refus: HOME axi ne correspond pas au run")
+    state = load_browser(run)
+    if state is not None and not owns_axi_session(run, state):
+        raise SystemExit("refus: le navigateur n'appartient pas à cette session du run")
+    binary = axi_binary()
+    save_browser(run, {"mode": "chrome-devtools-axi", "session": session,
+                       "session_signature": run["session_signature"], "started_by": "verify-ezerbot"})
     env = os.environ.copy()
-    env["CHROME_DEVTOOLS_AXI_SESSION"] = session_id()
-    result = subprocess.run([axi_binary(), *arguments], env=env)
+    env["CHROME_DEVTOOLS_AXI_SESSION"] = session
+    env["HOME"] = run["axi_home"]
+    result = subprocess.run([binary, *arguments], env=env)
     raise SystemExit(result.returncode)
 
 
@@ -475,11 +487,20 @@ def main() -> None:
     evidence = args.evidence or (Path(os.environ["EZERBOT_VERIFY_EVIDENCE_DIR"]) if os.environ.get("EZERBOT_VERIFY_EVIDENCE_DIR") else None)
     if evidence is None:
         raise SystemExit("EZERBOT_VERIFY_EVIDENCE_DIR ou --evidence est requis")
-    run = load_run(evidence)
-    if browser_mode() == "chrome-headless":
-        run_headless(run, command)
-    else:
-        run_axi(command)
+    with run_lock(evidence):
+        run = load_run(evidence)
+        if run.get("cleaned") or run.get("cleaning"):
+            raise SystemExit("refus: le nettoyage de ce run a commencé")
+        root = assert_created_run_root(require_absolute(run.get("run_root"), "run_root"), run)
+        assert_created_home(require_absolute(run.get("home"), "HOME"), root)
+        mode = browser_mode()
+        state = load_browser(run)
+        if state is not None and state.get("mode") != mode:
+            raise SystemExit("refus: ce run utilise déjà un autre mode de navigateur")
+        if mode == "chrome-headless":
+            run_headless(run, command)
+        else:
+            run_axi(run, command)
 
 
 if __name__ == "__main__":

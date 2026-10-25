@@ -14,9 +14,8 @@
 //! schedule is a cron/@every string, or trigger is a typed scheduler Schedule.
 //! /run-now requires nonce. History includes compact missed_ranges, not only runs.
 use super::{
-    mcp, routine_calendar,
-    routine_cost::{self, Costing},
-    routine_github, routine_mail, routine_webhooks, write_transaction, Context,
+    mcp, routine_calendar, routine_cost, routine_github, routine_mail, routine_webhooks,
+    write_transaction, Context,
 };
 use crate::{parse, validate_id, ApiError, ApiResponse, App, ACCOUNT, DEFAULT_BOT};
 use grokbot_engine::{
@@ -234,7 +233,7 @@ struct Enable {
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     routine::migrate(conn)?;
     occurrences::migrate(conn)?;
-    super::routine_cost::migrate(conn)?;
+    routine_cost::migrate(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS wrapper_routine_confirmation (
         routine_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
@@ -779,13 +778,12 @@ pub fn routes(
                 let b: Bot = serde_json::from_value(query(q)?)
                     .map_err(|_| ApiError::new(400, "bot_id required"))?;
                 require_bot(&app.connection, &b.bot_id)?;
-                let costing =
-                    Costing::new(&app.connection, &app.provider, app.feature_context().now_ms)?;
+                let now_ms = app.feature_context().now_ms;
                 let values = routine::list(&app.connection, &b.bot_id)?
                     .iter()
                     .map(|r| {
                         let mut value = routine_value(&app.connection, r)?;
-                        value["cost"] = costing.of(&app.connection, r)?;
+                        value["cost"] = routine_cost::of(&app.connection, r, now_ms)?;
                         Ok(value)
                     })
                     .collect::<Result<Vec<_>, ApiError>>()?;
@@ -1055,7 +1053,6 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let bots = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let costing = Costing::new(ctx.connection, ctx.provider, ctx.now_ms)?;
         let mut list = Vec::new();
         for bot in bots {
             for r in routine::list(ctx.connection, &bot)? {
@@ -1075,7 +1072,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
                     .as_object_mut()
                     .expect("routine object")
                     .remove("body");
-                metadata["cost"] = costing.of(ctx.connection, &r)?;
+                metadata["cost"] = routine_cost::of(ctx.connection, &r, ctx.now_ms)?;
                 let running:bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_occurrences WHERE routine_id=?1 AND status IN ('pending','running'))",[&r.routine_id],|row|row.get(0))?;
                 let queue = occurrences::queue(ctx.connection, &r.routine_id)?;
                 list.push(json!({"routine":metadata,"error":error,"confirmation_conversation_id":confirmation,"running":running,"queue":queue}));
@@ -1584,26 +1581,7 @@ pub fn heartbeat(ctx: &Context<'_>) {
         let _ = occurrences::heartbeat(ctx.connection, now);
     }
 }
-/// Notes in `db` the account behind every model request, when it is sent: the tick sees an
-/// account only between two requests, and a sign-in can change during one (a renewal after a 401).
-pub fn watch_account(provider: &crate::Provider, db: &std::path::Path) {
-    let db = db.to_path_buf();
-    provider.on_account_used(std::sync::Arc::new(move |identity| {
-        let Ok(conn) = Connection::open(&db) else {
-            return;
-        };
-        let _ = conn.busy_timeout(std::time::Duration::from_millis(400));
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_millis() as i64);
-        let _ = routine_cost::note_account(&conn, identity, now);
-    }));
-}
 pub fn tick(ctx: &Context<'_>) {
-    if let Ok(now) = clock(ctx) {
-        let _ =
-            routine_cost::note_account(ctx.connection, &ctx.provider.demonstration_identity(), now);
-    }
     let needed:bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_routines WHERE deleted=0 AND enabled=1) OR EXISTS(SELECT 1 FROM scheduler_occurrences WHERE status IN ('pending','running'))",[],|row|row.get(0)).unwrap_or(false);
     if !needed {
         // Nothing to materialize, so nothing can be hidden: this tick is the pulse.

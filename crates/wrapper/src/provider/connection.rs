@@ -77,19 +77,16 @@ impl Provider {
 
     /// Stable account binding without storing tokens in demonstration metadata.
     pub(crate) fn demonstration_identity(&self) -> String {
-        self.session().identity()
-    }
-
-    /// `hook` is given the identity of the account behind every model request, as it is sent.
-    pub(crate) fn on_account_used(&self, hook: AccountUsed) {
-        *lock(&self.primary.inner.account_used) = Some(hook);
-    }
-
-    /// Test seam: `hook` runs once a model request holds its token, before it is used for anything.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn after_token(&self, hook: Arc<dyn Fn() + Send + Sync>) {
-        *lock(&self.primary.inner.after_token) = Some(hook);
+        let session = self.session();
+        let _guard = lock(&session.inner.credentials);
+        let c = session.read().unwrap_or_default();
+        format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&json!([session.inner.codex, c.account_id, c.subject,]))
+                    .unwrap_or_default()
+            )
+        )
     }
 
     pub fn connected(&self) -> bool {
@@ -157,10 +154,7 @@ impl Provider {
     /// Explicit refresh test uses the app's own grant in the network worker.
     /// It never exposes credentials, changes accounts, or waits on the UI thread.
     pub(crate) fn test_connection_with_refresh(&self, refresh: bool) {
-        let session = Session {
-            notes_account: false,
-            ..self.session()
-        };
+        let session = self.session();
         if !session.connected() {
             *lock(&session.inner.probe) = json!({"state":"unavailable", "message":"Aucun compte connecté. Connectez votre compte ChatGPT ci-dessus."});
             return;

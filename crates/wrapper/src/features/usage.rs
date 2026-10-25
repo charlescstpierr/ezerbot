@@ -1,9 +1,5 @@
 //! Provider quota and local, measured engine telemetry are deliberately separate:
-//! token counts do not, on their own, convert to a percentage of a ChatGPT subscription.
-//! The only conversion is `routine_cost`'s estimate: tokens measured here since the weekly window
-//! began, divided by its `used_percent`. It is given only for enough use of the window and the
-//! same signed-in account since it began, and it is rough: other Codex apps and auxiliary calls
-//! are not measured here. Nothing in this module applies it.
+//! token counts cannot be converted to a percentage of a ChatGPT subscription.
 use super::Context;
 use crate::{ApiError, ApiResponse, App, ACCOUNT};
 use rusqlite::Connection;

@@ -370,11 +370,6 @@ struct Inner {
     titling: AtomicUsize,
     catalog: Mutex<Catalog>,
     quota: Mutex<codex::UsageCache>,
-    /// Told the account whose credentials a model request is about to use, request by request.
-    account_used: Mutex<Option<AccountUsed>>,
-    /// Test seam: runs on the sending thread once a model request holds its token.
-    #[cfg(debug_assertions)]
-    after_token: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     mcp: crate::mcp::Manager,
     /// Fils de fond du produit (sonde de connexion, catalogue, quota, lecture d'un tour, tour du
     /// moteur, suivis de fond), gardés seulement pour que la destruction de l'`App` ou un test
@@ -397,20 +392,9 @@ struct Background {
     stop: Option<Arc<AtomicBool>>,
 }
 
-pub(crate) type AccountUsed = Arc<dyn Fn(&str) + Send + Sync>;
-
-/// An access token and the account whose credentials it was read from, in the same reading.
-struct Bearer {
-    token: String,
-    account: String,
-}
-
 #[derive(Clone)]
 struct Session {
     inner: Arc<Inner>,
-    /// Whether its model requests tell `account_used` the account they send for. Off for the connection
-    /// check, which a read starts and which no run measures.
-    notes_account: bool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -904,16 +888,12 @@ impl Session {
                 titling: AtomicUsize::new(0),
                 catalog: Mutex::new(Catalog::default()),
                 quota: Mutex::new(codex::UsageCache::default()),
-                account_used: Mutex::new(None),
-                #[cfg(debug_assertions)]
-                after_token: Mutex::new(None),
                 mcp: crate::mcp::Manager::default(),
                 #[cfg(debug_assertions)]
                 background: Mutex::new(Vec::new()),
                 #[cfg(debug_assertions)]
                 waits_started: AtomicUsize::new(0),
             }),
-            notes_account: true,
         }
     }
 
@@ -1060,30 +1040,6 @@ impl Session {
 
     pub(crate) fn mcp(&self) -> &crate::mcp::Manager {
         &self.inner.mcp
-    }
-
-    /// Stable account binding without storing tokens in demonstration metadata.
-    fn identity(&self) -> String {
-        let _guard = lock(&self.inner.credentials);
-        self.account_of(&self.read().unwrap_or_default())
-    }
-
-    fn account_of(&self, c: &Credentials) -> String {
-        format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&json!([self.inner.codex, c.account_id, c.subject,]))
-                    .unwrap_or_default()
-            )
-        )
-    }
-
-    /// Before each attempt, the renewed one after a 401 included, with the account of the token it sends.
-    fn note_account_used(&self, account: &str) {
-        let hook = lock(&self.inner.account_used).clone();
-        if let (true, Some(hook)) = (self.notes_account, hook) {
-            hook(account);
-        }
     }
 
     fn read(&self) -> Option<Credentials> {
@@ -1624,17 +1580,14 @@ impl Session {
 
     /// Rend un jeton d'accès valide, renouvelé s'il expire bientôt ou si `force` le demande.
     fn bearer(&self, force: bool) -> Result<String, Failure> {
-        Ok(self.bearer_of(force)?.token)
-    }
-
-    /// Comme `bearer`, avec le compte des identifiants dont vient le jeton.
-    fn bearer_of(&self, force: bool) -> Result<Bearer, Failure> {
         if !force && !self.inner.local_revoked.load(Ordering::SeqCst) {
             if let Some(credentials) = self
                 .read()
                 .filter(|c| c.usable(self.inner.codex) && c.expires_at > seconds() + REFRESH_MARGIN)
             {
-                return self.bearer_from(&credentials);
+                return credentials.access_token.ok_or_else(|| {
+                    Failure::other("Aucune session ChatGPT enregistrée sur ce Mac.")
+                });
             }
         }
         let Some(_refresh_lock) = AuthLock::acquire(&self.inner.file) else {
@@ -1646,18 +1599,7 @@ impl Session {
         self.bearer_locked(force, false)
     }
 
-    fn bearer_from(&self, credentials: &Credentials) -> Result<Bearer, Failure> {
-        let token = credentials
-            .access_token
-            .clone()
-            .ok_or_else(|| Failure::other("Aucune session ChatGPT enregistrée sur ce Mac."))?;
-        Ok(Bearer {
-            token,
-            account: self.account_of(credentials),
-        })
-    }
-
-    fn bearer_locked(&self, force: bool, retried: bool) -> Result<Bearer, Failure> {
+    fn bearer_locked(&self, force: bool, retried: bool) -> Result<String, Failure> {
         if self.inner.local_revoked.load(Ordering::SeqCst) {
             return Err(Failure::other(
                 "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex.",
@@ -1668,7 +1610,10 @@ impl Session {
                 "Aucune session ChatGPT enregistrée sur ce Mac.",
             ));
         };
-        let access = self.bearer_from(&credentials)?;
+        let access = credentials
+            .access_token
+            .clone()
+            .ok_or_else(|| Failure::other("Aucune session ChatGPT enregistrée sur ce Mac."))?;
         if !force && credentials.expires_at > seconds() + REFRESH_MARGIN {
             return Ok(access);
         }
@@ -1757,17 +1702,17 @@ impl Session {
                 ));
             }
         }
-        self.bearer_from(&credentials)
+        Ok(tokens.access_token)
     }
 
-    fn use_disk_session(&self, stored: &Credentials, retried: bool) -> Result<Bearer, Failure> {
+    fn use_disk_session(&self, stored: &Credentials, retried: bool) -> Result<String, Failure> {
         if !stored.usable(self.inner.codex) {
             return Err(Failure::other(
                 "La session enregistrée sur ce Mac est conservée. Réessayez.",
             ));
         }
         if stored.expires_at > seconds() + REFRESH_MARGIN || retried {
-            return self.bearer_from(stored).map_err(|_| {
+            return stored.access_token.clone().ok_or_else(|| {
                 Failure::other("La session enregistrée sur ce Mac est conservée. Réessayez.")
             });
         }
@@ -1776,7 +1721,7 @@ impl Session {
 
     /// Un seul refus ne suffit pas. On relit, on réessaie le jeton encore sur le
     /// disque, et on n’efface qu’après un second refus de ce même jeton.
-    fn rejected_refresh(&self, sent: &str, retried: bool) -> Result<Bearer, Failure> {
+    fn rejected_refresh(&self, sent: &str, retried: bool) -> Result<String, Failure> {
         let Some(stored) = self.read() else {
             return Err(Failure::other(
                 "La session enregistrée sur ce Mac est conservée. Réessayez.",
@@ -2163,18 +2108,13 @@ impl Session {
         deadline: Option<Instant>,
         on_status: &mut dyn FnMut(u16),
     ) -> Result<ureq::Response, Failure> {
-        let mut bearer = self.bearer_of(false)?;
+        let mut token = self.bearer(false)?;
         let mut refreshed = false;
         loop {
             if abandoned.load(Ordering::SeqCst) {
                 return Err(Failure::other("Réponse annulée."));
             }
-            #[cfg(debug_assertions)]
-            if let Some(hook) = lock(&self.inner.after_token).clone() {
-                hook();
-            }
-            self.note_account_used(&bearer.account);
-            let mut request = self.request(&bearer.token, &mut body)?;
+            let mut request = self.request(&token, &mut body)?;
             if let Some(deadline) = deadline {
                 // A deadline replaces ureq's per-read timeout, so a stream that
                 // sends a byte before each read timeout cannot hold the socket.
@@ -2191,7 +2131,7 @@ impl Session {
             on_status(status);
             if status == 401 && !refreshed {
                 refreshed = true;
-                bearer = self.bearer_of(true)?;
+                token = self.bearer(true)?;
             } else if status == 401 {
                 // Le renouvellement a déjà eu lieu, ou le jeton renvoyé est encore refusé
                 // par l’API. Ce n’est pas un refus du refresh_token : la session reste.

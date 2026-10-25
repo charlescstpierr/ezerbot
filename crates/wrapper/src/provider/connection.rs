@@ -239,6 +239,12 @@ impl Provider {
     pub fn wait_for_background_work(&self) -> Result<(), String> {
         self.primary.wait_background()
     }
+    /// Pour les tests : combien d'attentes de fils de fond ont commencé sur cette connexion.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn background_waits_started(&self) -> usize {
+        self.primary.inner.waits_started.load(Ordering::SeqCst)
+    }
     /// Comme `wait_for_background_work`, avec une borne choisie (essai de la borne elle-même).
     #[cfg(debug_assertions)]
     #[doc(hidden)]

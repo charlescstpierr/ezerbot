@@ -377,6 +377,10 @@ struct Inner {
     /// version livrée n'a ni ce champ ni cette attente.
     #[cfg(debug_assertions)]
     background: Mutex<Vec<Background>>,
+    /// Nombre d'attentes de fils de fond commencées : un test sait ainsi que la destruction de
+    /// l'`App` est en cours sans deviner un délai.
+    #[cfg(debug_assertions)]
+    waits_started: AtomicUsize,
 }
 
 /// Un fil de fond retenu. `stop` est l'indicateur que le fil observe pour finir de lui-même :
@@ -875,6 +879,8 @@ impl Session {
                 mcp: crate::mcp::Manager::default(),
                 #[cfg(debug_assertions)]
                 background: Mutex::new(Vec::new()),
+                #[cfg(debug_assertions)]
+                waits_started: AtomicUsize::new(0),
             }),
         }
     }
@@ -948,6 +954,7 @@ impl Session {
 
     #[cfg(debug_assertions)]
     pub(crate) fn wait_background_within(&self, limit: Duration) -> Result<(), String> {
+        self.inner.waits_started.fetch_add(1, Ordering::SeqCst);
         let current = thread::current().id();
         let deadline = Instant::now() + limit;
         loop {

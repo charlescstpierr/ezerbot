@@ -1,9 +1,10 @@
 {
-  "comment": "Version exacte de chrome-headless-shell (Chrome for Testing) que les tests UI --dump-dom utilisent sur macOS (#438). Le Chrome complet gèle après son démarrage sous macOS ; ce binaire n'a pas de NSApplication et ne gèle pas. Pour changer de version : mettre à jour version et les deux sha256 (shasum -a 256 du zip), puis relancer node tools/install-chrome-headless-shell.cjs.",
+  "comment": "Version exacte de chrome-headless-shell (Chrome for Testing) pour la sonde de faisabilité wrapper sur macOS et Linux x86_64, et pour --dump-dom sur macOS. Pour changer de version : vérifier les archives officielles, mettre à jour version et les sha256, puis relancer node tools/install-chrome-headless-shell.cjs.",
   "version": "155.0.8059.12",
   "urlBase": "https://storage.googleapis.com/chrome-for-testing-public",
   "platforms": {
     "mac-x64": { "sha256": "2c59f4abfdce4da9095e39ecad29e2daf5130c9c4ceef3d8470a5fbc10ab6bfe" },
-    "mac-arm64": { "sha256": "fb75cf159f4bd5d880e0ea95600858f6404d57c9048aae71c12da7ee59a26836" }
+    "mac-arm64": { "sha256": "fb75cf159f4bd5d880e0ea95600858f6404d57c9048aae71c12da7ee59a26836" },
+    "linux64": { "sha256": "aeb9283943ef1f21864ea42ad1201b89f5bcf6a84c3e3d0d641529d251914bed" }
   }
 }

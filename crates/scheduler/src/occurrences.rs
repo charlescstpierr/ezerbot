@@ -70,6 +70,11 @@ pub struct Occurrence {
     /// The simple trigger of a group that started this occurrence; empty outside a group.
     #[serde(default)]
     pub member_id: String,
+    /// The bot said, with `rien_a_signaler`, that this pass had nothing to report. A flag next
+    /// to the status, not a status: the CHECK on `status` would need a table rebuild on every
+    /// existing database.
+    #[serde(default)]
+    pub quiet: bool,
 }
 
 /// At most this many individual missed slots plus one newest slot are inserted
@@ -100,7 +105,7 @@ pub struct MissedRange {
 }
 
 const COLUMNS: &str = "occurrence_id, routine_id, schedule_version, scheduled_at_utc,
-    manual_nonce, status, run_id, reason, member_id";
+    manual_nonce, status, run_id, reason, member_id, quiet";
 
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -119,6 +124,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             catch_up INTEGER NOT NULL DEFAULT 0 CHECK (catch_up IN (0, 1)),
             member_id TEXT NOT NULL DEFAULT '',
             slot_key TEXT NOT NULL DEFAULT '',
+            quiet INTEGER NOT NULL DEFAULT 0 CHECK (quiet IN (0, 1)),
             CHECK (status NOT IN ('running', 'done') OR run_id IS NOT NULL),
             CHECK (status != 'failed' OR reason IS NOT NULL)
          );
@@ -215,6 +221,15 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     {
         conn.execute_batch(
             "ALTER TABLE scheduler_occurrences ADD COLUMN slot_key TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    if !columns("scheduler_occurrences")?
+        .iter()
+        .any(|name| name == "quiet")
+    {
+        conn.execute_batch(
+            "ALTER TABLE scheduler_occurrences
+             ADD COLUMN quiet INTEGER NOT NULL DEFAULT 0 CHECK (quiet IN (0, 1));",
         )?;
     }
     let keyed: bool = conn.query_row(
@@ -1071,7 +1086,7 @@ pub fn history_page(
     let mut rows = stmt
         .query_map(
             params![id, cursor.snapshot, cursor.after, HISTORY_PAGE_SIZE + 1],
-            |r| Ok((from_row(r)?, r.get::<_, i64>(9)?)),
+            |r| Ok((from_row(r)?, r.get::<_, i64>(10)?)),
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let more = rows.len() > HISTORY_PAGE_SIZE;
@@ -1280,6 +1295,22 @@ pub fn mark_done(conn: &Connection, occurrence_id: &str, run_id: &str) -> Result
     Ok(())
 }
 
+/// Called by the `rien_a_signaler` tool, before the task is completed. Only the attached,
+/// running run of the occurrence can say it: a failure or a late call never turns quiet.
+pub fn mark_quiet(conn: &Connection, occurrence_id: &str, run_id: &str) -> Result<()> {
+    if conn.execute(
+        "UPDATE scheduler_occurrences SET quiet=1
+         WHERE occurrence_id=?1 AND run_id=?2 AND status='running'",
+        params![occurrence_id, run_id],
+    )? == 0
+    {
+        return Err(Error::InvalidInput(
+            "nothing to report does not match a running run".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn mark_failed(conn: &Connection, occurrence_id: &str, reason: &str) -> Result<()> {
     let occurrence = require(conn, occurrence_id)?;
     if occurrence.status
@@ -1326,6 +1357,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Occurrence> {
             _ => return Err(rusqlite::Error::InvalidQuery),
         },
         member_id: row.get(8)?,
+        quiet: row.get(9)?,
     })
 }
 
@@ -2048,6 +2080,37 @@ mod occurrences_tests {
         migrate(&conn).unwrap();
         migrate(&conn).unwrap();
         assert_eq!(pending(&conn).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_quiet_occurrence_stays_done_and_a_database_from_before_upgrades() {
+        let (conn, routine) = setup();
+        let id = run_now(&conn, &routine.routine_id, "click", 1_000)
+            .unwrap()
+            .occurrence_id;
+        assert!(mark_quiet(&conn, &id, "run").is_err(), "not attached yet");
+        attach_run(&conn, &id, "run").unwrap();
+        assert!(mark_quiet(&conn, &id, "other").is_err(), "another run");
+        assert!(!get(&conn, &id).unwrap().unwrap().quiet);
+        mark_quiet(&conn, &id, "run").unwrap();
+        mark_quiet(&conn, &id, "run").unwrap();
+        mark_done(&conn, &id, "run").unwrap();
+        let quiet = get(&conn, &id).unwrap().unwrap();
+        assert!(quiet.quiet);
+        assert_eq!(
+            quiet.status,
+            OccurrenceStatus::Done {
+                run_id: "run".into()
+            }
+        );
+        assert!(mark_quiet(&conn, &id, "run").is_err(), "too late once done");
+        conn.execute_batch("ALTER TABLE scheduler_occurrences DROP COLUMN quiet")
+            .unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        let old = get(&conn, &id).unwrap().unwrap();
+        assert!(!old.quiet);
+        assert_eq!(old.status, quiet.status);
     }
 
     fn group_of(members: Vec<(&str, cron::Schedule)>) -> cron::Schedule {

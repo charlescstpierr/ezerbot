@@ -992,3 +992,16 @@ test('the list describes a calendar routine', async () => {
   h.t.renderList();
   assert.match(h.t.content.textContent, /Calendrier : démarre pour un événement de l’agenda connecté \(créé, commence\)/);
 });
+
+test('a pass the bot noted with nothing to report reads « Rien à signaler », a failed one stays a failure', async () => {
+  const h = harness(async () => page([
+    { ...occurrence('quiet'), quiet: true },
+    occurrence('result'),
+    { ...occurrence('failed', 'failed'), quiet: true },
+  ]));
+  await h.t.showHistory(routine);
+  const label = id => h.t.content.querySelectorAll('article').find(a => a.dataset.occurrenceId === id).children[0].textContent;
+  assert.equal(label('quiet'), 'Rien à signaler');
+  assert.equal(label('result'), 'Terminée');
+  assert.equal(label('failed'), 'Échec / tâche inachevée');
+});

@@ -829,7 +829,7 @@ fn shell_description_secrets_are_masked_in_the_card_result_and_persisted_journal
     f.settings(true, false);
     f.post(
         "/api/secrets/put",
-        json!({"bot_id":"grokbot","name":"description-factice","description":"Valeur de test","value":FAKE_SECRET}),
+        json!({"bot_id":"grokbot","name":"DESCRIPTION_FACTICE","description":"Valeur de test","value":FAKE_SECRET}),
     );
     let mut args = f.shell("printf visible");
     args["description"] = json!(format!("Afficher la valeur factice {FAKE_SECRET}"));
@@ -866,7 +866,7 @@ fn shell_description_secrets_are_masked_in_the_card_result_and_persisted_journal
     );
     f.post(
         "/api/secrets/delete",
-        json!({"bot_id":"grokbot","name":"description-factice"}),
+        json!({"bot_id":"grokbot","name":"DESCRIPTION_FACTICE"}),
     );
     f.reopen();
     assert!(!f

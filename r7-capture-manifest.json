@@ -1,0 +1,54 @@
+{
+  "head": "62498373e85ee1316a501e88d5814df6dd2503d5",
+  "binary_sha256": "70fd17aeb8ba4c5c84079b0f0e182d4d4a60fd9dea133bde173820923210c857",
+  "platform": "macOS",
+  "browser": "chrome-devtools-axi",
+  "session": "pm-i281",
+  "checks": [
+    "modèle disponible",
+    "envoi disponible",
+    "Page générée et cliquable",
+    "titre public enregistré avant apprentissage",
+    "résumé public chargé dans le vrai état partagé",
+    "cache initial réellement périmé, sans pré-masquage",
+    "apprentissage sans rafraîchir le résumé",
+    "réponse rename masquée appliquée au champ",
+    "réponse rename corrige le vrai résumé partagé",
+    "réponse rename corrige la liste",
+    "rendu local demandé 0",
+    "échec GET observé 0",
+    "diagnostic de repli visible 0",
+    "champ et liste sûrs après rendu local et échec 0",
+    "rendu local demandé 1",
+    "échec GET observé 1",
+    "diagnostic de repli visible 1",
+    "champ et liste sûrs après rendu local et échec 1",
+    "panneau fermé par navigation locale",
+    "Page rouverte malgré GET en échec",
+    "champ et liste sûrs après réouverture",
+    "thème confirmé light",
+    "champ et liste masqués avant capture light",
+    "capture sans valeur privée light",
+    "thème confirmé dark",
+    "champ et liste masqués avant capture dark",
+    "capture sans valeur privée dark",
+    "Page restaurée après rétablissement GET",
+    "titre toujours masqué après rétablissement"
+  ],
+  "captures": [
+    {
+      "file": "cache-apres-echec-dark-1140.png",
+      "sha256": "ee357af73e01d425965c452f94ce7b9e7c951d1069a378c49d970ce99ca2331c",
+      "width": 1140,
+      "height": 780,
+      "action": "Résumé initial intact, renommage masqué, rendu local, GET échoué et réouverture"
+    },
+    {
+      "file": "cache-apres-echec-light-1140.png",
+      "sha256": "93467847d01de55425b3e4dcf6e78229daee222e8e3c38e5eccb8586b0711646",
+      "width": 1140,
+      "height": 780,
+      "action": "Résumé initial intact, renommage masqué, rendu local, GET échoué et réouverture"
+    }
+  ]
+}

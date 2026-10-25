@@ -31,7 +31,9 @@ def verify_ui_regressions():
     env = dict(os.environ, CHROME_DEVTOOLS_AXI_SESSION=f'{session}-ui-{os.getpid()}-{uuid.uuid4().hex[:8]}')
     env.pop('CHROME_DEVTOOLS_AXI_AUTO_CONNECT', None)
     # Assets are embedded with include_str!: always rebuild with the parent HOME/toolchain.
-    subprocess.run([str(ROOT.parent / '_orch/bin/cargo-gate'), 'build', '--locked', '-p', 'grokbot-wrapper'],
+    cargo = os.environ.get('EZERBOT_VERIFY_CARGO', str(Path.home() / '.cargo/bin/cargo'))
+    gate = os.environ.get('EZERBOT_VERIFY_CARGO_GATE')
+    subprocess.run(([gate] if gate else []) + [cargo, 'build', '--locked', '-p', 'grokbot-wrapper'],
                    cwd=ROOT, check=True)
 
     def chrome(*arguments):

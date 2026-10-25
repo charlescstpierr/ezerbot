@@ -2144,21 +2144,37 @@ impl<R: BufRead> BufRead for Cancellable<'_, R> {
 /// lit, et ce fil garde la connexion ouverte jusqu'à ce qu'elle soit servie : le navigateur
 /// attend sans fin. Ici, une connexion acceptée appartient à son fil de lecture, borné, puis à
 /// sa `Request` ; une requête que l'attente ne prend plus reçoit `gone`, puis la fermeture.
+///
+/// Un afflux de connexions locales ne retient pas l'attente : `recv_timeout` rend d'abord une
+/// requête déjà lue, accepte au plus `ACCEPT_BUDGET` connexions par passage et revient à son
+/// échéance, où l'appelant vérifie l'annulation et l'expiration. Au plus `MAX_ACTIVE`
+/// connexions sont lues ou attendent dans la file à la fois ; au-delà, une connexion acceptée
+/// est fermée aussitôt.
 pub(crate) mod loopback {
     use std::io::{self, Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
-    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
-    /// Un retour n'a qu'une ligne de requête (`code`, `state`) et quelques en-têtes.
+    /// Un retour n'a qu'une ligne de requête (`code`, `state`) et quelques en-têtes : 16 Kio au
+    /// plus, terminateur compris.
     const HEAD_LIMIT: usize = 16 * 1024;
     /// Temps laissé à une connexion acceptée pour envoyer ses en-têtes ; elle est fermée ensuite.
     const HEAD_WINDOW: Duration = Duration::from_secs(10);
     const WRITE_WINDOW: Duration = Duration::from_secs(5);
+    /// Après un refus, ce qui reste à lire est jeté pendant ce temps au plus, pour que la
+    /// fermeture n'efface pas la réponse chez le client.
+    const DRAIN_WINDOW: Duration = Duration::from_secs(1);
+    const DRAIN_LIMIT: usize = 64 * 1024;
     /// Rythme auquel `recv_timeout` accepte les connexions en attente.
     const ACCEPT_EVERY: Duration = Duration::from_millis(20);
+    /// Connexions acceptées par passage : un navigateur en ouvre au plus 6 par hôte.
+    const ACCEPT_BUDGET: usize = 16;
+    /// Connexions lues (un fil chacune) ou en file à la fois ; la file ne peut en contenir plus.
+    const MAX_ACTIVE: usize = 32;
 
     /// Une réponse entière, toujours suivie de la fermeture de la connexion.
     pub(crate) struct Reply {
@@ -2179,6 +2195,9 @@ pub(crate) mod loopback {
             self
         }
         fn send(&self, mut stream: TcpStream) {
+            self.write(&mut stream);
+        }
+        fn write(&self, stream: &mut TcpStream) {
             let reason = match self.status {
                 200 => "OK",
                 400 => "Bad Request",
@@ -2205,6 +2224,22 @@ pub(crate) mod loopback {
         }
     }
 
+    /// Une place parmi `MAX_ACTIVE`, rendue à sa destruction.
+    struct Slot(Arc<AtomicUsize>);
+    impl Slot {
+        /// Seul le passage d'acceptation prend des places. Refusée, la place rend aussitôt
+        /// l'incrément qu'elle a fait.
+        fn take(active: &Arc<AtomicUsize>) -> Option<Self> {
+            let slot = Self(active.clone());
+            (active.fetch_add(1, Ordering::SeqCst) < MAX_ACTIVE).then_some(slot)
+        }
+    }
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
     /// Une requête reçue en entier. Servie par `respond`, ou par `gone` à sa destruction.
     pub(crate) struct Request {
         stream: Option<TcpStream>,
@@ -2212,6 +2247,7 @@ pub(crate) mod loopback {
         url: String,
         host: Option<String>,
         gone: Arc<Reply>,
+        _slot: Slot,
     }
     impl Request {
         pub(crate) fn method(&self) -> &str {
@@ -2242,32 +2278,38 @@ pub(crate) mod loopback {
     pub(crate) struct Listener {
         socket: TcpListener,
         port: u16,
-        sender: Sender<Request>,
+        sender: SyncSender<Request>,
         requests: Receiver<Request>,
         gone: Arc<Reply>,
+        active: Arc<AtomicUsize>,
     }
     impl Listener {
         pub(crate) fn bind(address: impl ToSocketAddrs, gone: Reply) -> io::Result<Self> {
             let socket = TcpListener::bind(address)?;
             socket.set_nonblocking(true)?;
             let port = socket.local_addr()?.port();
-            let (sender, requests) = mpsc::channel();
+            let (sender, requests) = mpsc::sync_channel(MAX_ACTIVE);
             Ok(Self {
                 socket,
                 port,
                 sender,
                 requests,
                 gone: Arc::new(gone),
+                active: Arc::new(AtomicUsize::new(0)),
             })
         }
         pub(crate) fn port(&self) -> u16 {
             self.port
         }
-        /// La première requête entière reçue avant `timeout`.
+        /// La première requête entière reçue avant `timeout`. Revient à l'échéance même sous
+        /// un afflux de connexions, et rend d'abord une requête déjà lue.
         pub(crate) fn recv_timeout(&self, timeout: Duration) -> Option<Request> {
             let deadline = Instant::now() + timeout;
             loop {
-                self.accept_waiting();
+                if let Ok(request) = self.requests.try_recv() {
+                    return Some(request);
+                }
+                self.accept_waiting(deadline);
                 let left = deadline.saturating_duration_since(Instant::now());
                 match self.requests.recv_timeout(left.min(ACCEPT_EVERY)) {
                     Ok(request) => return Some(request),
@@ -2276,16 +2318,25 @@ pub(crate) mod loopback {
                 }
             }
         }
-        fn accept_waiting(&self) {
-            loop {
+        /// Accepte au plus `ACCEPT_BUDGET` connexions, et rien après `deadline`. Une connexion
+        /// sans place parmi `MAX_ACTIVE` est fermée aussitôt.
+        fn accept_waiting(&self, deadline: Instant) {
+            for _ in 0..ACCEPT_BUDGET {
+                if Instant::now() >= deadline {
+                    return;
+                }
                 match self.socket.accept() {
                     Ok((stream, _)) => {
+                        let Some(slot) = Slot::take(&self.active) else {
+                            drop(stream);
+                            continue;
+                        };
                         let sender = self.sender.clone();
                         let gone = self.gone.clone();
-                        // Un fil qui ne démarre pas emporte et ferme sa connexion.
+                        // Un fil qui ne démarre pas emporte et ferme sa connexion et sa place.
                         let _ = thread::Builder::new()
                             .name("retour-oauth".into())
-                            .spawn(move || read_head(stream, &sender, gone));
+                            .spawn(move || read_head(stream, &sender, gone, slot));
                     }
                     Err(error)
                         if matches!(
@@ -2298,36 +2349,66 @@ pub(crate) mod loopback {
         }
     }
 
-    /// Lit les en-têtes d'une connexion acceptée en `HEAD_WINDOW` au plus et confie la requête à
-    /// l'écouteur ; s'il est parti, elle reçoit `gone`.
-    fn read_head(mut stream: TcpStream, sender: &Sender<Request>, gone: Arc<Reply>) {
-        // Sur macOS, la connexion acceptée hérite du mode non bloquant de l'écouteur.
-        if stream.set_nonblocking(false).is_err() {
-            return;
-        }
+    /// Répond `status` puis jette ce qui reste à lire, en `DRAIN_WINDOW` et `DRAIN_LIMIT` au
+    /// plus : fermer une connexion qui a encore des octets à lire la réinitialise, et le client
+    /// peut perdre la réponse.
+    fn refuse(mut stream: TcpStream, status: u16) {
+        Reply::new(status, "").write(&mut stream);
         let started = Instant::now();
-        let mut head = Vec::new();
+        let mut drained = 0;
         let mut chunk = [0; 2048];
-        let end = loop {
-            if let Some(end) = head.windows(4).position(|w| w == b"\r\n\r\n") {
-                break end;
-            }
-            if head.len() > HEAD_LIMIT {
-                return Reply::new(431, "").send(stream);
-            }
-            let left = HEAD_WINDOW.saturating_sub(started.elapsed());
+        while drained < DRAIN_LIMIT {
+            let left = DRAIN_WINDOW.saturating_sub(started.elapsed());
             if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
                 return;
             }
             match stream.read(&mut chunk) {
                 Ok(0) => return,
+                Ok(read) => drained += read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Lit les en-têtes d'une connexion acceptée en `HEAD_WINDOW` et `HEAD_LIMIT` au plus et
+    /// confie la requête à l'écouteur ; s'il est parti, elle reçoit `gone`.
+    fn read_head(
+        mut stream: TcpStream,
+        sender: &SyncSender<Request>,
+        gone: Arc<Reply>,
+        slot: Slot,
+    ) {
+        // Sur macOS, la connexion acceptée hérite du mode non bloquant de l'écouteur.
+        if stream.set_nonblocking(false).is_err() {
+            return;
+        }
+        let started = Instant::now();
+        let mut head = Vec::with_capacity(2048);
+        let mut chunk = [0; 2048];
+        let end = loop {
+            // Le terminateur compte dans la limite : jamais plus de `HEAD_LIMIT` octets lus.
+            let from = head.len().saturating_sub(3);
+            let read = match head.len() {
+                HEAD_LIMIT => return refuse(stream, 431),
+                len => chunk.len().min(HEAD_LIMIT - len),
+            };
+            let left = HEAD_WINDOW.saturating_sub(started.elapsed());
+            if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+                return;
+            }
+            match stream.read(&mut chunk[..read]) {
+                Ok(0) => return,
                 Ok(read) => head.extend_from_slice(&chunk[..read]),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(_) => return,
             }
+            if let Some(end) = head[from..].windows(4).position(|w| w == b"\r\n\r\n") {
+                break from + end;
+            }
         };
         let Some((method, url, host)) = parse_head(&head[..end]) else {
-            return Reply::new(400, "").send(stream);
+            return refuse(stream, 400);
         };
         let request = Request {
             stream: Some(stream),
@@ -2335,19 +2416,32 @@ pub(crate) mod loopback {
             url,
             host,
             gone,
+            _slot: slot,
         };
-        // Refusée, la requête revient ici et sa destruction répond `gone`.
-        let _ = sender.send(request);
+        // Refusée (écouteur parti), la requête revient ici et sa destruction répond `gone`. La
+        // file ne peut être pleine : chaque requête qu'elle contient tient une place.
+        let _ = sender.try_send(request);
     }
 
+    /// Un `token` de la RFC 9110 : nom d'en-tête ou méthode.
+    fn is_token(text: &str) -> bool {
+        !text.is_empty()
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+    }
+
+    /// Refuse ce qu'un autre analyseur lirait autrement : `Host` répété, espace avant les
+    /// deux-points, ligne repliée, caractère de contrôle.
     fn parse_head(head: &[u8]) -> Option<(String, String, Option<String>)> {
         let head = std::str::from_utf8(head).ok()?;
         let mut lines = head.split("\r\n");
         let mut line = lines.next()?.split(' ');
         let (method, url, version) = (line.next()?, line.next()?, line.next()?);
         if line.next().is_some()
-            || method.is_empty()
+            || !is_token(method)
             || url.is_empty()
+            || url.bytes().any(|byte| byte.is_ascii_control())
             || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
         {
             return None;
@@ -2355,7 +2449,17 @@ pub(crate) mod loopback {
         let mut host = None;
         for header in lines {
             let (name, value) = header.split_once(':')?;
-            if host.is_none() && name.eq_ignore_ascii_case("Host") {
+            if !is_token(name)
+                || value
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() && byte != b'\t')
+            {
+                return None;
+            }
+            if name.eq_ignore_ascii_case("Host") {
+                if host.is_some() {
+                    return None;
+                }
                 host = Some(value.trim().to_owned());
             }
         }
@@ -2442,6 +2546,213 @@ pub(crate) mod loopback {
                 answer.is_empty() || answer.starts_with("HTTP/1.1 431 "),
                 "{answer}"
             );
+        }
+
+        /// Ce qui revient d'un client qui ferme son côté écriture après sa requête.
+        fn ask(port: u16, head: &[u8]) -> String {
+            let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            client.write_all(head).unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            read_answer(&mut client).unwrap_or_default()
+        }
+
+        fn padded_head(size: usize) -> Vec<u8> {
+            let start = b"GET /auth/callback?code=c&state=s HTTP/1.1\r\nhost: 127.0.0.1\r\nx-pad: ";
+            let mut head = start.to_vec();
+            head.resize(size - 4, b'a');
+            head.extend_from_slice(b"\r\n\r\n");
+            assert_eq!(head.len(), size);
+            head
+        }
+
+        #[test]
+        fn a_terminated_head_one_byte_over_the_limit_is_refused_and_one_at_the_limit_is_served() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            // The client keeps its side open: the refusal must still reach it before the close.
+            let mut over = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+            over.write_all(&padded_head(HEAD_LIMIT + 1)).unwrap();
+            assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+            let answer = read_answer(&mut over).unwrap();
+            assert!(
+                answer.starts_with("HTTP/1.1 431 Request Header Fields Too Large\r\n"),
+                "{answer}"
+            );
+            let mut at = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+            at.write_all(&padded_head(HEAD_LIMIT)).unwrap();
+            let request = listener.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(request.url(), "/auth/callback?code=c&state=s");
+            request.respond(&Reply::new(200, "ok"));
+            assert!(read_answer(&mut at)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 OK\r\n"));
+        }
+
+        #[test]
+        fn a_head_another_parser_could_read_differently_is_refused() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let line = "GET /auth/callback?code=c&state=s HTTP/1.1\r\n";
+            for headers in [
+                "Host: 127.0.0.1\r\nHost: 127.0.0.2\r\n",
+                "Host : 127.0.0.1\r\n",
+                "Host: 127.0.0.1\r\nX-Folded: a\r\n b\r\n",
+                "Host: 127.0.0.1\r\nX-Control: a\x01b\r\n",
+                ": 127.0.0.1\r\n",
+            ] {
+                let head = format!("{line}{headers}\r\n");
+                let port = listener.port();
+                let asking = thread::spawn(move || ask(port, head.as_bytes()));
+                assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+                let answer = asking.join().unwrap();
+                assert!(
+                    answer.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+                    "{headers:?}: {answer}"
+                );
+            }
+            for request in ["G(T / HTTP/1.1\r\n\r\n", "GET /a\x7fb HTTP/1.1\r\n\r\n"] {
+                let port = listener.port();
+                let asking = thread::spawn(move || ask(port, request.as_bytes()));
+                assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+                let answer = asking.join().unwrap();
+                assert!(
+                    answer.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+                    "{request:?}: {answer}"
+                );
+            }
+        }
+
+        /// Un fil ouvre des connexions sans arrêt et garde les `2 × MAX_ACTIVE` dernières
+        /// ouvertes, sans rien envoyer. L'attente, menée comme le font les deux boucles OAuth
+        /// (`recv_timeout` de 250 ms, annulation et échéance vérifiées entre deux appels), sert
+        /// quand même le retour déjà envoyé, revient à temps, et l'écouteur ne lit jamais plus de
+        /// `MAX_ACTIVE` connexions.
+        #[test]
+        fn a_flood_of_connections_holds_neither_the_wait_nor_a_ready_return_and_stays_capped() {
+            use std::collections::VecDeque;
+            use std::sync::atomic::{AtomicBool, Ordering};
+            const RING: usize = 2 * MAX_ACTIVE;
+            const BOUND: Duration = Duration::from_secs(2);
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let port = listener.port();
+            let mut browser = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            browser.write_all(RETURN).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let flood = {
+                let stop = stop.clone();
+                thread::spawn(move || {
+                    let address = ("127.0.0.1", port)
+                        .to_socket_addrs()
+                        .unwrap()
+                        .next()
+                        .unwrap();
+                    let started = Instant::now();
+                    let (mut ring, mut opened) = (VecDeque::new(), 0_usize);
+                    while !stop.load(Ordering::SeqCst)
+                        && started.elapsed() < Duration::from_secs(30)
+                    {
+                        if let Ok(stream) =
+                            TcpStream::connect_timeout(&address, Duration::from_millis(100))
+                        {
+                            opened += 1;
+                            ring.push_back(stream);
+                            if ring.len() > RING {
+                                ring.pop_front();
+                            }
+                        }
+                    }
+                    (ring, opened)
+                })
+            };
+            let (done, finished) = mpsc::channel();
+            let waiting = thread::spawn(move || {
+                // Lets the flood fill the accept queue behind the ready return.
+                thread::sleep(Duration::from_millis(100));
+                let mut slowest = Duration::ZERO;
+                let mut wait = |listener: &Listener| {
+                    let started = Instant::now();
+                    let request = listener.recv_timeout(Duration::from_millis(250));
+                    slowest = slowest.max(started.elapsed());
+                    request
+                };
+                // The return sent before the flood is served.
+                let started = Instant::now();
+                let request = loop {
+                    if let Some(request) = wait(&listener) {
+                        break request;
+                    }
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "the ready return was never served"
+                    );
+                };
+                assert_eq!(request.url(), "/auth/callback?code=c&state=s");
+                request.respond(&Reply::new(200, "ok"));
+                // Cancellation, set from another thread, is seen in time.
+                let cancel = Arc::new(AtomicBool::new(false));
+                let cancelling = {
+                    let cancel = cancel.clone();
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_millis(300));
+                        cancel.store(true, Ordering::SeqCst);
+                        Instant::now()
+                    })
+                };
+                while !cancel.load(Ordering::SeqCst) {
+                    if let Some(request) = wait(&listener) {
+                        request.respond(&Reply::new(404, ""));
+                    }
+                }
+                let cancelled = cancelling.join().unwrap().elapsed();
+                // The wait's own deadline is met in time.
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while Instant::now() < deadline {
+                    if let Some(request) = wait(&listener) {
+                        request.respond(&Reply::new(404, ""));
+                    }
+                }
+                let expired = deadline.elapsed();
+                stop.store(true, Ordering::SeqCst);
+                let (ring, opened) = flood.join().unwrap();
+                // What the flood left in the accept queue is accepted, or closed.
+                for _ in 0..4 {
+                    let _ = wait(&listener);
+                }
+                done.send((listener, ring, opened, slowest, cancelled, expired))
+                    .unwrap();
+            });
+            let (listener, ring, opened, slowest, cancelled, expired) =
+                match finished.recv_timeout(Duration::from_secs(60)) {
+                    Ok(outcome) => outcome,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        panic!("the wait never came back under the flood")
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        std::panic::resume_unwind(waiting.join().unwrap_err())
+                    }
+                };
+            thread::sleep(Duration::from_millis(200));
+            let held = ring
+                .iter()
+                .filter(|stream| {
+                    stream.set_nonblocking(true).unwrap();
+                    matches!(stream.peek(&mut [0]), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+                })
+                .count();
+            eprintln!(
+                "flood: {opened} connections, slowest wait {slowest:?}, cancellation seen after {cancelled:?}, deadline overrun {expired:?}, {held} of the last {} still read",
+                ring.len()
+            );
+            assert!(slowest < BOUND, "a 250 ms wait took {slowest:?}");
+            assert!(cancelled < BOUND, "cancellation seen after {cancelled:?}");
+            assert!(expired < BOUND, "deadline overrun {expired:?}");
+            assert!(opened > RING, "the flood opened only {opened} connections");
+            assert!(
+                held <= MAX_ACTIVE,
+                "{held} connections are still read, over {MAX_ACTIVE}"
+            );
+            assert!(read_answer(&mut browser)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 OK\r\n"));
+            drop(listener);
         }
     }
 }

@@ -298,6 +298,8 @@ function boot() {
   let holdCreate = null;
   let failCreate = false;
   let createWaiting = null;
+  let holdSend = null;
+  let sendWaiting = null;
   const realSetTimeout = setTimeout;
   const realClearTimeout = clearTimeout;
   function relaxedTimeout(handler, delay, ...args) {
@@ -329,6 +331,8 @@ function boot() {
     }
     if (url === "/api/send") {
       sent.push(body);
+      sendWaiting?.();
+      if (holdSend) await holdSend;
       if (body.page_anchor?.passage === "REFUSÉ") {
         // Un vrai moteur ne garde pas le message refusé ; ce faux partage l'état avec le client.
         for (const thread of state.conversations) thread.messages = thread.messages.filter((message) => message.state !== "queued");
@@ -426,6 +430,15 @@ function boot() {
         release() { holdCreate = null; failCreate = false; release(); },
         fail() { failCreate = true; holdCreate = null; release(); },
       };
+    },
+    // Retient la réponse du prochain /api/send : le serveur a reçu le message, l'accusé n'est pas encore revenu.
+    gateSend() {
+      let release;
+      holdSend = new Promise((resolve) => { release = resolve; });
+      let opened;
+      const waiting = new Promise((resolve) => { opened = resolve; });
+      sendWaiting = () => { sendWaiting = null; opened(); };
+      return { waiting, release() { holdSend = null; release(); } };
     },
   };
 }
@@ -610,7 +623,8 @@ test("short composer names stay whole and a maximal name ellipsizes only when th
   assert.equal(label().className, "composer-bot-name");
 });
 
-test("l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce", async () => {
+// Ouvre la Page « Trois forfaits » dans le premier fil, avec app.js et le panneau Pages réels.
+async function quotedPage() {
   const app = boot();
   await ready(app);
   app.type("Bonjour");
@@ -643,7 +657,11 @@ test("l’envoi d’un passage cité transmet page_anchor ; après la croix, le 
     await doc.getElementById("composer-form").requestSubmit();
     for (const thread of app.state.conversations) thread.messages = thread.messages.filter((message) => message.state !== "queued");
   };
+  return { app, doc, comment, chip, select, sendWith };
+}
 
+test("l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce", async () => {
+  const { app, comment, chip, select, sendWith } = await quotedPage();
   select("Confort");
   assert.equal(comment.hidden, false);
   comment.click();
@@ -671,6 +689,35 @@ test("l’envoi d’un passage cité transmet page_anchor ; après la croix, le 
   assert.equal(chip.hidden, true);
   select("Confort");
   assert.equal(comment.hidden, true);
+});
+
+// Course : l'accusé d'un envoi lent ne doit retirer que la citation partie avec lui, même quand une nouvelle citation
+// du même passage a été posée entre-temps (la croix, puis « Commenter » à nouveau).
+test("l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre", async () => {
+  const { app, doc, comment, chip, select, sendWith } = await quotedPage();
+  const anchor = { page_id: "page_forfaits", source_version: "c".repeat(64), passage: "Confort" };
+  select("Confort");
+  comment.click();
+  const gate = app.gateSend();
+  app.type("Premier");
+  const first = doc.getElementById("composer-form").requestSubmit();
+  await gate.waiting;
+  assert.deepEqual(structuredClone(app.sent.at(-1).page_anchor), anchor, "le premier message part avec la première citation");
+  chip.querySelector(".gb-quote-remove").click();
+  assert.equal(chip.hidden, true);
+  select("Confort");
+  comment.click();
+  assert.equal(chip.hidden, false, "la nouvelle citation est posée pendant l’envoi");
+  app.type("Deuxième");
+  gate.release();
+  await first;
+  for (const thread of app.state.conversations) thread.messages = thread.messages.filter((message) => message.state !== "queued");
+  assert.equal(app.composer().api.value, "Deuxième", "le brouillon tapé pendant l’envoi reste");
+  assert.equal(chip.hidden, false, "l’accusé du premier envoi ne retire pas la nouvelle citation");
+  await sendWith("Deuxième");
+  assert.equal(app.sent.at(-1).body, "Deuxième");
+  assert.deepEqual(structuredClone(app.sent.at(-1).page_anchor), anchor, "le deuxième message part avec la nouvelle citation");
+  assert.equal(chip.hidden, true, "la nouvelle citation part avec le deuxième message");
 });
 
 // Après un redémarrage, la carte pendingSends est vide : seule l'ancre enregistrée dans le fil peut la rendre au renvoi.

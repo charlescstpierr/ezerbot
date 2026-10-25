@@ -445,15 +445,32 @@ test("sélectionner « Forfait B » affiche « Commenter » près de la sélecti
 
 test("l’envoi transmet la Page, la version lue par le panneau et le passage rogné ; la puce part avec le message", async () => {
   const { comment, quoteBar, panels, select, selection, anchor } = await openForfaits();
+  const before = panels.panel.composer.capture();
   select("  Forfait B\n");
   comment.click();
   assert.equal(anchor().page_anchor.passage, "Forfait B");
-  panels.panel.composer.onSent({ messageId: "m1", extras: { mentions: [] } });
+  panels.panel.composer.onSent({ messageId: "m1", extras: { mentions: [] }, captured: before });
   assert.equal(quoteBar.hidden, false, "un envoi sans ancre ne retire pas la puce");
-  panels.panel.composer.onSent({ messageId: "m2", extras: anchor() });
+  const extras = anchor();
+  panels.panel.composer.onSent({ messageId: "m2", extras, captured: panels.panel.composer.capture() });
   assert.equal(quoteBar.hidden, true);
   assert.deepEqual(anchor(), {});
   assert.equal(selection.rangeCount, 0);
+});
+
+test("l’accusé d’un envoi ne retire que sa citation : la même citation posée à nouveau entre-temps reste", async () => {
+  const { comment, quoteBar, panels, select, anchor } = await openForfaits();
+  select("Forfait B");
+  comment.click();
+  const extras = anchor();
+  const captured = panels.panel.composer.capture();
+  buttons(quoteBar)[0].click();
+  select("Forfait B");
+  comment.click();
+  assert.deepEqual(anchor(), extras, "même Page, même version, même passage");
+  panels.panel.composer.onSent({ messageId: "m1", extras, captured });
+  assert.equal(quoteBar.hidden, false, "la nouvelle citation n’est pas celle qui est partie");
+  assert.deepEqual(anchor(), extras);
 });
 
 test("la croix retire la puce : le message part sans ancre", async () => {

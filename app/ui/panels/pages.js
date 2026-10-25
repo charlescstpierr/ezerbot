@@ -191,7 +191,7 @@
 
   function paintAnnotations() {
     const anchors = detail?.id === selectedId && Array.isArray(detail.anchors) ? detail.anchors : [];
-    shell.revertButton.hidden = detail?.id !== selectedId || (!detail?.has_previous && reverting?.id !== selectedId);
+    shell.revertButton.hidden = reverting?.id !== selectedId && (detail?.id !== selectedId || !detail?.has_previous);
     shell.revertButton.disabled = Boolean(reverting) || !detail?.has_previous;
     shell.revertButton.textContent = reverting?.id === selectedId ? "Restauration…" : "Revenir à avant";
     shell.commentsButton.hidden = !anchors.length;
@@ -241,13 +241,13 @@
     paintAnnotations();
     try {
       const result = await host.api("/api/pages/revert", { id: operation.id });
-      if (selectedId === operation.id && !shell.stage.hidden) remember(result.page);
+      if (selectedId === operation.id) remember(result.page);
     } catch (error) {
       host.notify(`Impossible de revenir à avant. ${error?.message || "Réessayez quand la Page sera disponible."}`);
     } finally {
       reverting = null;
       paintAnnotations();
-      if (selectedId === operation.id && !shell.stage.hidden) {
+      if (selectedId === operation.id) {
         const summary = knownPages.find((page) => page.id === operation.id);
         if (summary) await load(summary);
       }
@@ -560,6 +560,8 @@
       }
     }
     detail = page;
+    if (quote?.page_id === page.id && page.status === "ready"
+        && !collapsed(page.preview || "").includes(collapsed(quote.passage))) clearQuote();
     retitleQuote(page.id, page.title);
     if (document.activeElement !== shell.input) shell.input.value = page.title || "";
     // Un état identique (le fil se rafraîchit toutes les 200 ms pendant une réponse) ne reconstruit pas le DOM :
@@ -573,6 +575,7 @@
     const id = summary.id;
     if (detail?.id !== summary.id) {
       detail = null;
+      shell.input.value = summary.title || "";
       loadedKey = null;
       paintedSignature = null;
       commentsKey = null;
@@ -581,8 +584,8 @@
       shell.canvas.replaceChildren();
       paintAnnotations();
     }
-    if (reverting?.id === summary.id) return;
     shell.stage.hidden = false;
+    if (reverting?.id === summary.id) return;
     try {
       const response = await host.api(`/api/pages/${id}`);
       if (token !== generation || !response || !response.page) return;
@@ -609,7 +612,7 @@
     try {
       const result = await host.api("/api/pages/rename", { id, title });
       const next = result && result.page && result.page.title ? result.page.title : title;
-      if (detail && detail.id === id) detail.title = next;
+      if (detail && detail.id === id) detail = { ...detail, title: next };
       retitleQuote(id, next);
       const link = [...shell.list.children].find((item) => item.dataset && item.dataset.pageId === id);
       if (link) link.textContent = next;
@@ -666,7 +669,7 @@
     knownPages = pages;
     const chosen = choose(pages, conversationId);
     selectedId = chosen ? chosen.id : null;
-    if (quote && (!chosen || chosen.id !== quote.page_id || inTask() || foreignPage())) clearQuote();
+    if (quote && (!chosen || chosen.id !== quote.page_id || inTask() || foreignPage())) { quoteSerial++; clearQuote(); }
     paintList(pages);
     if (!chosen) {
       hideStage();
@@ -690,13 +693,19 @@
         const page = knownPages.find((item) => item.id === captured.page_id);
         const unavailable = (reason) => { clearQuote(); return `La citation n’a pas pu être reprise : ${reason}`; };
         if (!page) return unavailable("la Page n’est plus disponible dans cette conversation.");
+        const previousDetail = detail;
         let restored;
         try { restored = (await host.api(`/api/pages/${page.id}`)).page; }
         catch {
-          if (captured.serial !== quoteSerial || currentConversationId !== contextId) return;
+          if (captured.serial !== quoteSerial || currentConversationId !== contextId || detail !== previousDetail || reverting?.id === page.id) return;
           return "La citation reste à vérifier : la Page n’a pas pu être relue. Réessayez quand elle sera disponible.";
         }
         if (captured.serial !== quoteSerial || currentConversationId !== contextId) return;
+        if (reverting?.id === page.id) return;
+        if (detail !== previousDetail) {
+          if (detail?.id !== page.id || detail.status !== "ready") return;
+          restored = detail;
+        }
         if (!knownPages.some((item) => item.id === captured.page_id)) return unavailable("la Page n’est plus disponible dans cette conversation.");
         if (inTask() || restored?.bot_id !== botId) return unavailable("son bot ne correspond plus au brouillon.");
         if (restored.status !== "ready" || !collapsed(restored.preview || "").includes(collapsed(captured.passage))) {

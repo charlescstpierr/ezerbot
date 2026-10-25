@@ -37,7 +37,7 @@ const SIGN_IN_WINDOW: Duration = Duration::from_secs(300);
 /// Borne de l'attente des fils de fond (jamais compilée dans la version livrée). Un tour en vol à
 /// la destruction de l'`App` peut légitimement finir une commande au premier plan, qui dure
 /// 120 s au plus : la borne laisse cette durée et une marge, puis l'attente échoue.
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions, feature = "test-support"))]
 const BACKGROUND_WAIT_LIMIT: Duration = Duration::from_secs(150);
 const REFRESH_MARGIN: u64 = 300;
 /// Attente courte : un flock tenu par un processus vivant n’est jamais volé.
@@ -375,18 +375,18 @@ struct Inner {
     /// moteur, suivis de fond), gardés seulement pour que la destruction de l'`App` ou un test
     /// attende leur fin. Compilé dans les versions de développement et de test uniquement : la
     /// version livrée n'a ni ce champ ni cette attente.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
     background: Mutex<Vec<Background>>,
     /// Nombre d'attentes de fils de fond commencées : un test sait ainsi que la destruction de
     /// l'`App` est en cours sans deviner un délai.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
     waits_started: AtomicUsize,
 }
 
 /// Un fil de fond retenu. `stop` est l'indicateur que le fil observe pour finir de lui-même :
 /// les attentes longues (retour OAuth, code d'appareil GitHub) le reçoivent, les autres fils
 /// ont une durée bornée par leurs propres délais réseau.
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions, feature = "test-support"))]
 struct Background {
     handle: thread::JoinHandle<()>,
     stop: Option<Arc<AtomicBool>>,
@@ -889,9 +889,9 @@ impl Session {
                 catalog: Mutex::new(Catalog::default()),
                 quota: Mutex::new(codex::UsageCache::default()),
                 mcp: crate::mcp::Manager::default(),
-                #[cfg(debug_assertions)]
+                #[cfg(any(test, debug_assertions, feature = "test-support"))]
                 background: Mutex::new(Vec::new()),
-                #[cfg(debug_assertions)]
+                #[cfg(any(test, debug_assertions, feature = "test-support"))]
                 waits_started: AtomicUsize::new(0),
             }),
         }
@@ -938,13 +938,13 @@ impl Session {
             builder = builder.name(name.to_owned());
         }
         let handle = builder.spawn(work)?;
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions, feature = "test-support"))]
         {
             let mut handles = lock(&self.inner.background);
             handles.retain(|background| !background.handle.is_finished());
             handles.push(Background { handle, stop });
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(test, debug_assertions, feature = "test-support")))]
         {
             let _ = stop;
             drop(handle);
@@ -959,12 +959,12 @@ impl Session {
     /// l'application une fois détruite ; jamais appelée par la version livrée. L'attente est
     /// bornée : un fil qui ne finit pas est une fuite, elle échoue avec un message au lieu de
     /// bloquer.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
     pub(crate) fn wait_background(&self) -> Result<(), String> {
         self.wait_background_within(BACKGROUND_WAIT_LIMIT)
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
     pub(crate) fn wait_background_within(&self, limit: Duration) -> Result<(), String> {
         self.inner.waits_started.fetch_add(1, Ordering::SeqCst);
         let current = thread::current().id();

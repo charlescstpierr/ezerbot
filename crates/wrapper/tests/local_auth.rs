@@ -113,12 +113,17 @@ fn all_local_routes_require_launch_identity() {
     let wrong = LaunchIdentity::new();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = vec![root.join("lib.rs")];
-    files.extend(
-        std::fs::read_dir(root.join("features"))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|p| p.extension().is_some_and(|e| e == "rs")),
-    );
+    fn collect(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, files);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    collect(&root.join("features"), &mut files);
     let mut routes = std::collections::BTreeSet::new();
     for file in files {
         let source = std::fs::read_to_string(file).unwrap();

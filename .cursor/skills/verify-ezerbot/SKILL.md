@@ -7,7 +7,7 @@ description: "Lance Ezerbot isolé (grokbot-wrapper, interface web locale) avec 
 
 Surface principale : l’interface web locale servie par `grokbot-wrapper` (coque `app/ui`, fil construit depuis `app/web`). Le binaire écoute seulement `127.0.0.1`. L’app Cocoa `Ezerbot.app` n’est pas la surface de cette skill : ne pas l’ouvrir.
 
-Deux instances peuvent tourner ensemble si chacune a son port, son `HOME` et sa base. Ne jamais piloter une instance que ce run n’a pas lancée. Ne jamais utiliser un compte ChatGPT réel.
+Deux instances peuvent tourner ensemble si chacune a son port, son `HOME`, sa base et sa session Chrome dédiée. Ne jamais piloter une instance que ce run n’a pas lancée. Ne jamais utiliser un compte ChatGPT réel.
 
 Les chemins du Mac du capitaine sont les défauts ci-dessous. Chaque chemin s’écrase avec une variable d’environnement.
 
@@ -57,7 +57,9 @@ CHROME_DEVTOOLS_AXI_SESSION=verify-ezerbot \
   bash .cursor/skills/verify-ezerbot/scripts/launch.sh --evidence <dossier-de-preuves>
 ```
 
-Le script écrit `<preuves>/run.json` (PID et identités des processus, port, URL, commit, empreinte du binaire), sans secret de lancement. Il ne lance pas `Ezerbot.app`.
+Le script écrit `<preuves>/run.json` (pid, port, URL, commit, empreinte du binaire). Il lie aussi la session axi et son `HOME` au répertoire du run par une signature HMAC. Il ne lance pas `Ezerbot.app`.
+
+Choisir un dossier de preuves neuf pour chaque lancement. Un dossier qui contient déjà `run.json`, même après nettoyage, est refusé.
 
 ## Doctor
 
@@ -85,6 +87,10 @@ La dernière ligne est `doctor: ok` ou `doctor: echec`.
 
 Harness : `chrome-devtools-axi`, avec `CHROME_DEVTOOLS_AXI_SESSION` égal à l’identifiant du run. Les commandes observées dans ce dépôt sont `open`, `resize`, `screenshot`, `eval`, `pages`, `selectpage`, `newpage`, `closepage`. `eval` imprime `result: <json>`. Si cette valeur est une chaîne qui contient encore du JSON, elle est décodée jusqu’à l’objet.
 
+Utiliser `browser.sh` pour attribuer la session axi au run. Le pilote valide la session signée et le `HOME` axi du lancement avant toute commande. Il enregistre cette utilisation dans `browser.json` sous le répertoire signé. Un changement de session ou de `HOME` est refusé.
+
+Lancement, commandes navigateur et nettoyage partagent un verrou conservé dans le dossier de preuves. Les métadonnées sont publiées par remplacement atomique. Le nettoyage attend la fin d'une commande déjà commencée. Dès que le nettoyage commence, le pilote refuse toute nouvelle commande et tout changement de mode navigateur.
+
 ```bash
 bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> open http://127.0.0.1:<port>
 bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> resize 1140 780
@@ -92,7 +98,9 @@ bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval 
 bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> screenshot <preuves>/spheres/accueil/dark-1140x780.png
 ```
 
-Le substitut `EZERBOT_VERIFY_BROWSER=chrome-headless` parle le même vocabulaire via le protocole Chrome. Il ne remplace pas une session `chrome-devtools-axi` sur le Mac. Il sert quand ce binaire n’existe pas (preuve Linux). Il lance `google-chrome-stable` (pas un wrapper qui épingle un profil du home réel), profil `--user-data-dir=<HOME jetable>/chrome-profile` en un seul argument, sans URL initiale, avec `--headless=new`. Ce Chrome est un processus du run, tué au nettoyage. Sur Mac, le lanceur crée aussi un Chrome propre, avec son profil et son port CDP, puis `chrome-devtools-axi` se connecte à ce Chrome. La session de ce run, enregistrée au lancement, est la seule arrêtée à la fin. Aucune autre session n’est arrêtée, et aucun processus n’est tué par son nom.
+Sur Mac, le lanceur crée un Chrome propre et son port CDP. Le gardien authentifié reste connecté à ce Chrome. Le pilote `chrome-devtools-axi` s’y connecte avec la session et le HOME axi signés du run. Il conserve les PID et le port du navigateur dans son attribution. Aucun secret de lancement n’est transmis à axi en argument ou dans son environnement.
+
+Le substitut `EZERBOT_VERIFY_BROWSER=chrome-headless` parle le même vocabulaire via le protocole Chrome. Il ne remplace pas une session `chrome-devtools-axi` sur le Mac. Il sert quand ce binaire n’existe pas (preuve Linux). Il lance `google-chrome-stable` (pas un wrapper qui épingle un profil du home réel), profil `--user-data-dir=<HOME jetable>/chrome-profile` en un seul argument, sans URL initiale, avec `--headless=new`. Ce Chrome est un processus du run, tué au nettoyage. Un run headless n’arrête aucune session axi. Aucun processus n’est tué par son nom.
 
 Les sélecteurs stables viennent de `app/ui/index.html`, `app/ui/app.js`, `app/ui/panels/` et `app/web/src` :
 
@@ -141,7 +149,13 @@ Dernière ligne de la sortie et de `report.md` : `PASS <sha>` ou `FIX <sha>`. Un
 
 ## Cleanup
 
-Ne jamais tuer par nom de processus. Le nettoyage ne signale `SIGTERM` puis `SIGKILL` qu’aux PID dont l’identité (instant de démarrage et ligne de commande) est encore celle enregistrée : wrapper, gardien du navigateur, faux OpenAI, et Chrome seulement si ce run l’a lancé. Le groupe de processus n’est tué que si `os.getpgid` confirme le pgid enregistré et que ce n’est pas le groupe de l’appelant. Un `HOME` ou un `run_root` vide est refusé (ce n’est pas le répertoire courant). La suppression ne vise qu’un répertoire `verify-ezerbot.*` créé par ce run : marqueur HMAC dans `run.json` et sur le disque, sous le `TMPDIR` du système, et `assert_throwaway` sur `run_root` comme sur `HOME`. À la fin d’un nettoyage accepté, et seulement alors, la session Chrome enregistrée dans `run.json` est arrêtée par `chrome-devtools-axi stop`. Une autre valeur dans l’environnement de Cleanup ne change pas cette cible. Un nettoyage refusé n’envoie pas cette commande. Le dossier de preuves, y compris `report.md` et les PNG, reste.
+Ne jamais tuer par nom de processus. Le nettoyage ne signale `SIGTERM` puis `SIGKILL` qu’aux PID dont l’identité (instant de démarrage et ligne de commande) est encore celle enregistrée : wrapper, gardien du navigateur, faux OpenAI, et Chrome seulement si ce run l’a lancé. Le groupe de processus n’est tué que si `os.getpgid` confirme le pgid enregistré et que ce n’est pas le groupe de l’appelant. Un `HOME` ou un `run_root` vide est refusé (ce n’est pas le répertoire courant). La suppression ne vise qu’un répertoire `verify-ezerbot.*` créé par ce run : marqueur HMAC dans `run.json` et sur le disque, sous le `TMPDIR` du système, et `assert_throwaway` sur `run_root` comme sur `HOME`.
+
+À la fin d’un nettoyage accepté, la commande `chrome-devtools-axi stop` utilise la session et le `HOME` axi signés du run. Le nettoyage exige aussi un `browser.json` attribué au même run par `browser.sh`. Les variables courantes de l’appelant ne choisissent pas la session à arrêter. Un nettoyage refusé n’envoie pas cette commande.
+
+Sans attribution validable, aucun arrêt axi n’est envoyé. Cela couvre les anciens runs sans signature de session, les runs sans utilisation d’axi et les métadonnées incohérentes ou illisibles. Le nettoyage des PID enregistrés et du dossier signé reste possible. Ne pas déduire une session à fermer de l’environnement. Un second nettoyage n’envoie aucune nouvelle commande. Le dossier de preuves, y compris `report.md` et les PNG, reste.
+
+Si axi est absent ou si son arrêt échoue, le nettoyage échoue et conserve le répertoire signé et l'attribution pour une nouvelle tentative. Le navigateur reste interdit pendant cet état. Relancer `cleanup.sh` avec axi disponible. Après un nettoyage réussi, un second nettoyage n'envoie aucune nouvelle commande.
 
 ```bash
 bash .cursor/skills/verify-ezerbot/scripts/cleanup.sh --evidence <preuves>

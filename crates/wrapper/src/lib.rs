@@ -611,13 +611,15 @@ impl Drop for App {
         // L'attente passe avant l'arrêt des tâches shell : un tour encore en vol peut lancer une
         // tâche pendant la vidange, et son moniteur est alors arrêté et joint comme les autres.
         // Les deux échecs sont explicites : l'attente bornée, puis les tâches non finies.
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions, feature = "test-support"))]
         let waited = self.provider.wait_for_background_work();
         let stopped = features::local::shutdown(&self.connection, &self.db_path);
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions, feature = "test-support"))]
         let stopped = waited.and(stopped);
         if let Err(message) = stopped {
-            if cfg!(debug_assertions) && !std::thread::panicking() {
+            if cfg!(any(test, debug_assertions, feature = "test-support"))
+                && !std::thread::panicking()
+            {
                 panic!("{message}");
             }
             eprintln!("{message}");

@@ -28,15 +28,12 @@ struct Fixture {
     server: FakeOpenAi,
     path: std::path::PathBuf,
     chat: String,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-screen-test-{}-{}",
-            std::process::id(),
-            now()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-screen-test");
+        let root = guard.to_path_buf();
         let path = root.join("workspace.sqlite");
         std::fs::write(path.with_extension("chatgpt-auth.json"),json!({"host_id":"test-host","client_id":CLIENT,"access_token":"fake-access","refresh_token":"fake-refresh","expires_at":now()/1000+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
@@ -60,6 +57,7 @@ impl Fixture {
             server,
             path,
             chat,
+            _dir: guard,
         }
     }
     fn db(&self) -> Connection {
@@ -136,7 +134,6 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         grokbot_wrapper::features::screen::startup(&self.path);
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 #[test]

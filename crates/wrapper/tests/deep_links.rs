@@ -3,30 +3,14 @@ use grokbot_wrapper::{
     App,
 };
 use serde_json::{json, Value};
-use std::{
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-};
 
-struct Fixture(PathBuf);
+struct Fixture(grokbot_test_support::TestDir);
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ezerbot-links-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
+        Self(grokbot_test_support::TestDir::new("ezerbot-links"))
     }
     fn open(&self) -> App {
         App::open(&self.0.join("workspace.sqlite")).unwrap()
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 fn post(app: &mut App, route: &str, body: Value) -> Value {

@@ -1,30 +1,13 @@
 // Run with: node --test app/ui/voice-icons.test.cjs
 const assert = require("node:assert/strict");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const { mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
+const { chromeBinary, freezeHint } = require("./chrome-binary.cjs");
 
 const UI = __dirname;
-const CHROME_CANDIDATES = [
-  "google-chrome",
-  "google-chrome-stable",
-  "chromium",
-  "chromium-browser",
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-];
-
-function chromeOnPath(command) {
-  if (command.includes("/")) return require("node:fs").existsSync(command);
-  return spawnSync("which", [command], { stdio: "ignore" }).status === 0;
-}
-
-function chromeBinary() {
-  if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
-  return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
-}
-
 function commands(path) {
   return [...path.matchAll(/[a-z]/gi)].map((match) => match[0].toLowerCase());
 }
@@ -104,7 +87,8 @@ function measure(modeSvg, memoSvgText) {
   const directory = mkdtempSync(join(tmpdir(), "voice-icons-"));
   const file = join(directory, "icons.html");
   writeFileSync(file, page(modeSvg, memoSvgText));
-  const chrome = spawn(chromeBinary(), [
+  const binary = chromeBinary({ dumpDom: true });
+  const chrome = spawn(binary, [
     "--headless=new",
     "--no-sandbox",
     "--disable-gpu",
@@ -121,7 +105,7 @@ function measure(modeSvg, memoSvgText) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       chrome.kill("SIGKILL");
-      reject(new Error(`chrome did not compare icons\n${err.slice(-400)}`));
+      reject(new Error(`chrome did not compare icons\n${err.slice(-400)}${freezeHint(binary)}`));
     }, 20000);
     chrome.stdout.on("data", (chunk) => {
       dom += chunk;
@@ -258,7 +242,8 @@ function measureGlyphs(icons) {
   const directory = mkdtempSync(join(tmpdir(), "voice-glyphs-"));
   const file = join(directory, "glyphs.html");
   writeFileSync(file, glyphPage(icons));
-  const chrome = spawn(chromeBinary(), [
+  const binary = chromeBinary({ dumpDom: true });
+  const chrome = spawn(binary, [
     "--headless=new",
     "--no-sandbox",
     "--disable-gpu",
@@ -275,7 +260,7 @@ function measureGlyphs(icons) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       chrome.kill("SIGKILL");
-      reject(new Error(`chrome did not measure glyphs\n${err.slice(-400)}`));
+      reject(new Error(`chrome did not measure glyphs\n${err.slice(-400)}${freezeHint(binary)}`));
     }, 20000);
     chrome.stdout.on("data", (chunk) => {
       dom += chunk;

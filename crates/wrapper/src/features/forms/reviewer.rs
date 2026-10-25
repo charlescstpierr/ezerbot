@@ -349,12 +349,8 @@ fn legacy_inflight_local_allow_and_new_standing_read_rules_cannot_grant() {
         contracts::{with_tx, RunBudgets, RunKind, Trigger},
         model,
     };
-    let root = std::env::temp_dir().join(format!(
-        "ezerbot-review-local-{}-{}",
-        std::process::id(),
-        crate::now()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let guard = grokbot_test_support::TestDir::new("ezerbot-review-local");
+    let root = guard.to_path_buf();
     let mut app = App::open(&root.join("workspace.sqlite")).unwrap();
     let file = root.join("identifiants-factices.txt");
     std::fs::write(&file, "secret factice").unwrap();
@@ -430,12 +426,8 @@ fn reviewer_allow_cannot_grant_send_delete_protected_connector_or_delegate() {
         contracts::{with_tx, RunBudgets, RunKind, Trigger},
         model,
     };
-    let root = std::env::temp_dir().join(format!(
-        "ezerbot-review-held-{}-{}",
-        std::process::id(),
-        crate::now()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let guard = grokbot_test_support::TestDir::new("ezerbot-review-held");
+    let root = guard.to_path_buf();
     let mut app = App::open(&root.join("workspace.sqlite")).unwrap();
     let chat = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]["id"]
         .as_str()

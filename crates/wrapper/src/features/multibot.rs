@@ -76,7 +76,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
 }
 
 pub fn members(conn: &Connection, conversation: &str) -> Result<Vec<String>, ApiError> {
-    let mut s = conn.prepare("SELECT m.bot_id FROM wrapper_members m JOIN wrapper_bots b ON b.account_id=m.account_id AND b.id=m.bot_id WHERE m.account_id=?1 AND m.conversation_id=?2 AND m.active=1 AND b.deleted=0 ORDER BY m.position,m.bot_id")?;
+    let mut s = conn.prepare_cached("SELECT m.bot_id FROM wrapper_members m JOIN wrapper_bots b ON b.account_id=m.account_id AND b.id=m.bot_id WHERE m.account_id=?1 AND m.conversation_id=?2 AND m.active=1 AND b.deleted=0 ORDER BY m.position,m.bot_id")?;
     let mut rows = s
         .query_map(params![ACCOUNT, conversation], |r| r.get(0))?
         .collect::<rusqlite::Result<Vec<String>>>()?;
@@ -113,11 +113,10 @@ pub fn initialize(conn: &Connection, conversation: &str, bots: &[String]) -> Res
     Ok(())
 }
 pub fn is_group(conn: &Connection, conversation: &str) -> bool {
-    conn.query_row(
+    conn.prepare_cached(
         "SELECT kind='group' FROM wrapper_conversations WHERE account_id=?1 AND id=?2",
-        params![ACCOUNT, conversation],
-        |r| r.get(0),
     )
+    .and_then(|mut s| s.query_row(params![ACCOUNT, conversation], |r| r.get(0)))
     .unwrap_or(false)
 }
 #[derive(Deserialize)]
@@ -366,7 +365,7 @@ pub fn capture(
     Ok(())
 }
 pub fn mentions(conn: &Connection, conversation: &str, message: &str) -> Value {
-    conn.query_row("SELECT mentions FROM wrapper_group_inputs WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,conversation,message],|r|r.get::<_,String>(0)).ok().and_then(|s|serde_json::from_str(&s).ok()).unwrap_or(json!([]))
+    conn.prepare_cached("SELECT mentions FROM wrapper_group_inputs WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3").and_then(|mut s|s.query_row(params![ACCOUNT,conversation,message],|r|r.get::<_,String>(0))).ok().and_then(|s|serde_json::from_str(&s).ok()).unwrap_or(json!([]))
 }
 pub fn enqueue(conn: &Connection, conversation: &str, message: &str) -> Result<bool, ApiError> {
     let saved: Option<(String,bool)> = conn.query_row("SELECT targets,group_mode FROM wrapper_group_inputs WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,conversation,message],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
@@ -778,9 +777,7 @@ fn drive(ctx: &super::Context<'_>) -> Result<(), ApiError> {
         // Legacy direct replies are paired to their submission, not timeline rows.
         for m in snapshot.iter_mut() {
             if m.role == Role::User && m.text.starts_with("Vous : ") {
-                if let Some(reply) =
-                    super::engine::reply(&local, &conversation, &m.entry_id, vec![])?
-                {
+                if let Some(reply) = super::engine::reply(&local, &conversation, &m.entry_id)? {
                     if reply.state != "streaming" {
                         m.text.push_str(&format!("\n{}", shared_reply(&reply)));
                     }
@@ -856,7 +853,7 @@ fn publish_limits(conn: &Connection) -> Result<(), ApiError> {
 }
 
 pub fn notice_visible(conn: &Connection, id: &str) -> Result<bool, ApiError> {
-    Ok(conn.query_row("SELECT CASE WHEN n.body LIKE 'Limite de chaîne atteinte%' OR n.id=l.notice_id THEN COALESCE(l.published=1 AND l.notice_id=n.id,0) ELSE 1 END FROM wrapper_group_notices n LEFT JOIN wrapper_group_limits l ON l.account_id=?1 AND l.conversation_id=n.conversation_id AND l.root_id=n.root_id WHERE n.id=?2",params![ACCOUNT,id],|r|r.get(0)).optional()?.unwrap_or(true))
+    Ok(conn.prepare_cached("SELECT CASE WHEN n.body LIKE 'Limite de chaîne atteinte%' OR n.id=l.notice_id THEN COALESCE(l.published=1 AND l.notice_id=n.id,0) ELSE 1 END FROM wrapper_group_notices n LEFT JOIN wrapper_group_limits l ON l.account_id=?1 AND l.conversation_id=n.conversation_id AND l.root_id=n.root_id WHERE n.id=?2")?.query_row(params![ACCOUNT,id],|r|r.get(0)).optional()?.unwrap_or(true))
 }
 
 fn member_event(
@@ -949,7 +946,6 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
             error: None,
             error_kind: None,
             notice: None,
-            proposals: vec![],
         });
     }
     if kind != "group_reply" {
@@ -991,7 +987,6 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
             error,
             error_kind: None,
             notice: None,
-            proposals: vec![],
         });
     if status == "cancelled" {
         message.state = "stopped";

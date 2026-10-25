@@ -2,8 +2,6 @@
 mod support;
 
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,18 +16,13 @@ use support::{FakeOpenAi, ScriptedResponse, Seen, CLIENT};
 struct Fixture {
     provider: Provider,
     server: FakeOpenAi,
-    directory: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "grokbot-gateway-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::SeqCst),
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
+        let guard = grokbot_test_support::TestDir::new("grokbot-gateway");
+        let directory = guard.to_path_buf();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         // Seed a disposable, already-authorized account; OAuth itself is covered in chatgpt.rs.
         let now = SystemTime::now()
@@ -51,7 +44,7 @@ impl Fixture {
         Self {
             provider,
             server,
-            directory,
+            _dir: guard,
         }
     }
 
@@ -126,12 +119,6 @@ fn validate_input(body: &Value) {
                 }
             }
         }
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.directory).unwrap();
     }
 }
 
@@ -588,6 +575,15 @@ fn parallel_tool_calls_keep_call_ids() {
 }
 
 #[test]
+fn a_local_endpoint_asks_for_one_tool_call_at_a_time() {
+    let fixture = Fixture::new();
+    fixture.events(&[json!({"type": "response.completed"})]);
+    fixture.collect(&request());
+    let body = &fixture.server.seen.lock().unwrap().bodies[0];
+    assert_eq!(body["parallel_tool_calls"], false, "{body}");
+}
+
+#[test]
 fn image_input_is_serialized() {
     let fixture = Fixture::new();
     fixture.events(&[json!({"type": "response.completed"})]);
@@ -621,7 +617,14 @@ fn image_input_is_serialized() {
             {"type": "input_image", "image_url": "data:image/png;base64,AA=="},
         ])
     );
-    for field in ["tools", "reasoning", "service_tier", "previous_response_id"] {
+    for field in [
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "service_tier",
+        "previous_response_id",
+    ] {
         assert!(body.get(field).is_none());
     }
     assert!(!body.to_string().contains("attachment_id"));

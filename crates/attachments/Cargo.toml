@@ -20,3 +20,6 @@ zip = { version = "6.0", default-features = false, features = ["deflate-flate2-z
 quick-xml = "0.38"
 # NFC keeps decomposed French accents readable in the PDF's WinAnsi font.
 unicode-normalization = "0.1"
+
+[dev-dependencies]
+grokbot-test-support = { workspace = true }

@@ -14,3 +14,6 @@ serde_json.workspace = true
 rusqlite.workspace = true
 getrandom.workspace = true
 jiff.workspace = true
+
+[dev-dependencies]
+grokbot-test-support = { workspace = true }

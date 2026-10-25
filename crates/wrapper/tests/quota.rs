@@ -4,7 +4,6 @@ mod support;
 use grokbot_wrapper::{App, Provider};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen};
@@ -19,16 +18,12 @@ struct Fixture {
     directory: PathBuf,
     server: FakeOpenAi,
     provider: Provider,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "ezerbot-quota-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-quota");
+        let directory = guard.to_path_buf();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen {
             request_id: Some("req_quota_test".into()),
             ..Seen::default()
@@ -51,6 +46,7 @@ impl Fixture {
             directory,
             server,
             provider,
+            _dir: guard,
         }
     }
     fn reply(&self, response: ScriptedResponse) {
@@ -80,12 +76,6 @@ impl Fixture {
         .unwrap()
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.directory);
-    }
-}
-
 fn post(app: &mut App, path: &str, body: Value) -> Value {
     app.api("POST", path, body.to_string().as_bytes()).unwrap()
 }

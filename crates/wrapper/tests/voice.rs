@@ -15,16 +15,12 @@ struct Fixture {
     provider: Provider,
     server: FakeOpenAi,
     dir: PathBuf,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "voice-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("voice-test");
+        let dir = guard.to_path_buf();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let provider =
             Provider::with_endpoints(&dir.join("workspace.sqlite"), server.endpoints(), false);
@@ -34,6 +30,7 @@ impl Fixture {
             provider,
             server,
             dir,
+            _dir: guard,
         }
     }
     fn post(&mut self, path: &str, body: Value) -> Value {
@@ -61,12 +58,6 @@ impl Fixture {
             .to_string()
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
 #[test]
 fn wav_validation_refuses_empty_wrong_format_and_excessive_duration() {
     assert_eq!(voice::wav_duration(WAV).unwrap(), 1000);

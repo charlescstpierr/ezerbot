@@ -775,12 +775,8 @@ mod tests {
             thread,
             time::Duration,
         };
-        let mut random = [0_u8; 16];
-        getrandom::getrandom(&mut random).unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "skills-library-{:x}.sqlite",
-            u128::from_le_bytes(random)
-        ));
+        let directory = grokbot_test_support::TestDir::new("skills-library");
+        let path = directory.join("library.sqlite");
         let conn = Connection::open(&path).unwrap();
         migrate(&conn).unwrap();
         let barrier = Arc::new(Barrier::new(8));
@@ -813,7 +809,6 @@ mod tests {
         );
         assert_eq!(list(&conn, "bot-a").unwrap().len(), 8);
         drop(conn);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

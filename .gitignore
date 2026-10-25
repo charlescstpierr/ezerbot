@@ -31,3 +31,6 @@ app/qa/
 
 # Vite dependency caches, wherever vite runs from
 **/node_modules/
+
+# chrome-headless-shell épinglé, installé par tools/install-chrome-headless-shell.cjs (#438)
+/tools/chrome-headless-shell/

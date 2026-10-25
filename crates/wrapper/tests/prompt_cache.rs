@@ -15,16 +15,12 @@ struct Fixture {
     server: FakeOpenAi,
     dir: PathBuf,
     conversation: String,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "ezerbot-cache-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = grokbot_test_support::TestDir::new("ezerbot-cache");
+        let dir = guard.to_path_buf();
         let db = dir.join("app.sqlite");
         let expires = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -62,6 +58,7 @@ impl Fixture {
             server,
             dir,
             conversation,
+            _dir: guard,
         }
     }
     fn remember(&self, text: &str) {
@@ -109,11 +106,6 @@ impl Fixture {
             .find(|b| b.get("prompt_cache_key").is_some())
             .unwrap()
             .clone()
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 fn post(app: &mut App, path: &str, body: Value) -> Value {

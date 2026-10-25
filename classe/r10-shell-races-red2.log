@@ -1,0 +1,77 @@
+✔ a draft typed during creation stays on its thread and does not return on Nouvelle conversation (108.616862ms)
+✔ an orphan welcome document left by an older transfer is purged instead of restored (45.347291ms)
+✔ a refused creation keeps both the submitted text and the text typed while waiting (28.893374ms)
+✔ a maximal bot name and its edit action stay inside an ellipsis rule (45.71879ms)
+✔ the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape (62.321171ms)
+✔ a disabled composer bot focuses the conversation title when the editor is not editable (25.177462ms)
+✔ a disabled composer bot returns menu focus to the editor (22.181657ms)
+✔ short composer names stay whole and a maximal name ellipsizes only when the bar is full (38.574287ms)
+✔ l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce (96.76294ms)
+✔ l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre (81.91073ms)
+✔ « Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file (54.326469ms)
+✔ le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée (54.472184ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 400 (78.714398ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 409 (73.900698ms)
+✔ r10 T24 le même brouillon partage une création de fil et transfère sa citation (71.720954ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué false (117.587297ms)
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: État injoignable
+Ezerbot local connection: La connexion au moteur local est interrompue.
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué true (130.704111ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient queued, aucun brouillon dupliqué (80.92455ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient dispatching, aucun brouillon dupliqué (65.173801ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient unknown, aucun brouillon dupliqué (64.134627ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient accepted, aucun brouillon dupliqué (105.032912ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient echoed, aucun brouillon dupliqué (53.308555ms)
+✔ r10 T10/T11 citation au refus après rename (51.166634ms)
+✔ r10 T10/T11 citation au refus après missing (69.530471ms)
+✔ r10 T10/T11 citation au refus après passage (70.639333ms)
+✔ r10 T10/T11 citation au refus après load (54.104489ms)
+✔ r10 T10/T11 citation au refus après reorder (49.967682ms)
+✔ r10 T12 refus ancien après remove de citation (50.318269ms)
+✔ r10 T12 refus ancien après same de citation (52.577534ms)
+✔ r10 T12 refus ancien après other de citation (52.159339ms)
+✔ r10 T09/N03 un snapshot omet le fil soumis sans écraser le brouillon new (51.64995ms)
+✔ r10 T21 stockage indisponible refuse une tentative avant de perdre le brouillon (47.703059ms)
+✔ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré false (64.127059ms)
+✔ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré true (68.319311ms)
+✔ r10 T08 la reprise d'un brouillon de lien attend la création en cours (57.570756ms)
+✔ r10 T16 la fin de sous-tâche conserve texte et fichiers visibles au refus (58.25787ms)
+✔ r10 T03/T21 création refusée conserve mentions et saisie dans leurs documents (48.88925ms)
+✔ r10 T23 restauration tardive après missing ne ressuscite pas la citation (61.789808ms)
+✔ r10 T23 restauration tardive après navigate ne ressuscite pas la citation (64.324481ms)
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+✖ r10 T11 panne réseau de Page ne relance pas sa lecture en boucle (72.718499ms)
+ℹ tests 40
+ℹ suites 0
+ℹ pass 39
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2802.45787
+
+✖ failing tests:
+
+test at app/ui/draft-transfer.test.cjs:7:29
+✖ r10 T11 panne réseau de Page ne relance pas sa lecture en boucle (72.718499ms)
+  AssertionError [ERR_ASSERTION]: la panne a déclenché 8 lectures
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:994:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }

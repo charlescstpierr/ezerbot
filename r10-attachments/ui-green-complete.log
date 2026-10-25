@@ -1,0 +1,36 @@
+test-gate: 1 places prises, attente (0 s)...
+test-gate: 1 places prises, attente (61 s)...
+✔ welcome attachment handoff preserves rich text and clears both home draft keys (83.396145ms)
+✔ shared attachment sizes use French o / Ko / Mo formatting (1.387843ms)
+✔ composer renders the shared document outline (41.050672ms)
+✔ empty and oversized files leave persistent, terminal refusal chips without reading or uploading (8.553183ms)
+✔ validation refusals hide Retry; transient HTTP failures and native network failures retain it (62.859031ms)
+✔ truncation and assumed encoding have a warning marker, not success-only styling (24.128603ms)
+✔ combined-document limits keep a persistent explanation and unblock after files are removed (34.439627ms)
+✔ escaped-document volume also blocks a single text that would overflow its context (8.415367ms)
+✔ removing an in-flight document aborts its request and ignores a late completion (13.948476ms)
+✔ uploads carry durable draft identity, a stable token and the original image name (18.096095ms)
+✔ state restores named image and document drafts once, without resurrecting a removed piece (23.081746ms)
+✔ discarding a finished task's attachment draft aborts pending uploads and clears its tray (7.315714ms)
+✔ T13 image reselected during send survives old acknowledgement, upload first true (5.36103ms)
+✔ T13 image reselected during send survives old acknowledgement, upload first false (5.0379ms)
+✔ T13 document reselected during send survives old acknowledgement, upload first true (3.330453ms)
+✔ T13 document reselected during send survives old acknowledgement, upload first false (3.316139ms)
+✔ T14 acknowledgement from another thread consumes only captured attachment occurrences (3.157878ms)
+✔ T18 first delayed disk restore does not resurrect a removed file (2.947535ms)
+✔ T18 delayed restore waits for a recent import and preserves its occurrence (4.514865ms)
+✔ T15 preparation failure retains the image unless removed false (3.490711ms)
+✔ T15 preparation failure retains the image unless removed true (2.766113ms)
+✔ T18 restored occurrence tokens are captured and released without removing a newer selection (2.214795ms)
+✔ T18 retry after a delayed restore keeps the user's recent file and releases the older occurrence (3.500565ms)
+✔ T18 delayed disk restore preserves the file reselected after an explicit removal (3.461358ms)
+✔ T15 a failed durable removal leaves a visible explanation (2.688601ms)
+✔ T18 removing a restored legacy file captures its tokenless occurrence (2.320958ms)
+ℹ tests 26
+ℹ suites 0
+ℹ pass 26
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 669.490186

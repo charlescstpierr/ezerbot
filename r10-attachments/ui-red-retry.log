@@ -1,0 +1,50 @@
+✔ welcome attachment handoff preserves rich text and clears both home draft keys (49.395077ms)
+✔ shared attachment sizes use French o / Ko / Mo formatting (0.96809ms)
+✔ composer renders the shared document outline (8.637825ms)
+✔ empty and oversized files leave persistent, terminal refusal chips without reading or uploading (5.539717ms)
+✔ validation refusals hide Retry; transient HTTP failures and native network failures retain it (30.868563ms)
+✔ truncation and assumed encoding have a warning marker, not success-only styling (5.622804ms)
+✔ combined-document limits keep a persistent explanation and unblock after files are removed (4.357713ms)
+✔ escaped-document volume also blocks a single text that would overflow its context (3.994045ms)
+✔ removing an in-flight document aborts its request and ignores a late completion (3.410102ms)
+✔ uploads carry durable draft identity, a stable token and the original image name (139.707174ms)
+✔ state restores named image and document drafts once, without resurrecting a removed piece (6.012102ms)
+✔ discarding a finished task's attachment draft aborts pending uploads and clears its tray (6.435989ms)
+✔ T13 image reselected during send survives old acknowledgement, upload first true (8.911686ms)
+✔ T13 image reselected during send survives old acknowledgement, upload first false (6.964115ms)
+✔ T13 document reselected during send survives old acknowledgement, upload first true (5.436724ms)
+✔ T13 document reselected during send survives old acknowledgement, upload first false (5.664009ms)
+✔ T14 acknowledgement from another thread consumes only captured attachment occurrences (4.090924ms)
+✔ T18 first delayed disk restore does not resurrect a removed file (3.123078ms)
+✔ T18 delayed restore waits for a recent import and preserves its occurrence (4.536866ms)
+✔ T15 preparation failure retains the image unless removed false (6.602864ms)
+✔ T15 preparation failure retains the image unless removed true (3.844857ms)
+✔ T18 restored occurrence tokens are captured and released without removing a newer selection (2.795586ms)
+✖ T18 retry after a delayed restore keeps the user's recent file and releases the older occurrence (5.976775ms)
+ℹ tests 23
+ℹ suites 0
+ℹ pass 22
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 727.421032
+
+✖ failing tests:
+
+test at app/web/src/attachments-ui.test.js:319:1
+✖ T18 retry after a delayed restore keeps the user's recent file and releases the older occurrence (5.976775ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /recent.txt/. Input:
+  
+  'old.txt6 oTexte extrait localementRéessayer×'
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:332:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'old.txt6 oTexte extrait localementRéessayer×',
+    expected: /recent.txt/,
+    operator: 'match',
+    diff: 'simple'
+  }

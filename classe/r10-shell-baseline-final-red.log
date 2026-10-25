@@ -1,0 +1,545 @@
+test-gate: 1 places prises, attente (0 s)...
+test-gate: 1 places prises, attente (61 s)...
+test-gate: 1 places prises, attente (122 s)...
+test-gate: 1 places prises, attente (183 s)...
+test-gate: 1 places prises, attente (245 s)...
+test-gate: 1 places prises, attente (306 s)...
+test-gate: 1 places prises, attente (367 s)...
+✔ a draft typed during creation stays on its thread and does not return on Nouvelle conversation (118.449326ms)
+✔ an orphan welcome document left by an older transfer is purged instead of restored (65.368627ms)
+✔ a refused creation keeps both the submitted text and the text typed while waiting (50.01992ms)
+✔ a maximal bot name and its edit action stay inside an ellipsis rule (75.170223ms)
+✔ the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape (60.852454ms)
+✔ a disabled composer bot focuses the conversation title when the editor is not editable (40.764917ms)
+✔ a disabled composer bot returns menu focus to the editor (36.415462ms)
+✔ short composer names stay whole and a maximal name ellipsizes only when the bar is full (59.150178ms)
+✔ l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce (305.689441ms)
+✔ l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre (111.604786ms)
+✔ « Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file (77.832201ms)
+✔ le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée (68.284786ms)
+✖ r10 T01/T02 citation orpheline récupérée après refus 400 (212.916704ms)
+✖ r10 T01/T02 citation orpheline récupérée après refus 409 (103.235093ms)
+✖ r10 T24 le même brouillon partage une création de fil et transfère sa citation (84.078318ms)
+Ezerbot local connection: Envoi interrompu
+✖ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué false (84.896804ms)
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: État injoignable
+Ezerbot local connection: La connexion au moteur local est interrompue.
+✖ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué true (384.258238ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient queued, aucun brouillon dupliqué (191.274056ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient dispatching, aucun brouillon dupliqué (167.694602ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient unknown, aucun brouillon dupliqué (238.253111ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient accepted, aucun brouillon dupliqué (140.832136ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient echoed, aucun brouillon dupliqué (174.109507ms)
+✔ r10 T10/T11 citation au refus après rename (113.784712ms)
+✖ r10 T10/T11 citation au refus après missing (109.595129ms)
+✖ r10 T10/T11 citation au refus après passage (137.655104ms)
+✖ r10 T10/T11 citation au refus après load (151.620727ms)
+Ezerbot local connection: État injoignable
+✖ r10 T10/T11 citation au refus après reorder (90.60394ms)
+✔ r10 T12 refus ancien après remove de citation (56.03837ms)
+✔ r10 T12 refus ancien après same de citation (54.944503ms)
+✔ r10 T12 refus ancien après other de citation (210.252322ms)
+✖ r10 T09/N03 un snapshot omet le fil soumis sans écraser le brouillon new (90.126657ms)
+✖ r10 T21 stockage indisponible refuse une tentative avant de perdre le brouillon (75.98905ms)
+✖ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré false (127.43163ms)
+✖ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré true (236.661049ms)
+✖ r10 T08 la reprise d'un brouillon de lien attend la création en cours (194.450576ms)
+✖ r10 T16 la fin de sous-tâche conserve texte et fichiers visibles au refus (143.25165ms)
+✔ r10 T03/T21 création refusée conserve mentions et saisie dans leurs documents (155.974397ms)
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+✖ r10 T11/T12 restauration tardive après missing ne ressuscite pas la citation (10001.72054ms)
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+✖ r10 T11/T12 restauration tardive après navigate ne ressuscite pas la citation (10000.962287ms)
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+✖ r10 T11 panne réseau de Page ne relance pas sa lecture en boucle (147.160212ms)
+✖ r10 T11/T12 résultat de revalidation tardif après missing (156.516991ms)
+✖ r10 T11/T12 résultat de revalidation tardif après navigate (218.680568ms)
+✖ r10 T08 une création de bot tardive laisse le brouillon soumis à son bot (203.345133ms)
+✖ r10 T21 le document restauré survit à un aller-retour sans stockage (222.943705ms)
+Ezerbot local connection: L’accès iPhone est désactivé sur le Mac.
+Ezerbot local connection: L’accès iPhone est désactivé sur le Mac.
+Ezerbot local connection: L’accès iPhone est désactivé sur le Mac.
+✔ r10 T06 fichiers iPhone préservés, accès désactivé sur send (177.57882ms)
+Ezerbot local connection: État injoignable
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: L’accès iPhone est désactivé sur le Mac.
+Ezerbot local connection: La connexion au moteur local est interrompue.
+✔ r10 T06 fichiers iPhone préservés, accès désactivé sur refresh (160.420734ms)
+✖ r10 N06 notification before envoi refusé récupère A avant ouverture de B (135.720234ms)
+✖ r10 N06 notification during envoi refusé récupère A avant ouverture de B (136.909979ms)
+✖ r10 R21/T21 le brouillon refusé du fil vide garde ses mentions en changeant de bot (153.034861ms)
+✔ meeting consent, destination/title, dictation signal, pause/resume, default-delete save and blocked reason (12.637767ms)
+✔ late poll cannot erase stop receipt; audio kept only with explicit checkbox (3.031517ms)
+✔ denial, no audio, cap and retry have alert tones, correct exits and system settings (5.922386ms)
+✔ deleting raw audio or a capture uses styled asynchronous decisions, never window.confirm (3.913342ms)
+✔ a late close event from a cancelled dialog cannot cancel a new decision (2.37586ms)
+✔ welcome capture is created atomically with its title; notes prevent removing its conversation (2.984334ms)
+✔ meeting cannot interrupt an active dictation, and closing a busy response never cancels its microphone (2.913311ms)
+✔ dismissing a restarted capture preserves its conversation when notes are present (3.38977ms)
+✔ the merged conversation voice mode cannot overlap meeting capture (3.012609ms)
+✔ partial text remains reviewable and saveable even when retry is temporarily unavailable (3.678644ms)
+✔ successful missing-passage retry clears the partial warning (2.783367ms)
+✔ a reloaded capture directs cleanup first, cancels its stale adapter, then permits a fresh capture (2.380781ms)
+✖ restart warning has its own fluid row, never the narrow recorder grid (4.487932ms)
+✔ existing conversation messages are never hidden by the meeting empty state (1.782908ms)
+✖ meeting surfaces never invoke native confirm or browser media; unavailable summary copy is conditional (0.90535ms)
+✖ welcome meeting transfers the staged composer through the shared creation before capture (4.900408ms)
+✔ welcome meeting whose refresh fails remains available for explicit cleanup (2.024181ms)
+ℹ tests 66
+ℹ suites 0
+ℹ pass 38
+ℹ fail 26
+ℹ cancelled 2
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 26821.214482
+
+✖ failing tests:
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T01/T02 citation orpheline récupérée après refus 400 (212.916704ms)
+  AssertionError [ERR_ASSERTION]: la citation accompagne le brouillon récupéré
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:786:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T01/T02 citation orpheline récupérée après refus 409 (103.235093ms)
+  AssertionError [ERR_ASSERTION]: la citation accompagne le brouillon récupéré
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:786:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T24 le même brouillon partage une création de fil et transfère sa citation (84.078318ms)
+  TypeError: app.window.GrokbotPanels.ensureDraftConversation is not a function
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:796:38)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué false (84.896804ms)
+  AssertionError [ERR_ASSERTION]: la tentative absente du journal reste récupérable après redémarrage du client
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:818:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué true (384.258238ms)
+  AssertionError [ERR_ASSERTION]: la tentative absente du journal reste récupérable après redémarrage du client
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:818:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T10/T11 citation au refus après missing (109.595129ms)
+  AssertionError [ERR_ASSERTION]: l'explication de récupération reste visible après l'erreur d'envoi
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:851:17)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'Envoi refusé',
+    expected: /citation|Citation/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T10/T11 citation au refus après passage (137.655104ms)
+  AssertionError [ERR_ASSERTION]: l'explication de récupération reste visible après l'erreur d'envoi
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:851:17)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'Envoi refusé',
+    expected: /citation|Citation/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T10/T11 citation au refus après load (151.620727ms)
+  AssertionError [ERR_ASSERTION]: l'explication de récupération reste visible après l'erreur d'envoi
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:851:17)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'Envoi refusé',
+    expected: /citation|Citation/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T10/T11 citation au refus après reorder (90.60394ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:849:12)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T09/N03 un snapshot omet le fil soumis sans écraser le brouillon new (90.126657ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'Brouillon du fil'
+  - 'Autre brouillon'
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:875:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'Brouillon du fil',
+    expected: 'Autre brouillon',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T21 stockage indisponible refuse une tentative avant de perdre le brouillon (75.98905ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  2 !== 1
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:884:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 2,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré false (127.43163ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'sous-fil'
+  - 'conv-1'
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:915:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'sous-fil',
+    expected: 'conv-1',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré true (236.661049ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'sous-fil'
+  - 'conv-1'
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:915:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'sous-fil',
+    expected: 'conv-1',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T08 la reprise d'un brouillon de lien attend la création en cours (194.450576ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'qa-redacteur'
+  - 'grokbot'
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:930:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'qa-redacteur',
+    expected: 'grokbot',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T16 la fin de sous-tâche conserve texte et fichiers visibles au refus (143.25165ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  2 !== 0
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:948:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 2,
+    expected: 0,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T11/T12 restauration tardive après missing ne ressuscite pas la citation (10001.72054ms)
+  'test timed out after 10000ms'
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T11/T12 restauration tardive après navigate ne ressuscite pas la citation (10000.962287ms)
+  'test timed out after 10000ms'
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T11 panne réseau de Page ne relance pas sa lecture en boucle (147.160212ms)
+  AssertionError [ERR_ASSERTION]: la panne a déclenché 7 lectures
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:997:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T11/T12 résultat de revalidation tardif après missing (156.516991ms)
+  TypeError: pagePanel.composer.restore is not a function
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:1007:40)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T11/T12 résultat de revalidation tardif après navigate (218.680568ms)
+  TypeError: pagePanel.composer.restore is not a function
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:1007:40)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T08 une création de bot tardive laisse le brouillon soumis à son bot (203.345133ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'bot-recent'
+  - 'grokbot'
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:1033:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'bot-recent',
+    expected: 'grokbot',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 T21 le document restauré survit à un aller-retour sans stockage (222.943705ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  'conv-1' !== ''
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:1047:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'conv-1',
+    expected: '',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 N06 notification before envoi refusé récupère A avant ouverture de B (135.720234ms)
+  evalmachine.<anonymous>:29
+    document.querySelector(".topbar-actions").prepend(button);
+                                              ^
+  
+  TypeError: document.querySelector(...).prepend is not a function
+      at evalmachine.<anonymous>:29:45
+      at evalmachine.<anonymous>:278:3
+      at Script.runInContext (node:vm:149:12)
+      at Object.runInContext (node:vm:301:6)
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:1080:6)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 N06 notification during envoi refusé récupère A avant ouverture de B (136.909979ms)
+  evalmachine.<anonymous>:29
+    document.querySelector(".topbar-actions").prepend(button);
+                                              ^
+  
+  TypeError: document.querySelector(...).prepend is not a function
+      at evalmachine.<anonymous>:29:45
+      at evalmachine.<anonymous>:278:3
+      at Script.runInContext (node:vm:149:12)
+      at Object.runInContext (node:vm:301:6)
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:1080:6)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at ../_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:7:29
+✖ r10 R21/T21 le brouillon refusé du fil vide garde ses mentions en changeant de bot (153.034861ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+      content: [
+        {
+          content: [
+            {
+  -           attrs: {
+  -             id: 'grokbot',
+  -             label: 'Ezerbot'
+  -           },
+  -           type: 'mention'
+  -         },
+  -         {
+              text: ' demande',
+              type: 'text'
+            }
+          ],
+          type: 'paragraph'
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/draft-transfer.test.cjs:1106:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { type: 'doc', content: [ [Object] ] },
+    expected: { type: 'doc', content: [ [Object] ] },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/meetings-ui.test.mjs:161:1
+✖ restart warning has its own fluid row, never the narrow recorder grid (4.487932ms)
+  Error: ENOENT: no such file or directory, open '/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/ui/panels/meetings.css'
+      at readFileSync (node:fs:441:20)
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/meetings-ui.test.mjs:165:13)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1325:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+      at Test.postRun (node:internal/test_runner/test:1465:19)
+      at Test.run (node:internal/test_runner/test:1390:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    errno: -2,
+    code: 'ENOENT',
+    syscall: 'open',
+    path: '/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/ui/panels/meetings.css'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/meetings-ui.test.mjs:179:1
+✖ meeting surfaces never invoke native confirm or browser media; unavailable summary copy is conditional (0.90535ms)
+  Error: ENOENT: no such file or directory, open '/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/cards/meeting.jsx'
+      at readFileSync (node:fs:441:20)
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/meetings-ui.test.mjs:181:14)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1325:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+      at Test.postRun (node:internal/test_runner/test:1465:19)
+      at Test.run (node:internal/test_runner/test:1390:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    errno: -2,
+    code: 'ENOENT',
+    syscall: 'open',
+    path: '/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/cards/meeting.jsx'
+  }
+
+test at ../_orch/pages/evidence/i294/classe/baseline/meetings-ui.test.mjs:185:1
+✖ welcome meeting transfers the staged composer through the shared creation before capture (4.900408ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'new:grokbot'
+  - 'created'
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/classe/baseline/meetings-ui.test.mjs:196:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'new:grokbot',
+    expected: 'created',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

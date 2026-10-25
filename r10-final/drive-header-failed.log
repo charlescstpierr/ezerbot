@@ -1,0 +1,16 @@
+test-gate: 1 places prises, attente (0 s)...
+test-gate: 1 places prises, attente (61 s)...
+Page réelle du faux fournisseur {"title": "Renommer\nOuvrir en pleine page\nTrois forfaits\n\nTout < 30 € par mois\n\nOffre choisie : Essentiel\n\nOffre\tPrix\t\nEssentiel\t9 €\tChoisir\nConfort\t19 €\tChoisir\nFamille\t29 €\tChoisir", "model": "GPT Test"}
+Non-régression sélection multi-cellules {"mentions": [], "attachments": [], "attachment_selections": {}, "page_anchor": {"page_id": "page_184eba7b2fb772132716ad016e4a4741d690c46f3ff6ba56ca23807413244f3e", "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928", "passage": "Confort\t19 €\tChoisir\nFamille"}, "conversation_id": "929e4603a40ea3bd2571a41d0cd6f2e7", "message_id": "0737197c-877a-46a9-8754-d93924e2a6ce", "body": "Commentaire sur plusieurs cellules", "simulate_loss": false}
+Traceback (most recent call last):
+  File "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-tools/drive.py", line 24, in <module>
+    runpy.run_path(str(Path(__file__).with_name("proof.py")), run_name="__main__")
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/runpy.py", line 268, in run_path
+    return _run_module_code(code, init_globals, run_name,
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/runpy.py", line 97, in _run_module_code
+    _run_code(code, mod_globals, init_globals,
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/runpy.py", line 87, in _run_code
+    exec(code, run_globals)
+  File "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-tools/proof.py", line 105, in <module>
+    assert result["status"] == 400
+AssertionError

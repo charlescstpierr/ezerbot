@@ -1,0 +1,114 @@
+✔ a draft typed during creation stays on its thread and does not return on Nouvelle conversation (127.024985ms)
+✔ an orphan welcome document left by an older transfer is purged instead of restored (94.048877ms)
+✔ a refused creation keeps both the submitted text and the text typed while waiting (69.88895ms)
+✔ a maximal bot name and its edit action stay inside an ellipsis rule (82.493535ms)
+✔ the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape (125.139181ms)
+✔ a disabled composer bot focuses the conversation title when the editor is not editable (31.093266ms)
+✔ a disabled composer bot returns menu focus to the editor (32.128748ms)
+✔ short composer names stay whole and a maximal name ellipsizes only when the bar is full (50.41703ms)
+✔ l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce (499.665715ms)
+✔ l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre (225.481001ms)
+✔ « Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file (84.650693ms)
+✔ le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée (67.844733ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 400 (60.657987ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 409 (174.872097ms)
+✔ r10 T24 le même brouillon partage une création de fil et transfère sa citation (86.384565ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué false (167.951276ms)
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: État injoignable
+Ezerbot local connection: La connexion au moteur local est interrompue.
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué true (154.636556ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient queued, aucun brouillon dupliqué (76.480475ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient dispatching, aucun brouillon dupliqué (46.572746ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient unknown, aucun brouillon dupliqué (47.16063ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient accepted, aucun brouillon dupliqué (79.991275ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient echoed, aucun brouillon dupliqué (200.008934ms)
+✔ r10 T10/T11 citation au refus après rename (46.514694ms)
+✔ r10 T10/T11 citation au refus après missing (201.796933ms)
+✔ r10 T10/T11 citation au refus après passage (55.305793ms)
+✔ r10 T10/T11 citation au refus après load (116.100349ms)
+✔ r10 T10/T11 citation au refus après reorder (108.72892ms)
+✔ r10 T12 refus ancien après remove de citation (102.084795ms)
+✔ r10 T12 refus ancien après same de citation (100.825745ms)
+✔ r10 T12 refus ancien après other de citation (127.347986ms)
+✔ r10 T09/N03 un snapshot omet le fil soumis sans écraser le brouillon new (76.134773ms)
+✔ r10 T21 stockage indisponible refuse une tentative avant de perdre le brouillon (50.044066ms)
+Ezerbot local connection: État injoignable
+✔ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré false (133.960674ms)
+✔ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré true (83.069213ms)
+✔ r10 T08 la reprise d'un brouillon de lien attend la création en cours (121.281781ms)
+✔ r10 T16 la fin de sous-tâche conserve texte et fichiers visibles au refus (87.218518ms)
+✔ r10 T03/T21 création refusée conserve mentions et saisie dans leurs documents (168.574227ms)
+✔ r10 T23 restauration tardive après missing ne ressuscite pas la citation (167.635095ms)
+✔ r10 T23 restauration tardive après navigate ne ressuscite pas la citation (143.368164ms)
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+✖ r10 T11 panne réseau de Page ne relance pas sa lecture en boucle (120.861656ms)
+✖ r10 T23 résultat de revalidation tardif après missing (132.249447ms)
+✖ r10 T23 résultat de revalidation tardif après navigate (116.300545ms)
+ℹ tests 42
+ℹ suites 0
+ℹ pass 39
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5019.936777
+
+✖ failing tests:
+
+test at app/ui/draft-transfer.test.cjs:7:29
+✖ r10 T11 panne réseau de Page ne relance pas sa lecture en boucle (120.861656ms)
+  AssertionError [ERR_ASSERTION]: la panne a déclenché 8 lectures
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:997:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:7:29
+✖ r10 T23 résultat de revalidation tardif après missing (132.249447ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  false !== true
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:1015:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:7:29
+✖ r10 T23 résultat de revalidation tardif après navigate (116.300545ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  false !== true
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:1015:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

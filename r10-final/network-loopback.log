@@ -1,0 +1,21 @@
+wrapper
+COMMAND     PID             USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+grokbot-w 59974 cstpierrecharles    9u  IPv4 0xcd3672a0c8f2e693      0t0  TCP 127.0.0.1:65288 (LISTEN)
+grokbot-w 59974 cstpierrecharles   10u  IPv4 0x823579d56afcfb17      0t0  TCP 127.0.0.1:65288->127.0.0.1:54724 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   11u  IPv4 0x823579d56afcfb17      0t0  TCP 127.0.0.1:65288->127.0.0.1:54724 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   12u  IPv4 0xaa8be9d6d4fd7e09      0t0  TCP 127.0.0.1:65288->127.0.0.1:54725 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   13u  IPv4 0xaa8be9d6d4fd7e09      0t0  TCP 127.0.0.1:65288->127.0.0.1:54725 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   14u  IPv4 0x3ae4a346eb43c616      0t0  TCP 127.0.0.1:65288->127.0.0.1:56000 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   15u  IPv4 0x3ae4a346eb43c616      0t0  TCP 127.0.0.1:65288->127.0.0.1:56000 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   16u  IPv4  0x1dade658a02fc20      0t0  TCP 127.0.0.1:65288->127.0.0.1:54727 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   17u  IPv4  0x1dade658a02fc20      0t0  TCP 127.0.0.1:65288->127.0.0.1:54727 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   18u  IPv4 0x3fb26c9458172c5d      0t0  TCP 127.0.0.1:65288->127.0.0.1:54870 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   19u  IPv4 0x3fb26c9458172c5d      0t0  TCP 127.0.0.1:65288->127.0.0.1:54870 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   20u  IPv4 0xa002563e180a33e0      0t0  TCP 127.0.0.1:65288->127.0.0.1:54729 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   21u  IPv4 0xa002563e180a33e0      0t0  TCP 127.0.0.1:65288->127.0.0.1:54729 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   22u  IPv4 0xe7d07fc628daab24      0t0  TCP 127.0.0.1:65288->127.0.0.1:54730 (ESTABLISHED)
+grokbot-w 59974 cstpierrecharles   23u  IPv4 0xe7d07fc628daab24      0t0  TCP 127.0.0.1:65288->127.0.0.1:54730 (ESTABLISHED)
+
+fake
+COMMAND   PID             USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+Python  59967 cstpierrecharles    4u  IPv4 0xd702abd03c65ff83      0t0  TCP 127.0.0.1:65266 (LISTEN)

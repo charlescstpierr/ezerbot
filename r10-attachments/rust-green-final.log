@@ -1,0 +1,139 @@
+   Compiling grokbot-wrapper v0.1.0 (/Users/cstpierrecharles/.treehouse/pm/ez-i294/crates/wrapper)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 34.90s
+     Running tests/delegation.rs (target/debug/deps/delegation-f39f1ae06fe23324)
+
+running 77 tests
+test a_child_can_use_an_image_of_a_selected_entry_as_a_generation_reference ... ok
+test a_voice_message_asks_for_a_short_answer_and_a_typed_one_does_not ... ok
+test captures::forgetting_a_fact_also_clears_it_from_the_captions_the_card_shows ... ok
+test captures::an_image_the_parent_card_result_links_outlives_the_deleted_thread ... ok
+test active_task_send_is_rejected_without_a_second_run ... ok
+test a_delegated_child_cannot_use_a_revoked_image_as_a_generation_reference ... ok
+test a_delegated_child_can_use_its_granted_image_as_a_generation_reference ... ok
+test background_delegate_card_saves_the_action_survives_restart_and_revoke_asks_again ... ok
+test admission_queues_then_refuses ... ok
+test captures::captures_that_are_not_this_threads_or_invalid_are_refused_and_the_child_can_retry ... ok
+test captures::a_child_joins_before_and_after_in_order_and_the_parent_only_reads_a_count ... ok
+test checked_context_is_reused_once_and_cache_is_scoped_to_assembly ... ok
+test cascade_settles_every_unexecuted_child_call ... ok
+test captures::forgetting_a_fact_also_clears_it_from_the_summary_the_card_shows ... ok
+test captures::masking_a_secret_hides_its_text_but_never_breaks_a_reference ... ok
+test captures::forgetting_the_parent_fact_a_child_echoed_clears_it_from_the_parent_card ... ok
+test completed_before_batch_suspension_wake_is_delivered_with_the_group ... ok
+test captures::without_captures_the_result_is_what_it_was ... ok
+test captures::deleting_the_thread_removes_every_reference_from_the_card ... FAILED
+test child_human_input_routes_to_principal_and_is_cancelled_with_parent ... ok
+test child_done_wakes_parent_with_summary ... ok
+test child_routine_does_not_reduce_the_selected_context_window ... ok
+test child_receives_only_selected_context ... ok
+test crash_before_child_launch_reconciles_without_duplicate_runs ... ok
+test cycle_is_refused_as_tool_result ... ok
+test delegation_call_retries_keep_binding_and_terminal_result ... ok
+test deleting_parent_conversation_prevents_any_first_child_model_call ... ok
+test deleting_waiting_task_thread_cancels_child_and_delivers_cancelled_to_parent ... ok
+test expired_last_delegate_still_waits_for_approved_sibling ... ok
+test followup_does_not_bypass_pending_human_gate ... ok
+test denied_last_delegate_still_waits_for_approved_sibling ... ok
+test failed_child_reports_failure_to_parent ... ok
+test followup_during_final_text_gets_another_model_call ... ok
+test followup_identity_denial_terminal_and_invalid_files_are_atomic ... ok
+test hook_storage_failure_is_reconciled_on_tick ... ok
+test malformed_task_conversation_keys_remain_rejected ... ok
+test group_member_can_delegate_and_receive_a_scoped_child_followup ... ok
+test followup_image_bytes_survive_tool_continuations_and_terminal_retry_is_idempotent ... ok
+test individual_cancel_wins_over_late_running_completion ... ok
+test nested_cycle_uses_reserved_ancestor_lineage ... ok
+test model_can_discover_real_recipient_and_selected_message_ids_without_private_history ... ok
+test nested_task_conversation_keys_can_address_the_deepest_child ... ok
+test interrupting_parent_cancels_children_including_queued ... ok
+test newest_long_results_and_all_wakees_fit_the_rendered_context_budget ... ok
+test non_object_last_delegate_cannot_own_the_batch_wait ... ok
+test plain_child_answer_is_preserved_and_completion_contract_is_host_owned ... ok
+test refused_legacy_queue_retry_is_persisted_and_never_promoted ... ok
+test revoking_one_selected_fact_keeps_other_context_and_reports_revocation ... ok
+test queued_child_starts_when_slot_frees ... ok
+test routines_and_all_delegated_result_tails_survive_assembly ... ok
+test parallel_delegates_in_one_response_run_concurrently ... ok
+test running_followup_beats_stale_completion_and_reaches_same_child_run ... ok
+test queued_followup_persists_and_individual_cancel_preserves_siblings ... ok
+test selected_image_follows_when_the_task_input_is_forwarded ... ok
+test task_namespace_is_rejected_for_bot_and_message_ids ... ok
+test selected_resources_are_parent_scoped_and_failed_writes_are_atomic ... ok
+test signout_can_cancel_a_child_before_its_first_tick ... ok
+test selected_images_captions_and_documents_reach_child_after_restart_only ... ok
+test task_thread_accepts_stop_with_its_conversation_key ... ok
+test selected_files_are_revoked_on_reset_and_missing_bytes_fail_honestly ... ok
+test the_voice_mark_leaves_with_its_undelivered_message_and_with_its_conversation ... ok
+test task_transcript_preserves_parent_provenance_followup_and_long_title_after_restart ... ok
+test task_snapshot_keeps_queued_and_cancelled_children_without_a_run ... ok
+test selected_image_reaches_the_child_request_and_not_another_thread ... ok
+test task_send_consumes_only_its_attachment_selection_and_replay_keeps_the_next_draft ... ok
+test thread_scope_keeps_to_its_conversation_and_bot_and_labels_each_task ... ok
+test thread_scope_places_a_task_turn_by_its_reply_entry ... ok
+test thread_scope_forgets_a_task_stamped_after_a_reset_set_back_by_the_clock ... ok
+test thread_scope_lists_a_task_started_in_an_earlier_reply ... ok
+test thread_scope_keeps_a_task_launched_in_the_millisecond_of_the_reset ... ok
+test thread_scope_forgets_the_tasks_a_reset_left_behind ... ok
+test thread_scope_lists_ten_tasks_of_the_last_day_but_counts_them_all ... ok
+test tool_budget_cannot_skip_the_final_batch_wait ... ok
+test unreadable_vault_prevents_child_model_calls_instead_of_dropping_context ... ok
+test yolo_launches_a_delegated_task_without_the_background_card ... ok
+test state_history_is_bounded_and_idle_tick_takes_no_writer_lock ... ok
+test failed_last_delegate_waits_for_its_admitted_sibling ... FAILED
+
+failures:
+
+---- captures::deleting_the_thread_removes_every_reference_from_the_card stdout ----
+
+thread 'captures::deleting_the_thread_removes_every_reference_from_the_card' (56669954) panicked at crates/wrapper/tests/support/mod.rs:666:9:
+délai dépassé : parent state
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- failed_last_delegate_waits_for_its_admitted_sibling stdout ----
+
+thread 'failed_last_delegate_waits_for_its_admitted_sibling' (56671994) panicked at crates/wrapper/tests/support/mod.rs:666:9:
+délai dépassé : parent state
+
+
+failures:
+    captures::deleting_the_thread_removes_every_reference_from_the_card
+    failed_last_delegate_waits_for_its_admitted_sibling
+
+test result: FAILED. 75 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.41s
+
+error: test failed, to rerun pass `-p grokbot-wrapper --test delegation`
+     Running tests/storage.rs (target/debug/deps/storage-f60b1189b46c03f2)
+
+running 27 tests
+test another_window_already_cleaned_is_not_reported_as_retained ... ok
+test forget_markers_are_counted_separately_from_visible_facts ... ok
+test draft_uploads_and_housekeeping_keep_the_local_request_gate ... ok
+test cancelled_document_upload_and_duplicate_selection_never_resurrect_or_drop_a_draft ... ok
+test failure_to_commit_intent_never_unlinks_anything ... ok
+test deleting_a_conversation_and_its_draft_is_one_atomic_decision ... ok
+test expired_preview_never_authorizes_deletion ... ok
+test dry_run_refusal_confirmation_usage_and_audit_survive_restart ... ok
+test deleted_and_unknown_conversations_cannot_keep_inaccessible_drafts ... ok
+test atomic_upload_draft_survives_restart_then_explicit_removal_allows_cleanup ... ok
+test deleted_bot_private_facts_have_confirmation_redaction_and_scope_guards ... ok
+test every_reference_path_is_retained_including_skill_history_and_delegated_children ... ok
+test markdown_links_inside_document_extractions_are_roots_and_corruption_fails_closed ... ok
+test image_names_are_validated_per_draft_and_survive_restart_and_duplicates ... ok
+test purging_old_private_versions_does_not_erase_their_shared_successor ... ok
+test private_purge_refuses_busy_runs_and_rolls_back_storage_errors ... ok
+test legacy_send_consumes_draft_once_and_replay_preserves_a_new_selection ... ok
+test reference_added_after_preview_wins_and_new_orphans_are_not_silently_added ... ok
+test interrupted_cleanup_intents_replay_and_restaging_cancels_old_intents ... ok
+test old_rolled_back_blobs_and_temporaries_clean_but_fresh_and_unknown_files_stay ... ok
+test legacy_draft_name_migration_is_idempotent_and_preserves_references ... ok
+test startup_only_removes_unreferenced_staging_older_than_24_hours ... ok
+test symlinks_unknown_files_and_external_directory_are_never_touched ... ok
+test usage_and_startup_skip_history_scans_until_a_possible_orphan_needs_revalidation ... ok
+test startup_prunes_legacy_drafts_without_removing_files_of_deleted_messages ... ok
+test removing_an_inflight_upload_wins_before_or_after_publication ... ok
+test reselected_attachment_occurrences_survive_old_send_commit_and_restart ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.32s
+
+error: 1 target failed:
+    `-p grokbot-wrapper --test delegation`

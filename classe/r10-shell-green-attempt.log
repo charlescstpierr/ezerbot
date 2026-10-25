@@ -1,0 +1,86 @@
+✔ a draft typed during creation stays on its thread and does not return on Nouvelle conversation (398.62374ms)
+✔ an orphan welcome document left by an older transfer is purged instead of restored (232.231152ms)
+✔ a refused creation keeps both the submitted text and the text typed while waiting (32.251119ms)
+✔ a maximal bot name and its edit action stay inside an ellipsis rule (184.848334ms)
+✔ the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape (68.179405ms)
+✔ a disabled composer bot focuses the conversation title when the editor is not editable (107.058915ms)
+✔ a disabled composer bot returns menu focus to the editor (36.137568ms)
+✔ short composer names stay whole and a maximal name ellipsizes only when the bar is full (155.260035ms)
+✔ l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce (353.616004ms)
+✔ l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre (283.108992ms)
+✔ « Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file (337.077798ms)
+✔ le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée (210.215423ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 400 (197.683414ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 409 (184.799373ms)
+✔ r10 T24 le même brouillon partage une création de fil et transfère sa citation (101.52074ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué false (138.358645ms)
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué true (97.286543ms)
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: État injoignable
+Ezerbot local connection: La connexion au moteur local est interrompue.
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient queued, aucun brouillon dupliqué (50.510605ms)
+✔ r10 T04 le serveur détient dispatching, aucun brouillon dupliqué (49.364641ms)
+✔ r10 T04 le serveur détient unknown, aucun brouillon dupliqué (51.296372ms)
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient accepted, aucun brouillon dupliqué (58.85008ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient echoed, aucun brouillon dupliqué (101.328661ms)
+✔ r10 T10/T11 citation au refus après rename (365.623007ms)
+✔ r10 T10/T11 citation au refus après missing (143.688475ms)
+✔ r10 T10/T11 citation au refus après passage (58.206579ms)
+✔ r10 T10/T11 citation au refus après load (48.290759ms)
+✔ r10 T10/T11 citation au refus après reorder (47.899032ms)
+✔ r10 T12 refus ancien après remove de citation (55.305591ms)
+✔ r10 T12 refus ancien après same de citation (55.246505ms)
+✔ r10 T12 refus ancien après other de citation (261.847407ms)
+✔ r10 T09/N03 un snapshot omet le fil soumis sans écraser le brouillon new (137.868815ms)
+Ezerbot local connection: État injoignable
+✔ r10 T21 stockage indisponible refuse une tentative avant de perdre le brouillon (177.824469ms)
+✔ la Page s’affiche à côté du fil, se renomme, s’ouvre en pleine page, et ne propose pas de partage (29.898501ms)
+✔ une Page de 64 niveaux s’affiche encore (12.633218ms)
+✔ une Page de 65 niveaux est refusée avant de peindre le DOM (2.938935ms)
+✔ une Page déjà enregistrée plus profonde que 64 niveaux est refusée sans construire le DOM (138.917686ms)
+✔ un useState se réinitialise quand la source change et garde le clic si la version est la même (62.497485ms)
+✔ une compilation cassée montre la ligne et le caractère, pas une Page vide réussie (15.567449ms)
+✔ les maps imbriquées respectent le budget cumulé (14, 1) (102.528345ms)
+✔ les maps imbriquées respectent le budget cumulé (14, 0) (23.27578ms)
+✔ les maps imbriquées respectent le budget cumulé (8, 3000) (12.80781ms)
+✔ les maps imbriquées respectent le budget cumulé (40, 1) (148.068266ms)
+✔ 1 000 000 octets de texte répartis en 100 paragraphes se peignent, un de plus non (même borne que compile.rs) (155.687774ms)
+✔ un rafraîchissement identique ne reconstruit pas la Page et garde le focus (3.41255ms)
+✔ une Page écrite par un autre participant d’un groupe s’affiche avec le fil du groupe (2.214261ms)
+✔ une Page dont la conversation a disparu reste ouvrable, sans l’afficher à côté d’un autre fil (11.562985ms)
+✔ une navigation refusée pendant une réponse prévient au lieu d’afficher la Page à côté d’un autre fil (7.640633ms)
+✔ sélectionner « Forfait B » affiche « Commenter » près de la sélection ; le clic pose la puce au-dessus de la boîte de message (4.998366ms)
+✔ l’envoi transmet la Page, la version lue par le panneau et le passage rogné ; la puce part avec le message (2.341444ms)
+✔ l’accusé d’un envoi ne retire que sa citation : la même citation posée à nouveau entre-temps reste (3.334314ms)
+✔ la croix retire la puce : le message part sans ancre (1.683942ms)
+✔ une sélection de plus de 500 caractères ne donne ni bouton ni ancre ; 500 passent (2.132246ms)
+✔ une sélection vide, hors de la Page ou qui déborde du canevas ne donne pas de bouton (2.133445ms)
+✔ au clavier, « Commenter » est un bouton après le canevas et garde la sélection quand il prend le focus (2.726251ms)
+✔ changer de fil retire la puce, et « Commenter » depuis la pleine page revient au fil pour écrire (2.525562ms)
+✔ un clic sur la puce du fil montre la Page ; une Page disparue prévient (117.734138ms)
+✔ ouvrir une autre Page du même fil retire la citation de la première avant tout envoi (3.500882ms)
+✔ dans une sous-tâche déléguée, « Commenter » n’est pas proposé : son envoi n’emporte pas d’ancre (2.229232ms)
+✔ 500 caractères en comptant les emoji comme le moteur : 500 passent, 501 non (2.028732ms)
+✔ le rognage suit `str::trim` de Rust : U+0085 est retiré, U+FEFF est gardé (2.116771ms)
+✔ une sélection sur plusieurs cellules et paragraphes donne le bouton et part telle quelle (2.241228ms)
+✔ les blancs sont réduits à un espace, jamais supprimés : un blanc dans un mot, ou absent entre deux cellules, ne donne pas de bouton (3.822563ms)
+✔ un texte changé par l’état interactif de la Page, absent de l’aperçu que contrôle le moteur, ne donne pas de bouton (4.846417ms)
+✔ dans un groupe, la Page d’un autre participant que le bot du fil ne donne pas de bouton (le moteur répondrait 409) (2.222958ms)
+✔ une navigation refusée vers une autre Page (liste ou puce du fil) garde la citation posée (18.160706ms)
+✔ renommer la Page met le nouveau titre dans la puce de la citation posée (10.227499ms)
+✔ après un renommage, la liste garde le nouveau titre quand l’hôte repeint avec son état (2.717379ms)
+✔ « Commenter » gardé au clavier ne cite pas un passage que la Page modifiée entre-temps n’affiche plus (2.233672ms)
+ℹ tests 68
+ℹ suites 0
+ℹ pass 68
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4986.32611

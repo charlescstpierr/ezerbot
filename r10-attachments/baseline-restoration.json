@@ -1,0 +1,6 @@
+{
+  "final_source_sha256": "e6138750d912565cbb95c877870cc8a93141aa9ca290d0b944bc826cc7eed641",
+  "baseline": "original delete-by-content semantics, new request and DTO retained",
+  "restored_source_sha256": "e6138750d912565cbb95c877870cc8a93141aa9ca290d0b944bc826cc7eed641",
+  "restored_exactly": true
+}

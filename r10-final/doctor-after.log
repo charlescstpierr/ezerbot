@@ -1,0 +1,9 @@
+ok  pid: 59974 vivant et toujours le wrapper lancé
+ok  port: 65288 écouté par [59974]
+ok  build-sha: binaire e84053c9eb08aff8997724ad856c6535fe88f609 commit extrait e84053c9eb08aff8997724ad856c6535fe88f609
+ok  binaire: empreinte inchangée depuis le lancement
+ok  sources: crates et interface identiques au commit
+ok  home: /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-tmp/verify-ezerbot.hfwtr_bz/home
+ok  page: http://127.0.0.1:65288 titre Ezerbot
+ok  faux-openai: http://127.0.0.1:65266
+doctor: ok

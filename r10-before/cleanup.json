@@ -1,0 +1,22 @@
+{
+  "cleaned": true,
+  "killed": {
+    "wrapper": "arrete",
+    "fake": "arrete",
+    "chrome": "absent",
+    "axi": {
+      "session": "verify-ezerbot",
+      "result": "arrete",
+      "code": 0
+    }
+  },
+  "removed_home": true,
+  "home_still_present": false,
+  "processes_still_ours": {
+    "wrapper": false,
+    "fake": false
+  },
+  "evidence": "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-before",
+  "build_sha": "1f0b03c7e2584794101df4c3b0d2c6adc0dcf373",
+  "url": "http://127.0.0.1:52292"
+}

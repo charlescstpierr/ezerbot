@@ -1,0 +1,215 @@
+✔ a draft typed during creation stays on its thread and does not return on Nouvelle conversation (98.60417ms)
+✔ an orphan welcome document left by an older transfer is purged instead of restored (42.088042ms)
+✔ a refused creation keeps both the submitted text and the text typed while waiting (30.63283ms)
+✔ a maximal bot name and its edit action stay inside an ellipsis rule (53.705843ms)
+✔ the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape (57.807321ms)
+✔ a disabled composer bot focuses the conversation title when the editor is not editable (32.732646ms)
+✔ a disabled composer bot returns menu focus to the editor (23.195863ms)
+✔ short composer names stay whole and a maximal name ellipsizes only when the bar is full (34.83028ms)
+✔ l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce (170.176027ms)
+✔ l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre (90.244719ms)
+✔ « Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file (48.632716ms)
+✔ le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée (50.01806ms)
+✖ r10 T01/T02 citation orpheline récupérée après refus 400 (71.50697ms)
+✖ r10 T01/T02 citation orpheline récupérée après refus 409 (82.947377ms)
+✖ r10 T24 le même brouillon partage une création de fil et transfère sa citation (56.224243ms)
+Ezerbot local connection: Envoi interrompu
+✖ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué false (98.140282ms)
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: État injoignable
+Ezerbot local connection: La connexion au moteur local est interrompue.
+✖ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué true (105.740334ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient queued, aucun brouillon dupliqué (50.121811ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient dispatching, aucun brouillon dupliqué (52.260874ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient unknown, aucun brouillon dupliqué (54.365302ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient accepted, aucun brouillon dupliqué (51.007643ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient echoed, aucun brouillon dupliqué (87.305551ms)
+✔ r10 T10/T11 citation au refus après rename (62.509795ms)
+✖ r10 T10/T11 citation au refus après missing (71.706131ms)
+✖ r10 T10/T11 citation au refus après passage (52.170224ms)
+✖ r10 T10/T11 citation au refus après load (87.805358ms)
+✖ r10 T10/T11 citation au refus après reorder (66.092983ms)
+✔ r10 T12 refus ancien après remove de citation (53.533809ms)
+✔ r10 T12 refus ancien après same de citation (52.123483ms)
+✔ r10 T12 refus ancien après other de citation (50.535593ms)
+✖ r10 T09/N03 un snapshot omet le fil soumis sans écraser le brouillon new (52.632034ms)
+✖ r10 T21 stockage indisponible refuse une tentative avant de perdre le brouillon (49.143735ms)
+ℹ tests 32
+ℹ suites 0
+ℹ pass 21
+ℹ fail 11
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2211.579958
+
+✖ failing tests:
+
+test at app/ui/draft-transfer.test.cjs:775:34
+✖ r10 T01/T02 citation orpheline récupérée après refus 400 (71.50697ms)
+  AssertionError [ERR_ASSERTION]: la citation accompagne le brouillon récupéré
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:780:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:775:34
+✖ r10 T01/T02 citation orpheline récupérée après refus 409 (82.947377ms)
+  AssertionError [ERR_ASSERTION]: la citation accompagne le brouillon récupéré
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:780:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:786:1
+✖ r10 T24 le même brouillon partage une création de fil et transfère sa citation (56.224243ms)
+  TypeError: app.window.GrokbotPanels.ensureDraftConversation is not a function
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:790:38)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at app/ui/draft-transfer.test.cjs:803:43
+✖ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué false (98.140282ms)
+  AssertionError [ERR_ASSERTION]: la tentative absente du journal reste récupérable après redémarrage du client
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:812:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:803:43
+✖ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué true (105.740334ms)
+  AssertionError [ERR_ASSERTION]: la tentative absente du journal reste récupérable après redémarrage du client
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:812:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:830:75
+✖ r10 T10/T11 citation au refus après missing (71.706131ms)
+  AssertionError [ERR_ASSERTION]: l'explication de récupération reste visible après l'erreur d'envoi
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:845:17)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'Envoi refusé',
+    expected: /citation|Citation/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:830:75
+✖ r10 T10/T11 citation au refus après passage (52.170224ms)
+  AssertionError [ERR_ASSERTION]: l'explication de récupération reste visible après l'erreur d'envoi
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:845:17)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'Envoi refusé',
+    expected: /citation|Citation/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:830:75
+✖ r10 T10/T11 citation au refus après load (87.805358ms)
+  AssertionError [ERR_ASSERTION]: l'explication de récupération reste visible après l'erreur d'envoi
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:845:17)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'Envoi refusé',
+    expected: /citation|Citation/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:830:75
+✖ r10 T10/T11 citation au refus après reorder (66.092983ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:843:12)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:861:1
+✖ r10 T09/N03 un snapshot omet le fil soumis sans écraser le brouillon new (52.632034ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'Brouillon du fil'
+  - 'Autre brouillon'
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:869:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'Brouillon du fil',
+    expected: 'Autre brouillon',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:873:1
+✖ r10 T21 stockage indisponible refuse une tentative avant de perdre le brouillon (49.143735ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  2 !== 1
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:878:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 2,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

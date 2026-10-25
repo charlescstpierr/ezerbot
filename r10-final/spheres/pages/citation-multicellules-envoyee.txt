@@ -1,0 +1,149 @@
+ezerbot.
+Nouvelle conversation
+⌘ N
+⌘ K
+Mémoire
+0
+BOTS
+Ezerbot
+SUJETS
+
+Regroupez plusieurs fils sous un sujet.
+
+Pages
+Trois forfaits
+CONVERSATIONS
+
+Aujourd’hui
+
+Vérification visuelle
+Vérification visuelle
+Vérification visuelle
+Vérification visuelle
+E
+Espace local
+Paramètres de l’application
+Ezerbot
+/
+Vérification visuelle
+Écran du Mac
+Notifications
+Créer un groupe
+Membres
+Appel vocal
+Page « Trois forfaits » — « Confort »
+Retouche refusée 409
+Envoyé
+Ezerbot
+11 h 38
+
+Bonjour vous
+
+Bon résultat
+Mauvais résultat
+Page « Trois forfaits » — « Confort »
+Accusé tardif de la première citation
+Envoyé
+Ezerbot
+11 h 38
+
+Bonjour vous
+
+Bon résultat
+Mauvais résultat
+Page « Trois forfaits » — « Confort »
+Nouvelle citation du même passage
+Envoyé
+Ezerbot
+11 h 38
+
+Bonjour vous
+
+Bon résultat
+Mauvais résultat
+Page « Trois forfaits » — « Confort »
+Tentative récupérée après rechargement
+Envoyé
+Ezerbot
+11 h 40
+
+Bonjour vous
+
+Bon résultat
+Mauvais résultat
+Page « Trois forfaits » — « Confort »
+Envoi inconnu avec ancre durable
+Envoyé
+Ezerbot
+12 h 08
+
+Bonjour vous
+
+Bon résultat
+Mauvais résultat
+Page « Trois forfaits » — « Confort »
+Reprise avec Page absente par fixture
+Envoyé
+Ezerbot
+12 h 09
+
+Bonjour vous
+
+Bon résultat
+Mauvais résultat
+Page « Trois forfaits » — « Confort »
+Reprise avec Page absente par fixture
+Envoyé
+Ezerbot
+12 h 24
+
+Bonjour vous
+
+Bon résultat
+Mauvais résultat
+Fais-moi une page des forfaits
+Envoyé
+Ezerbot
+12 h 24
+Outil · write_pageAppel terminé
+
+Voici la Page.
+
+Bon résultat
+Mauvais résultat
+Page « Trois forfaits » — « Confort 19 € Choisir Famille »
+Commentaire sur plusieurs cellules
+Envoyé
+Ezerbot
+12 h 24
+
+Voici la Page.
+
+Bon résultat
+Mauvais résultat
+Renommer
+Ouvrir en pleine page
+Trois forfaits
+
+Tout < 30 € par mois
+
+Offre choisie : Essentiel
+
+Offre	Prix	
+Essentiel	9 €	Choisir
+Confort	19 €	Choisir
+Famille	29 €	Choisir
+
+
+
+
+● Enregistrer une réunion
+Ezerbot
+GPT Test
+medium
+Standard
+Mode voix
+Mémo vocal
+Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne
+Quota de votre abonnement ChatGPT ·
+Gérer l’utilisation

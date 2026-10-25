@@ -1,0 +1,131 @@
+✔ a draft typed during creation stays on its thread and does not return on Nouvelle conversation (283.150605ms)
+✔ an orphan welcome document left by an older transfer is purged instead of restored (53.909578ms)
+✔ a refused creation keeps both the submitted text and the text typed while waiting (154.851662ms)
+✔ a maximal bot name and its edit action stay inside an ellipsis rule (105.524323ms)
+✔ the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape (122.093136ms)
+✔ a disabled composer bot focuses the conversation title when the editor is not editable (41.812158ms)
+✔ a disabled composer bot returns menu focus to the editor (25.2728ms)
+✔ short composer names stay whole and a maximal name ellipsizes only when the bar is full (43.167694ms)
+✔ l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce (109.161162ms)
+✔ l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre (190.390465ms)
+✔ « Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file (137.926963ms)
+✔ le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée (130.08637ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 400 (237.115502ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 409 (103.337304ms)
+✔ r10 T24 le même brouillon partage une création de fil et transfère sa citation (94.468402ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué false (125.379601ms)
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: État injoignable
+Ezerbot local connection: La connexion au moteur local est interrompue.
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué true (219.975892ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient queued, aucun brouillon dupliqué (169.419989ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient dispatching, aucun brouillon dupliqué (129.893321ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient unknown, aucun brouillon dupliqué (154.461354ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient accepted, aucun brouillon dupliqué (108.923474ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient echoed, aucun brouillon dupliqué (126.455234ms)
+✔ r10 T10/T11 citation au refus après rename (64.820918ms)
+✔ r10 T10/T11 citation au refus après missing (80.690223ms)
+✔ r10 T10/T11 citation au refus après passage (109.431149ms)
+✔ r10 T10/T11 citation au refus après load (117.784029ms)
+✔ r10 T10/T11 citation au refus après reorder (141.456375ms)
+✔ r10 T12 refus ancien après remove de citation (104.320716ms)
+✔ r10 T12 refus ancien après same de citation (98.131876ms)
+Ezerbot local connection: État injoignable
+✔ r10 T12 refus ancien après other de citation (64.676487ms)
+✔ r10 T09/N03 un snapshot omet le fil soumis sans écraser le brouillon new (85.906744ms)
+✔ r10 T21 stockage indisponible refuse une tentative avant de perdre le brouillon (51.354653ms)
+✔ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré false (60.667402ms)
+✔ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré true (84.755272ms)
+✔ r10 T08 la reprise d'un brouillon de lien attend la création en cours (79.504739ms)
+✔ r10 T16 la fin de sous-tâche conserve texte et fichiers visibles au refus (59.248435ms)
+✔ r10 T03/T21 création refusée conserve mentions et saisie dans leurs documents (133.147932ms)
+✔ r10 T23 restauration tardive après missing ne ressuscite pas la citation (173.369918ms)
+✔ r10 T23 restauration tardive après navigate ne ressuscite pas la citation (113.69094ms)
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+✖ r10 T11 panne réseau de Page ne relance pas sa lecture en boucle (157.802742ms)
+✔ r10 T23 résultat de revalidation tardif après missing (61.376074ms)
+✔ r10 T23 résultat de revalidation tardif après navigate (63.968265ms)
+✔ la Page s’affiche à côté du fil, se renomme, s’ouvre en pleine page, et ne propose pas de partage (72.11712ms)
+✔ une Page de 64 niveaux s’affiche encore (5.235679ms)
+✔ une Page de 65 niveaux est refusée avant de peindre le DOM (9.345259ms)
+✔ une Page déjà enregistrée plus profonde que 64 niveaux est refusée sans construire le DOM (20.141169ms)
+✔ un useState se réinitialise quand la source change et garde le clic si la version est la même (4.995025ms)
+✔ une compilation cassée montre la ligne et le caractère, pas une Page vide réussie (2.181039ms)
+✔ les maps imbriquées respectent le budget cumulé (14, 1) (66.310828ms)
+✔ les maps imbriquées respectent le budget cumulé (14, 0) (24.649282ms)
+✔ les maps imbriquées respectent le budget cumulé (8, 3000) (92.652326ms)
+✔ les maps imbriquées respectent le budget cumulé (40, 1) (49.979407ms)
+✔ 1 000 000 octets de texte répartis en 100 paragraphes se peignent, un de plus non (même borne que compile.rs) (49.789164ms)
+✔ un rafraîchissement identique ne reconstruit pas la Page et garde le focus (17.429606ms)
+✔ une Page écrite par un autre participant d’un groupe s’affiche avec le fil du groupe (30.782331ms)
+✔ une Page dont la conversation a disparu reste ouvrable, sans l’afficher à côté d’un autre fil (27.27033ms)
+✔ une navigation refusée pendant une réponse prévient au lieu d’afficher la Page à côté d’un autre fil (14.714502ms)
+✔ sélectionner « Forfait B » affiche « Commenter » près de la sélection ; le clic pose la puce au-dessus de la boîte de message (5.691094ms)
+✔ l’envoi transmet la Page, la version lue par le panneau et le passage rogné ; la puce part avec le message (2.171269ms)
+✔ l’accusé d’un envoi ne retire que sa citation : la même citation posée à nouveau entre-temps reste (2.47405ms)
+✔ la croix retire la puce : le message part sans ancre (3.640344ms)
+✔ une sélection de plus de 500 caractères ne donne ni bouton ni ancre ; 500 passent (2.249698ms)
+✔ une sélection vide, hors de la Page ou qui déborde du canevas ne donne pas de bouton (1.555022ms)
+✔ au clavier, « Commenter » est un bouton après le canevas et garde la sélection quand il prend le focus (2.051188ms)
+✔ changer de fil retire la puce, et « Commenter » depuis la pleine page revient au fil pour écrire (4.978119ms)
+✔ un clic sur la puce du fil montre la Page ; une Page disparue prévient (5.260928ms)
+✔ ouvrir une autre Page du même fil retire la citation de la première avant tout envoi (11.406146ms)
+✔ dans une sous-tâche déléguée, « Commenter » n’est pas proposé : son envoi n’emporte pas d’ancre (4.84312ms)
+✔ 500 caractères en comptant les emoji comme le moteur : 500 passent, 501 non (6.868731ms)
+✔ le rognage suit `str::trim` de Rust : U+0085 est retiré, U+FEFF est gardé (5.240118ms)
+✔ une sélection sur plusieurs cellules et paragraphes donne le bouton et part telle quelle (8.286242ms)
+✔ les blancs sont réduits à un espace, jamais supprimés : un blanc dans un mot, ou absent entre deux cellules, ne donne pas de bouton (4.389818ms)
+✔ un texte changé par l’état interactif de la Page, absent de l’aperçu que contrôle le moteur, ne donne pas de bouton (5.363654ms)
+✔ dans un groupe, la Page d’un autre participant que le bot du fil ne donne pas de bouton (le moteur répondrait 409) (1.88881ms)
+✔ une navigation refusée vers une autre Page (liste ou puce du fil) garde la citation posée (2.85816ms)
+✔ renommer la Page met le nouveau titre dans la puce de la citation posée (21.502129ms)
+✔ après un renommage, la liste garde le nouveau titre quand l’hôte repeint avec son état (3.251882ms)
+✔ « Commenter » gardé au clavier ne cite pas un passage que la Page modifiée entre-temps n’affiche plus (2.810669ms)
+✔ meeting consent, destination/title, dictation signal, pause/resume, default-delete save and blocked reason (18.181158ms)
+✔ late poll cannot erase stop receipt; audio kept only with explicit checkbox (5.295324ms)
+✔ denial, no audio, cap and retry have alert tones, correct exits and system settings (5.307009ms)
+✔ deleting raw audio or a capture uses styled asynchronous decisions, never window.confirm (2.887272ms)
+✔ a late close event from a cancelled dialog cannot cancel a new decision (2.479967ms)
+✔ welcome capture is created atomically with its title; notes prevent removing its conversation (4.399318ms)
+✔ meeting cannot interrupt an active dictation, and closing a busy response never cancels its microphone (4.105851ms)
+✔ dismissing a restarted capture preserves its conversation when notes are present (4.594311ms)
+✔ the merged conversation voice mode cannot overlap meeting capture (2.257326ms)
+✔ partial text remains reviewable and saveable even when retry is temporarily unavailable (3.063867ms)
+✔ successful missing-passage retry clears the partial warning (2.294673ms)
+✔ a reloaded capture directs cleanup first, cancels its stale adapter, then permits a fresh capture (18.927352ms)
+✔ restart warning has its own fluid row, never the narrow recorder grid (15.377345ms)
+✔ existing conversation messages are never hidden by the meeting empty state (9.843998ms)
+✔ meeting surfaces never invoke native confirm or browser media; unavailable summary copy is conditional (10.029143ms)
+ℹ tests 93
+ℹ suites 0
+ℹ pass 92
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5019.416453
+
+✖ failing tests:
+
+test at app/ui/draft-transfer.test.cjs:7:29
+✖ r10 T11 panne réseau de Page ne relance pas sa lecture en boucle (157.802742ms)
+  AssertionError [ERR_ASSERTION]: la panne a déclenché 6 lectures
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:997:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }

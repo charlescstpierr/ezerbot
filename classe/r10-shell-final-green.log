@@ -1,0 +1,180 @@
+✔ a draft typed during creation stays on its thread and does not return on Nouvelle conversation (308.233711ms)
+✔ an orphan welcome document left by an older transfer is purged instead of restored (162.601275ms)
+✔ a refused creation keeps both the submitted text and the text typed while waiting (55.834216ms)
+✔ a maximal bot name and its edit action stay inside an ellipsis rule (143.547209ms)
+✔ the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape (189.475926ms)
+✔ a disabled composer bot focuses the conversation title when the editor is not editable (33.658638ms)
+✔ a disabled composer bot returns menu focus to the editor (120.038625ms)
+✔ short composer names stay whole and a maximal name ellipsizes only when the bar is full (132.230795ms)
+✔ l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce (549.896724ms)
+✔ l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre (160.844701ms)
+✔ « Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file (294.918518ms)
+✔ le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée (191.469173ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 400 (283.125858ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 409 (289.128547ms)
+✔ r10 T24 le même brouillon partage une création de fil et transfère sa citation (149.931389ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué false (378.160798ms)
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: État injoignable
+Ezerbot local connection: La connexion au moteur local est interrompue.
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué true (318.528499ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient queued, aucun brouillon dupliqué (193.796647ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient dispatching, aucun brouillon dupliqué (179.128208ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient unknown, aucun brouillon dupliqué (108.133504ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient accepted, aucun brouillon dupliqué (190.082962ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient echoed, aucun brouillon dupliqué (113.584506ms)
+✔ r10 T10/T11 citation au refus après rename (128.27421ms)
+✔ r10 T10/T11 citation au refus après missing (242.359996ms)
+✔ r10 T10/T11 citation au refus après passage (116.753174ms)
+Ezerbot local connection: État injoignable
+✔ r10 T10/T11 citation au refus après load (141.601101ms)
+✔ r10 T10/T11 citation au refus après reorder (151.041709ms)
+✔ r10 T12 refus ancien après remove de citation (57.180131ms)
+✔ r10 T12 refus ancien après same de citation (61.75785ms)
+✔ r10 T12 refus ancien après other de citation (222.215991ms)
+✔ r10 T09/N03 un snapshot omet le fil soumis sans écraser le brouillon new (173.774453ms)
+✔ r10 T21 stockage indisponible refuse une tentative avant de perdre le brouillon (106.264942ms)
+✔ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré false (196.228645ms)
+✔ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré true (192.250792ms)
+✔ r10 T08 la reprise d'un brouillon de lien attend la création en cours (158.479131ms)
+Ezerbot local connection: État injoignable
+✔ r10 T16 la fin de sous-tâche conserve texte et fichiers visibles au refus (221.501649ms)
+✔ r10 T03/T21 création refusée conserve mentions et saisie dans leurs documents (253.542551ms)
+✔ r10 T11/T12 restauration tardive après missing ne ressuscite pas la citation (338.811108ms)
+✔ r10 T11/T12 restauration tardive après navigate ne ressuscite pas la citation (122.246225ms)
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+✔ r10 T11 panne réseau de Page ne relance pas sa lecture en boucle (336.779437ms)
+✔ r10 T11/T12 résultat de revalidation tardif après missing (142.14468ms)
+✔ r10 T11/T12 résultat de revalidation tardif après navigate (122.864815ms)
+Ezerbot local connection: État injoignable
+✔ r10 T08 une création de bot tardive laisse le brouillon soumis à son bot (298.919669ms)
+✖ r10 T21 le document restauré survit à un aller-retour sans stockage (224.524591ms)
+Ezerbot local connection: L’accès iPhone est désactivé sur le Mac.
+Ezerbot local connection: L’accès iPhone est désactivé sur le Mac.
+Ezerbot local connection: L’accès iPhone est désactivé sur le Mac.
+✔ r10 T06 fichiers iPhone préservés, accès désactivé sur send (130.269263ms)
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: L’accès iPhone est désactivé sur le Mac.
+Ezerbot local connection: La connexion au moteur local est interrompue.
+✔ r10 T06 fichiers iPhone préservés, accès désactivé sur refresh (150.903451ms)
+✖ r10 N06 notification before envoi refusé récupère A avant ouverture de B (140.036075ms)
+✖ r10 N06 notification during envoi refusé récupère A avant ouverture de B (110.231668ms)
+✔ r10 R21/T21 le brouillon refusé du fil vide garde ses mentions en changeant de bot (171.676101ms)
+✔ la Page s’affiche à côté du fil, se renomme, s’ouvre en pleine page, et ne propose pas de partage (95.614922ms)
+✔ une Page de 64 niveaux s’affiche encore (3.816975ms)
+✔ une Page de 65 niveaux est refusée avant de peindre le DOM (33.610017ms)
+✔ une Page déjà enregistrée plus profonde que 64 niveaux est refusée sans construire le DOM (9.568919ms)
+✔ un useState se réinitialise quand la source change et garde le clic si la version est la même (2.974439ms)
+✔ une compilation cassée montre la ligne et le caractère, pas une Page vide réussie (2.349449ms)
+✔ les maps imbriquées respectent le budget cumulé (14, 1) (52.602843ms)
+✔ les maps imbriquées respectent le budget cumulé (14, 0) (29.599657ms)
+✔ les maps imbriquées respectent le budget cumulé (8, 3000) (83.456299ms)
+✔ les maps imbriquées respectent le budget cumulé (40, 1) (39.42115ms)
+✔ 1 000 000 octets de texte répartis en 100 paragraphes se peignent, un de plus non (même borne que compile.rs) (133.060992ms)
+✔ un rafraîchissement identique ne reconstruit pas la Page et garde le focus (6.433255ms)
+✔ une Page écrite par un autre participant d’un groupe s’affiche avec le fil du groupe (25.218834ms)
+✔ une Page dont la conversation a disparu reste ouvrable, sans l’afficher à côté d’un autre fil (29.940169ms)
+✔ une navigation refusée pendant une réponse prévient au lieu d’afficher la Page à côté d’un autre fil (28.216962ms)
+✔ sélectionner « Forfait B » affiche « Commenter » près de la sélection ; le clic pose la puce au-dessus de la boîte de message (16.819705ms)
+✔ l’envoi transmet la Page, la version lue par le panneau et le passage rogné ; la puce part avec le message (7.341882ms)
+✔ l’accusé d’un envoi ne retire que sa citation : la même citation posée à nouveau entre-temps reste (3.948649ms)
+✔ la croix retire la puce : le message part sans ancre (2.211865ms)
+✔ une sélection de plus de 500 caractères ne donne ni bouton ni ancre ; 500 passent (7.595113ms)
+✔ une sélection vide, hors de la Page ou qui déborde du canevas ne donne pas de bouton (5.361311ms)
+✔ au clavier, « Commenter » est un bouton après le canevas et garde la sélection quand il prend le focus (2.027477ms)
+✔ changer de fil retire la puce, et « Commenter » depuis la pleine page revient au fil pour écrire (3.141829ms)
+✔ un clic sur la puce du fil montre la Page ; une Page disparue prévient (12.81449ms)
+✔ ouvrir une autre Page du même fil retire la citation de la première avant tout envoi (5.655257ms)
+✔ dans une sous-tâche déléguée, « Commenter » n’est pas proposé : son envoi n’emporte pas d’ancre (1.794403ms)
+✔ 500 caractères en comptant les emoji comme le moteur : 500 passent, 501 non (7.741757ms)
+✔ le rognage suit `str::trim` de Rust : U+0085 est retiré, U+FEFF est gardé (10.631811ms)
+✔ une sélection sur plusieurs cellules et paragraphes donne le bouton et part telle quelle (2.658416ms)
+✔ les blancs sont réduits à un espace, jamais supprimés : un blanc dans un mot, ou absent entre deux cellules, ne donne pas de bouton (6.828345ms)
+✔ un texte changé par l’état interactif de la Page, absent de l’aperçu que contrôle le moteur, ne donne pas de bouton (2.17074ms)
+✔ dans un groupe, la Page d’un autre participant que le bot du fil ne donne pas de bouton (le moteur répondrait 409) (13.448477ms)
+✔ une navigation refusée vers une autre Page (liste ou puce du fil) garde la citation posée (4.391913ms)
+✔ renommer la Page met le nouveau titre dans la puce de la citation posée (123.675398ms)
+✔ après un renommage, la liste garde le nouveau titre quand l’hôte repeint avec son état (5.124783ms)
+✔ « Commenter » gardé au clavier ne cite pas un passage que la Page modifiée entre-temps n’affiche plus (2.998776ms)
+✔ meeting consent, destination/title, dictation signal, pause/resume, default-delete save and blocked reason (54.53522ms)
+✔ late poll cannot erase stop receipt; audio kept only with explicit checkbox (38.726803ms)
+✔ denial, no audio, cap and retry have alert tones, correct exits and system settings (15.281518ms)
+✔ deleting raw audio or a capture uses styled asynchronous decisions, never window.confirm (4.895978ms)
+✔ a late close event from a cancelled dialog cannot cancel a new decision (2.640393ms)
+✔ welcome capture is created atomically with its title; notes prevent removing its conversation (3.43621ms)
+✔ meeting cannot interrupt an active dictation, and closing a busy response never cancels its microphone (4.959464ms)
+✔ dismissing a restarted capture preserves its conversation when notes are present (5.447956ms)
+✔ the merged conversation voice mode cannot overlap meeting capture (17.319853ms)
+✔ partial text remains reviewable and saveable even when retry is temporarily unavailable (9.042406ms)
+✔ successful missing-passage retry clears the partial warning (3.258061ms)
+✔ a reloaded capture directs cleanup first, cancels its stale adapter, then permits a fresh capture (11.976972ms)
+✔ restart warning has its own fluid row, never the narrow recorder grid (2.326192ms)
+✔ existing conversation messages are never hidden by the meeting empty state (3.004919ms)
+✔ meeting surfaces never invoke native confirm or browser media; unavailable summary copy is conditional (12.444794ms)
+✔ welcome meeting transfers the staged composer through the shared creation before capture (3.961974ms)
+✔ welcome meeting whose refresh fails remains available for explicit cleanup (2.67368ms)
+ℹ tests 102
+ℹ suites 0
+ℹ pass 99
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 9616.151434
+
+✖ failing tests:
+
+test at app/ui/draft-transfer.test.cjs:7:29
+✖ r10 T21 le document restauré survit à un aller-retour sans stockage (224.524591ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  'conv-1' !== ''
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:1047:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'conv-1',
+    expected: '',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:7:29
+✖ r10 N06 notification before envoi refusé récupère A avant ouverture de B (140.036075ms)
+  evalmachine.<anonymous>:29
+    document.querySelector(".topbar-actions").prepend(button);
+                                              ^
+  
+  TypeError: document.querySelector(...).prepend is not a function
+      at evalmachine.<anonymous>:29:45
+      at evalmachine.<anonymous>:278:3
+      at Script.runInContext (node:vm:149:12)
+      at Object.runInContext (node:vm:301:6)
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:1080:6)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at app/ui/draft-transfer.test.cjs:7:29
+✖ r10 N06 notification during envoi refusé récupère A avant ouverture de B (110.231668ms)
+  evalmachine.<anonymous>:29
+    document.querySelector(".topbar-actions").prepend(button);
+                                              ^
+  
+  TypeError: document.querySelector(...).prepend is not a function
+      at evalmachine.<anonymous>:29:45
+      at evalmachine.<anonymous>:278:3
+      at Script.runInContext (node:vm:149:12)
+      at Object.runInContext (node:vm:301:6)
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:1080:6)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)

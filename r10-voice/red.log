@@ -1,0 +1,125 @@
+✖ T17 R23 memo survives a created thread omitted from refresh and another onState before retry (8.551774ms)
+✔ T17 creation refusal preserves the captured result for retry (2.859388ms)
+✖ T17 created memo does not depend on a successful follow-up refresh (2.175296ms)
+✖ N05 T24 recent capture follows the automatic transfer of the same draft (2.642534ms)
+✔ R19 T14 prepared memos survive stale snapshots and old receipts consume only the submitted memo (2.348137ms)
+✖ R19 T17 a context change announces abandonment of a pending memo (1.828696ms)
+✖ R19 T16 discard announces a pending memo before removing its retry (1.596001ms)
+✖ R19 T09 prepared memo hidden by an absent owner is announced and remains recoverable (1.45312ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 2
+ℹ fail 6
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 143.263526
+
+✖ failing tests:
+
+test at app/ui/panels/voice.test.cjs:94:1
+✖ T17 R23 memo survives a created thread omitted from refresh and another onState before retry (8.551774ms)
+  AssertionError [ERR_ASSERTION]: failed memo remains retryable after onState
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/panels/voice.test.cjs:99:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/panels/voice.test.cjs:118:1
+✖ T17 created memo does not depend on a successful follow-up refresh (2.175296ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+  + []
+  - [
+  -   'memo-1'
+  - ]
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/panels/voice.test.cjs:121:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [],
+    expected: [ 'memo-1' ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/panels/voice.test.cjs:125:1
+✖ N05 T24 recent capture follows the automatic transfer of the same draft (2.642534ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+  + []
+  - [
+  -   'memo-1'
+  - ]
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/panels/voice.test.cjs:130:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [],
+    expected: [ 'memo-1' ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/panels/voice.test.cjs:148:1
+✖ R19 T17 a context change announces abandonment of a pending memo (1.828696ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /mémo.*(?:abandonné|perdu|pas été conservé)/i. Input:
+  
+  'Refus /api/voice/memos'
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/panels/voice.test.cjs:154:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'Refus /api/voice/memos',
+    expected: /mémo.*(?:abandonné|perdu|pas été conservé)/i,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at app/ui/panels/voice.test.cjs:157:1
+✖ R19 T16 discard announces a pending memo before removing its retry (1.596001ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /mémo.*(?:abandonné|perdu|pas été conservé)/i. Input:
+  
+  'Refus /api/voice/memos'
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/panels/voice.test.cjs:163:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'Refus /api/voice/memos',
+    expected: /mémo.*(?:abandonné|perdu|pas été conservé)/i,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at app/ui/panels/voice.test.cjs:166:1
+✖ R19 T09 prepared memo hidden by an absent owner is announced and remains recoverable (1.45312ms)
+  AssertionError [ERR_ASSERTION]: The "string" argument must be of type string. Received type undefined (undefined)
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/panels/voice.test.cjs:170:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: /mémo.*(?:introuvable|inaccessible|indisponible)/i,
+    operator: 'match',
+    diff: 'simple'
+  }

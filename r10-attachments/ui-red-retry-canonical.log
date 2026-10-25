@@ -1,0 +1,58 @@
+✔ welcome attachment handoff preserves rich text and clears both home draft keys (19.229125ms)
+✔ shared attachment sizes use French o / Ko / Mo formatting (0.466489ms)
+✔ composer renders the shared document outline (4.717368ms)
+✔ empty and oversized files leave persistent, terminal refusal chips without reading or uploading (3.181641ms)
+✔ validation refusals hide Retry; transient HTTP failures and native network failures retain it (23.144219ms)
+✔ truncation and assumed encoding have a warning marker, not success-only styling (5.109518ms)
+✔ combined-document limits keep a persistent explanation and unblock after files are removed (5.833705ms)
+✔ escaped-document volume also blocks a single text that would overflow its context (2.935071ms)
+✔ removing an in-flight document aborts its request and ignores a late completion (3.82122ms)
+✔ uploads carry durable draft identity, a stable token and the original image name (5.63251ms)
+✔ state restores named image and document drafts once, without resurrecting a removed piece (3.147628ms)
+✔ discarding a finished task's attachment draft aborts pending uploads and clears its tray (3.588973ms)
+✔ T13 image reselected during send survives old acknowledgement, upload first true (5.040877ms)
+✔ T13 image reselected during send survives old acknowledgement, upload first false (6.010085ms)
+✔ T13 document reselected during send survives old acknowledgement, upload first true (3.629119ms)
+✔ T13 document reselected during send survives old acknowledgement, upload first false (5.343834ms)
+✔ T14 acknowledgement from another thread consumes only captured attachment occurrences (4.751177ms)
+✔ T18 first delayed disk restore does not resurrect a removed file (4.411929ms)
+✔ T18 delayed restore waits for a recent import and preserves its occurrence (7.379298ms)
+✔ T15 preparation failure retains the image unless removed false (5.782091ms)
+✔ T15 preparation failure retains the image unless removed true (4.417069ms)
+✔ T18 restored occurrence tokens are captured and released without removing a newer selection (3.064257ms)
+✖ T18 retry after a delayed restore keeps the user's recent file and releases the older occurrence (6.714879ms)
+✔ T18 delayed disk restore preserves the file reselected after an explicit removal (6.263161ms)
+✔ T15 a failed durable removal leaves a visible explanation (3.586435ms)
+ℹ tests 25
+ℹ suites 0
+ℹ pass 24
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 367.864456
+
+✖ failing tests:
+
+test at app/web/src/attachments-ui.test.js:319:1
+✖ T18 retry after a delayed restore keeps the user's recent file and releases the older occurrence (6.714879ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+      document_9999999999999999999999999999999999999999999999999999999999999999: [
+  +     'old-upload'
+  -     'upload-1'
+      ]
+    }
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:333:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { document_9999999999999999999999999999999999999999999999999999999999999999: [ 'old-upload' ] },
+    expected: { document_9999999999999999999999999999999999999999999999999999999999999999: [ 'upload-1' ] },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }

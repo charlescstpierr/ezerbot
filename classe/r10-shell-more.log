@@ -1,0 +1,336 @@
+✔ a draft typed during creation stays on its thread and does not return on Nouvelle conversation (113.493115ms)
+✔ an orphan welcome document left by an older transfer is purged instead of restored (47.301837ms)
+✔ a refused creation keeps both the submitted text and the text typed while waiting (30.975389ms)
+✔ a maximal bot name and its edit action stay inside an ellipsis rule (59.665175ms)
+✔ the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape (58.250746ms)
+✔ a disabled composer bot focuses the conversation title when the editor is not editable (27.013098ms)
+✔ a disabled composer bot returns menu focus to the editor (26.175416ms)
+✔ short composer names stay whole and a maximal name ellipsizes only when the bar is full (39.772283ms)
+✔ l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce (111.362909ms)
+✔ l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre (103.394251ms)
+✔ « Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file (78.419774ms)
+✔ le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée (54.105773ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 400 (81.733226ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 409 (89.043415ms)
+✔ r10 T24 le même brouillon partage une création de fil et transfère sa citation (89.731669ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué false (112.428126ms)
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: État injoignable
+Ezerbot local connection: La connexion au moteur local est interrompue.
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué true (121.045819ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient queued, aucun brouillon dupliqué (57.783913ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient dispatching, aucun brouillon dupliqué (67.11126ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient unknown, aucun brouillon dupliqué (92.379671ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient accepted, aucun brouillon dupliqué (96.596686ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient echoed, aucun brouillon dupliqué (61.015353ms)
+✔ r10 T10/T11 citation au refus après rename (60.071533ms)
+✔ r10 T10/T11 citation au refus après missing (104.41951ms)
+✔ r10 T10/T11 citation au refus après passage (58.003905ms)
+✔ r10 T10/T11 citation au refus après load (51.67591ms)
+✔ r10 T10/T11 citation au refus après reorder (56.010851ms)
+✔ r10 T12 refus ancien après remove de citation (54.784195ms)
+✔ r10 T12 refus ancien après same de citation (73.779158ms)
+✔ r10 T12 refus ancien après other de citation (79.692967ms)
+✔ r10 T09/N03 un snapshot omet le fil soumis sans écraser le brouillon new (57.949469ms)
+✔ r10 T21 stockage indisponible refuse une tentative avant de perdre le brouillon (49.561895ms)
+✔ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré false (56.067252ms)
+✔ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré true (55.584843ms)
+✔ r10 T08 la reprise d'un brouillon de lien attend la création en cours (72.110611ms)
+✔ r10 T16 la fin de sous-tâche conserve texte et fichiers visibles au refus (98.395124ms)
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+Ezerbot local connection: État injoignable
+
+Interrupted while running:
+
+⚠ app/ui/draft-transfer.test.cjs (app/ui/draft-transfer.test.cjs:1:1)
+✖ app/ui/draft-transfer.test.cjs (410600.619591ms)
+ℹ tests 37
+ℹ suites 0
+ℹ pass 36
+ℹ fail 0
+ℹ cancelled 1
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 410613.408339
+
+✖ failing tests:
+
+test at app/ui/draft-transfer.test.cjs:1:1
+✖ app/ui/draft-transfer.test.cjs (410600.619591ms)
+  'Promise resolution is still pending but the event loop has already resolved'

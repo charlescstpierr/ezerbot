@@ -1,0 +1,12 @@
+build: /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-tools/cargo build --locked -p grokbot-wrapper
+   Compiling grokbot-engine v0.1.0 (/Users/cstpierrecharles/.treehouse/pm/ez-i294/crates/engine)
+   Compiling grokbot-wrapper v0.1.0 (/Users/cstpierrecharles/.treehouse/pm/ez-i294/crates/wrapper)
+   Compiling grokbot-attachments v0.1.0 (/Users/cstpierrecharles/.treehouse/pm/ez-i294/crates/attachments)
+   Compiling grokbot-memory v0.1.0 (/Users/cstpierrecharles/.treehouse/pm/ez-i294/crates/memory)
+   Compiling grokbot-delegation v0.1.0 (/Users/cstpierrecharles/.treehouse/pm/ez-i294/crates/delegation)
+   Compiling grokbot-skills v0.1.0 (/Users/cstpierrecharles/.treehouse/pm/ez-i294/crates/skills)
+   Compiling grokbot-scheduler v0.1.0 (/Users/cstpierrecharles/.treehouse/pm/ez-i294/crates/scheduler)
+   Compiling grokbot-forms v0.1.0 (/Users/cstpierrecharles/.treehouse/pm/ez-i294/crates/forms)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 13s
+run: /Users/cstpierrecharles/.treehouse/pm/ez-i294/target/debug/grokbot-wrapper --port 0 --db /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-tmp/verify-ezerbot.hfwtr_bz/home/workspace.sqlite
+{"url": "http://127.0.0.1:65288", "evidence": "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-final", "sha": "e84053c9eb08aff8997724ad856c6535fe88f609", "port": 65288}

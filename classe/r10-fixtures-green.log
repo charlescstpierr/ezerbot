@@ -1,0 +1,104 @@
+test-gate: 1 places prises, attente (0 s)...
+test-gate: 1 places prises, attente (61 s)...
+test-gate: 1 places prises, attente (122 s)...
+test-gate: 1 places prises, attente (183 s)...
+test-gate: 1 places prises, attente (244 s)...
+test-gate: 1 places prises, attente (305 s)...
+test-gate: 1 places prises, attente (366 s)...
+test-gate: 1 places prises, attente (427 s)...
+test-gate: 1 places prises, attente (488 s)...
+test-gate: 1 places prises, attente (549 s)...
+test-gate: 1 places prises, attente (609 s)...
+test-gate: 1 places prises, attente (670 s)...
+test-gate: 1 places prises, attente (731 s)...
+test-gate: 1 places prises, attente (792 s)...
+test-gate: 1 places prises, attente (853 s)...
+test-gate: 1 places prises, attente (914 s)...
+✔ a draft typed during creation stays on its thread and does not return on Nouvelle conversation (80.103045ms)
+✔ an orphan welcome document left by an older transfer is purged instead of restored (32.240996ms)
+✔ a refused creation keeps both the submitted text and the text typed while waiting (21.066666ms)
+✔ a maximal bot name and its edit action stay inside an ellipsis rule (34.065281ms)
+✔ the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape (52.251513ms)
+✔ a disabled composer bot focuses the conversation title when the editor is not editable (17.87446ms)
+✔ a disabled composer bot returns menu focus to the editor (16.929312ms)
+✔ short composer names stay whole and a maximal name ellipsizes only when the bar is full (23.637969ms)
+✔ l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce (65.052897ms)
+✔ l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre (48.310524ms)
+✔ « Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file (37.286202ms)
+✔ le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée (36.758417ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 400 (52.144124ms)
+✔ r10 T01/T02 citation orpheline récupérée après refus 409 (51.305704ms)
+✔ r10 T24 le même brouillon partage une création de fil et transfère sa citation (53.361189ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué false (77.821396ms)
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: État injoignable
+Ezerbot local connection: La connexion au moteur local est interrompue.
+✔ r10 T05/T22 tentative interrompue récupérable après rechargement, refresh échoué true (62.961151ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient queued, aucun brouillon dupliqué (39.976228ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient dispatching, aucun brouillon dupliqué (40.196099ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient unknown, aucun brouillon dupliqué (39.483605ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient accepted, aucun brouillon dupliqué (39.441409ms)
+Ezerbot local connection: Envoi interrompu
+✔ r10 T04 le serveur détient echoed, aucun brouillon dupliqué (39.639577ms)
+✔ r10 T10/T11 citation au refus après rename (38.168962ms)
+✔ r10 T10/T11 citation au refus après missing (39.099767ms)
+✔ r10 T10/T11 citation au refus après passage (38.989174ms)
+✔ r10 T10/T11 citation au refus après load (39.997754ms)
+✔ r10 T10/T11 citation au refus après reorder (39.706331ms)
+✔ r10 T10/T11 citation au refus après error (41.388093ms)
+✔ r10 T10/T11 citation au refus après version (39.046848ms)
+✔ r10 T12 refus ancien après remove de citation (40.476408ms)
+✔ r10 T12 refus ancien après same de citation (40.239174ms)
+✔ r10 T12 refus ancien après other de citation (62.990105ms)
+✔ r10 T09/N03 un snapshot omet le fil soumis sans écraser le brouillon new (45.641868ms)
+✔ r10 T21 stockage indisponible refuse une tentative avant de perdre le brouillon (48.310635ms)
+✔ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré false (39.350513ms)
+✔ r10 T07 ouverture tardive du sous-fil pendant un envoi, enregistré true (40.200962ms)
+✔ r10 T08 la reprise d'un brouillon de lien attend la création en cours (44.207045ms)
+✔ r10 T16 la fin de sous-tâche conserve texte et fichiers visibles au refus (37.233213ms)
+✔ r10 T03/T21 création refusée conserve mentions et saisie dans leurs documents (39.849018ms)
+✔ r10 T11/T12 restauration tardive après missing ne ressuscite pas la citation (46.680294ms)
+✔ r10 T11/T12 restauration tardive après navigate ne ressuscite pas la citation (49.349369ms)
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+Ezerbot local connection: Réseau coupé
+✔ r10 T11 panne réseau de Page ne relance pas sa lecture en boucle (49.508578ms)
+✔ r10 T11/T12 résultat de revalidation tardif après missing (37.523541ms)
+✔ r10 T11/T12 résultat de revalidation tardif après navigate (39.252255ms)
+✔ r10 T08 une création de bot tardive laisse le brouillon soumis à son bot (48.246732ms)
+✔ r10 T21 le document restauré survit à un aller-retour sans stockage (38.104069ms)
+Ezerbot local connection: L’accès iPhone est désactivé sur le Mac.
+Ezerbot local connection: L’accès iPhone est désactivé sur le Mac.
+Ezerbot local connection: L’accès iPhone est désactivé sur le Mac.
+✔ r10 T06 fichiers iPhone préservés, accès désactivé sur send (31.816166ms)
+Ezerbot local connection: Envoi interrompu
+Ezerbot local connection: L’accès iPhone est désactivé sur le Mac.
+Ezerbot local connection: La connexion au moteur local est interrompue.
+✔ r10 T06 fichiers iPhone préservés, accès désactivé sur refresh (37.159599ms)
+✔ r10 N06 notification before envoi refusé récupère A avant ouverture de B (54.973046ms)
+✔ r10 N06 notification during envoi refusé récupère A avant ouverture de B (50.956214ms)
+✔ r10 R21/T21 le brouillon refusé du fil vide garde ses mentions en changeant de bot (32.598064ms)
+✔ a running task composer only sends follow-ups; cancellation stays in the banner (22.069061ms)
+✔ a finished task retains its draft and attachments, explains the refusal and becomes read-only (5.080711ms)
+✔ task hints prioritize blocked-send alerts over the generic follow-up hint (5.18003ms)
+✔ leaving a finished task restores the ordinary group and chat composer (3.858001ms)
+✔ conversation and compose confirmations keep their position above the composer (3.467364ms)
+✔ copy feedback enters the top layer over settings, even when its footer is offscreen (2.238838ms)
+✔ the foremost bot sheet anchors feedback above its visible action buttons (0.914236ms)
+✔ document save feedback anchors above the destination dialog action footer (1.616488ms)
+✔ older WebKit without popover support hosts the status inside the active modal (1.075485ms)
+✔ expiry safely restores the toast after its temporary modal host has been removed (0.970212ms)
+✔ the status uses a manual popover without stealing focus or clicks (1.625077ms)
+ℹ tests 62
+ℹ suites 0
+ℹ pass 62
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2347.979797

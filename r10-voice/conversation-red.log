@@ -1,0 +1,107 @@
+✖ R32 voice session follows an automatic transfer while listening on the welcome draft (8.346745ms)
+✖ R32 welcome voice sends using the created conversation even when refresh is unavailable (2.143274ms)
+✔ end-to-end voice sends only the recognized utterance once, reads streamed sentences, pauses on approval (3.23906ms)
+✔ voice controls share one toolbar group; listening has no false interrupt and live text follows its tail (1.479918ms)
+✔ the mute button sends mute, says the bot cannot hear, and empties the live transcript; a second click listens again (1.77478ms)
+✔ the screen follows the bridge, not the click: a bridge that stays unmuted keeps the button released (1.374209ms)
+✔ ⌘⇧M toggles the microphone during a session and does nothing without one (10.711787ms)
+✔ leaving the voice mode and starting it again listens: the mute never sticks (1.441426ms)
+✔ a microphone gone while muted is announced when the microphone is turned back on (1.459692ms)
+✔ welcome voice creates a thread only after a successful utterance, never for permission refusal (1.637824ms)
+✔ Escape interrupts audio, switching conversations cancels capture, and late replies cannot restart it (2.420625ms)
+✔ composer voice control stays an icon with a hidden label at every width (0.469998ms)
+✔ meeting ownership disables conversation voice without cancelling the meeting (1.24105ms)
+✔ permission denial and transcription errors stop safely and give French recovery (1.390683ms)
+✔ the voice mode listens to the chosen microphone and never sends it as a voice setting (1.35501ms)
+✔ a microphone gone when the voice mode starts is announced and the mode still runs (2.108903ms)
+✔ each bot's voice mode speaks with the voice, speed and language of its own bot (2.253813ms)
+✔ the bot setting shows the voice of its bot, offers speeds up to 2 and a language or Auto (25.576221ms)
+✔ a single voice is announced as shared by every bot (1.398498ms)
+✔ saving sends the bot's choice, and a refused speed is said without replacing the saved one (1.442687ms)
+✔ the voices the Mac offers are handed to the engine once, so that bots without a choice get distinct ones (3.680604ms)
+✔ in a group, each reply is spoken with the voice of the bot that wrote it (1.506225ms)
+✔ an older bridge answer cannot undo a newer unmute: the screen never says muted while the bridge listens (1.404983ms)
+✔ a gesture while a mute command is in flight is ignored: one command, and the screen follows its answer (2.93678ms)
+✔ a card waiting for a click and a muted microphone are both said (1.526084ms)
+✔ whatever the outcome, lateness and order of the bridge answers, the screen ends on the bridge's muted and the next gesture sends the right command (248.030951ms)
+✔ a mute answered after the session ended changes nothing in the next session (2.650711ms)
+✔ a status that carries the microphone fallback announces it, once, for the microphone asked at the start (1.149355ms)
+✔ a command whose answer never comes ends at its limit: the screen follows the bridge again and the gestures come back (1.958871ms)
+✔ the microphone fallback is announced even when the answer that carries it is an error (2.126891ms)
+✔ a task of this thread that finishes during the voice mode is announced once, with its title, and the bar shows it for 5 s (1.491074ms)
+✔ a failed or refused task is announced as failed, a cancelled one is not (1.201233ms)
+✔ the announcement waits while Charles speaks and is said once he stops (1.1868ms)
+✔ the announcement waits for the end of the sentence being spoken, even while the reply is still being written (1.402289ms)
+✔ a task of another thread is never announced (1.145103ms)
+✔ a task finished before the voice mode opened is not announced (1.067459ms)
+✔ muted with a card waiting, nothing is announced until the card is answered (1.299443ms)
+✔ an announcement that Charles cuts off after the bridge took it is said again once he stops (1.380481ms)
+✔ an announcement that Charles cut by speaking is said again, and shown only once said (1.436541ms)
+✔ an announcement waits for the silence after Charles starts to speak, even before his words are transcribed (1.288984ms)
+✔ an announcement the bridge refused is tried again when the voice mode is relaunched (1.437552ms)
+✔ two announcements in a row are each shown for 5 s, one after the other (1.303333ms)
+✔ an announcement paused by a card and then cut by Charles is said again once the card is answered (1.47864ms)
+✔ an announcement lost by a synthesis failure after the bridge took it is said at the relaunch (1.263738ms)
+✔ an announcement heard to the end is not said again when Charles cuts the bot's next sentence (1.447849ms)
+✔ an announcement whose speak is still unanswered when Charles leaves is said at the relaunch (4.780712ms)
+✔ a synthesis failure reported with the cut of the announcement's own sentence still owes it to the relaunch (1.590726ms)
+✔ an announcement cut by Charles and left before it is said again is said at the relaunch (1.430705ms)
+✔ muting during the 5 s of an announcement shows that the microphone is off (1.30691ms)
+ℹ tests 49
+ℹ suites 0
+ℹ pass 47
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 485.882864
+
+✖ failing tests:
+
+test at app/web/src/voice-conversation-ui.test.js:84:1
+✖ R32 voice session follows an automatic transfer while listening on the welcome draft (8.346745ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+  + []
+  - [
+  -   {
+  -     id: 'text-send',
+  -     text: 'Une phrase ajoutée après la création.'
+  -   }
+  - ]
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/voice-conversation-ui.test.js:90:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [],
+    expected: [ { text: 'Une phrase ajoutée après la création.', id: 'text-send' } ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at app/web/src/voice-conversation-ui.test.js:93:1
+✖ R32 welcome voice sends using the created conversation even when refresh is unavailable (2.143274ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+  + []
+  - [
+  -   {
+  -     id: 'created',
+  -     text: 'Phrase conservée.'
+  -   }
+  - ]
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/voice-conversation-ui.test.js:98:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [],
+    expected: [ { text: 'Phrase conservée.', id: 'created' } ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }

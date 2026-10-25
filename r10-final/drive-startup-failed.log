@@ -1,0 +1,20 @@
+test-gate: 1 places prises, attente (0 s)...
+test-gate: 1 places prises, attente (61 s)...
+Traceback (most recent call last):
+  File "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-tools/drive.py", line 24, in <module>
+    runpy.run_path(str(Path(__file__).with_name("proof.py")), run_name="__main__")
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/runpy.py", line 268, in run_path
+    return _run_module_code(code, init_globals, run_name,
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/runpy.py", line 97, in _run_module_code
+    _run_code(code, mod_globals, init_globals,
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/runpy.py", line 87, in _run_code
+    exec(code, run_globals)
+  File "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-tools/proof.py", line 79, in <module>
+    ready()
+  File "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-tools/proof.py", line 76, in ready
+    command("open", run["url"])
+  File "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-tools/proof.py", line 19, in command
+    result = subprocess.run([axi, *map(str, args)], capture_output=True, text=True, check=True)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/subprocess.py", line 528, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/Users/cstpierrecharles/.local/bin/chrome-devtools-axi', 'open', 'http://127.0.0.1:65288']' returned non-zero exit status 1.

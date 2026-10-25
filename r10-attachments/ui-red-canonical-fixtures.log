@@ -1,0 +1,147 @@
+✔ welcome attachment handoff preserves rich text and clears both home draft keys (31.345206ms)
+✔ shared attachment sizes use French o / Ko / Mo formatting (1.22233ms)
+✔ composer renders the shared document outline (13.181465ms)
+✔ empty and oversized files leave persistent, terminal refusal chips without reading or uploading (6.758851ms)
+✔ validation refusals hide Retry; transient HTTP failures and native network failures retain it (59.432231ms)
+✔ truncation and assumed encoding have a warning marker, not success-only styling (6.806284ms)
+✔ combined-document limits keep a persistent explanation and unblock after files are removed (5.358714ms)
+✔ escaped-document volume also blocks a single text that would overflow its context (4.531477ms)
+✔ removing an in-flight document aborts its request and ignores a late completion (3.458144ms)
+✔ uploads carry durable draft identity, a stable token and the original image name (6.878431ms)
+✔ state restores named image and document drafts once, without resurrecting a removed piece (3.384262ms)
+✔ discarding a finished task's attachment draft aborts pending uploads and clears its tray (5.964661ms)
+✖ T13 image reselected during send survives old acknowledgement, upload first true (12.258609ms)
+✖ T13 image reselected during send survives old acknowledgement, upload first false (12.275327ms)
+✖ T13 document reselected during send survives old acknowledgement, upload first true (7.450383ms)
+✖ T13 document reselected during send survives old acknowledgement, upload first false (9.256838ms)
+✔ T14 acknowledgement from another thread consumes only captured attachment occurrences (6.150945ms)
+✖ T18 first delayed disk restore does not resurrect a removed file (4.911023ms)
+✖ T18 delayed restore waits for a recent import and preserves its occurrence (8.843733ms)
+✔ T15 preparation failure retains the image unless removed false (6.652968ms)
+✔ T15 preparation failure retains the image unless removed true (4.028868ms)
+✖ T18 restored occurrence tokens are captured and released without removing a newer selection (2.178179ms)
+✖ T18 retry after a delayed restore keeps the user's recent file and releases the older occurrence (6.658932ms)
+✖ T18 delayed disk restore preserves the file reselected after an explicit removal (10.915749ms)
+✔ T15 a failed durable removal leaves a visible explanation (3.82389ms)
+ℹ tests 25
+ℹ suites 0
+ℹ pass 16
+ℹ fail 9
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 558.435672
+
+✖ failing tests:
+
+test at app/web/src/attachments-ui.test.js:221:3
+✖ T13 image reselected during send survives old acknowledgement, upload first true (12.258609ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  0 !== 1
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:239:12)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 0,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/web/src/attachments-ui.test.js:221:3
+✖ T13 image reselected during send survives old acknowledgement, upload first false (12.275327ms)
+  SyntaxError: "undefined" is not valid JSON
+      at JSON.parse (<anonymous>)
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:241:27)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at app/web/src/attachments-ui.test.js:221:3
+✖ T13 document reselected during send survives old acknowledgement, upload first true (7.450383ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  0 !== 1
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:239:12)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 0,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/web/src/attachments-ui.test.js:221:3
+✖ T13 document reselected during send survives old acknowledgement, upload first false (9.256838ms)
+  SyntaxError: "undefined" is not valid JSON
+      at JSON.parse (<anonymous>)
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:241:27)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at app/web/src/attachments-ui.test.js:260:1
+✖ T18 first delayed disk restore does not resurrect a removed file (4.911023ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  1 !== 0
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:268:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 1,
+    expected: 0,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/web/src/attachments-ui.test.js:271:1
+✖ T18 delayed restore waits for a recent import and preserves its occurrence (8.843733ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  2 !== 1
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:279:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 2,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/web/src/attachments-ui.test.js:307:1
+✖ T18 restored occurrence tokens are captured and released without removing a newer selection (2.178179ms)
+  SyntaxError: "undefined" is not valid JSON
+      at JSON.parse (<anonymous>)
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:312:25)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1325:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+      at Test.postRun (node:internal/test_runner/test:1465:19)
+      at Test.run (node:internal/test_runner/test:1390:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at app/web/src/attachments-ui.test.js:319:1
+✖ T18 retry after a delayed restore keeps the user's recent file and releases the older occurrence (6.658932ms)
+  SyntaxError: "undefined" is not valid JSON
+      at JSON.parse (<anonymous>)
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:333:25)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at app/web/src/attachments-ui.test.js:339:1
+✖ T18 delayed disk restore preserves the file reselected after an explicit removal (10.915749ms)
+  SyntaxError: "undefined" is not valid JSON
+      at JSON.parse (<anonymous>)
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:350:25)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)

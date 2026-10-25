@@ -1,0 +1,113 @@
+✔ welcome attachment handoff preserves rich text and clears both home draft keys (15.394822ms)
+✔ shared attachment sizes use French o / Ko / Mo formatting (0.385377ms)
+✔ composer renders the shared document outline (3.471447ms)
+✔ empty and oversized files leave persistent, terminal refusal chips without reading or uploading (2.230759ms)
+✔ validation refusals hide Retry; transient HTTP failures and native network failures retain it (20.246557ms)
+✔ truncation and assumed encoding have a warning marker, not success-only styling (3.881429ms)
+✔ combined-document limits keep a persistent explanation and unblock after files are removed (3.631697ms)
+✔ escaped-document volume also blocks a single text that would overflow its context (3.206889ms)
+✔ removing an in-flight document aborts its request and ignores a late completion (2.576158ms)
+✔ uploads carry durable draft identity, a stable token and the original image name (4.27542ms)
+✔ state restores named image and document drafts once, without resurrecting a removed piece (2.298507ms)
+✔ discarding a finished task's attachment draft aborts pending uploads and clears its tray (2.265443ms)
+✖ T13 image reselected during send survives old acknowledgement, upload first true (3.992406ms)
+✖ T13 image reselected during send survives old acknowledgement, upload first false (4.823341ms)
+✖ T13 document reselected during send survives old acknowledgement, upload first true (3.269165ms)
+✖ T13 document reselected during send survives old acknowledgement, upload first false (2.999418ms)
+✔ T14 acknowledgement from another thread consumes only captured attachment occurrences (2.682794ms)
+✖ T18 first delayed disk restore does not resurrect a removed file (2.424398ms)
+✖ T18 delayed restore waits for a recent import and preserves its occurrence (3.371828ms)
+ℹ tests 19
+ℹ suites 0
+ℹ pass 13
+ℹ fail 6
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 237.987674
+
+✖ failing tests:
+
+test at app/web/src/attachments-ui.test.js:209:3
+✖ T13 image reselected during send survives old acknowledgement, upload first true (3.992406ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  0 !== 1
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:227:12)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 0,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/web/src/attachments-ui.test.js:209:3
+✖ T13 image reselected during send survives old acknowledgement, upload first false (4.823341ms)
+  SyntaxError: "undefined" is not valid JSON
+      at JSON.parse (<anonymous>)
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:229:27)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at app/web/src/attachments-ui.test.js:209:3
+✖ T13 document reselected during send survives old acknowledgement, upload first true (3.269165ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  0 !== 1
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:227:12)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 0,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/web/src/attachments-ui.test.js:209:3
+✖ T13 document reselected during send survives old acknowledgement, upload first false (2.999418ms)
+  SyntaxError: "undefined" is not valid JSON
+      at JSON.parse (<anonymous>)
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:229:27)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7)
+
+test at app/web/src/attachments-ui.test.js:248:1
+✖ T18 first delayed disk restore does not resurrect a removed file (2.424398ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  1 !== 0
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:256:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 1,
+    expected: 0,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/web/src/attachments-ui.test.js:259:1
+✖ T18 delayed restore waits for a recent import and preserves its occurrence (3.371828ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  2 !== 1
+  
+      at TestContext.<anonymous> (file:///Users/cstpierrecharles/.treehouse/pm/ez-i294/app/web/src/attachments-ui.test.js:267:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 2,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

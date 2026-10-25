@@ -1,0 +1,16 @@
+✔ T17 R23 memo survives a created thread omitted from refresh and another onState before retry (128.655116ms)
+✔ T17 creation refusal preserves the captured result for retry (4.934505ms)
+✔ T17 created memo does not depend on a successful follow-up refresh (2.961823ms)
+✔ N05 T24 recent capture follows the automatic transfer of the same draft (4.290125ms)
+✔ R19 T14 prepared memos survive stale snapshots and old receipts consume only the submitted memo (6.94558ms)
+✔ R19 T17 a context change announces abandonment of a pending memo (2.87283ms)
+✔ R19 T16 discard announces a pending memo before removing its retry (3.392424ms)
+✔ R19 T09 prepared memo hidden by an absent owner is announced and remains recoverable (2.407199ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 587.629338

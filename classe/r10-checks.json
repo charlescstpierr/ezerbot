@@ -1,0 +1,65 @@
+{
+  "head": "e84053c9eb08aff8997724ad856c6535fe88f609",
+  "checks": [
+    {
+      "command": "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/test-gate node --test app/ui/*.test.cjs app/ui/panels/*.test.cjs app/web/src/*.test.js",
+      "exit": 0,
+      "tests": 1165,
+      "fail": 0,
+      "skipped": 0,
+      "log": "classe/r10-node-integrated.log"
+    },
+    {
+      "command": "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/cargo-gate /Users/cstpierrecharles/.cargo/bin/cargo test --locked -p grokbot-wrapper --lib --test storage --test delegation --test delegation_success --test pages --test state_scale -- --test-threads=4",
+      "exit": 0,
+      "tests": 454,
+      "fail": 0,
+      "ignored": 0,
+      "filtered": 0,
+      "log": "classe/r10-rust-integrated.log"
+    },
+    {
+      "command": "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/cargo-gate /Users/cstpierrecharles/.cargo/bin/cargo fmt --all -- --check",
+      "exit": 0,
+      "log": "classe/r10-fmt-integrated.log"
+    },
+    {
+      "command": "npm run build (cwd app/web)",
+      "exit": 0,
+      "log": "classe/r10-web-build.log"
+    },
+    {
+      "command": "bash tools/compile-native.sh",
+      "exit": 0,
+      "log": "classe/r10-native-build.log"
+    },
+    {
+      "command": "gitleaks git --redact --log-opts=origin/main..HEAD",
+      "exit": 0,
+      "log": "classe/r10-gitleaks-final.log"
+    },
+    {
+      "command": "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/test-gate python3 /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-tools/drive-resume-t23.py /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-final",
+      "exit": 0,
+      "log": "r10-final/drive-full.log",
+      "captures": 11
+    },
+    {
+      "command": "bash .cursor/skills/verify-ezerbot/scripts/doctor.sh --evidence /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-final",
+      "exit": 0,
+      "log": "r10-final/doctor-after.log"
+    },
+    {
+      "command": "bash .cursor/skills/verify-ezerbot/scripts/verdict.sh --evidence /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-final --ref HEAD --status pass",
+      "exit": 0,
+      "log": "r10-final/report.md",
+      "scope": "preuve owner, pas verdict officiel"
+    },
+    {
+      "command": "TMPDIR=/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-tmp CHROME_DEVTOOLS_AXI_SESSION=pm-i294 python3 /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-tools/cleanup-safe.py --evidence /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i294/r10-final",
+      "exit": 0,
+      "log": "r10-final/cleanup.json"
+    }
+  ],
+  "cwd": "/Users/cstpierrecharles/.treehouse/pm/ez-i294"
+}

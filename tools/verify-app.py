@@ -606,28 +606,17 @@ try:
     except urllib.error.HTTPError as error:
         refused = error.code == 403
     require('native launch identity stays private to the native host', refused)
+    from proof_chatgpt_mac import NativeHost, compile_host
     with tempfile.TemporaryDirectory(prefix='grokbot-native-engine-qa-') as directory:
-        identity = LaunchIdentity()
-        isolated = identity.spawn([engine, '--port', '0', '--db', str(Path(directory) / 'workspace.sqlite')],
-            env=dict(os.environ, HOME=directory, CFFIXED_USER_HOME=directory),
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        home = Path(directory).resolve()
+        isolated = NativeHost(compile_host(home, engine), home)
         try:
-            with selectors.DefaultSelector() as selector:
-                selector.register(isolated.stdout, selectors.EVENT_READ)
-                if not selector.select(15):
-                    raise TimeoutError('Isolated native engine did not announce its URL')
-            isolated_url = json.loads(isolated.stdout.readline())['url']
-            with identity.open(isolated_url + '/api/state', timeout=10) as response:
-                state = json.load(response)
-            require('running engine advertises a known mode', state['mode'] in ('simulated', 'chatgpt'))
+            status, state = isolated.call('GET', '/api/state')
+            require('source-native host authenticates its own engine state', status == 200)
+            require('source-native engine advertises a known mode', state['mode'] in ('simulated', 'chatgpt'))
+            isolated.check_journals()
         finally:
-            isolated.terminate()
-            try:
-                isolated.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                isolated.kill()
-                isolated.wait(timeout=5)
-            isolated.stdout.close()
+            isolated.close()
 
     # Query only this application's window metadata, without screen capture or Accessibility.
     source = r'''#import <Cocoa/Cocoa.h>

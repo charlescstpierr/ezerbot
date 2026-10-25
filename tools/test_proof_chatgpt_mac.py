@@ -117,7 +117,8 @@ class ProofChecks(unittest.TestCase):
             calls.append((method, path))
             if path == "/api/state":
                 messages = [{"id": "reply-preuve-1", "state": "echoed", "body": "1. Sept. 2. Sept. 3. Sept."}] if sent else []
-                return 200, {"provider": {"signed_in": signed, "connected": signed},
+                return 200, {"mode": "simulated" if fault == "simulated" else "chatgpt",
+                             "provider": {"signed_in": signed, "connected": signed},
                              "conversations": [{"messages": messages}]}
             if path == "/api/preferences":
                 return 200, {"preferences": body if fault != "model" else {"model": "other", "effort": "high"}}
@@ -185,7 +186,7 @@ class ProofChecks(unittest.TestCase):
             self.scenario("signed")
 
     def test_full_scenario_requires_selected_model_and_successful_send(self):
-        for fault in ("model", "http"):
+        for fault in ("model", "http", "simulated"):
             with self.subTest(fault=fault):
                 with self.assertRaises(self.proof.ProofError):
                     self.scenario(fault)

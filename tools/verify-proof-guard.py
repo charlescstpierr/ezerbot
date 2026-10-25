@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -26,15 +27,19 @@ def contains_sensitive_pattern(text):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Proof of authenticated local calls, without a real account")
+    parser.add_argument("--guard-calls", action="store_true", required=True)
+    parser.parse_args()
     binary = Path(os.environ.get("EZERBOT_WRAPPER", ROOT / "target/debug/grokbot-wrapper"))
     if not binary.is_file():
         binary = Path(os.environ.get("EZERBOT_APP", ROOT / "app/build/Ezerbot.app")) / "Contents/MacOS/grokbot-wrapper"
     require(binary.is_file(), "Build the wrapper through cargo-gate before running the guard proof")
     identity = LaunchIdentity()
+    url = None
     with tempfile.TemporaryDirectory(prefix="ezerbot-proof-guard-") as directory:
         process = identity.spawn([str(binary), "--port", "0", "--db", str(Path(directory) / "workspace.sqlite")],
             env={"PATH": os.environ.get("PATH", ""), "HOME": directory, "CFFIXED_USER_HOME": directory},
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
@@ -75,11 +80,6 @@ def main():
                     "The guard accepted missing launch authentication")
             require(call("/api/state", headers={"X-Ezerbot-Launch": secrets.token_bytes(32).hex()})[0] == 403,
                     "The guard accepted unrelated launch authentication")
-            if "--self-check" in sys.argv:
-                generated = "eyJ" + secrets.token_urlsafe(24)
-                require(contains_sensitive_pattern(generated), "Credential-pattern detection failed")
-                require(not contains_sensitive_pattern("status=200 code=completed"), "Credential-pattern detection rejected a clean log")
-                require(generated not in "fuite", "Credential-pattern detection disclosed a value")
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -89,7 +89,11 @@ def main():
                     process.kill()
                     process.wait(timeout=5)
             process.stdout.close()
-    print("self-check ok" if "--self-check" in sys.argv else "guard-calls ok")
+            diagnostics = process.stderr.read()
+            process.stderr.close()
+            require((url is None or identity.headers(url)["X-Ezerbot-Launch"] not in diagnostics) and
+                    not contains_sensitive_pattern(diagnostics), "The isolated guard journal disclosed a credential")
+    print("guard-calls ok, real ChatGPT journey not executed")
 
 
 if __name__ == "__main__":

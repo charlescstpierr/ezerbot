@@ -72,7 +72,9 @@
       rows = (facts || []).filter((fact) => fact.needs_review === true).sort((a, b) => lastSeen(a) - lastSeen(b));
       draw();
     }
-    return { element: root, sync };
+    // L'écran ouvert depuis une réponse repart sans la note ni l'erreur d'une visite précédente.
+    function reset() { note = problem = ""; draw(); }
+    return { element: root, sync, reset, busy: () => busy };
   }
   window.EzerbotMemoryReview = { create };
 })();

@@ -1052,6 +1052,12 @@
       openBotDialog(bot);
       return { ok: true };
     },
+    // « N souvenirs utilisés » : l'écran Mémoire s'ouvre sur ces souvenirs, avec de quoi revenir à la réponse.
+    onOpenMemory(ids, message) {
+      const space = window.EzerbotMemorySpace;
+      if (!space) return { ok: false, message: "L’écran Mémoire n’est pas disponible ici." };
+      return space.openWith(ids, { conversationId: currentConversation()?.id, messageId: message?.id });
+    },
     async onCopy(text) {
       try { await copyText(text); return true; }
       catch { notify("La copie n’est pas disponible. Sélectionnez le texte pour le copier."); return false; }

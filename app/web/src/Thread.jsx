@@ -21,6 +21,7 @@ import { isTeachMessage, isDemonstrationMessage } from "./teach.js";
 import { citeMarkdown, hasSources, textWithSources } from "./sources.js";
 import { PageQuote } from "./page-quote.jsx";
 import { SourcesContext, SourcesLine, citeComponents, citeTags } from "./sources.jsx";
+import { MemoryUsedPill } from "./memory-used.jsx";
 import { signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
 
 // A capability adds only cards/<name>.jsx exporting `kind` and `Card`.
@@ -271,7 +272,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
           )
           : queued && message.payload?.wait_reason === "signin" ? <SignInCard message={message} actions={actions} /> : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : "En attente"}</span> : streaming && !toolPreparing && <Dots />}
         <MessageAttachments message={message} align="start" markdown />
-        {!streaming && <SourcesLine message={message} onOpenSource={actions.onOpenSource} />}
+        {!streaming && <div className="gb-provenance"><SourcesLine message={message} onOpenSource={actions.onOpenSource} /><MemoryUsedPill message={message} onOpenMemory={actions.onOpenMemory} /></div>}
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
         {visibleNotice(message) && (!queued || message.payload?.parent_turn_id) && (toolPreparing ? <div className="gb-pending" role="status"><Clock /><div className="gb-pending-copy"><strong>Préparation d’un outil</strong><p>Aucune action n’a encore été exécutée.</p></div></div> : <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>)}
         {!streaming && (copyText || message.state === "stopped") && (
@@ -298,7 +299,7 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed, onOpenSource, onOpenPage }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed, onOpenSource, onOpenMemory, onOpenPage }) {
   const [openMenuId, setOpenMenuId] = useState(null);
   const onMenuOpenChange = (messageId, open) => setOpenMenuId((current) => messageMenuOpenId(current, messageId, open));
   const appearance = useAppearance();
@@ -310,7 +311,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThr
   const arrived = useSyncExternalStore(subscribeBundles, arrivedBundles, arrivedBundles);
   const plugins = useMemo(() => ({ code, mermaid, math: createMathPlugin() }), [mermaid, arrived]);
   const threadAction = isGroup || isTask ? undefined : onThread;
-  const actions = useMemo(() => ({ onCopy, onReact, onThread: threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource }), [onCopy, onReact, threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource]);
+  const actions = useMemo(() => ({ onCopy, onReact, onThread: threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource, onOpenMemory }), [onCopy, onReact, threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource, onOpenMemory]);
   const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);
   const last = ordered[ordered.length - 1];
   const findAnchor = useRef(null);

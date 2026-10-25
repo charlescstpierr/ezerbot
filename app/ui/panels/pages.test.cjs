@@ -656,3 +656,61 @@ test("dans un groupe, la Page d’un autre participant que le bot du fil ne donn
   h.selection.change(1, "Forfait B", range);
   assert.equal(comment.hidden, false);
 });
+
+test("une navigation refusée vers une autre Page (liste ou puce du fil) garde la citation posée", async () => {
+  const h = await openForfaits();
+  h.panels.state.conversations = [{ id: "fil" }, { id: "autre" }];
+  h.panels.state.pages.by_bot.grokbot.push({ id: "page_autre", bot_id: "grokbot", conversation_id: "autre", title: "Autre", filename: "autre.page.tsx", status: "ready" });
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  h.select("Forfait B");
+  h.comment.click();
+  const posed = h.anchor();
+  const notices = [];
+  h.panels.notify = (message) => notices.push(message);
+  h.panels.openConversation = () => false;
+  descendants(h.sidebar).find((el) => el.tagName === "button" && el.dataset.pageId === "page_autre").click();
+  h.panels.panel.openPage("page_autre");
+  assert.equal(notices.length, 2);
+  assert.equal(h.quoteBar.hidden, false, "la Page affichée n’a pas changé : sa citation reste");
+  assert.deepEqual(h.anchor(), posed);
+});
+
+test("renommer la Page met le nouveau titre dans la puce de la citation posée", async () => {
+  const h = await openForfaits();
+  h.select("Forfait B");
+  h.comment.click();
+  const rename = descendants(h.main).find((el) => el.tagName === "input");
+  rename.value = "Mes forfaits";
+  rename.listeners.change?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.quoteBar.textContent, "Page « Mes forfaits » — « Forfait B »");
+  // Un renommage venu d’ailleurs (autre fenêtre) arrive avec le rafraîchissement de la Page.
+  h.use({ ...h.current(), title: "Forfaits 2027" });
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  assert.equal(h.quoteBar.textContent, "Page « Forfaits 2027 » — « Forfait B »");
+});
+
+test("« Commenter » gardé au clavier ne cite pas un passage que la Page modifiée entre-temps n’affiche plus", async () => {
+  const h = await openForfaits();
+  h.select("Forfait B");
+  h.comment.focus();
+  h.selection.change(0, "");
+  assert.equal(h.comment.hidden, false);
+  const edited = JSON.parse(JSON.stringify(forfaits));
+  edited.source_version = "b".repeat(64);
+  edited.preview = edited.preview.replace("Forfait B", "Forfait Duo");
+  edited.document.view.children[1].children[0].children[1].children[0] = cell("Forfait Duo");
+  h.use(edited);
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  h.comment.click();
+  assert.equal(h.quoteBar.hidden, true, "le moteur refuserait ce passage (400)");
+  assert.deepEqual(h.anchor(), {});
+  assert.equal(h.comment.hidden, true);
+  // Un passage encore affiché après la modification se cite avec la version lue maintenant.
+  h.select("19 €", textNode(canvasOf(h.main), "19 €"));
+  h.comment.focus();
+  h.use({ ...edited, source_version: "c".repeat(64) });
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  h.comment.click();
+  assert.deepEqual(h.anchor(), { page_anchor: { page_id: "page_forfaits", source_version: "c".repeat(64), passage: "19 €" } });
+});

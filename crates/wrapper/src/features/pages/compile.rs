@@ -891,28 +891,50 @@ fn count_values(value: &Value) -> usize {
     }
 }
 
-fn push_text(out: &mut String, text: &str) -> Result<(), Diagnostic> {
-    if text.len() > MAX_PREVIEW_BYTES - out.len() {
-        return Err(render_budget_exceeded());
-    }
-    out.push_str(text);
-    Ok(())
+/// The preview being built, and what is left of the text budget shared with pages.js. That budget
+/// counts only the text pages.js paints: a `BREAK` goes into the preview without counting, so a
+/// Page refused here is one the panel refuses too (the breaks add at most two bytes per visit).
+struct Preview {
+    text: String,
+    remaining_bytes: usize,
 }
 
-fn push_value(out: &mut String, value: &Value) -> Result<(), Diagnostic> {
-    match value {
-        Value::String(text) => push_text(out, text)?,
-        Value::Number(number) => push_text(out, &number.to_string())?,
-        _ => {}
+impl Preview {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            remaining_bytes: MAX_PREVIEW_BYTES,
+        }
     }
-    Ok(())
+
+    fn push_text(&mut self, text: &str) -> Result<(), Diagnostic> {
+        if text.len() > self.remaining_bytes {
+            return Err(render_budget_exceeded());
+        }
+        self.remaining_bytes -= text.len();
+        self.text.push_str(text);
+        Ok(())
+    }
+
+    fn push_value(&mut self, value: &Value) -> Result<(), Diagnostic> {
+        match value {
+            Value::String(text) => self.push_text(text)?,
+            Value::Number(number) => self.push_text(&number.to_string())?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn push_break(&mut self) {
+        self.text.push_str(BREAK);
+    }
 }
 
 fn preview_node(
     node: &Node,
     row: Option<&[Value]>,
     states: &BTreeMap<String, Value>,
-    out: &mut String,
+    out: &mut Preview,
     depth: usize,
     remaining_visits: &mut usize,
 ) -> Result<(), Diagnostic> {
@@ -924,15 +946,15 @@ fn preview_node(
         return Err(too_deep());
     }
     match node {
-        Node::Text(text) => push_text(out, text)?,
+        Node::Text(text) => out.push_text(text)?,
         Node::State(name) => {
             if let Some(value) = states.get(name) {
-                push_value(out, value)?;
+                out.push_value(value)?;
             }
         }
         Node::Field { index } => {
             if let Some(value) = row.and_then(|cells| cells.get(*index)) {
-                push_value(out, value)?;
+                out.push_value(value)?;
             }
         }
         Node::Map { items, node } => {
@@ -947,7 +969,7 @@ fn preview_node(
         Node::Element { tag, children, .. } => {
             let block = is_block(tag);
             if block {
-                push_text(out, BREAK)?;
+                out.push_break();
             }
             for child in children {
                 let next = if nests(child) {
@@ -961,7 +983,7 @@ fn preview_node(
                 preview_node(child, row, states, out, next, remaining_visits)?;
             }
             if block {
-                push_text(out, BREAK)?;
+                out.push_break();
             }
         }
     }
@@ -970,8 +992,8 @@ fn preview_node(
 
 /// Written where the browser starts a new line or cell (a tab or a line break in a selection) so that
 /// the preview, once its blanks are collapsed, reads like what Charles selects: "Confort 19 €",
-/// never "Confort19 €". Inline elements stay glued to their text, as on screen. The breaks count in
-/// the same text budget, so this side refuses a Page at most earlier than the one in pages.js.
+/// never "Confort19 €". Inline elements stay glued to their text, as on screen. The breaks stay
+/// outside the text budget (`Preview`), which pages.js counts without them.
 const BREAK: &str = " ";
 
 /// The tags `ALLOWED` lets through that the browser shows inline; every other one is a block, a
@@ -1067,9 +1089,10 @@ pub fn compile(source: &str) -> Result<Compiled, Diagnostic> {
     let mut parser = Parser::new(source);
     let view = parser.parse_program()?;
     let states: BTreeMap<_, _> = parser.states.iter().cloned().collect();
-    let mut preview = String::new();
+    let mut built = Preview::new();
     let mut remaining_visits = MAX_RENDER_VISITS;
-    preview_node(&view, None, &states, &mut preview, 1, &mut remaining_visits)?;
+    preview_node(&view, None, &states, &mut built, 1, &mut remaining_visits)?;
+    let preview = built.text;
     if preview.trim().is_empty() {
         return Err(Diagnostic {
             line: 1,
@@ -1289,6 +1312,31 @@ mod tests {
         assert!(inline.contains("Confort 19€"), "{inline:?}");
     }
 
+    /// pages.js peint jusqu'à 1 000 000 octets de texte, sans compter de séparateur : les `BREAK` de
+    /// l'aperçu ne doivent pas faire refuser ici une Page que le panneau affiche.
+    #[test]
+    fn block_breaks_stay_outside_the_text_budget_shared_with_pages_js() {
+        let rows = (0..100)
+            .map(|n| format!("[{n}]"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let text = "x".repeat(10_000);
+        let source = format!(
+            "export default function Page() {{ const rows = [{rows}]; return (<div>{{rows.map((row) => (<p>{text}</p>))}}</div>); }}"
+        );
+        let page = compile(&source).expect("1 000 000 octets de texte, comme dans pages.js");
+        assert_eq!(
+            page.preview.split_whitespace().map(str::len).sum::<usize>(),
+            1_000_000
+        );
+        assert_eq!(page.preview.split_whitespace().count(), 100);
+        let over = source.replacen(&text, &format!("{text}x"), 1);
+        assert_eq!(
+            compile(&over).unwrap_err().message,
+            "la Page dépasse le budget de rendu"
+        );
+    }
+
     #[test]
     fn string_escapes_are_decoded() {
         let preview =
@@ -1430,14 +1478,14 @@ mod tests {
         let states = BTreeMap::new();
         let kept = chain(MAX_DEPTH);
         assert!(node_value(&kept, 1).is_ok());
-        let mut preview = String::new();
+        let mut preview = Preview::new();
         let mut remaining_visits = MAX_RENDER_VISITS;
         preview_node(&kept, None, &states, &mut preview, 1, &mut remaining_visits).unwrap();
-        assert!(preview.contains("ok"), "{preview}");
+        assert!(preview.text.contains("ok"), "{}", preview.text);
 
         let over = chain(MAX_DEPTH + 1);
         assert_eq!(node_value(&over, 1).unwrap_err().message, TOO_DEEP);
-        let mut preview = String::new();
+        let mut preview = Preview::new();
         assert_eq!(
             preview_node(&over, None, &states, &mut preview, 1, &mut remaining_visits)
                 .unwrap_err()

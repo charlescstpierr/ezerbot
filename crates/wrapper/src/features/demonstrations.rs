@@ -220,10 +220,24 @@ fn stop_recording(ctx: &Context<'_>, id: &str, notice: &str) -> Result<(), ApiEr
     ctx.connection.execute("UPDATE wrapper_demonstrations SET status='review',ended_at=?2,summary=?3,notice=?4,capture_error=?5 WHERE id=?1 AND status='recording'",params![id,ctx.now_ms,summary.as_str().unwrap_or(""),message,r.error.as_deref()])?;
     Ok(())
 }
+pub(super) const PURGE_WORK: &str = "SELECT EXISTS(SELECT 1 FROM wrapper_demonstration_images i JOIN wrapper_demonstrations d ON d.id=i.demonstration_id JOIN skills_library s ON s.skill_id=d.skill_id JOIN wrapper_bots b ON b.id=d.bot_id WHERE s.deleted=1 OR b.deleted=1)";
+
+pub(super) fn purge_after_probe(
+    conn: &Connection,
+    after_probe: impl FnOnce(bool),
+) -> Result<(), ApiError> {
+    let available: bool = conn.query_row(PURGE_WORK, [], |r| r.get(0))?;
+    after_probe(available);
+    if available {
+        conn.execute("DELETE FROM wrapper_demonstration_images WHERE demonstration_id IN (SELECT d.id FROM wrapper_demonstrations d JOIN skills_library s ON s.skill_id=d.skill_id JOIN wrapper_bots b ON b.id=d.bot_id WHERE s.deleted=1 OR b.deleted=1)", [])?;
+    }
+    Ok(())
+}
+
 pub fn tick(ctx: &Context<'_>) {
     // Saved provenance survives deleting its original conversation. Deleting the
     // skill or bot, however, also retires any opt-in raw media.
-    let _ = ctx.connection.execute("DELETE FROM wrapper_demonstration_images WHERE demonstration_id IN (SELECT d.id FROM wrapper_demonstrations d JOIN skills_library s ON s.skill_id=d.skill_id JOIN wrapper_bots b ON b.id=d.bot_id WHERE s.deleted=1 OR b.deleted=1)", []);
+    let _ = purge_after_probe(ctx.connection, |_| {});
     let Some(id) = pending_id(ctx.connection) else {
         recordings().lock().unwrap().remove(ctx.db_path);
         return;

@@ -36,7 +36,21 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     Ok(())
 }
 fn purge(conn: &Connection, now: u64) -> Result<(), ApiError> {
-    conn.execute("UPDATE wrapper_meetings SET audio=NULL,expires_at=NULL WHERE audio IS NOT NULL AND expires_at<=?1", [now])?;
+    purge_after_probe(conn, now, |_| {})
+}
+pub(super) const PURGE_WORK: &str =
+    "SELECT EXISTS(SELECT 1 FROM wrapper_meetings WHERE audio IS NOT NULL AND expires_at<=?1)";
+
+pub(super) fn purge_after_probe(
+    conn: &Connection,
+    now: u64,
+    after_probe: impl FnOnce(bool),
+) -> Result<(), ApiError> {
+    let available: bool = conn.query_row(PURGE_WORK, [now], |r| r.get(0))?;
+    after_probe(available);
+    if available {
+        conn.execute("UPDATE wrapper_meetings SET audio=NULL,expires_at=NULL WHERE audio IS NOT NULL AND expires_at<=?1", [now])?;
+    }
     Ok(())
 }
 pub fn tick(ctx: &Context<'_>) {

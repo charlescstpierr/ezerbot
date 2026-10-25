@@ -274,6 +274,7 @@ def verify_ui_regressions():
       const chevron = document.querySelector('.composer-chevron');
       check(`attach plus and composer chevron stay visible at ${width}×${height} ${theme}`, paintedIcon(plus) && paintedIcon(chevron));
       choose('Ezerbot');
+      crowdTools();
       const ezerbotName = $('composer-bot-name');
       check(`composer shows the full Ezerbot name at ${width}×${height} ${theme}`, ezerbotName.textContent === 'Ezerbot' && ezerbotName.scrollWidth <= ezerbotName.clientWidth + 1 && clearOfControls(ezerbotName));
       check(`bot name and chevron stay inside the button at ${width}×${height} ${theme}`, insideBot(ezerbotName) && insideBot(document.querySelector('#composer-bot .composer-chevron')) && modelReadable());

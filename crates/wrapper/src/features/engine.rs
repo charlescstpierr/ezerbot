@@ -1633,6 +1633,10 @@ impl RunServices for Services<'_> {
                 !super::screen::is_tool(&s.name)
                     || super::screen::enabled(self.connection, &run.bot_id)
             })
+            .filter(|s| {
+                s.name != super::routines::QUIET_TOOL
+                    || matches!(run.trigger, Trigger::Occurrence { .. })
+            })
             .map(gated)
             .collect()
     }

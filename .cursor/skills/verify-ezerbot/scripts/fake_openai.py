@@ -256,6 +256,26 @@ def capture_turn(payload: dict, instructions: str, items: list) -> bytes | None:
     return None
 
 
+def routine_turn(items: list) -> bytes | None:
+    """Passage de routine : « rien_a_signaler » puis complete_task, ou un résultat tout de suite."""
+    if not items or not isinstance(items[-1], dict):
+        return None
+    usage = {"input_tokens": 1, "output_tokens": 2}
+    last = items[-1]
+    if last.get("type") == "function_call_output":
+        if last.get("call_id") != "verify-quiet":
+            return None
+        name, call_id, arguments = "complete_task", "verify-quiet-done", {"summary": "Rien de neuf."}
+    elif "preuve-rien-a-signaler" in _last_user_text(items):
+        name, call_id, arguments = "rien_a_signaler", "verify-quiet", {}
+    elif "preuve-resultat" in _last_user_text(items):
+        name, call_id, arguments = "complete_task", "verify-result", {"summary": "Trois nouveaux courriels."}
+    else:
+        return None
+    call = {"id": f"fc-{call_id}", "type": "function_call", "status": "completed", "call_id": call_id, "name": name, "arguments": json.dumps(arguments)}
+    return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed", "response": {"usage": usage}}])
+
+
 def parent_message(instructions: str) -> str:
     """Le message parent d'un sous-fil : bloc de données externes JSON dans les instructions."""
     for found in re.finditer(r"<external_data[^>]*>\n(.*?)\n</external_data>", instructions, re.S):
@@ -322,6 +342,9 @@ def response_body(raw: bytes) -> bytes:
     recall = recall_turn(items)
     if recall is not None:
         return recall
+    routine = routine_turn(items)
+    if routine is not None:
+        return routine
     outputs = [item for item in items if isinstance(item, dict) and item.get("type") == "function_call_output"]
     if outputs and outputs[-1].get("call_id") == "verify-context":
         call = {

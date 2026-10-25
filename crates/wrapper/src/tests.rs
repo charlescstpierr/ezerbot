@@ -2100,7 +2100,7 @@ fn a_secret_stored_while_the_replies_are_masked_never_leaves_in_clear() {
     // for it, a tool worker stores the renewed token, before the second reply is masked.
     let mut stored = false;
     let conversations = app
-        .conversations_settled(&mut || {
+        .conversations_settled(None, &mut || {
             if !stored {
                 vault.set("OAUTH_RENOUVELE", "", secret).unwrap();
                 stored = true;
@@ -2118,7 +2118,7 @@ fn a_secret_stored_while_the_replies_are_masked_never_leaves_in_clear() {
     // with a stale snapshot.
     let mut renewals = 0;
     let refused = app
-        .conversations_settled(&mut || {
+        .conversations_settled(None, &mut || {
             renewals += 1;
             vault
                 .set("OAUTH_RENOUVELE", "", &format!("{secret}-{renewals}"))
@@ -2126,6 +2126,32 @@ fn a_secret_stored_while_the_replies_are_masked_never_leaves_in_clear() {
         })
         .unwrap_err();
     assert_eq!(refused.status, 503);
+}
+
+#[test]
+fn a_send_response_projecting_one_conversation_is_masked_with_a_settled_vault() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let secret = "jeton-oauth-renouvele-pendant-la-reponse";
+    let id = history_quoting(&mut app, secret);
+    let vault = super::features::engine::event_vault(&app.connection).unwrap();
+    let mut stored = false;
+    let conversations = app
+        .conversations_settled(Some(&id), &mut || {
+            if !stored {
+                vault.set("OAUTH_RENOUVELE", "", secret).unwrap();
+                stored = true;
+            }
+        })
+        .unwrap();
+    assert!(stored, "the vault changed during the projection");
+    assert_eq!(conversations.len(), 1);
+    let replies = replies(&conversations);
+    assert_eq!(replies.len(), 2);
+    for reply in &replies {
+        assert!(!reply.contains(secret), "secret in clear: {reply}");
+        assert!(reply.contains("[...]"), "{reply}");
+    }
 }
 
 /// A conversation without any direct reply (#377): one routine reply (`engine_reply`) and one
@@ -2239,7 +2265,7 @@ fn a_secret_stored_while_routine_and_group_replies_are_masked_never_leaves_in_cl
     // renewed token, before the group reply is masked.
     let mut stored = false;
     let conversations = app
-        .conversations_settled(&mut || {
+        .conversations_settled(None, &mut || {
             if !stored {
                 vault.set("OAUTH_RENOUVELE", "", secret).unwrap();
                 stored = true;

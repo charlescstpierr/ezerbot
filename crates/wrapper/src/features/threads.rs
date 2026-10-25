@@ -107,9 +107,7 @@ fn open(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
     validate_id(&input.message_id)?;
     app.require_conversation(&input.conversation_id)?;
     let parent = app
-        .conversations()?
-        .into_iter()
-        .find(|item| item.id == input.conversation_id)
+        .conversation(&input.conversation_id)?
         .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?;
     if parent.kind != "chat" {
         return Err(ApiError::new(

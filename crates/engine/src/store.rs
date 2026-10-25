@@ -7,8 +7,8 @@
 //! On SQLITE_BUSY or a uniqueness race, callers must roll back and retry the
 //! whole transaction, never reuse a stale WAL snapshot (see model::start).
 use crate::contracts::{
-    Result, RunEvent, RunEventKind, SuspendCause, TaskStatus, TokenUsage, Trigger, TurnEnd,
-    WakeCause, WakeStatus,
+    ContextEstimate, Result, RunEvent, RunEventKind, SuspendCause, TaskStatus, TokenUsage, Trigger,
+    TurnEnd, WakeCause, WakeStatus,
 };
 use crate::model::{invalid, BudgetUsage, Run, RunStatus};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -80,7 +80,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
-    if !(1..=2).contains(&version) {
+    if !(1..=3).contains(&version) {
         return Err(invalid(format!(
             "unsupported engine schema version {version}"
         )));
@@ -99,6 +99,15 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             UPDATE component_versions SET version=2 WHERE component='engine';
             RELEASE engine_usage_migration;")?;
     }
+    if version < 3 {
+        // Legacy rows keep NULL: the estimate was never recorded, which is not zero.
+        conn.execute_batch("SAVEPOINT engine_estimate_migration;
+            ALTER TABLE engine_response_usage ADD COLUMN context_characters INTEGER CHECK(context_characters >= 0);
+            ALTER TABLE engine_response_usage ADD COLUMN characters_per_token INTEGER CHECK(characters_per_token > 0);
+            ALTER TABLE engine_response_usage ADD COLUMN tool_characters INTEGER CHECK(tool_characters >= 0);
+            UPDATE component_versions SET version=3 WHERE component='engine';
+            RELEASE engine_estimate_migration;")?;
+    }
     Ok(())
 }
 
@@ -108,19 +117,26 @@ pub fn save_token_usage(
     run_id: &str,
     response: u32,
     usage: &TokenUsage,
+    estimate: Option<&ContextEstimate>,
 ) -> Result<()> {
     require_transaction(conn)?;
     conn.execute(
-        "INSERT INTO engine_response_usage (run_id,response,input_tokens,output_tokens,cached_input_tokens)
-        VALUES (?1,?2,?3,?4,?5)
+        "INSERT INTO engine_response_usage (run_id,response,input_tokens,output_tokens,cached_input_tokens,
+        context_characters,characters_per_token,tool_characters)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
         ON CONFLICT(run_id,response) DO UPDATE SET input_tokens=excluded.input_tokens,
-        output_tokens=excluded.output_tokens,cached_input_tokens=excluded.cached_input_tokens",
+        output_tokens=excluded.output_tokens,cached_input_tokens=excluded.cached_input_tokens,
+        context_characters=excluded.context_characters,characters_per_token=excluded.characters_per_token,
+        tool_characters=excluded.tool_characters",
         params![
             run_id,
             response,
             usage.input_tokens,
             usage.output_tokens,
-            usage.cached_input_tokens
+            usage.cached_input_tokens,
+            estimate.map(|e| e.characters),
+            estimate.map(|e| e.characters_per_token),
+            estimate.map(|e| e.tool_characters)
         ],
     )?;
     Ok(())
@@ -163,11 +179,8 @@ pub(crate) fn trigger_key(trigger: &Trigger) -> (&str, &str, u32) {
 
 pub fn get(conn: &Connection, run_id: &str) -> Result<Option<Run>> {
     let record: Option<String> = conn
-        .query_row(
-            "SELECT record FROM engine_runs WHERE run_id = ?1",
-            [run_id],
-            |row| row.get(0),
-        )
+        .prepare_cached("SELECT record FROM engine_runs WHERE run_id = ?1")?
+        .query_row([run_id], |row| row.get(0))
         .optional()?;
     record
         .map(|record| Ok(serde_json::from_str(&record)?))
@@ -924,7 +937,7 @@ mod tests {
                 [],
                 |row| row.get::<_, i64>(0)
             )?,
-            2
+            3
         );
         assert!(model::start(&conn, &sample()).is_err());
         Ok(())
@@ -943,11 +956,11 @@ mod tests {
             output_tokens: 10,
             cached_input_tokens: 80,
         };
-        assert!(save_token_usage(&conn, "run", 1, &usage).is_err());
+        assert!(save_token_usage(&conn, "run", 1, &usage, None).is_err());
         with_tx(&conn, |conn| {
-            save_token_usage(conn, "run", 1, &usage)?;
-            save_token_usage(conn, "run", 1, &usage)?;
-            save_token_usage(conn, "run", 2, &usage)
+            save_token_usage(conn, "run", 1, &usage, None)?;
+            save_token_usage(conn, "run", 1, &usage, None)?;
+            save_token_usage(conn, "run", 2, &usage, None)
         })?;
         assert_eq!(
             token_usage(&conn, "run")?,
@@ -964,7 +977,96 @@ mod tests {
             &TokenUsage {
                 cached_input_tokens: 101,
                 ..usage
-            }
+            },
+            None
+        ))
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn estimate_columns_migrate_from_v2_keeping_legacy_rows_unknown() -> Result<()> {
+        let conn = database()?;
+        conn.execute_batch(
+            "DROP TABLE engine_response_usage;
+            CREATE TABLE engine_response_usage (
+                run_id TEXT NOT NULL REFERENCES engine_runs(run_id),
+                response INTEGER NOT NULL CHECK(response > 0),
+                input_tokens INTEGER NOT NULL CHECK(input_tokens >= 0),
+                output_tokens INTEGER NOT NULL CHECK(output_tokens >= 0),
+                cached_input_tokens INTEGER NOT NULL CHECK(cached_input_tokens >= 0 AND cached_input_tokens <= input_tokens),
+                PRIMARY KEY(run_id, response)
+            );
+            INSERT INTO engine_response_usage VALUES ('run',1,100,10,0);
+            UPDATE component_versions SET version=2 WHERE component='engine';",
+        )?;
+        migrate(&conn)?;
+        migrate(&conn)?;
+        let version = |conn: &Connection| {
+            conn.query_row(
+                "SELECT version FROM component_versions WHERE component='engine'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        };
+        assert_eq!(version(&conn)?, 3);
+        let legacy = conn.query_row(
+            "SELECT context_characters,characters_per_token,tool_characters
+            FROM engine_response_usage WHERE response=1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )?;
+        assert_eq!(legacy, (None, None, None));
+        assert_eq!(
+            token_usage(&conn, "run")?,
+            Some(TokenUsage {
+                input_tokens: 100,
+                output_tokens: 10,
+                cached_input_tokens: 0
+            })
+        );
+        let usage = TokenUsage {
+            input_tokens: 50,
+            output_tokens: 5,
+            cached_input_tokens: 0,
+        };
+        let estimate = ContextEstimate {
+            characters: 190,
+            characters_per_token: 4,
+            tool_characters: 30,
+        };
+        with_tx(&conn, |conn| {
+            save_token_usage(conn, "run", 2, &usage, Some(&estimate))
+        })?;
+        let stored = conn.query_row(
+            "SELECT context_characters,characters_per_token,tool_characters
+            FROM engine_response_usage WHERE response=2",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        assert_eq!(stored, (190, 4, 30));
+        let zero_rate = ContextEstimate {
+            characters_per_token: 0,
+            ..estimate
+        };
+        assert!(with_tx(&conn, |conn| save_token_usage(
+            conn,
+            "run",
+            3,
+            &usage,
+            Some(&zero_rate)
         ))
         .is_err());
         Ok(())

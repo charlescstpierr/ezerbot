@@ -1428,17 +1428,31 @@ fn shell(
     // $0 is the leader token. Restart kills this group only while that
     // argument and the recorded start time still belong to this pid.
     let leader = super::shell_tasks::leader_token();
+    // Only a background task has a line to read: it can wait on a prompt. The
+    // watchdog holds a copy of the writer of that input, so the host dying
+    // closes the host's copy only: the program reads no end of file before the
+    // watchdog has killed its group, itself included.
+    let (program_input, host_input) = if a.background {
+        let (reader, writer) = std::io::pipe().map_err(io_error)?;
+        (Some(reader), Some(writer))
+    } else {
+        (None, None)
+    };
     let watchdog = Command::new("/bin/sh")
         .arg("-c")
         // The parent alone owns the pipe writer (CLOEXEC). EOF also works
-        // after SIGKILL, without PID polling or a sleep/fork loop.
-        .arg("read -r _; /bin/kill -KILL -- -$$")
+        // after SIGKILL, without PID polling or a sleep/fork loop. `kill` is
+        // the shell's own: a full process table cannot refuse it.
+        .arg("read -r _; kill -s KILL -- -$$")
         .arg(&leader)
         .current_dir(&cwd)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(match &host_input {
+            Some(writer) => Stdio::from(writer.try_clone().map_err(io_error)?),
+            None => Stdio::null(),
+        })
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()
@@ -1491,12 +1505,7 @@ fn shell(
             "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
         )
         .env("LANG", "fr_CA.UTF-8")
-        // Only a background task has a line to read: it can wait on a prompt.
-        .stdin(if a.background {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(program_input.map_or_else(Stdio::null, Stdio::from))
         .stdout(Stdio::from(OwnedFd::from(out_writer)))
         .stderr(Stdio::from(OwnedFd::from(err_writer)))
         .process_group(group.0.id() as i32);
@@ -1510,7 +1519,7 @@ fn shell(
                    // The host's end of the pipe never blocks: a program that stopped reading
                    // refuses the line instead of freezing the app. (The program's end is a
                    // separate open file description, so it keeps blocking reads.)
-    let stdin = match child.stdin.take() {
+    let stdin = match host_input {
         Some(stdin) => {
             rustix::fs::fcntl_setfl(&stdin, rustix::fs::OFlags::NONBLOCK)
                 .map_err(|error| io_error(error.into()))?;

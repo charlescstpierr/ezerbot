@@ -1775,6 +1775,58 @@ fn a_stopped_task_stays_stopped_when_no_process_can_start() {
 }
 
 #[test]
+fn a_task_whose_app_dies_is_killed_before_its_input_closes() {
+    // The App dies for real (abort): the test runs again alone in a child
+    // process, which says where its task lives before dying.
+    const CHILD: &str = "EZERBOT_TASK_HOST_DIES";
+    if std::env::var_os(CHILD).is_some() {
+        let mut f = Fixture::new();
+        f.settings(true, false);
+        start_background(&mut f, "mort", "read -r ligne; printf fin > apres.txt");
+        let pgid: i64 = f
+            .db()
+            .query_row(
+                "SELECT pgid FROM wrapper_shell_tasks WHERE call_id='mort'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        println!("GROUPE={pgid}");
+        println!("DOSSIER={}", f.root().display());
+        std::process::abort();
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "a_task_whose_app_dies_is_killed_before_its_input_closes",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let field = |name: &str| {
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .unwrap_or_else(|| panic!("{name} absent : {stdout}"))
+            .to_owned()
+    };
+    let pgid: i32 = field("GROUPE=").parse().unwrap();
+    let root = PathBuf::from(field("DOSSIER="));
+    let group = rustix::process::Pid::from_raw(pgid).unwrap();
+    wait("le groupe de la tâche a disparu", || {
+        rustix::process::test_kill_process_group(group).is_err()
+    });
+    let continued = root.join("apres.txt").exists();
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(
+        !continued,
+        "la tâche de l’App morte a continué après la fin de son entrée"
+    );
+}
+
+#[test]
 fn a_password_prompt_written_one_byte_at_a_time_still_refuses_the_secret() {
     let mut f = Fixture::new();
     f.settings(true, false);

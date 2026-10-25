@@ -34,9 +34,11 @@ const APP_NAME: &str = "Ezerbot";
 const CALLBACK_PORTS: std::ops::RangeInclusive<u16> = 1455..=1465;
 const CALLBACK_PATH: &str = "/auth/callback";
 const SIGN_IN_WINDOW: Duration = Duration::from_secs(300);
-/// Borne de l'attente des fils de fond dans les tests (jamais compilée dans la version livrée).
+/// Borne de l'attente des fils de fond (jamais compilée dans la version livrée). Un tour en vol à
+/// la destruction de l'`App` peut légitimement finir une commande au premier plan, qui dure
+/// 120 s au plus : la borne laisse cette durée et une marge, puis l'attente échoue.
 #[cfg(debug_assertions)]
-const BACKGROUND_WAIT_LIMIT: Duration = Duration::from_secs(60);
+const BACKGROUND_WAIT_LIMIT: Duration = Duration::from_secs(150);
 const REFRESH_MARGIN: u64 = 300;
 /// Attente courte : un flock tenu par un processus vivant n’est jamais volé.
 const REFRESH_LOCK_WAIT: Duration = Duration::from_millis(400);
@@ -369,11 +371,25 @@ struct Inner {
     catalog: Mutex<Catalog>,
     quota: Mutex<codex::UsageCache>,
     mcp: crate::mcp::Manager,
-    /// Fils réseau de fond (sonde de connexion, catalogue, quota, lecture d'un tour), gardés
-    /// seulement pour qu'un test attende leur fin. Compilé dans les versions de développement et
-    /// de test uniquement : la version livrée n'a ni ce champ ni cette attente.
+    /// Fils de fond du produit (sonde de connexion, catalogue, quota, lecture d'un tour, tour du
+    /// moteur, suivis de fond), gardés seulement pour que la destruction de l'`App` ou un test
+    /// attende leur fin. Compilé dans les versions de développement et de test uniquement : la
+    /// version livrée n'a ni ce champ ni cette attente.
     #[cfg(debug_assertions)]
-    background: Mutex<Vec<thread::JoinHandle<()>>>,
+    background: Mutex<Vec<Background>>,
+    /// Nombre d'attentes de fils de fond commencées : un test sait ainsi que la destruction de
+    /// l'`App` est en cours sans deviner un délai.
+    #[cfg(debug_assertions)]
+    waits_started: AtomicUsize,
+}
+
+/// Un fil de fond retenu. `stop` est l'indicateur que le fil observe pour finir de lui-même :
+/// les attentes longues (retour OAuth, code d'appareil GitHub) le reçoivent, les autres fils
+/// ont une durée bornée par leurs propres délais réseau.
+#[cfg(debug_assertions)]
+struct Background {
+    handle: thread::JoinHandle<()>,
+    stop: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Clone)]
@@ -807,6 +823,18 @@ fn write_credentials(path: &Path, credentials: &Credentials) -> std::io::Result<
     fs::rename(temporary, path)
 }
 
+/// La réponse de l'écouteur à un retour qui arrive quand la connexion n'est plus attendue.
+fn ended_reply() -> loopback::Reply {
+    loopback::Reply::new(
+        409,
+        page(
+            "Connexion non terminée",
+            "Cette demande de connexion n’est plus en cours. Revenez dans Ezerbot pour recommencer.",
+        ),
+    )
+    .header("Content-Type", "text/html; charset=utf-8")
+}
+
 fn page(title: &str, detail: &str) -> String {
     let escape = |s: &str| {
         s.replace('&', "&amp;")
@@ -863,29 +891,74 @@ impl Session {
                 mcp: crate::mcp::Manager::default(),
                 #[cfg(debug_assertions)]
                 background: Mutex::new(Vec::new()),
+                #[cfg(debug_assertions)]
+                waits_started: AtomicUsize::new(0),
             }),
         }
     }
 
-    /// Lance un fil réseau de fond détaché, comme `thread::spawn` : l'appelant n'attend jamais
-    /// sa fin. En développement et en test, la poignée est retenue pour `wait_background`.
-    fn spawn_background(&self, work: impl FnOnce() + Send + 'static) {
-        let handle = thread::spawn(work);
+    /// Lance un fil de fond détaché, comme `thread::spawn` : l'appelant n'attend jamais sa fin.
+    /// En développement et en test, la poignée est retenue pour `wait_background`, que la
+    /// destruction de l'`App` appelle. Dans la version livrée la poignée est lâchée : le produit
+    /// ne joint rien et l'arrêt de l'application ne change pas.
+    pub(crate) fn spawn_background(&self, work: impl FnOnce() + Send + 'static) {
+        self.track(None, None, work)
+            .expect("le système refuse de créer un fil de fond");
+    }
+
+    /// Comme `spawn_background`, avec le nom du fil, et sans paniquer si le système refuse de
+    /// le créer : l'appelant a un repli.
+    pub(crate) fn try_spawn_background(
+        &self,
+        name: &str,
+        work: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<()> {
+        self.track(Some(name), None, work)
+    }
+
+    /// Comme `spawn_background`, pour un fil qui attend un événement externe (retour du
+    /// navigateur, autorisation GitHub) : `stop` est levé par `wait_background` pour qu'il finisse.
+    pub(crate) fn spawn_background_stoppable(
+        &self,
+        stop: Arc<AtomicBool>,
+        work: impl FnOnce() + Send + 'static,
+    ) {
+        self.track(None, Some(stop), work)
+            .expect("le système refuse de créer un fil de fond");
+    }
+
+    fn track(
+        &self,
+        name: Option<&str>,
+        stop: Option<Arc<AtomicBool>>,
+        work: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<()> {
+        let mut builder = thread::Builder::new();
+        if let Some(name) = name {
+            builder = builder.name(name.to_owned());
+        }
+        let handle = builder.spawn(work)?;
         #[cfg(debug_assertions)]
         {
             let mut handles = lock(&self.inner.background);
-            handles.retain(|handle| !handle.is_finished());
-            handles.push(handle);
+            handles.retain(|background| !background.handle.is_finished());
+            handles.push(Background { handle, stop });
         }
         #[cfg(not(debug_assertions))]
-        drop(handle);
+        {
+            let _ = stop;
+            drop(handle);
+        }
+        Ok(())
     }
 
     /// Attend la fin de tous les fils de fond lancés par cette session, y compris ceux que la fin
-    /// d'un autre fil vient de lancer (le fil OAuth de connexion relance un catalogue). Réservé
-    /// aux tests, qui veulent supprimer leur dossier seulement quand plus rien ne peut y écrire ;
-    /// jamais appelé par le produit. L'attente est bornée : un fil qui ne finit pas est une fuite,
-    /// elle échoue avec un message au lieu de bloquer le test.
+    /// d'un autre fil vient de lancer (le fil OAuth de connexion relance un catalogue), après avoir
+    /// levé l'indicateur d'arrêt de ceux qui attendent un événement externe. Appelée par la
+    /// destruction de l'`App` et par les tests, pour que plus rien n'écrive dans le dossier de
+    /// l'application une fois détruite ; jamais appelée par la version livrée. L'attente est
+    /// bornée : un fil qui ne finit pas est une fuite, elle échoue avec un message au lieu de
+    /// bloquer.
     #[cfg(debug_assertions)]
     pub(crate) fn wait_background(&self) -> Result<(), String> {
         self.wait_background_within(BACKGROUND_WAIT_LIMIT)
@@ -893,27 +966,38 @@ impl Session {
 
     #[cfg(debug_assertions)]
     pub(crate) fn wait_background_within(&self, limit: Duration) -> Result<(), String> {
+        self.inner.waits_started.fetch_add(1, Ordering::SeqCst);
         let current = thread::current().id();
         let deadline = Instant::now() + limit;
         loop {
             let pending: Vec<_> = std::mem::take(&mut *lock(&self.inner.background))
                 .into_iter()
-                .filter(|handle| handle.thread().id() != current)
+                .filter(|background| background.handle.thread().id() != current)
                 .collect();
             if pending.is_empty() {
                 return Ok(());
             }
-            for handle in pending {
-                while !handle.is_finished() {
+            for background in &pending {
+                if let Some(stop) = &background.stop {
+                    stop.store(true, Ordering::SeqCst);
+                }
+            }
+            let mut pending = pending.into_iter();
+            while let Some(background) = pending.next() {
+                while !background.handle.is_finished() {
                     if Instant::now() >= deadline {
+                        // Les fils non finis restent suivis : une attente suivante les revoit.
+                        let mut kept = lock(&self.inner.background);
+                        kept.push(background);
+                        kept.extend(pending);
                         return Err(format!(
                             "un fil de fond du fournisseur n'a pas fini après {limit:?} : \
-                             il écrirait encore dans le dossier du test"
+                             il écrirait encore dans le dossier de l'application"
                         ));
                     }
                     thread::sleep(Duration::from_millis(5));
                 }
-                let _ = handle.join();
+                let _ = background.handle.join();
             }
         }
     }
@@ -1176,7 +1260,9 @@ impl Session {
             .find_map(|attempt| {
                 if attempt > 0 { thread::sleep(Duration::from_millis(50)); }
                 ports.clone().find_map(|port| {
-                    tiny_http::Server::http(("127.0.0.1", port)).ok().map(|server| (server, port))
+                    loopback::Listener::bind(("127.0.0.1", port), ended_reply())
+                        .ok()
+                        .map(|server| (server, port))
                 })
             })
             .ok_or_else(|| {
@@ -1249,7 +1335,10 @@ impl Session {
         }
         let provider = self.clone();
         // Suivi comme les autres fils de fond : à la fin il relance le catalogue des modèles.
-        self.spawn_background(move || provider.await_callback(server, attempt, cancel));
+        let stop = cancel.clone();
+        self.spawn_background_stoppable(stop, move || {
+            provider.await_callback(server, attempt, cancel)
+        });
         if self.inner.open_browser {
             // L'adresse peut contenir `id_token_hint` : elle va au navigateur, jamais dans un journal.
             let _ = std::process::Command::new("/usr/bin/open")
@@ -1259,7 +1348,12 @@ impl Session {
         Ok(url)
     }
 
-    fn await_callback(&self, server: tiny_http::Server, attempt: Attempt, cancel: Arc<AtomicBool>) {
+    fn await_callback(
+        &self,
+        server: loopback::Listener,
+        attempt: Attempt,
+        cancel: Arc<AtomicBool>,
+    ) {
         let mut server = Some(server);
         let deadline = Instant::now() + SIGN_IN_WINDOW;
         let outcome = loop {
@@ -1269,7 +1363,7 @@ impl Session {
             if Instant::now() >= deadline {
                 break Err("La connexion a expiré. Recommencez.".to_owned());
             }
-            let Ok(Some(request)) = server
+            let Some(request) = server
                 .as_ref()
                 .expect("serveur actif")
                 .recv_timeout(Duration::from_millis(250))
@@ -1278,13 +1372,13 @@ impl Session {
             };
             let url = request.url().to_owned();
             if url.split('?').next() != Some(CALLBACK_PATH) {
-                let _ = request.respond(tiny_http::Response::empty(404));
+                request.respond(&loopback::Reply::new(404, ""));
                 continue;
             }
             let query = parse_query(&url);
             // Un retour dont l'état ne correspond pas n'appartient pas à cette tentative.
             if query.get("state") != Some(&attempt.state) {
-                let _ = request.respond(tiny_http::Response::empty(400));
+                request.respond(&loopback::Reply::new(400, ""));
                 continue;
             }
             // Libérer le port avant l’échange réseau, qui peut être lent ou annulé.
@@ -1308,9 +1402,9 @@ impl Session {
                 ),
                 Err(message) => page("Connexion non terminée", message),
             };
-            let header = tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8")
-                .expect("en-tête constant");
-            let _ = request.respond(tiny_http::Response::from_string(html).with_header(header));
+            request.respond(
+                &loopback::Reply::new(200, html).header("Content-Type", "text/html; charset=utf-8"),
+            );
             break outcome;
         };
         let mut signin = lock(&self.inner.signin);
@@ -2179,10 +2273,1149 @@ impl<R: BufRead> BufRead for Cancellable<'_, R> {
     }
 }
 
+/// Écouteur de retour OAuth sur une adresse de bouclage : connexion ChatGPT et connecteurs.
+///
+/// Pas tiny_http 0.12 : un fil de sa piscine lit chaque connexion acceptée et dépose ses
+/// requêtes dans une file partagée, et détruire son `Server` ne fait qu'arrêter l'acceptation.
+/// Une requête arrivée après le départ de l'attente reste dans cette file, que plus personne ne
+/// lit, et ce fil garde la connexion ouverte jusqu'à ce qu'elle soit servie : le navigateur
+/// attend sans fin. Ici, une connexion acceptée appartient à son fil de lecture, borné, puis à
+/// sa `Request` ; une requête que l'attente ne prend plus reçoit `gone`, puis la fermeture.
+///
+/// Un afflux de connexions locales ne retient pas l'attente : `recv_timeout` rend d'abord une
+/// requête déjà lue, accepte au plus `ACCEPT_BUDGET` connexions par passage et revient à son
+/// échéance, où l'appelant vérifie l'annulation et l'expiration. Au plus `MAX_ACTIVE`
+/// connexions sont lues ou attendent dans la file à la fois. Quand toutes les places sont
+/// prises, la plus vieille connexion qui n'a pas livré de requête complète (muette, ou en drain
+/// après un refus) est fermée pour faire place à la nouvelle ; une requête complète n'est
+/// jamais évincée, et une nouvelle connexion sans place attend la sienne au lieu d'être fermée.
+pub(crate) mod loopback {
+    use std::collections::VecDeque;
+    use std::io::{self, Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    /// Un retour n'a qu'une ligne de requête (`code`, `state`) et quelques en-têtes : 16 Kio au
+    /// plus, terminateur compris.
+    const HEAD_LIMIT: usize = 16 * 1024;
+    /// Temps laissé à une connexion acceptée pour envoyer ses en-têtes ; elle est fermée ensuite.
+    const HEAD_WINDOW: Duration = Duration::from_secs(10);
+    const WRITE_WINDOW: Duration = Duration::from_secs(5);
+    /// Après un refus, ce qui reste à lire est jeté pendant ce temps au plus, pour que la
+    /// fermeture n'efface pas la réponse chez le client.
+    const DRAIN_WINDOW: Duration = Duration::from_secs(1);
+    const DRAIN_LIMIT: usize = 64 * 1024;
+    /// Rythme auquel `recv_timeout` accepte les connexions en attente.
+    const ACCEPT_EVERY: Duration = Duration::from_millis(20);
+    /// Connexions acceptées par passage : un navigateur en ouvre au plus 6 par hôte.
+    const ACCEPT_BUDGET: usize = 16;
+    /// Connexions lues (un fil chacune) ou en file à la fois, évincées non comptées ; la file
+    /// ne peut en contenir plus.
+    const MAX_ACTIVE: usize = 32;
+    /// Fils évincés qui n'ont pas encore rendu leur place : au-delà, plus aucune éviction tant
+    /// qu'ils ne sont pas sortis. Au plus `MAX_ACTIVE + MAX_LEAVING` fils par écouteur.
+    const MAX_LEAVING: usize = 8;
+    /// Une connexion acceptée depuis moins longtemps n'est pas évincée : son fil a le temps de
+    /// lire des en-têtes déjà arrivés, même sous un afflux qui renouvelle ses connexions.
+    const EVICTABLE_AFTER: Duration = Duration::from_millis(100);
+
+    /// Une réponse entière, toujours suivie de la fermeture de la connexion.
+    pub(crate) struct Reply {
+        status: u16,
+        headers: Vec<(&'static str, String)>,
+        body: String,
+    }
+    impl Reply {
+        pub(crate) fn new(status: u16, body: impl Into<String>) -> Self {
+            Self {
+                status,
+                headers: Vec::new(),
+                body: body.into(),
+            }
+        }
+        pub(crate) fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+            self.headers.push((name, value.into()));
+            self
+        }
+        fn send(&self, mut stream: TcpStream) {
+            self.write(&mut stream);
+        }
+        fn write(&self, stream: &mut TcpStream) {
+            let reason = match self.status {
+                200 => "OK",
+                400 => "Bad Request",
+                404 => "Not Found",
+                409 => "Conflict",
+                431 => "Request Header Fields Too Large",
+                _ => "",
+            };
+            let mut message = format!(
+                "HTTP/1.1 {} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                self.status,
+                self.body.len()
+            );
+            for (name, value) in &self.headers {
+                message.push_str(&format!("{name}: {value}\r\n"));
+            }
+            message.push_str("\r\n");
+            message.push_str(&self.body);
+            let _ = stream.set_write_timeout(Some(WRITE_WINDOW));
+            let _ = stream
+                .write_all(message.as_bytes())
+                .and_then(|()| stream.flush());
+            let _ = stream.shutdown(Shutdown::Write);
+        }
+    }
+
+    /// Les places d'un écouteur. Seul son passage d'acceptation les incrémente.
+    #[derive(Default)]
+    struct Places {
+        /// Places tenues : fils de lecture, évincés compris, et requêtes pas encore servies.
+        active: AtomicUsize,
+        /// Fils évincés pas encore sortis. Décrémenté avant que leur place soit rendue.
+        leaving: AtomicUsize,
+    }
+    impl Places {
+        /// Places tenues hors évincés. `active` est lu d'abord : une sortie concurrente
+        /// décrémente `leaving` puis `active`, donc l'estimation n'est jamais trop basse.
+        fn held(&self) -> (usize, usize) {
+            let active = self.active.load(Ordering::SeqCst);
+            let leaving = self.leaving.load(Ordering::SeqCst);
+            (active, active.saturating_sub(leaving))
+        }
+    }
+
+    /// Une place, rendue à sa destruction.
+    struct Slot(Arc<Places>);
+    impl Slot {
+        fn take(places: &Arc<Places>) -> Self {
+            places.active.fetch_add(1, Ordering::SeqCst);
+            Self(places.clone())
+        }
+    }
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            self.0.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// En-têtes en lecture, ou refus en drain : évinçable.
+    const READING: u8 = 0;
+    /// Requête complète confiée à l'écouteur : jamais évincée.
+    const HANDED: u8 = 1;
+    const EVICTED: u8 = 2;
+    /// Fil sorti sans requête.
+    const OVER: u8 = 3;
+
+    /// Ce que l'écouteur voit d'une connexion lue : une copie de son socket, pour la fermer.
+    struct Watch {
+        stream: TcpStream,
+        accepted: Instant,
+        state: AtomicU8,
+    }
+
+    /// La place d'un fil de lecture. Sa destruction ferme une connexion qui n'a rien livré,
+    /// compte la sortie d'un fil évincé, puis rend la place.
+    struct Reader {
+        watch: Arc<Watch>,
+        slot: Option<Slot>,
+    }
+    impl Reader {
+        /// La place passe à la requête, sauf si l'écouteur vient d'évincer la connexion.
+        fn hand(&mut self) -> Option<Slot> {
+            self.watch
+                .state
+                .compare_exchange(READING, HANDED, Ordering::SeqCst, Ordering::SeqCst)
+                .ok()
+                .and_then(|_| self.slot.take())
+        }
+    }
+    impl Drop for Reader {
+        fn drop(&mut self) {
+            let watch = &self.watch;
+            match watch
+                .state
+                .compare_exchange(READING, OVER, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                // L'écouteur garde une copie du socket : sans cela, le client ne verrait la
+                // fermeture qu'au prochain tri des connexions lues.
+                Ok(_) => {
+                    let _ = watch.stream.shutdown(Shutdown::Both);
+                }
+                Err(EVICTED) => {
+                    if let Some(slot) = &self.slot {
+                        slot.0.leaving.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                Err(_) => {}
+            }
+            drop(self.slot.take());
+        }
+    }
+
+    /// Les connexions lues, de la plus vieille à la plus récente, et celle qui attend une place.
+    #[derive(Default)]
+    struct Admission {
+        readers: VecDeque<Arc<Watch>>,
+        waiting: Option<TcpStream>,
+    }
+
+    /// Une requête reçue en entier. Servie par `respond`, ou par `gone` à sa destruction.
+    pub(crate) struct Request {
+        stream: Option<TcpStream>,
+        method: String,
+        url: String,
+        host: Option<String>,
+        gone: Arc<Reply>,
+        _slot: Slot,
+    }
+    impl Request {
+        pub(crate) fn method(&self) -> &str {
+            &self.method
+        }
+        pub(crate) fn url(&self) -> &str {
+            &self.url
+        }
+        pub(crate) fn host(&self) -> Option<&str> {
+            self.host.as_deref()
+        }
+        pub(crate) fn respond(mut self, reply: &Reply) {
+            if let Some(stream) = self.stream.take() {
+                reply.send(stream);
+            }
+        }
+    }
+    impl Drop for Request {
+        fn drop(&mut self) {
+            if let Some(stream) = self.stream.take() {
+                self.gone.send(stream);
+            }
+        }
+    }
+
+    /// Le port est libéré quand l'écouteur est détruit ; les requêtes restées dans sa file et
+    /// celles qui arrivent ensuite sur une connexion déjà acceptée reçoivent `gone`.
+    pub(crate) struct Listener {
+        socket: TcpListener,
+        port: u16,
+        sender: SyncSender<Request>,
+        requests: Receiver<Request>,
+        gone: Arc<Reply>,
+        places: Arc<Places>,
+        admission: Mutex<Admission>,
+    }
+    impl Listener {
+        pub(crate) fn bind(address: impl ToSocketAddrs, gone: Reply) -> io::Result<Self> {
+            let socket = TcpListener::bind(address)?;
+            socket.set_nonblocking(true)?;
+            let port = socket.local_addr()?.port();
+            let (sender, requests) = mpsc::sync_channel(MAX_ACTIVE);
+            Ok(Self {
+                socket,
+                port,
+                sender,
+                requests,
+                gone: Arc::new(gone),
+                places: Arc::default(),
+                admission: Mutex::default(),
+            })
+        }
+        pub(crate) fn port(&self) -> u16 {
+            self.port
+        }
+        /// La première requête entière reçue avant `timeout`. Revient à l'échéance même sous
+        /// un afflux de connexions, et rend d'abord une requête déjà lue.
+        pub(crate) fn recv_timeout(&self, timeout: Duration) -> Option<Request> {
+            let deadline = Instant::now() + timeout;
+            loop {
+                if let Ok(request) = self.requests.try_recv() {
+                    return Some(request);
+                }
+                self.accept_waiting(deadline);
+                let left = deadline.saturating_duration_since(Instant::now());
+                match self.requests.recv_timeout(left.min(ACCEPT_EVERY)) {
+                    Ok(request) => return Some(request),
+                    Err(RecvTimeoutError::Timeout) if !left.is_zero() => {}
+                    Err(_) => return None,
+                }
+            }
+        }
+        /// Accepte au plus `ACCEPT_BUDGET` connexions, et rien après `deadline`. Une connexion
+        /// qui n'a pas de place attend la sienne, et l'acceptation avec elle.
+        fn accept_waiting(&self, deadline: Instant) {
+            let mut admission = self
+                .admission
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for _ in 0..ACCEPT_BUDGET {
+                if Instant::now() >= deadline {
+                    return;
+                }
+                let stream = match admission.waiting.take() {
+                    Some(stream) => stream,
+                    None => match self.socket.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
+                            ) =>
+                        {
+                            continue
+                        }
+                        Err(_) => return,
+                    },
+                };
+                if let Err(stream) = self.place(stream, &mut admission.readers) {
+                    admission.waiting = Some(stream);
+                    return;
+                }
+            }
+        }
+        /// Donne une place et un fil à `stream`, au besoin en évinçant la plus vieille
+        /// connexion qui n'a rien livré ; la rend si aucune place ne peut se libérer.
+        fn place(
+            &self,
+            stream: TcpStream,
+            readers: &mut VecDeque<Arc<Watch>>,
+        ) -> Result<(), TcpStream> {
+            readers.retain(|watch| watch.state.load(Ordering::SeqCst) == READING);
+            let (active, held) = self.places.held();
+            if active >= MAX_ACTIVE + MAX_LEAVING
+                || (held >= MAX_ACTIVE && !self.evict_oldest(readers))
+            {
+                return Err(stream);
+            }
+            // Sans copie, la connexion ne pourrait être évincée : elle est fermée.
+            let Ok(copy) = stream.try_clone() else {
+                return Ok(());
+            };
+            let watch = Arc::new(Watch {
+                stream: copy,
+                accepted: Instant::now(),
+                state: AtomicU8::new(READING),
+            });
+            readers.push_back(watch.clone());
+            let reader = Reader {
+                watch,
+                slot: Some(Slot::take(&self.places)),
+            };
+            let sender = self.sender.clone();
+            let gone = self.gone.clone();
+            // Un fil qui ne démarre pas emporte et ferme sa connexion et sa place.
+            let _ = thread::Builder::new()
+                .name("retour-oauth".into())
+                .spawn(move || read_head(stream, &sender, gone, reader));
+            Ok(())
+        }
+        /// Ferme la plus vieille connexion qui lit encore ses en-têtes ou jette un refus, si
+        /// elle a au moins `EVICTABLE_AFTER` : son fil, débloqué, sort et rend sa place.
+        fn evict_oldest(&self, readers: &mut VecDeque<Arc<Watch>>) -> bool {
+            if self.places.leaving.load(Ordering::SeqCst) >= MAX_LEAVING {
+                return false;
+            }
+            while let Some(watch) = readers.pop_front() {
+                if watch.accepted.elapsed() < EVICTABLE_AFTER {
+                    readers.push_front(watch);
+                    return false;
+                }
+                // Compté avant la bascule : le fil évincé le décompte en sortant.
+                self.places.leaving.fetch_add(1, Ordering::SeqCst);
+                if watch
+                    .state
+                    .compare_exchange(READING, EVICTED, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let _ = watch.stream.shutdown(Shutdown::Both);
+                    return true;
+                }
+                self.places.leaving.fetch_sub(1, Ordering::SeqCst);
+            }
+            false
+        }
+        #[cfg(test)]
+        fn active(&self) -> usize {
+            self.places.active.load(Ordering::SeqCst)
+        }
+        #[cfg(test)]
+        fn leaving(&self) -> usize {
+            self.places.leaving.load(Ordering::SeqCst)
+        }
+        #[cfg(test)]
+        fn has_waiting(&self) -> bool {
+            self.admission
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .waiting
+                .is_some()
+        }
+    }
+
+    /// Répond `status` puis jette ce qui reste à lire, en `DRAIN_WINDOW` et `DRAIN_LIMIT` au
+    /// plus : fermer une connexion qui a encore des octets à lire la réinitialise, et le client
+    /// peut perdre la réponse.
+    fn refuse(mut stream: TcpStream, status: u16) {
+        Reply::new(status, "").write(&mut stream);
+        let started = Instant::now();
+        let mut drained = 0;
+        let mut chunk = [0; 2048];
+        while drained < DRAIN_LIMIT {
+            let left = DRAIN_WINDOW.saturating_sub(started.elapsed());
+            if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+                return;
+            }
+            let read = chunk.len().min(DRAIN_LIMIT - drained);
+            match stream.read(&mut chunk[..read]) {
+                Ok(0) => return,
+                Ok(read) => drained += read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Lit les en-têtes d'une connexion acceptée en `HEAD_WINDOW` et `HEAD_LIMIT` au plus et
+    /// confie la requête à l'écouteur ; s'il est parti, elle reçoit `gone`. Une éviction ferme
+    /// le socket : la lecture en cours, ou le drain d'un refus, se termine aussitôt.
+    fn read_head(
+        mut stream: TcpStream,
+        sender: &SyncSender<Request>,
+        gone: Arc<Reply>,
+        mut reader: Reader,
+    ) {
+        // Sur macOS, la connexion acceptée hérite du mode non bloquant de l'écouteur.
+        if stream.set_nonblocking(false).is_err() {
+            return;
+        }
+        let started = Instant::now();
+        let mut head = Vec::with_capacity(2048);
+        let mut chunk = [0; 2048];
+        let end = loop {
+            // Le terminateur compte dans la limite : jamais plus de `HEAD_LIMIT` octets lus.
+            let from = head.len().saturating_sub(3);
+            let read = match head.len() {
+                HEAD_LIMIT => return refuse(stream, 431),
+                len => chunk.len().min(HEAD_LIMIT - len),
+            };
+            let left = HEAD_WINDOW.saturating_sub(started.elapsed());
+            if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+                return;
+            }
+            match stream.read(&mut chunk[..read]) {
+                Ok(0) => return,
+                Ok(read) => head.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+            if let Some(end) = head[from..].windows(4).position(|w| w == b"\r\n\r\n") {
+                break from + end;
+            }
+        };
+        let Some((method, url, host)) = parse_head(&head[..end]) else {
+            return refuse(stream, 400);
+        };
+        // Évincée à l'instant, la connexion est déjà fermée : il n'y a plus personne à servir.
+        let Some(slot) = reader.hand() else {
+            return;
+        };
+        let request = Request {
+            stream: Some(stream),
+            method,
+            url,
+            host,
+            gone,
+            _slot: slot,
+        };
+        // Refusée (écouteur parti), la requête revient ici et sa destruction répond `gone`. La
+        // file ne peut être pleine : chaque requête qu'elle contient tient une place non
+        // évincée, et il n'y en a que `MAX_ACTIVE`.
+        let _ = sender.try_send(request);
+    }
+
+    /// Un `token` de la RFC 9110 : nom d'en-tête ou méthode.
+    fn is_token(text: &str) -> bool {
+        !text.is_empty()
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+    }
+
+    /// Refuse ce qu'un autre analyseur lirait autrement : `Host` répété, espace avant les
+    /// deux-points, ligne repliée, caractère de contrôle.
+    fn parse_head(head: &[u8]) -> Option<(String, String, Option<String>)> {
+        let head = std::str::from_utf8(head).ok()?;
+        let mut lines = head.split("\r\n");
+        let mut line = lines.next()?.split(' ');
+        let (method, url, version) = (line.next()?, line.next()?, line.next()?);
+        if line.next().is_some()
+            || !is_token(method)
+            || url.is_empty()
+            || url.bytes().any(|byte| byte.is_ascii_control())
+            || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+        {
+            return None;
+        }
+        let mut host = None;
+        for header in lines {
+            let (name, value) = header.split_once(':')?;
+            if !is_token(name)
+                || value
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() && byte != b'\t')
+            {
+                return None;
+            }
+            if name.eq_ignore_ascii_case("Host") {
+                if host.is_some() {
+                    return None;
+                }
+                host = Some(value.trim().to_owned());
+            }
+        }
+        Some((method.to_owned(), url.to_owned(), host))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn gone() -> Reply {
+            Reply::new(409, "partie").header("Content-Type", "text/plain")
+        }
+        fn read_answer(stream: &mut TcpStream) -> io::Result<String> {
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut answer = String::new();
+            stream.read_to_string(&mut answer)?;
+            Ok(answer)
+        }
+        const RETURN: &[u8] =
+            b"GET /auth/callback?code=c&state=s HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n";
+
+        #[test]
+        fn a_request_is_served_once_and_the_connection_closes() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let mut browser = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+            browser.write_all(RETURN).unwrap();
+            let request = listener.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(request.method(), "GET");
+            assert_eq!(request.url(), "/auth/callback?code=c&state=s");
+            assert_eq!(request.host(), Some("127.0.0.1"));
+            request.respond(&Reply::new(200, "ok").header("Cache-Control", "no-store"));
+            assert_eq!(
+                read_answer(&mut browser).unwrap(),
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nCache-Control: no-store\r\n\r\nok"
+            );
+        }
+
+        #[test]
+        fn a_request_sent_after_the_listener_left_on_a_connection_it_accepted_gets_gone() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let port = listener.port();
+            let mut early = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            // The connection is accepted while the sign-in waits, then the sign-in leaves.
+            assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+            drop(listener);
+            // Its port is free at once.
+            drop(TcpListener::bind(("127.0.0.1", port)).unwrap());
+            early.write_all(RETURN).unwrap();
+            let answer = read_answer(&mut early).unwrap();
+            assert!(answer.starts_with("HTTP/1.1 409 Conflict\r\n"), "{answer}");
+            assert!(answer.ends_with("\r\n\r\npartie"), "{answer}");
+        }
+
+        #[test]
+        fn a_request_nobody_took_from_the_queue_gets_gone_when_the_listener_leaves() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let mut browser = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+            assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+            browser.write_all(RETURN).unwrap();
+            // Read by its connection's thread, the request waits in the queue.
+            std::thread::sleep(Duration::from_millis(300));
+            drop(listener);
+            let answer = read_answer(&mut browser).unwrap();
+            assert!(answer.starts_with("HTTP/1.1 409 Conflict\r\n"), "{answer}");
+        }
+
+        #[test]
+        fn a_malformed_or_oversized_return_is_refused() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let mut malformed = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+            malformed.write_all(b"GET\r\n\r\n").unwrap();
+            assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+            let answer = read_answer(&mut malformed).unwrap();
+            assert!(
+                answer.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+                "{answer}"
+            );
+            let mut oversized = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+            let _ = oversized.write_all(&vec![b'a'; HEAD_LIMIT + 4096]);
+            assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+            let answer = read_answer(&mut oversized).unwrap_or_default();
+            assert!(
+                answer.is_empty() || answer.starts_with("HTTP/1.1 431 "),
+                "{answer}"
+            );
+        }
+
+        /// Ce qui revient d'un client qui ferme son côté écriture après sa requête.
+        fn ask(port: u16, head: &[u8]) -> String {
+            let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            client.write_all(head).unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            read_answer(&mut client).unwrap_or_default()
+        }
+
+        fn padded_head(size: usize) -> Vec<u8> {
+            let start = b"GET /auth/callback?code=c&state=s HTTP/1.1\r\nhost: 127.0.0.1\r\nx-pad: ";
+            let mut head = start.to_vec();
+            head.resize(size - 4, b'a');
+            head.extend_from_slice(b"\r\n\r\n");
+            assert_eq!(head.len(), size);
+            head
+        }
+
+        #[test]
+        fn a_terminated_head_one_byte_over_the_limit_is_refused_and_one_at_the_limit_is_served() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            // The client keeps its side open: the refusal must still reach it before the close.
+            let mut over = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+            over.write_all(&padded_head(HEAD_LIMIT + 1)).unwrap();
+            assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+            let answer = read_answer(&mut over).unwrap();
+            assert!(
+                answer.starts_with("HTTP/1.1 431 Request Header Fields Too Large\r\n"),
+                "{answer}"
+            );
+            let mut at = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
+            at.write_all(&padded_head(HEAD_LIMIT)).unwrap();
+            let request = listener.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(request.url(), "/auth/callback?code=c&state=s");
+            request.respond(&Reply::new(200, "ok"));
+            assert!(read_answer(&mut at)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 OK\r\n"));
+        }
+
+        #[test]
+        fn a_head_another_parser_could_read_differently_is_refused() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let line = "GET /auth/callback?code=c&state=s HTTP/1.1\r\n";
+            for headers in [
+                "Host: 127.0.0.1\r\nHost: 127.0.0.2\r\n",
+                "Host : 127.0.0.1\r\n",
+                "Host: 127.0.0.1\r\nX-Folded: a\r\n b\r\n",
+                "Host: 127.0.0.1\r\nX-Control: a\x01b\r\n",
+                ": 127.0.0.1\r\n",
+            ] {
+                let head = format!("{line}{headers}\r\n");
+                let port = listener.port();
+                let asking = thread::spawn(move || ask(port, head.as_bytes()));
+                assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+                let answer = asking.join().unwrap();
+                assert!(
+                    answer.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+                    "{headers:?}: {answer}"
+                );
+            }
+            for request in ["G(T / HTTP/1.1\r\n\r\n", "GET /a\x7fb HTTP/1.1\r\n\r\n"] {
+                let port = listener.port();
+                let asking = thread::spawn(move || ask(port, request.as_bytes()));
+                assert!(listener.recv_timeout(Duration::from_millis(300)).is_none());
+                let answer = asking.join().unwrap();
+                assert!(
+                    answer.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+                    "{request:?}: {answer}"
+                );
+            }
+        }
+
+        /// Un fil ouvre des connexions sans arrêt et garde les `2 × MAX_ACTIVE` dernières
+        /// ouvertes, sans rien envoyer. L'attente, menée comme le font les deux boucles OAuth
+        /// (`recv_timeout` de 250 ms, annulation et échéance vérifiées entre deux appels), sert
+        /// quand même le retour déjà envoyé, revient à temps, et l'écouteur ne lit jamais plus de
+        /// `MAX_ACTIVE` connexions.
+        #[test]
+        fn a_flood_of_connections_holds_neither_the_wait_nor_a_ready_return_and_stays_capped() {
+            use std::collections::VecDeque;
+            use std::sync::atomic::{AtomicBool, Ordering};
+            const RING: usize = 2 * MAX_ACTIVE;
+            const BOUND: Duration = Duration::from_secs(2);
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let port = listener.port();
+            let mut browser = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            browser.write_all(RETURN).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let flood = {
+                let stop = stop.clone();
+                thread::spawn(move || {
+                    let address = ("127.0.0.1", port)
+                        .to_socket_addrs()
+                        .unwrap()
+                        .next()
+                        .unwrap();
+                    let started = Instant::now();
+                    let (mut ring, mut opened) = (VecDeque::new(), 0_usize);
+                    while !stop.load(Ordering::SeqCst)
+                        && started.elapsed() < Duration::from_secs(30)
+                    {
+                        if let Ok(stream) =
+                            TcpStream::connect_timeout(&address, Duration::from_millis(100))
+                        {
+                            opened += 1;
+                            ring.push_back(stream);
+                            if ring.len() > RING {
+                                ring.pop_front();
+                            }
+                        }
+                    }
+                    (ring, opened)
+                })
+            };
+            let (done, finished) = mpsc::channel();
+            let waiting = thread::spawn(move || {
+                // Lets the flood fill the accept queue behind the ready return.
+                thread::sleep(Duration::from_millis(100));
+                let mut slowest = Duration::ZERO;
+                let mut wait = |listener: &Listener| {
+                    let started = Instant::now();
+                    let request = listener.recv_timeout(Duration::from_millis(250));
+                    slowest = slowest.max(started.elapsed());
+                    request
+                };
+                // The return sent before the flood is served.
+                let started = Instant::now();
+                let request = loop {
+                    if let Some(request) = wait(&listener) {
+                        break request;
+                    }
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "the ready return was never served"
+                    );
+                };
+                assert_eq!(request.url(), "/auth/callback?code=c&state=s");
+                request.respond(&Reply::new(200, "ok"));
+                // Cancellation, set from another thread, is seen in time.
+                let cancel = Arc::new(AtomicBool::new(false));
+                let cancelling = {
+                    let cancel = cancel.clone();
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_millis(300));
+                        cancel.store(true, Ordering::SeqCst);
+                        Instant::now()
+                    })
+                };
+                while !cancel.load(Ordering::SeqCst) {
+                    if let Some(request) = wait(&listener) {
+                        request.respond(&Reply::new(404, ""));
+                    }
+                }
+                let cancelled = cancelling.join().unwrap().elapsed();
+                // The wait's own deadline is met in time.
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while Instant::now() < deadline {
+                    if let Some(request) = wait(&listener) {
+                        request.respond(&Reply::new(404, ""));
+                    }
+                }
+                let expired = deadline.elapsed();
+                stop.store(true, Ordering::SeqCst);
+                let (ring, opened) = flood.join().unwrap();
+                // What the flood left in the accept queue is accepted, or closed.
+                for _ in 0..4 {
+                    let _ = wait(&listener);
+                }
+                done.send((listener, ring, opened, slowest, cancelled, expired))
+                    .unwrap();
+            });
+            let (listener, ring, opened, slowest, cancelled, expired) =
+                match finished.recv_timeout(Duration::from_secs(60)) {
+                    Ok(outcome) => outcome,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        panic!("the wait never came back under the flood")
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        std::panic::resume_unwind(waiting.join().unwrap_err())
+                    }
+                };
+            thread::sleep(Duration::from_millis(200));
+            let held = ring
+                .iter()
+                .filter(|stream| {
+                    stream.set_nonblocking(true).unwrap();
+                    matches!(stream.peek(&mut [0]), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+                })
+                .count();
+            eprintln!(
+                "flood: {opened} connections, slowest wait {slowest:?}, cancellation seen after {cancelled:?}, deadline overrun {expired:?}, {held} of the last {} still read",
+                ring.len()
+            );
+            assert!(slowest < BOUND, "a 250 ms wait took {slowest:?}");
+            assert!(cancelled < BOUND, "cancellation seen after {cancelled:?}");
+            assert!(expired < BOUND, "deadline overrun {expired:?}");
+            assert!(opened > RING, "the flood opened only {opened} connections");
+            assert!(
+                held <= MAX_ACTIVE,
+                "{held} connections are still read, over {MAX_ACTIVE}"
+            );
+            assert!(read_answer(&mut browser)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 OK\r\n"));
+            drop(listener);
+        }
+
+        /// Drives the wait as the OAuth loops do until `done`; no request is expected meanwhile.
+        fn drive_until(listener: &Listener, what: &str, done: impl Fn(&Listener) -> bool) {
+            let started = Instant::now();
+            while !done(listener) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "{what} never happened"
+                );
+                if let Some(request) = listener.recv_timeout(Duration::from_millis(20)) {
+                    panic!("unexpected request {}", request.url());
+                }
+            }
+        }
+
+        /// The first request the wait returns within `bound`, waiting 250 ms at a time.
+        fn wait_for(listener: &Listener, bound: Duration, what: &str) -> Request {
+            let started = Instant::now();
+            loop {
+                if let Some(request) = listener.recv_timeout(Duration::from_millis(250)) {
+                    return request;
+                }
+                assert!(started.elapsed() < bound, "{what}");
+            }
+        }
+
+        /// What the OAuth loops do with a return: 200 when its `state` is the attempt's, 400
+        /// otherwise.
+        fn serve_return(request: Request) {
+            let state = super::super::parse_query(request.url())
+                .get("state")
+                .cloned();
+            let status = if state.as_deref() == Some("s") {
+                200
+            } else {
+                400
+            };
+            request.respond(&Reply::new(status, "ok"));
+        }
+
+        /// Whether the listener closed `stream`, seen from the client without waiting.
+        fn closed(stream: &TcpStream) -> bool {
+            stream.set_nonblocking(true).unwrap();
+            let closed = !matches!(
+                stream.peek(&mut [0]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock
+            );
+            stream.set_nonblocking(false).unwrap();
+            closed
+        }
+
+        #[test]
+        fn a_return_on_a_new_connection_is_served_when_silent_connections_hold_every_place() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let port = listener.port();
+            let silent: Vec<_> = (0..MAX_ACTIVE)
+                .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
+                .collect();
+            drive_until(&listener, "accepting the silent connections", |listener| {
+                listener.active() == MAX_ACTIVE
+            });
+            // Every place is taken; the browser's return comes on a new connection.
+            let mut browser = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            browser.write_all(RETURN).unwrap();
+            let request = wait_for(
+                &listener,
+                Duration::from_secs(5),
+                "the return was never read: silent connections kept every place",
+            );
+            assert_eq!(request.url(), "/auth/callback?code=c&state=s");
+            // The oldest silent connection made room: it is closed, and its thread left.
+            drive_until(&listener, "the evicted thread leaving", |listener| {
+                listener.leaving() == 0 && listener.active() == MAX_ACTIVE
+            });
+            serve_return(request);
+            assert!(read_answer(&mut browser)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 OK\r\n"));
+            let mut oldest = &silent[0];
+            assert_eq!(oldest.read(&mut [0]).unwrap(), 0);
+            let open = silent[1..].iter().filter(|stream| !closed(stream)).count();
+            assert_eq!(open, MAX_ACTIVE - 1);
+        }
+
+        /// A thread opens silent connections without pause and keeps up to `3 × MAX_ACTIVE`
+        /// of them, replacing each one the listener closes.
+        #[test]
+        fn a_return_is_served_while_silent_connections_keep_renewing_every_place() {
+            use std::sync::atomic::AtomicBool;
+            const KEPT: usize = 3 * MAX_ACTIVE;
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let port = listener.port();
+            let stop = Arc::new(AtomicBool::new(false));
+            let flood = {
+                let stop = stop.clone();
+                thread::spawn(move || {
+                    let address = ("127.0.0.1", port)
+                        .to_socket_addrs()
+                        .unwrap()
+                        .next()
+                        .unwrap();
+                    let started = Instant::now();
+                    let (mut kept, mut opened, mut evicted) = (Vec::new(), 0_usize, 0_usize);
+                    while !stop.load(Ordering::SeqCst)
+                        && started.elapsed() < Duration::from_secs(30)
+                    {
+                        let before = kept.len();
+                        kept.retain(|stream| !closed(stream));
+                        evicted += before - kept.len();
+                        if kept.len() >= KEPT {
+                            thread::yield_now();
+                        } else if let Ok(stream) =
+                            TcpStream::connect_timeout(&address, Duration::from_millis(100))
+                        {
+                            opened += 1;
+                            kept.push(stream);
+                        }
+                    }
+                    (opened, evicted)
+                })
+            };
+            drive_until(&listener, "the flood taking every place", |listener| {
+                listener.active() == MAX_ACTIVE
+            });
+            let mut browser = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            browser.write_all(RETURN).unwrap();
+            let (mut most, mut most_read) = (0, 0);
+            let started = Instant::now();
+            let request = loop {
+                let request = listener.recv_timeout(Duration::from_millis(250));
+                let (active, read) = (listener.active(), listener.active() - listener.leaving());
+                most = most.max(active);
+                most_read = most_read.max(read);
+                if let Some(request) = request {
+                    break request;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "the return was never read under the renewing flood"
+                );
+            };
+            let served = started.elapsed();
+            assert_eq!(request.url(), "/auth/callback?code=c&state=s");
+            serve_return(request);
+            stop.store(true, Ordering::SeqCst);
+            let (opened, evicted) = flood.join().unwrap();
+            eprintln!(
+                "renewing flood: {opened} connections, {evicted} closed by the listener, return served after {served:?}, at most {most} places and {most_read} read"
+            );
+            assert!(read_answer(&mut browser)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(opened > KEPT, "the flood opened only {opened} connections");
+            assert!(most_read <= MAX_ACTIVE, "{most_read} connections read");
+            assert!(most <= MAX_ACTIVE + MAX_LEAVING, "{most} places held");
+        }
+
+        #[test]
+        fn a_complete_request_is_never_evicted_and_a_newcomer_waits_for_its_place() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let port = listener.port();
+            let mut clients: Vec<_> = (0..MAX_ACTIVE)
+                .map(|n| {
+                    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                    let head = format!(
+                        "GET /auth/callback?code={n}&state=s HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n"
+                    );
+                    client.write_all(head.as_bytes()).unwrap();
+                    client
+                })
+                .collect();
+            // Every place holds a complete request, being answered.
+            let mut held = Vec::new();
+            while held.len() < MAX_ACTIVE {
+                held.push(wait_for(
+                    &listener,
+                    Duration::from_secs(10),
+                    "a complete request was never read",
+                ));
+            }
+            let mut newcomer = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            newcomer.write_all(RETURN).unwrap();
+            drive_until(&listener, "accepting the newcomer", Listener::has_waiting);
+            // Long enough for any request to be old enough to evict: none is.
+            let deadline = Instant::now() + 3 * EVICTABLE_AFTER;
+            while Instant::now() < deadline {
+                assert!(listener.recv_timeout(Duration::from_millis(20)).is_none());
+            }
+            assert_eq!(listener.active(), MAX_ACTIVE);
+            assert!(clients.iter().all(|client| !closed(client)));
+            for request in held {
+                serve_return(request);
+            }
+            for client in &mut clients {
+                assert!(read_answer(client)
+                    .unwrap()
+                    .starts_with("HTTP/1.1 200 OK\r\n"));
+            }
+            // A place came back: the newcomer is read and served.
+            let request = wait_for(
+                &listener,
+                Duration::from_secs(5),
+                "the newcomer never got a place",
+            );
+            assert_eq!(request.url(), "/auth/callback?code=c&state=s");
+            serve_return(request);
+            assert!(read_answer(&mut newcomer)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 OK\r\n"));
+        }
+
+        #[test]
+        fn every_way_out_of_a_place_gives_it_back() {
+            let listener = Listener::bind("127.0.0.1:0", gone()).unwrap();
+            let port = listener.port();
+            let free = |listener: &Listener| listener.active() == 0;
+            // Served.
+            let mut served = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            served.write_all(RETURN).unwrap();
+            wait_for(&listener, Duration::from_secs(5), "never read").respond(&Reply::new(200, ""));
+            assert!(free(&listener));
+            assert!(read_answer(&mut served)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 "));
+            // Dropped unanswered: it gets `gone`.
+            let mut dropped = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            dropped.write_all(RETURN).unwrap();
+            drop(wait_for(&listener, Duration::from_secs(5), "never read"));
+            assert!(free(&listener));
+            assert!(read_answer(&mut dropped)
+                .unwrap()
+                .starts_with("HTTP/1.1 409 "));
+            // Closed by the client before its head.
+            let early = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            drive_until(&listener, "accepting", |listener| listener.active() == 1);
+            drop(early);
+            drive_until(&listener, "the closed connection leaving", free);
+            // Refused, after the drain.
+            for (head, status) in [
+                (b"GET\r\n\r\n".to_vec(), "400"),
+                (padded_head(HEAD_LIMIT + 1), "431"),
+            ] {
+                let mut refused = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                drive_until(&listener, "accepting", |listener| listener.active() == 1);
+                // Set before the close: macOS refuses socket options on a closed connection.
+                refused
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                refused.write_all(&head).unwrap();
+                refused.shutdown(Shutdown::Write).unwrap();
+                let asking = thread::spawn(move || {
+                    let mut answer = String::new();
+                    refused.read_to_string(&mut answer).unwrap();
+                    answer
+                });
+                drive_until(&listener, "the refused connection leaving", free);
+                let answer = asking.join().unwrap();
+                assert!(
+                    answer.starts_with(&format!("HTTP/1.1 {status} ")),
+                    "{answer}"
+                );
+            }
+            // Evicted: covered by the silent-connections test.
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn a_return_sent_after_a_cancelled_sign_in_on_a_connection_it_accepted_is_answered() {
+        use std::io::Read;
+        use std::net::TcpStream;
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "ezerbot-signin-{}-{}",
+            std::process::id(),
+            random_token(8)
+        )));
+        fs::create_dir_all(&scratch.0).unwrap();
+        // Nothing is exchanged: the sign-in is cancelled before its return.
+        let base = "http://127.0.0.1:9";
+        let endpoints = Endpoints {
+            authorize: format!("{base}/authorize"),
+            token: format!("{base}/token"),
+            revoke: format!("{base}/revoke"),
+            jwks: format!("{base}/jwks"),
+            issuer: base.to_owned(),
+            api: format!("{base}/v1"),
+        };
+        let provider =
+            Provider::with_endpoints(&scratch.0.join("ezerbot.sqlite"), endpoints, false);
+        let query = parse_query(&provider.start_signin().unwrap());
+        let port: u16 = query["redirect_uri"]
+            .trim_end_matches(CALLBACK_PATH)
+            .rsplit_once(':')
+            .unwrap()
+            .1
+            .parse()
+            .unwrap();
+        // The browser opens its connection first and sends the return after the cancellation.
+        let mut early = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        early
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        thread::sleep(Duration::from_millis(300));
+        provider.cancel_signin();
+        let started = Instant::now();
+        while TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the sign-in kept its port"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        let request = format!(
+            "GET {CALLBACK_PATH}?code=late&state={} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n",
+            query["state"]
+        );
+        // A reset connection is closed too: the browser is not left waiting.
+        if early.write_all(request.as_bytes()).is_ok() {
+            let mut answer = Vec::new();
+            if let Err(error) = early.read_to_end(&mut answer) {
+                assert!(
+                    !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ),
+                    "the return got neither an answer nor a closed connection within 5 s: {error}"
+                );
+            }
+            let answer = String::from_utf8_lossy(&answer);
+            assert!(
+                answer.is_empty()
+                    || answer.starts_with("HTTP/1.1 409 Conflict\r\n")
+                        && answer.contains("n’est plus en cours"),
+                "{answer}"
+            );
+        }
+        assert_eq!(provider.status()["signin"], "idle");
+    }
 
     #[test]
     fn pkce_challenge_matches_rfc_7636_example() {

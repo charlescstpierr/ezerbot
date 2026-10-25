@@ -443,6 +443,8 @@
       retitleQuote(id, next);
       const link = [...shell.list.children].find((item) => item.dataset && item.dataset.pageId === id);
       if (link) link.textContent = next;
+      // La liste se repeint depuis l'état de l'hôte : sans le relire, le repeint suivant remettrait l'ancien titre.
+      try { await host.refresh(); } catch { /* le prochain rafraîchissement relira la liste */ }
     } catch (error) {
       host.notify(error && error.message ? error.message : "Le nom n’a pas pu être enregistré.");
     } finally {

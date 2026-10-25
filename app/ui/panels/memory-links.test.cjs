@@ -5,7 +5,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const window = {};
-vm.runInContext(fs.readFileSync(`${__dirname}/memory-links.js`, "utf8"), vm.createContext({ window, Map, Set, String, Math, Array }));
+const context = vm.createContext({ window, Map, Set, String, Math, Array });
+vm.runInContext(fs.readFileSync(`${__dirname}/memory-links.js`, "utf8"), context);
 const { counts, pairs, of, radius } = window.EzerbotMemoryLinks;
 const fact = (id, conversation, scope = "private") => ({ fact_id: id, scope, text: `souvenir ${id}`, provenance: { source: "automatic", conversation_id: conversation } });
 const plain = (value) => JSON.parse(JSON.stringify(value)); // sort du contexte vm
@@ -57,14 +58,21 @@ test("une conversation de 4 000 souvenirs reste bornée : n − 1 traits, et lir
   assert.equal(counts(all).size, 4000);
   assert.deepEqual(ids(of(all, alone)), []);
 });
-test("le coût des traits, des comptes et d'un souvenir isolé croît à peu près comme le nombre de souvenirs, pas comme son carré", () => {
-  const best = (n) => { // le meilleur de cinq passes : le bruit de la machine ne compte pas
-    const list = [...Array.from({ length: n }, (_, i) => fact(`m${i}`, "gros")), fact("seul", "autre")];
-    let min = Infinity;
-    for (let run = 0; run < 5; run += 1) { const start = process.hrtime.bigint(); pairs(list); counts(list); of(list, list[n]); min = Math.min(min, Number(process.hrtime.bigint() - start)); }
-    return min;
+test("le travail des traits, des comptes et d'un souvenir isolé croît comme le nombre de souvenirs, pas comme son carré", () => {
+  // On compte les éléments parcourus (boucles, copies par `...`) : le compte ne dépend pas de la charge de la machine, contrairement à un chronomètre.
+  const walked = (work) => {
+    // Les tableaux créés par memory-links.js (contexte vm) ont leur propre prototype.
+    const prototypes = [Array.prototype, Object.getPrototypeOf(vm.runInContext("[]", context))], originals = prototypes.map((proto) => proto[Symbol.iterator]);
+    let steps = 0;
+    for (const proto of prototypes) proto[Symbol.iterator] = function* () { for (let i = 0; i < this.length; i += 1) { steps += 1; yield this[i]; } };
+    try { work(); } finally { prototypes.forEach((proto, i) => { proto[Symbol.iterator] = originals[i]; }); }
+    return steps;
   };
-  assert.ok(best(32000) / best(8000) < 10, "4 fois plus de souvenirs : moins de 10 fois le temps (linéaire ≈ 4, quadratique ≥ 16)");
+  for (const n of [500, 4000]) {
+    const list = [...Array.from({ length: n }, (_, i) => fact(`m${i}`, "gros")), fact("seul", "autre")];
+    const steps = walked(() => { pairs(list); counts(list); of(list, list[n]); });
+    assert.ok(steps < 20 * n, `${n} souvenirs : ${steps} éléments parcourus (un parcours linéaire en fait quelques n, une copie à chaque ajout en fait n²/2)`);
+  }
 });
 test("la taille d'un point grandit un peu avec ses liens, sans jamais dépasser un plafond", () => {
   assert.equal(radius(0), 6, "un souvenir isolé garde la taille d'avant");

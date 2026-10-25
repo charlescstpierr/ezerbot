@@ -96,6 +96,7 @@ pub mod generated;
 pub mod images;
 pub mod iphone;
 pub mod library;
+pub mod livrables;
 pub mod local;
 pub mod mcp;
 pub mod meetings;
@@ -178,6 +179,7 @@ registry!(
     generated,
     pages,
     images,
+    livrables,
     mcp,
     storage,
     usage,

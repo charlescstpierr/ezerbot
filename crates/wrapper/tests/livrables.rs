@@ -266,10 +266,10 @@ fn type_and_bot_filters_isolate_the_livrables_and_unknown_parameters_are_refused
     let beta = f.list("bot=beta");
     assert_eq!(beta.len(), 1);
     assert_eq!(beta[0]["bot_id"], "beta");
-    assert_eq!(beta[0]["title"], "RapportB");
+    assert_eq!(beta[0]["title"], "RapportB.docx");
     let alpha_documents = f.list("bot=alpha&type=document");
     assert_eq!(alpha_documents.len(), 1);
-    assert_eq!(alpha_documents[0]["title"], "RapportA");
+    assert_eq!(alpha_documents[0]["title"], "RapportA.pdf");
     assert_eq!(f.list("bot=alpha").len(), 3);
     assert!(f.list("bot=inconnu").is_empty());
     for query in [
@@ -331,8 +331,8 @@ fn documents_and_images_from_before_the_migration_are_found_without_error() {
     f.image(&chat, "i1", "un vieux phare");
     let before = f.list("");
     assert_eq!(before.len(), 2);
-    // Un document dont plus aucune run ne se souvient : origine inconnue.
-    f.db().execute("INSERT INTO attachments_generated VALUES ('generated_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',?1,x'00','<svg/>',5)", [json!({"id":"generated_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"Orphelin.pdf","format":"pdf","byte_length":1,"pages":1,"preview_url":"/api/generated/generated_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/preview"}).to_string()]).unwrap();
+    // Un document récent dont plus aucune run ne se souvient : origine inconnue (au-delà de 24 h, le démarrage nettoie un tel orphelin).
+    f.db().execute("INSERT INTO attachments_generated VALUES ('generated_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',?1,x'00','<svg/>',?2)", rusqlite::params![json!({"id":"generated_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"Orphelin.pdf","format":"pdf","byte_length":1,"pages":1,"preview_url":"/api/generated/generated_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/preview"}).to_string(), now()]).unwrap();
     f.before_the_migration();
     let after = f.list("");
     assert_eq!(after.len(), 3, "{after:?}");
@@ -366,7 +366,7 @@ fn documents_and_images_from_before_the_migration_are_found_without_error() {
 #[test]
 fn an_unknown_origin_document_stays_cleanable_by_the_storage_screen() {
     let mut f = Fixture::new();
-    f.db().execute("INSERT INTO attachments_generated VALUES ('generated_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',?1,x'00','<svg/>',5)", [json!({"id":"generated_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","name":"Vieux.pdf","format":"pdf","byte_length":1,"pages":1,"preview_url":"/api/generated/generated_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/preview"}).to_string()]).unwrap();
+    f.db().execute("INSERT INTO attachments_generated VALUES ('generated_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',?1,x'00','<svg/>',?2)", rusqlite::params![json!({"id":"generated_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","name":"Vieux.pdf","format":"pdf","byte_length":1,"pages":1,"preview_url":"/api/generated/generated_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/preview"}).to_string(), now()]).unwrap();
     f.reopen_without_marker();
     assert_eq!(f.list("").len(), 1);
     let plan = f.post("/api/storage/preview", json!({}));
@@ -464,4 +464,56 @@ fn a_failed_generation_creates_no_livrable() {
     assert!(f.list("").is_empty());
     f.before_the_migration();
     assert!(f.list("").is_empty());
+}
+
+/// VM instructions of the one read, with `livrables` rows to list and `noise` older run
+/// events that are not livrables.
+fn list_cost(livrables: usize, noise: usize) -> (i32, usize) {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    let db = f.db();
+    db.execute_batch("BEGIN").unwrap();
+    for i in 0..livrables {
+        db.execute("INSERT INTO wrapper_livrables VALUES (?1,?1,'document',?2,'Rapport','alpha',?3,'/api/x',?4)", rusqlite::params![format!("run-{i}:2"), format!("generated_{i}"), chat, i]).unwrap();
+    }
+    db.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) VALUES ('ancien','alpha',?1,'t','r',1,'finished','{}')", [&chat]).unwrap();
+    for i in 0..noise {
+        db.execute("INSERT INTO engine_run_events VALUES ('ancien', ?1, 'tool_result', '{\"call_id\":\"c\",\"outcome\":{\"status\":\"done\",\"output\":{\"id\":\"generated_0\"}}}')", [i + 1]).unwrap();
+    }
+    db.execute_batch("COMMIT").unwrap();
+    let mut statement = db
+        .prepare(grokbot_wrapper::features::livrables::LIST)
+        .unwrap();
+    let rows = statement
+        .query_map(
+            rusqlite::params!["local-workspace", None::<&str>, None::<&str>],
+            |_| Ok(()),
+        )
+        .unwrap()
+        .count();
+    (
+        statement.get_status(rusqlite::StatementStatus::VmStep),
+        rows,
+    )
+}
+
+#[test]
+fn the_read_does_not_grow_with_the_run_history() {
+    let ((small, rows), (large, _)) = (list_cost(50, 1000), list_cost(50, 10_000));
+    assert_eq!(rows, 50);
+    assert!(
+        large <= small + small / 10,
+        "1000 older events: {small} VM instructions, 10000: {large}"
+    );
+}
+
+#[test]
+fn the_read_grows_linearly_with_the_livrables() {
+    let ((small, _), (large, rows)) = (list_cost(200, 0), list_cost(400, 0));
+    assert_eq!(rows, 400);
+    assert!(
+        large <= small * 5 / 2,
+        "200 livrables: {small} VM instructions, 400: {large}"
+    );
+    eprintln!("VmStep LIST : 200 livrables {small}, 400 livrables {large}");
 }

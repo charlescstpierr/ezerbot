@@ -120,6 +120,15 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
                 ctx.now_ms
             ],
         )?;
+        super::livrables::record(
+            ctx.connection,
+            ctx,
+            &call.call_id,
+            "document",
+            &file.id,
+            &file.name,
+            &file.preview_url,
+        )?;
         Ok(json!(file))
     })();
     Some(outcome(result))

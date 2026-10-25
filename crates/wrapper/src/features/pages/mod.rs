@@ -52,6 +52,14 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     if !kept {
         conn.execute_batch("ALTER TABLE bot_pages ADD COLUMN previous_source TEXT")?;
     }
+    let carded: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bot_pages') WHERE name = 'entry_id')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !carded {
+        conn.execute_batch("ALTER TABLE bot_pages ADD COLUMN entry_id TEXT")?;
+    }
     anchors::migrate(conn)
 }
 
@@ -110,6 +118,8 @@ struct PageKey<'a> {
     conversation: &'a str,
     title: &'a str,
     filename: &'a str,
+    /// The thread card of the write that made this version; none for a revert.
+    entry: Option<&'a str>,
 }
 
 pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
@@ -140,12 +150,14 @@ fn persist(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     let (bot, conversation) = attached(ctx)?;
     let id = page_id(bot, &filename);
     let compiled = compile::compile(&args.source);
+    let card = super::images::tool_message_id(ctx, &call.call_id).ok();
     let key = PageKey {
         id: &id,
         bot,
         conversation,
         title: &title,
         filename: &filename,
+        entry: card.as_deref().filter(|_| compiled.is_ok()),
     };
     store(
         ctx.connection,
@@ -217,10 +229,11 @@ fn store(
     }
     conn.execute(
         "INSERT INTO bot_pages (
-            id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+            id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview, created_at, updated_at, entry_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12)
          ON CONFLICT(id) DO UPDATE SET
             conversation_id = excluded.conversation_id,
+            entry_id = COALESCE(excluded.entry_id, bot_pages.entry_id),
             title = excluded.title,
             previous_source = CASE
                 WHEN bot_pages.status = 'ready' AND bot_pages.source <> excluded.source
@@ -242,7 +255,8 @@ fn store(
             diagnostic,
             document,
             preview,
-            now_ms
+            now_ms,
+            key.entry
         ],
     )?;
     Ok(())
@@ -307,12 +321,14 @@ fn edit(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
             ),
         ));
     }
+    let card = super::images::tool_message_id(ctx, &call.call_id).ok();
     let key = PageKey {
         id: &args.id,
         bot,
         conversation,
         title: &title,
         filename: &filename,
+        entry: card.as_deref(),
     };
     store(
         ctx.connection,
@@ -472,6 +488,7 @@ fn revert(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
         conversation: &conversation,
         title: &title,
         filename: &filename,
+        entry: None,
     };
     store(
         &tx,

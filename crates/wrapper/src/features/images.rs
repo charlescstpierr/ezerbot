@@ -481,7 +481,17 @@ fn store(
     {
         return failed(FAILED);
     }
-    if tx.commit().is_err() {
+    let title: String = call.arguments["description"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(80)
+        .collect();
+    let url = format!("/api/attachments/{}", staged.id);
+    if super::livrables::record(&tx, ctx, &call.call_id, "image", &staged.id, &title, &url).is_err()
+        || tx.commit().is_err()
+    {
         return failed(FAILED);
     }
     ToolOutcome::Done {
@@ -493,7 +503,7 @@ fn store(
     }
 }
 
-fn tool_message_id(ctx: &Context<'_>, call_id: &str) -> Result<String, ()> {
+pub(super) fn tool_message_id(ctx: &Context<'_>, call_id: &str) -> Result<String, ()> {
     let run_id = ctx.run_id.ok_or(())?;
     let seq: i64 = ctx
         .connection

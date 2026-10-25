@@ -129,6 +129,7 @@ fn roots(conn: &Connection) -> Result<HashSet<String>, ApiError> {
                 | "attachments_caption_cache"
                 | "attachments_caption_uses"
                 | "wrapper_attachment_retry"
+                | "wrapper_livrables"
         ) || table.starts_with("wrapper_storage_") && table != "wrapper_storage_drafts"
         {
             continue;
@@ -546,6 +547,7 @@ fn log(conn: &Connection, item: &Candidate, reason: &str, state: &str) -> Result
 fn queue(conn: &Connection, items: &[Candidate], reason: &str) -> Result<Vec<i64>, ApiError> {
     let mut sequences = Vec::new();
     for item in items {
+        conn.execute("DELETE FROM wrapper_livrables WHERE ref=?1", [&item.id])?;
         if item.kind == "image" {
             conn.execute(
                 "DELETE FROM attachments_caption_cache WHERE sha256=?1",

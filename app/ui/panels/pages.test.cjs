@@ -459,3 +459,97 @@ test("une réponse rename ancienne ne réexpose pas un document masqué par un p
   await rename;
   assert.equal(canvasOf(main).textContent,"[...]");
 });
+
+for (const failed of [false, true]) {
+  test(`r6 titre édité, ${failed ? "échec de chargement" : "deux réponses masquées"}`, async () => {
+    const page = { id: "r6_title", title: "Titre synthétique", status: "ready", source_version: "v1", document: readyDocument };
+    const { panels, main, sidebar, use } = harness(page);
+    await panels.panel.onState(panels.state, ctxOf("fil"));
+    const input = main.querySelector("input");
+    input.ownerDocument.activeElement = input;
+    input.value += " suite";
+    use({ ...page, title: "[...]" });
+    panels.state.pages.by_bot.grokbot[0].title = "[...]";
+    if (failed) panels.api = async () => { throw new Error("indisponible"); };
+    for (let response = 0; response < 2; response++) {
+      await panels.panel.onState(panels.state, ctxOf("fil"));
+      assert.equal(input.value.includes(page.title), false, "le champ retire le titre privé");
+      assert.equal(input.value, "[...]");
+      assert.equal(sidebar.textContent.includes(page.title), false);
+    }
+  });
+}
+
+test("r6 poll identique conserve le brouillon", async () => {
+  const page = { id: "r6_draft", title: "Titre public", status: "ready", document: readyDocument };
+  const { panels, main } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  const input = main.querySelector("input");
+  input.ownerDocument.activeElement = input;
+  input.value += " suite";
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(input.value, "Titre public suite");
+});
+
+test("r6 renommage masqué pendant une nouvelle édition", async () => {
+  const page = { id: "r6_rename", title: "Titre synthétique", status: "ready", document: readyDocument };
+  const { panels, main } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  const input = main.querySelector("input");
+  input.ownerDocument.activeElement = input;
+  input.value += " suite";
+  let complete;
+  panels.api = () => new Promise((resolve) => { complete = resolve; });
+  const pending = input.listeners.change();
+  input.value += " encore";
+  complete({ page: { ...page, title: "[...] suite" } });
+  await pending;
+  assert.equal(input.value.includes(page.title), false, "la réponse de renommage retire le titre privé même réédité");
+  assert.equal(input.value, "[...] suite");
+});
+
+for (const rename of [false, true]) {
+  test(`r6 réponse tardive de ${rename ? "renommage" : "lecture"}`, async () => {
+    const page = { id: "r6_late", title: "Titre synthétique", status: "ready", document: readyDocument };
+    const { panels, main, sidebar, use } = harness(page);
+    await panels.panel.onState(panels.state, ctxOf("fil"));
+    const input = main.querySelector("input");
+    input.ownerDocument.activeElement = input;
+    input.value += " suite";
+    const api = panels.api;
+    let complete;
+    panels.api = () => new Promise((resolve) => { complete = resolve; });
+    const pending = rename ? input.listeners.change() : panels.panel.onState(panels.state, ctxOf("fil"));
+    panels.api = api;
+    use({ ...page, title: "[...]" });
+    panels.state.pages.by_bot.grokbot[0].title = "[...]";
+    await panels.panel.onState(panels.state, ctxOf("fil"));
+    complete({ page });
+    await pending;
+    await panels.panel.onState(panels.state, ctxOf("fil"));
+    assert.equal(input.value.includes(page.title), false, "la réponse ancienne ne réexpose pas le titre privé");
+    assert.equal(input.value, "[...]");
+    assert.equal(sidebar.textContent.includes(page.title), false);
+  });
+}
+
+test("r6 réouverture et changement de Page", async () => {
+  const page = { id: "r6_reopen", title: "Titre synthétique", status: "ready", document: readyDocument };
+  const { panels, main, use } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  const input = main.querySelector("input");
+  input.ownerDocument.activeElement = input;
+  input.value += " suite";
+  await panels.panel.onState(panels.state, ctxOf(null));
+  use({ ...page, title: "[...]" });
+  panels.state.pages.by_bot.grokbot[0].title = "[...]";
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(input.value.includes(page.title), false, "la réouverture retire le brouillon privé");
+  input.value += " suite";
+  use({ ...page, id: "r6_other", title: "[...]" });
+  panels.state.pages.by_bot.grokbot[0].id = "r6_other";
+  panels.api = async () => ({ page: { ...page, id: "r6_other", title: "[...]" } });
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(input.value, "[...]");
+});

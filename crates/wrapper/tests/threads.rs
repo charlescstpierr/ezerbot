@@ -257,3 +257,63 @@ fn un_message_ou_une_conversation_absente_n_ouvre_pas_de_fil() {
     }
     assert!(f.state()["threads"].as_object().unwrap().is_empty());
 }
+
+#[test]
+fn r6_thread_excerpt_is_masked_on_reopen_and_state() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.answer_with_parent();
+    let main = f.conversation();
+    f.ask(&main, "question", QUESTION);
+    f.reply(&main, "question");
+    let input = json!({"conversation_id": main, "message_id": "reply-question"});
+    let opened = f.post("/api/messages/thread", input.clone());
+    let thread = opened["conversation"]["id"].as_str().unwrap().to_owned();
+    assert!(opened["thread"]["parent_excerpt"]
+        .as_str()
+        .unwrap()
+        .contains(PARENT_REPLY));
+    let vault = grokbot_forms::vault::Vault::open(&f.dir.join("workspace.secrets.json")).unwrap();
+    vault
+        .set("R6_PARENT", "Fixture synthétique", PARENT_REPLY)
+        .unwrap();
+    assert!(
+        !f.parent_prompt(&thread).contains(PARENT_REPLY),
+        "le contexte masque le parent"
+    );
+    for restarted in [false, true] {
+        if restarted {
+            f.reopen();
+        }
+        let state = f.state();
+        assert!(
+            !state.to_string().contains(PARENT_REPLY),
+            "le poll masque le parent"
+        );
+        assert!(state["threads"][&thread]["parent_excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("[...]"));
+        let reopened = f.post("/api/messages/thread", input.clone());
+        assert!(
+            !reopened.to_string().contains(PARENT_REPLY),
+            "la réouverture masque le parent"
+        );
+        assert_eq!(reopened["conversation"]["id"], thread);
+        assert!(reopened["thread"]["parent_excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("[...]"));
+    }
+    vault.remove("R6_PARENT").unwrap();
+    f.reopen();
+    let reopened = f.post("/api/messages/thread", input);
+    assert!(
+        !reopened.to_string().contains(PARENT_REPLY),
+        "le retrait du coffre ne réexpose pas le parent"
+    );
+    assert!(
+        !f.state().to_string().contains(PARENT_REPLY),
+        "le poll garde le masque après retrait"
+    );
+}

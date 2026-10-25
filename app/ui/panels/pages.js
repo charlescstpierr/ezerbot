@@ -259,6 +259,15 @@
   }
 
   function remember(page) {
+    const byBot = lastState && lastState.pages && lastState.pages.by_bot;
+    for (const bucket of Object.values(byBot || {})) {
+      if (!Array.isArray(bucket)) continue;
+      for (const summary of bucket) {
+        if (summary.id === page.id) summary.title = page.title;
+      }
+    }
+    const link = [...shell.list.children].find((item) => item.dataset && item.dataset.pageId === page.id);
+    if (link) link.textContent = page.title || "Page";
     const key = sourceKey(page);
     const documentKey = page.document && !pastCap(page.document.view, 1) ? JSON.stringify(page.document) : null;
     const changed = loadedKey !== key || loadedDocumentKey !== documentKey;

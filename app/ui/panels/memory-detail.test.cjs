@@ -515,12 +515,13 @@ test("deux souvenirs liés au texte tronqué identique : le focus reste sur celu
   h.item("m").click();
   const items = () => h.panel().querySelectorAll(".memory-detail-link-item");
   assert.equal(items()[0].textContent, items()[1].textContent, "les deux boutons portent le même libellé");
+  assert.deepEqual(items().map((item) => item.title), [`${FAR} B`, `${FAR} C`], "le titre porte le texte entier");
   items()[1].focus();
-  const wanted = Element.active.dataset.factId;
+  assert.equal(Element.active.dataset.factId, "c", "le deuxième bouton est celui du souvenir c");
   h.net.touch("m");
   h.reload();
   await h.settle();
-  assert.equal(Element.active.dataset.factId, wanted, "le focus est resté sur le même souvenir lié");
+  assert.equal(Element.active.dataset.factId, "c", "le focus est resté sur le souvenir c, pas sur son jumeau b");
 });
 test("le souvenir lié focalisé disparaît : le focus va au titre du panneau", async () => {
   const h = await harness({ start: CHAIN });

@@ -325,7 +325,7 @@ pub fn tick(ctx: &Context<'_>) {
     );
     let path = ctx.db_path.to_path_buf();
     let provider = ctx.provider.clone();
-    std::thread::spawn(move || {
+    ctx.provider.spawn_background(move || {
         struct Release;
         impl Drop for Release {
             fn drop(&mut self) {

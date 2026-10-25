@@ -1419,11 +1419,8 @@ fn shell(
     struct Group(std::process::Child, Arc<AtomicBool>);
     impl Drop for Group {
         fn drop(&mut self) {
-            let _ = Command::new("/bin/kill")
-                .args(["-KILL", "--", &format!("-{}", self.0.id())])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            // Waiting closes the watchdog's input: it ends even if this kill fails.
+            let _ = super::shell_tasks::kill_group(self.0.id());
             let _ = self.0.wait();
             self.1.store(true, Ordering::SeqCst);
         }
@@ -1719,7 +1716,6 @@ fn shell(
                                 if !stop.load(Ordering::SeqCst) =>
                             {
                                 stop.store(true, Ordering::SeqCst);
-                                super::shell_tasks::kill_group(pgid);
                                 break;
                             }
                             _ => {}
@@ -1727,12 +1723,18 @@ fn shell(
                     }
                     std::thread::sleep(Duration::from_millis(150));
                 }
-                // A stopped task is killed before its input closes: an end of file
-                // first would let `read` return and the rest of the command run.
-                // Whoever raised `stop` may not have killed the group yet.
+                // A stopped task dies before its input closes: an end of file first
+                // would let `read` return and the rest of the command run. Whoever
+                // raised `stop` may not have killed the group yet.
                 if stop.load(Ordering::SeqCst) {
-                    super::shell_tasks::kill_group(pgid);
+                    if let Err(error) = super::shell_tasks::kill_group(pgid) {
+                        // The input stays open and `stop` refuses every line: the
+                        // program keeps waiting, it does not go on.
+                        eprintln!("La tâche de fond {call_id} n'a pas pu être tuée : {error}");
+                    }
                 }
+                // The input closes only once the program is over, killed or ended.
+                let status = child.wait().ok();
                 // Closed under the input lock: from here the task takes no more
                 // lines, and the reader sees its last echo.
                 drop(
@@ -1741,7 +1743,6 @@ fn shell(
                         .take(),
                 );
                 finished.store(true, Ordering::SeqCst);
-                let status = child.wait().ok();
                 drop(group);
                 let (stdout, t1, i1) = out.join().unwrap_or_else(|_| (String::new(), false, true));
                 let (stderr, t2, i2) = err.join().unwrap_or_else(|_| (String::new(), false, true));

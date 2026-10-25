@@ -1718,6 +1718,63 @@ fn a_stopped_task_is_killed_before_its_input_closes() {
 }
 
 #[test]
+fn a_stopped_task_stays_stopped_when_no_process_can_start() {
+    // The process limit is process-wide and macOS does not let it rise again:
+    // the test runs again alone in a child process, which ends with it.
+    const CHILD: &str = "EZERBOT_STOP_WITHOUT_SPAWN";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_stopped_task_stays_stopped_when_no_process_can_start",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    start_background(&mut f, "nproc", "read -r ligne; printf fin > apres.txt");
+    let limit = getrlimit(Resource::Nproc);
+    setrlimit(
+        Resource::Nproc,
+        Rlimit {
+            current: Some(0),
+            maximum: limit.maximum,
+        },
+    )
+    .unwrap();
+    let refused = std::process::Command::new("/bin/echo").output().is_err();
+    let stopped = f.app.api(
+        "POST",
+        "/api/local/tasks/stop",
+        json!({"run_id": f.run("nproc").run_id, "call_id": "nproc"})
+            .to_string()
+            .as_bytes(),
+    );
+    // Destroying the App joins the task's monitor while the limit holds: its
+    // kill and the closing of the input are both behind us.
+    let root = f.root();
+    let Fixture { app, _dir, .. } = f;
+    drop(app);
+    assert!(refused, "la limite de processus n’a pas pris");
+    assert_eq!(stopped.unwrap()["status"], "arrêtée");
+    assert!(
+        !root.join("apres.txt").exists(),
+        "la tâche arrêtée a continué après la fin de son entrée"
+    );
+}
+
+#[test]
 fn a_password_prompt_written_one_byte_at_a_time_still_refuses_the_secret() {
     let mut f = Fixture::new();
     f.settings(true, false);

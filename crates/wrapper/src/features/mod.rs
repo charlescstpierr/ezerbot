@@ -107,6 +107,7 @@ pub mod page_snapshot;
 pub mod pages;
 pub mod recall;
 pub mod routine_calendar;
+mod routine_cost;
 pub mod routine_github;
 pub mod routine_mail;
 pub mod routine_webhooks;
@@ -122,6 +123,7 @@ pub mod templates;
 pub mod threads;
 pub mod topic_memory;
 pub mod topics;
+pub mod turns;
 pub mod updates;
 pub mod usage;
 pub mod voice;
@@ -181,6 +183,7 @@ registry!(
     mcp,
     storage,
     usage,
+    turns,
     notifications,
     iphone,
     floating,

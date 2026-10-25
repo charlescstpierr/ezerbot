@@ -5,8 +5,10 @@
 mod support;
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeSet,
     fs,
     io::{BufRead, BufReader},
+    net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
@@ -24,6 +26,9 @@ struct Host {
 }
 impl Host {
     fn new() -> Self {
+        Self::with_reserved_hook().0
+    }
+    fn with_reserved_hook() -> (Self, TcpListener) {
         // The clock alone can repeat across parallel tests: add a counter.
         let guard = grokbot_test_support::TestDir::new("ezerbot-webhook");
         let root = guard.to_path_buf();
@@ -68,15 +73,13 @@ esac
             hook: String::new(),
             _dir: guard,
         };
-        host.open();
-        host
+        let reserved_hook = host.open();
+        (host, reserved_hook)
     }
-    fn open(&mut self) {
-        let hook_port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+    fn open(&mut self) -> TcpListener {
+        // Keep the desktop server from claiming the webhook port at startup.
+        let reserved_hook = TcpListener::bind("127.0.0.1:0").unwrap();
+        let hook_port = reserved_hook.local_addr().unwrap().port();
         fs::write(self.root.join("hook-port"), hook_port.to_string()).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
             .args(["--port", "0", "--db"])
@@ -101,6 +104,7 @@ esac
             .into();
         self.hook = format!("http://127.0.0.1:{hook_port}");
         self.child = Some(child);
+        reserved_hook
     }
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -108,12 +112,60 @@ esac
             let _ = child.wait();
         }
     }
+    fn quit(&mut self) {
+        use nix::{
+            sys::signal::{kill, Signal},
+            unistd::Pid,
+        };
+        let pid = Pid::from_raw(self.child.as_ref().unwrap().id().try_into().unwrap());
+        kill(pid, Signal::SIGTERM).unwrap();
+        let mut child = self.child.take().unwrap();
+        let (exited, exit) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            exited.send(child.wait()).unwrap();
+        });
+        let status = exit.recv_timeout(std::time::Duration::from_secs(10));
+        if status.is_err() {
+            let _ = kill(pid, Signal::SIGKILL);
+        }
+        waiter.join().unwrap();
+        assert!(
+            status
+                .expect("the wrapper must exit after SIGTERM")
+                .unwrap()
+                .success(),
+            "the wrapper must finish its shutdown handler successfully"
+        );
+    }
     fn state(&self) -> Value {
         ureq::get(&format!("{}/api/state", self.url))
             .call()
             .unwrap()
             .into_json()
             .unwrap()
+    }
+    fn listeners(&self) -> BTreeSet<String> {
+        let pid = self.child.as_ref().unwrap().id().to_string();
+        let output = Command::new("lsof")
+            .args(["-nP", "-a", "-p", &pid, "-iTCP", "-sTCP:LISTEN", "-Fn"])
+            .output()
+            .expect("inspect the wrapper's TCP listeners with lsof");
+        assert!(
+            output.status.success(),
+            "lsof failed for wrapper PID {pid}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let listeners: BTreeSet<String> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix('n'))
+            .map(str::to_owned)
+            .collect();
+        assert!(
+            listeners.contains(self.url.trim_start_matches("http://")),
+            "desktop API listener missing for wrapper PID {pid}: {listeners:?}"
+        );
+        listeners
     }
     fn get(&self, path: &str) -> Value {
         ureq::get(&format!("{}{path}", self.url))
@@ -450,16 +502,25 @@ fn a_body_that_is_not_json_is_refused_without_a_run() {
 
 #[test]
 fn the_webhook_listener_is_loopback_only_and_closed_without_any_webhook() {
-    let host = Host::new();
-    let port = host.hook.rsplit(':').next().unwrap().to_owned();
-    std::thread::sleep(std::time::Duration::from_millis(700));
-    assert!(std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_err());
+    let (mut host, reserved_hook) = Host::with_reserved_hook();
+    let desktop = format!("127.0.0.1:{}", host.url.rsplit(':').next().unwrap());
+    let hook = format!("127.0.0.1:{}", reserved_hook.local_addr().unwrap().port());
+    let initial = host.state();
+    assert_eq!(initial["routine_webhooks"]["listener"]["listening"], false);
+    assert!(initial["routine_webhooks"]["listener"]["error"].is_null());
+    // A successful connect does not identify the wrapper as the listener's owner.
+    assert!(std::net::TcpStream::connect(&hook).is_ok());
+    assert_eq!(host.listeners(), BTreeSet::from([desktop.clone()]));
+    drop(reserved_hook);
     host.webhook_routine("Écoute");
     host.wait_listener();
+    assert_eq!(host.listeners(), BTreeSet::from([desktop, hook]));
     assert_eq!(
         host.state()["routine_webhooks"]["listener"]["listening"],
         true
     );
+    // Waiting for this PID's exit proves its sockets closed, regardless of port reuse.
+    host.quit();
 }
 
 #[test]

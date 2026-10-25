@@ -52,11 +52,13 @@ flate2 = "1"
 brotli = "8"
 
 [dev-dependencies]
-# Les intégrations compilent la bibliothèque sans cfg(test), même en release.
-grokbot-wrapper = { path = ".", features = ["test-support"] }
+# `progress_handler` counts every SQLite instruction of a read (routine_cost scale test).
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 # Décode les réponses Brotli servies, comme le ferait le navigateur.
 brotli = "8"
 grokbot-test-support = { workspace = true }
+# Les intégrations compilent la bibliothèque sans cfg(test), même en release.
+grokbot-wrapper = { path = ".", features = ["test-support"] }
 nix = { version = "0.29.0", default-features = false, features = ["fs", "user"] }
 # Relit le QR servi au Mac, comme le ferait l'appareil photo de l'iPhone.
 rqrr = { version = "0.11", default-features = false }

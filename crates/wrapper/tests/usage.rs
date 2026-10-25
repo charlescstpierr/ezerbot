@@ -6,6 +6,7 @@ use grokbot_engine::{
     model::{Run, RunStatus},
     store,
 };
+use grokbot_scheduler::occurrences;
 use grokbot_wrapper::{App, Endpoints, Provider};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -142,6 +143,13 @@ fn seed_run(
     kind: &str,
     measured: bool,
 ) {
+    insert_run(conn, id, bot, conversation, kind, 1);
+    if measured {
+        add_usage(conn, id, 100, 20, 30);
+    }
+}
+
+fn insert_run(conn: &Connection, id: &str, bot: &str, conversation: &str, kind: &str, at: i64) {
     let trigger = match kind {
         "routine" => Trigger::Occurrence {
             occurrence_id: id.into(),
@@ -176,21 +184,22 @@ fn seed_run(
         }),
         turn_end: Some(TurnEnd::Finished),
         budgets: RunBudgets::default(),
-        started_at: 1,
+        started_at: at,
     };
     conn.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) VALUES (?1,?2,?3,?4,?1,0,'finished',?5)", params![id,bot,conversation,trigger_kind,serde_json::to_string(&run).unwrap()]).unwrap();
-    if measured {
-        let tx = conn.unchecked_transaction().unwrap();
-        let usage = TokenUsage {
-            input_tokens: 100,
-            output_tokens: 20,
-            cached_input_tokens: 30,
-        };
-        store::save_token_usage(&tx, id, 1, &usage, None).unwrap();
-        store::save_token_usage(&tx, id, 1, &usage, None).unwrap(); // duplicate telemetry
-        store::save_token_usage(&tx, id, 2, &usage, None).unwrap(); // second model response
-        tx.commit().unwrap();
-    }
+}
+
+fn add_usage(conn: &Connection, id: &str, input: u64, output: u64, cached: u64) {
+    let tx = conn.unchecked_transaction().unwrap();
+    let usage = TokenUsage {
+        input_tokens: input,
+        output_tokens: output,
+        cached_input_tokens: cached,
+    };
+    store::save_token_usage(&tx, id, 1, &usage, None).unwrap();
+    store::save_token_usage(&tx, id, 1, &usage, None).unwrap(); // duplicate telemetry
+    store::save_token_usage(&tx, id, 2, &usage, None).unwrap(); // second model response
+    tx.commit().unwrap();
 }
 
 #[test]
@@ -262,6 +271,560 @@ fn local_tokens_roll_up_once_per_bot_and_source_and_survive_deletion_restart() {
     drop(app);
     let mut app = f.app();
     assert_eq!(get(&mut app), data);
+}
+
+fn edge(conn: &Connection, parent: &str, child: &str) {
+    conn.execute("INSERT INTO delegation_graph(id,parent_run_id,root_run_id,parent_bot,child_bot,depth,child_run_id,conversation_id,selected_context,status) VALUES (?1,?2,?2,'b','b',1,?1,NULL,'{}','{\"status\":\"done\"}')", params![child, parent]).unwrap();
+}
+
+#[test]
+fn usage_totals_are_frozen_for_chat_routine_and_delegation_runs() {
+    let f = Fixture::new(ScriptedResponse::json(200, valid()));
+    let mut app = f.app();
+    let conn = Connection::open(f.dir.join("app.sqlite")).unwrap();
+    let bot: String = conn
+        .query_row("SELECT id FROM wrapper_bots LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    let conversation = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (id, source, measured) in [
+        ("chat", "chat", true),
+        ("routine", "routine", true),
+        ("child", "delegation", true),
+        ("grandchild", "delegation", true),
+        ("unknown", "chat", false),
+    ] {
+        seed_run(&conn, id, &bot, &conversation, source, measured);
+    }
+    edge(&conn, "routine", "child");
+    edge(&conn, "child", "grandchild");
+    let name: String = conn
+        .query_row("SELECT name FROM wrapper_bots WHERE id=?1", [&bot], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let tokens = |input: u64, output: u64, cached: u64, measured: u64, unknown: u64| json!({"input_tokens":input,"output_tokens":output,"cached_input_tokens":cached,"measured_runs":measured,"unknown_runs":unknown});
+    let local = app.api("GET", "/api/usage", b"").unwrap()["local"].clone();
+    assert_eq!(
+        local,
+        json!({
+            "total": tokens(800, 160, 240, 4, 1),
+            "by_bot": [{"id":bot,"name":name,"deleted":false,"tokens":tokens(800, 160, 240, 4, 1)}],
+            "by_source": [
+                {"source":"bot_to_bot","tokens":tokens(0, 0, 0, 0, 0)},
+                {"source":"chat","tokens":tokens(200, 40, 60, 1, 1)},
+                {"source":"delegation","tokens":tokens(400, 80, 120, 2, 0)},
+                {"source":"group","tokens":tokens(0, 0, 0, 0, 0)},
+                {"source":"routine","tokens":tokens(200, 40, 60, 1, 0)},
+            ],
+        })
+    );
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+/// A routine on `schedule` with its bot and conversation, plus the app and a raw connection.
+struct Cost {
+    f: Fixture,
+    app: App,
+    conn: Connection,
+    bot: String,
+    routine: String,
+    conversation: String,
+}
+impl Cost {
+    fn new(quota: Value, trigger: Value) -> Self {
+        let f = Fixture::new(ScriptedResponse::json(200, quota));
+        let mut app = f.app();
+        let conn = Connection::open(f.dir.join("app.sqlite")).unwrap();
+        let bot: String = conn
+            .query_row("SELECT id FROM wrapper_bots LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        let body = json!({"bot_id":bot,"name":"Veille","prompt":"Résume.","trigger":trigger});
+        let created = app
+            .api("POST", "/api/routines", body.to_string().as_bytes())
+            .unwrap();
+        f.quota();
+        let routine = created["routine"]["routine_id"].as_str().unwrap().into();
+        let conversation = created["routine"]["conversation_id"]
+            .as_str()
+            .unwrap()
+            .into();
+        Self {
+            f,
+            app,
+            conn,
+            bot,
+            routine,
+            conversation,
+        }
+    }
+    fn every_30_minutes() -> Self {
+        Self::new(valid(), json!({"kind":"every","interval_ms":1_800_000}))
+    }
+    /// One passage whose run started `age_ms` ago and used `tokens` in total.
+    fn pass(&self, id: &str, status: &str, age_ms: i64, tokens: Option<u64>) -> &Self {
+        self.pass_for(&self.routine, id, status, age_ms, tokens)
+    }
+    fn pass_for(
+        &self,
+        routine: &str,
+        id: &str,
+        status: &str,
+        age_ms: i64,
+        tokens: Option<u64>,
+    ) -> &Self {
+        self.late_pass_for(routine, id, status, age_ms, age_ms, tokens)
+    }
+    /// A passage scheduled `slot_age_ms` ago whose run started `age_ms` ago (a catch-up).
+    fn late_pass_for(
+        &self,
+        routine: &str,
+        id: &str,
+        status: &str,
+        slot_age_ms: i64,
+        age_ms: i64,
+        tokens: Option<u64>,
+    ) -> &Self {
+        let started = (now() * 1000) as i64 - age_ms;
+        let scheduled = (now() * 1000) as i64 - slot_age_ms;
+        insert_run(
+            &self.conn,
+            id,
+            &self.bot,
+            &self.conversation,
+            "routine",
+            started,
+        );
+        if let Some(tokens) = tokens {
+            add_usage(&self.conn, id, tokens / 2 - 100, 100, 0);
+        }
+        self.conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,run_id,reason) VALUES (?1,?2,1,?3,?4,?1,'test')", params![id, routine, scheduled, status]).unwrap();
+        self
+    }
+    /// A local run with `tokens` in total, started a day ago, that no routine owns.
+    fn chat(&self, tokens: u64) {
+        let started = (now() * 1000) as i64 - DAY_MS;
+        insert_run(
+            &self.conn,
+            "chat",
+            &self.bot,
+            &self.conversation,
+            "chat",
+            started,
+        );
+        add_usage(&self.conn, "chat", tokens / 2 - 100, 100, 0);
+    }
+    /// The cost the routine list and the routines state both return, which must agree.
+    fn cost(&mut self) -> Value {
+        let ours = |routines: &Value, routine: &str| {
+            routines
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["routine_id"] == routine)
+                .unwrap()["cost"]
+                .clone()
+        };
+        let list = self
+            .app
+            .api("GET", &format!("/api/routines?bot_id={}", self.bot), b"")
+            .unwrap()["routines"]
+            .clone();
+        let state = self.app.api("GET", "/api/state", b"").unwrap()["routines"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["routine"].clone())
+            .collect::<Vec<_>>();
+        let (list, state) = (
+            ours(&list, &self.routine),
+            ours(&json!(state), &self.routine),
+        );
+        assert_eq!(list, state);
+        list
+    }
+}
+
+#[test]
+fn a_routine_costs_the_mean_of_its_last_ten_finished_passages_and_seven_days_of_tokens() {
+    let mut c = Cost::every_30_minutes();
+    c.pass("a", "done", 3 * 3_600_000, Some(1000))
+        .pass("b", "done", 2 * 3_600_000, Some(2000))
+        .pass("c", "done", 3_600_000, Some(3000));
+    let cost = c.cost();
+    assert_eq!(cost["state"], "measured");
+    assert_eq!(cost["average_tokens"], 2000);
+    assert_eq!(cost["average_sample"], 3);
+    assert_eq!(cost["tokens_7d"], 6000);
+    // Eleven older passages: only the ten latest finished ones average; the 8-day one is out of the 7 days.
+    let mut c = Cost::every_30_minutes();
+    c.pass("old", "done", 8 * DAY_MS, Some(90_000))
+        .pass("older", "done", 6 * DAY_MS, Some(90_000));
+    for n in 0..10 {
+        c.pass(&format!("n{n}"), "done", n * 60_000 + 60_000, Some(1000));
+    }
+    let cost = c.cost();
+    assert_eq!(cost["average_tokens"], 1000);
+    assert_eq!(cost["average_sample"], 10);
+    assert_eq!(cost["tokens_7d"], 100_000);
+}
+
+#[test]
+fn a_subtask_and_its_own_subtask_count_once_in_the_passage_that_started_them() {
+    let mut c = Cost::every_30_minutes();
+    c.pass("root", "done", 3_600_000, Some(1000));
+    for (id, parent, tokens) in [("child", "root", 500), ("grandchild", "child", 250)] {
+        insert_run(&c.conn, id, &c.bot, &c.conversation, "delegation", 1);
+        add_usage(&c.conn, id, tokens / 2 - 50, 50, 0);
+        edge(&c.conn, parent, id);
+    }
+    // Another routine's passage, with its own subtask, is not ours.
+    let other = c
+        .app
+        .api(
+            "POST",
+            "/api/routines",
+            json!({"bot_id":c.bot,"name":"Autre","prompt":"Résume.","schedule":"@every 1h"})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap()["routine"]["routine_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    c.pass_for(&other, "foreign", "done", 3_600_000, Some(5000));
+    insert_run(
+        &c.conn,
+        "foreign-child",
+        &c.bot,
+        &c.conversation,
+        "delegation",
+        1,
+    );
+    add_usage(&c.conn, "foreign-child", 1450, 50, 0);
+    edge(&c.conn, "foreign", "foreign-child");
+    let cost = c.cost();
+    assert_eq!(cost["average_tokens"], 1750);
+    assert_eq!(cost["tokens_7d"], 1750);
+}
+
+#[test]
+fn the_daily_forecast_is_the_mean_times_the_passages_the_schedule_plans_each_day() {
+    for trigger in [
+        json!({"kind":"every","interval_ms":1_800_000}),
+        json!({"kind":"cron","expression":"*/30 * * * *","time_zone":"UTC"}),
+    ] {
+        let mut c = Cost::new(valid(), trigger);
+        c.pass("a", "done", 3_600_000, Some(2000));
+        let forecast = c.cost()["forecast"].clone();
+        assert_eq!(forecast["state"], "estimated");
+        assert_eq!(forecast["tokens_per_day"], 96_000);
+        assert_eq!(forecast["tokens_next_7d"], 672_000);
+    }
+    // A weekly routine is one passage a week, not zero on six days out of seven.
+    let mut c = Cost::new(
+        valid(),
+        json!({"kind":"cron","expression":"0 9 * * 1","time_zone":"UTC"}),
+    );
+    c.pass("a", "done", 3_600_000, Some(2000));
+    let forecast = c.cost()["forecast"].clone();
+    assert_eq!(forecast["runs_next_7d"], 1);
+    assert_eq!(forecast["tokens_per_day"], 286);
+    // Events have no clock: the forecast is impossible, not zero.
+    let mut c = Cost::new(valid(), json!({"kind":"webhook"}));
+    c.pass("a", "done", 3_600_000, Some(2000));
+    let forecast = c.cost()["forecast"].clone();
+    assert_eq!(forecast["state"], "impossible");
+    assert_eq!(forecast["reason"], "event_trigger");
+    assert!(forecast["tokens_per_day"].is_null());
+}
+
+#[test]
+fn a_routine_without_a_measured_finished_passage_has_no_measure_yet() {
+    let mut c = Cost::every_30_minutes();
+    let cost = c.cost();
+    assert_eq!(cost["state"], "no_measure_yet");
+    assert!(cost["average_tokens"].is_null() && cost["tokens_7d"].is_null());
+    assert_eq!(cost["forecast"]["state"], "no_measure_yet");
+    // A failed passage, and one whose provider sent no usage, are not zeros.
+    c.pass("failed", "failed", 60_000, Some(4000))
+        .pass("blind", "done", 120_000, None);
+    let cost = c.cost();
+    assert_eq!(cost["state"], "no_measure_yet");
+    assert!(cost["average_tokens"].is_null());
+    // What the failed passage did use is still the week's measured total.
+    assert_eq!(cost["tokens_7d"], 4000);
+}
+
+#[test]
+fn the_forecast_follows_the_scheduler_cursor_and_counts_each_group_member_on_its_own() {
+    // Every ten days, last due nine days ago: the next passage is tomorrow, inside the week.
+    let mut c = Cost::new(valid(), json!({"kind":"every","interval_ms":864_000_000}));
+    c.pass("a", "done", 3_600_000, Some(2000));
+    let cursor = (now() * 1000) as i64 - 9 * DAY_MS;
+    c.conn
+        .execute(
+            "UPDATE scheduler_routines SET materialized_after=?1 WHERE routine_id=?2",
+            params![cursor, c.routine],
+        )
+        .unwrap();
+    assert_eq!(c.cost()["forecast"]["runs_next_7d"], 1);
+    // Two coincident daily triggers start two passages a day, as the scheduler materializes them.
+    let daily = json!({"trigger":{"kind":"cron","expression":"0 9 * * *","time_zone":"UTC"}});
+    let mut c = Cost::new(valid(), json!({"kind":"group","members":[daily, daily]}));
+    c.pass("a", "done", 3_600_000, Some(2000));
+    assert_eq!(c.cost()["forecast"]["runs_next_7d"], 14);
+}
+
+#[test]
+fn a_weekday_schedule_is_counted_whatever_the_day_it_is_read() {
+    // Any 7 days hold five weekdays of 1 440 minutes.
+    let mut c = Cost::new(
+        valid(),
+        json!({"kind":"cron","expression":"* * * * 1-5","time_zone":"UTC"}),
+    );
+    c.pass("a", "done", 3_600_000, Some(2000));
+    let forecast = c.cost()["forecast"].clone();
+    assert_eq!(forecast["runs_next_7d"], 7200);
+    assert_eq!(forecast["tokens_next_7d"], 14_400_000);
+    // Nothing is planned while the routine is paused.
+    c.conn
+        .execute("UPDATE scheduler_routines SET enabled=0", [])
+        .unwrap();
+    assert_eq!(c.cost()["forecast"]["runs_next_7d"], 0);
+}
+
+#[test]
+fn passages_without_telemetry_never_hide_a_measured_one_however_many_are_newer() {
+    let mut c = Cost::every_30_minutes();
+    c.pass("measured", "done", 2 * DAY_MS, Some(2000));
+    for n in 0..1500 {
+        c.pass(&format!("blind{n}"), "done", 3_600_000 + n * 2000, None);
+    }
+    let cost = c.cost();
+    assert_eq!(
+        (
+            cost["average_tokens"].clone(),
+            cost["average_sample"].clone()
+        ),
+        (json!(2000), json!(1)),
+        "{cost}"
+    );
+    assert_eq!(cost["forecast"]["state"], "estimated");
+}
+
+#[test]
+fn catch_up_passages_count_by_when_their_run_started_and_a_backlog_hides_nothing() {
+    // Twelve slots owed for ten days, run today: the week counts them all, the average takes ten.
+    let mut c = Cost::every_30_minutes();
+    for n in 0..12 {
+        c.late_pass_for(
+            &c.routine,
+            &format!("late{n}"),
+            "done",
+            10 * DAY_MS + n * 2000,
+            3_600_000 - n * 1000,
+            Some(1000),
+        );
+    }
+    let cost = c.cost();
+    assert_eq!(cost["tokens_7d"], 12_000);
+    assert_eq!(
+        (
+            cost["average_tokens"].clone(),
+            cost["average_sample"].clone()
+        ),
+        (json!(1000), json!(10))
+    );
+    // 250 newer catch-up occurrences still pending do not push the finished ones out of sight.
+    let now_ms = (now() * 1000) as i64;
+    for n in 0..250 {
+        c.conn
+            .execute(
+                "INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,catch_up) VALUES (?1,?2,1,?3,'pending',1)",
+                params![format!("backlog{n}"), c.routine, now_ms + n],
+            )
+            .unwrap();
+    }
+    let cost = c.cost();
+    assert_eq!(cost["state"], "measured");
+    assert_eq!(cost["average_sample"], 10);
+}
+
+#[test]
+fn a_week_without_telemetry_is_unknown_and_a_week_without_passages_is_zero() {
+    let mut c = Cost::every_30_minutes();
+    c.pass("old", "done", 10 * DAY_MS, Some(1000));
+    assert_eq!(c.cost()["tokens_7d"], 0);
+    c.pass("blind", "done", 3_600_000, None);
+    assert!(c.cost()["tokens_7d"].is_null());
+}
+
+#[test]
+fn a_passage_is_measured_when_any_run_of_its_delegation_tree_sent_usage() {
+    let mut c = Cost::every_30_minutes();
+    let subtask = |c: &Cost, id: &str, parent: &str| {
+        insert_run(&c.conn, id, &c.bot, &c.conversation, "delegation", 1);
+        (id.to_owned(), parent.to_owned())
+    };
+    let average = |c: &mut Cost| {
+        let cost = c.cost();
+        (
+            cost["average_tokens"].clone(),
+            cost["average_sample"].clone(),
+        )
+    };
+    // Finished without telemetry of its own, then its subtask sends 1 750 tokens.
+    c.pass("root", "done", 3 * 3_600_000, None);
+    let (child, parent) = subtask(&c, "child", "root");
+    edge(&c.conn, &parent, &child);
+    assert_eq!(average(&mut c), (Value::Null, json!(0)));
+    add_usage(&c.conn, &child, 825, 50, 0);
+    assert_eq!(average(&mut c), (json!(1750), json!(1)));
+    // The subtask's tokens were sent before the link to its passage was written.
+    c.pass("linked-late", "done", 2 * 3_600_000, None);
+    let (child, parent) = subtask(&c, "late-child", "linked-late");
+    add_usage(&c.conn, &child, 1_075, 50, 0);
+    edge(&c.conn, &parent, &child);
+    assert_eq!(average(&mut c), (json!(2000), json!(2)));
+    // The passage finishes after its subtask sent tokens, two levels down.
+    c.pass("running", "running", 3_600_000, None);
+    let (child, parent) = subtask(&c, "child-1", "running");
+    edge(&c.conn, &parent, &child);
+    let (grandchild, parent) = subtask(&c, "child-2", "child-1");
+    edge(&c.conn, &parent, &grandchild);
+    add_usage(&c.conn, &grandchild, 1_325, 50, 0);
+    assert_eq!(average(&mut c), (json!(2000), json!(2)));
+    c.conn
+        .execute(
+            "UPDATE scheduler_occurrences SET status='done' WHERE occurrence_id='running'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(average(&mut c), (json!(2250), json!(3)));
+}
+
+#[test]
+fn a_quiet_passage_is_a_finished_measured_passage_like_any_other() {
+    let mut c = Cost::every_30_minutes();
+    c.pass("loud", "done", 2 * 3_600_000, Some(1000));
+    // « Rien à signaler » (#286): the running passage turns quiet, then is done.
+    c.pass("quiet", "running", 3_600_000, Some(3000));
+    occurrences::mark_quiet(&c.conn, "quiet", "quiet").unwrap();
+    occurrences::mark_done(&c.conn, "quiet", "quiet").unwrap();
+    let cost = c.cost();
+    assert_eq!(
+        (
+            &cost["average_tokens"],
+            &cost["average_sample"],
+            &cost["tokens_7d"]
+        ),
+        (&json!(2000), &json!(2), &json!(4000)),
+        "{cost}"
+    );
+}
+
+#[test]
+fn deleting_a_passage_takes_it_out_of_the_average_and_the_eleventh_comes_back() {
+    let mut c = Cost::every_30_minutes();
+    c.pass("oldest", "done", 12 * 3_600_000, Some(1000));
+    for n in 0..10 {
+        c.pass(&format!("p{n}"), "done", (10 - n) * 3_600_000, Some(2000));
+    }
+    let cost = c.cost();
+    assert_eq!(
+        (&cost["average_tokens"], &cost["average_sample"]),
+        (&json!(2000), &json!(10))
+    );
+    c.conn
+        .execute(
+            "DELETE FROM scheduler_occurrences WHERE occurrence_id='p9'",
+            [],
+        )
+        .unwrap();
+    let cost = c.cost();
+    assert_eq!(
+        (&cost["average_tokens"], &cost["average_sample"]),
+        (&json!(1900), &json!(10)),
+        "{cost}"
+    );
+}
+
+#[test]
+fn reading_routine_costs_never_writes_even_the_first_state_read() {
+    let mut c = Cost::new(
+        weekly(20.0),
+        json!({"kind":"every","interval_ms":1_800_000}),
+    );
+    c.chat(2_000_000);
+    c.pass("a", "done", 3_600_000, Some(2000));
+    // Changes when another connection commits anything to the database.
+    let version = |c: &Cost| -> i64 {
+        c.conn
+            .query_row("PRAGMA data_version", [], |r| r.get(0))
+            .unwrap()
+    };
+    let before = version(&c);
+    // The first state read starts the connection check: it must not write either.
+    c.cost();
+    c.f.provider.wait_for_background_work().unwrap();
+    c.cost();
+    assert_eq!(version(&c), before);
+}
+
+fn is_money(key: &str) -> bool {
+    ["usd", "dollar", "price", "prix", "eur", "currency"]
+        .iter()
+        .any(|word| key.to_lowercase().contains(word))
+}
+fn money_keys(value: &Value) -> Vec<String> {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .flat_map(|(k, v)| {
+                let mut found = money_keys(v);
+                if is_money(k) {
+                    found.push(k.clone());
+                }
+                found
+            })
+            .collect(),
+        Value::Array(items) => items.iter().flat_map(money_keys).collect(),
+        _ => vec![],
+    }
+}
+
+fn weekly(used: f64) -> Value {
+    json!({"rate_limit":{"primary_window":{"used_percent":used,"limit_window_seconds":604800,"reset_at":now()+3*86400}}})
+}
+
+/// The share of the weekly quota is not attributed to a Codex account yet (a follow-up ticket notes
+/// the account on every response): whatever the gauge says, it is an explicit state without a number.
+#[test]
+fn the_quota_share_is_explicitly_not_attributed_and_no_field_is_money() {
+    let not_attributed = json!({"state":"unknown","reason":"quota_not_attributed"});
+    let every = json!({"kind":"every","interval_ms":1_800_000});
+    for (quota, trigger, measured) in [
+        (weekly(20.0), every.clone(), true),
+        (json!({}), every.clone(), true),
+        (weekly(20.0), json!({"kind":"webhook"}), true),
+        (weekly(20.0), every, false),
+    ] {
+        let mut c = Cost::new(quota, trigger);
+        c.chat(2_000_000);
+        if measured {
+            c.pass("a", "done", 3_600_000, Some(2000));
+        }
+        let cost = c.cost();
+        assert_eq!(cost["quota_share"], not_attributed, "{cost}");
+        assert!(money_keys(&cost).is_empty(), "{cost}");
+        if measured {
+            assert_eq!(cost["average_tokens"], 2000);
+        }
+    }
 }
 
 fn window(reset: Value) -> Value {

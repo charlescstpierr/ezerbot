@@ -7,6 +7,10 @@ Dans **Paramètres → Usage**, Ezerbot distingue deux mesures :
 
 Le quota du forfait est partagé avec les autres applications Codex. Les tokens locaux ne permettent donc pas de le calculer. L’historique local couvre toutes les connexions utilisées dans cet espace, y compris les bots supprimés. Il compte les réponses principales du moteur, pas les appels auxiliaires de titres, mémoire automatique, vision ou résumés. Les exécutions sans télémétrie sont signalées comme non mesurées, jamais estimées.
 
+## Coût d'une routine
+
+`GET /api/routines` et l'état des routines renvoient `routine.cost`, en tokens et jamais en prix : moyenne des 10 derniers passages terminés et mesurés, total des 7 derniers jours (sous-tâches déléguées comprises, chacune une fois) et prévision de l'horaire sur 7 jours (`forecast`, « impossible » pour GitHub, courriel, calendrier ou webhook). La prévision suit le planificateur (jours ouvrés, changements d'heure, groupes) ; une routine en pause n'a aucun passage prévu. La part du quota hebdomadaire (`quota_share`) vaut toujours `{"state":"unknown","reason":"quota_not_attributed"}`, sans nombre : les tokens locaux peuvent venir d'un autre compte Codex que celui dont le quota est lu, tant que chaque réponse ne note pas son compte.
+
 ## Lecture et confidentialité
 
 `GET /backend-api/wham/usage` utilise le Bearer et l’en-tête `chatgpt-account-id` de la session Codex propre à Ezerbot. Aucun fichier d’identifiants de pi, de Codex CLI ou d’un autre outil n’est lu. Le transport ne suit pas les redirections ; toute réponse hors 2xx est une erreur. Seuls les champs validés du quota atteignent l’interface ; ni jeton, ni corps d’erreur brut ne sont exposés.
@@ -121,6 +125,35 @@ Le fichier ne contient ni texte de message, ni secret, ni identifiant brut.
 **Ces erreurs sont synthétiques** : `input_tokens` vient d'un compteur de test, pas
 du fournisseur. Elles mesurent l'écart de l'estimation, sans régler
 `characters_per_token` ni `compaction_percent`.
+
+## Journal des tours
+
+Chaque tour terminé laisse une ligne JSON dans la table `wrapper_turn_log` (`run_id`, `at_ms`, `entry`) de la base de l’espace ; rien ne quitte le Mac. Un tour n’est écrit qu’une fois : sa première ligne reste, même s’il est arrêté ou régénéré ensuite.
+
+Par tour : `at_ms`, `bot_id`, `source` (chat, routine, group, delegation, bot_to_bot, comme `/api/usage`), `turn` (empreinte de 16 caractères, la même que `turn=` dans `logs/engine.log`), `model`, `effort`, `status`, `error_kind`, `duration_ms`, `model_calls`, `tool_calls`, `tokens` (`input`, `output`, `cached`, ou `null` si le fournisseur n’a rien mesuré) et `tools`.
+
+Par appel d’outil, dans l’ordre : `name`, `started_ms`, `duration_ms`, `result` et `code`. La durée va de l’entrée de l’appel à son résultat ; un appel suspendu pour approbation est chronométré à sa reprise, sans l’attente humaine. Un appel jamais exécuté, repris après redémarrage ou d’effet incertain n’a ni début ni durée (`null`). Un nom venu du modèle (`mcp_<connecteur>_<outil>` pour un outil MCP) n’est gardé que s’il tient en 64 octets de `A-Z a-z 0-9 _ . -` et si l’appel a été validé ; sinon, et pour `unknown_tool` et `not_executed`, il devient `-`. Un résultat d’avant le journal, sans `code`, est déduit de son statut (`ok` ou `failed`) et son nom devient `-`. Un tour arrêté en attente d’approbation est journalisé à l’arrêt ; une tâche déléguée suspendue puis annulée avec son parent ne l’est pas.
+
+| `code` | `result` |
+| --- | --- |
+| `ok` | `ok` |
+| `failed`, `uncertain` | `erreur` |
+| `invalid_arguments`, `unknown_tool`, `follow_up_pending`, `approval_pending` | `refusé` |
+| `approval_denied` | `approbation refusée` |
+| `not_executed` | `annulé` |
+
+**Jamais dans le journal** : texte de message, argument, sortie ou raison d’un outil, secret du coffre, jeton, en-tête, `request_id`, titre de conversation. Que des compteurs, des codes fixes et des identifiants opaques.
+
+**Bornes.** 64 appels détaillés par tour au plus (`tool_calls` garde le vrai total), 20 000 tours au plus (les plus anciens partent), 30 jours : les lignes plus vieilles sont supprimées au démarrage puis une fois par jour, sans toucher aux autres tables. Une écriture qui échoue ne change pas l’issue du tour.
+
+**Résumé d’une journée**, en heure locale du Mac (minuit à minuit, changements d’heure compris), par la route ou la commande, qui renvoient le même JSON ; un jour qui n’est pas `AAAA-MM-JJ` donne une erreur 400 (code de sortie 1 en ligne de commande) :
+
+```sh
+curl -s 'http://127.0.0.1:<port>/api/turns/summary?day=2026-10-24'
+grokbot-wrapper --turns-summary 2026-10-24 [--db chemin.sqlite]
+```
+
+`turns` ; `tokens` (`input`, `output`, `cached` sur les tours mesurés, `unmeasured_turns` pour les autres, jamais comptés comme zéro) ; `most_used` (`name`, `calls`) ; `slowest` (`name`, `calls` chronométrés, `median_ms`, `p95_ms`, du plus lent au plus rapide selon `p95_ms`) ; `errors` (`name`, `code`, `count` pour tout résultat autre que `ok`). Médiane et p95 se calculent au rang le plus proche : la valeur de rang `ceil(n × p ÷ 100)` sur `n` durées triées. Les égalités se départagent par nom, puis par code.
 
 ## Évaluation sur faux serveur (opt-in)
 

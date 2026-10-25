@@ -1329,7 +1329,7 @@ fn cancel_runs(ctx: &Context<'_>, cancelled: Vec<Delegation>) -> Result<()> {
                                     ctx.connection,
                                     id,
                                     RunEventKind::ToolResult,
-                                    &json!({"call_id":call,"outcome":{"status":"failed","reason":"not executed: stopped"}}),
+                                    &json!({"call_id":call,"code":"not_executed","outcome":{"status":"failed","reason":"not executed: stopped"}}),
                                 )?;
                             }
                         }

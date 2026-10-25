@@ -1,0 +1,68 @@
+{
+  "head": "df52372a8111e7de8a7622f57b13f0dd059b8aa3",
+  "binary_sha256": "8a5def015824aa9f9311a7037c121621e5304348f8e045b24ac10450d0596f58",
+  "platform": "macOS",
+  "browser": "chrome-devtools-axi",
+  "session": "pm-i281",
+  "checks": [
+    "modèle disponible",
+    "envoi disponible",
+    "Page générée et cliquable",
+    "renommage enregistré",
+    "titre relu deux fois avant édition",
+    "brouillon focalisé modifié",
+    "deux réponses Page masquées reçues",
+    "champ édité masqué sans perdre le focus",
+    "titre retiré de la liste et du DOM",
+    "thème confirmé light",
+    "capture sans valeur privée light",
+    "thème confirmé dark",
+    "capture sans valeur privée dark",
+    "Page API masquée",
+    "titre masqué après retrait",
+    "envoi parent disponible",
+    "parent visible et réponse terminée",
+    "action fil disponible",
+    "sous-fil ouvert",
+    "parent initial visible",
+    "poll masque le bandeau parent",
+    "retour au message parent",
+    "action rouvrir disponible",
+    "réponse directe rouvrir masquée",
+    "bandeau rouvert masqué",
+    "thème confirmé light",
+    "capture sans valeur privée light",
+    "thème confirmé dark",
+    "capture sans valeur privée dark"
+  ],
+  "captures": [
+    {
+      "file": "parent-rouvert-dark-1140.png",
+      "sha256": "0d6b6e8a0b1234f2b053a963a4ade3d00e9894269fe90e129dff4630aa3643ea",
+      "width": 1140,
+      "height": 780,
+      "action": "Réouverture réelle du fil après apprentissage du parent au coffre"
+    },
+    {
+      "file": "parent-rouvert-light-1140.png",
+      "sha256": "e53c764b3177d1a6bc56d2d822b819fd13444490ac8914c674dba4345f6999e4",
+      "width": 1140,
+      "height": 780,
+      "action": "Réouverture réelle du fil après apprentissage du parent au coffre"
+    },
+    {
+      "file": "titre-edite-dark-1140.png",
+      "sha256": "52f76e6966e8c03ef2fa6947ec2097c6a408137b2140dce2da44bc4b50bf269d",
+      "width": 1140,
+      "height": 780,
+      "action": "Titre édité puis deux réponses masquées"
+    },
+    {
+      "file": "titre-edite-light-1140.png",
+      "sha256": "77898fe3115cd7b7563f7c4e42bc39ed27c1880b1f50d68a9be7351bad756589",
+      "width": 1140,
+      "height": 780,
+      "action": "Titre édité puis deux réponses masquées"
+    }
+  ]
+}

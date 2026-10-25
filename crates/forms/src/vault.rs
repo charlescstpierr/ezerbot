@@ -6,11 +6,11 @@
 //! storage. The wrapper supplies the companion path used for migration and fallback.
 use grokbot_engine::contracts::{Error, Result, SecretRef};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const VAULT_FILE_MODE: u32 = 0o600;
@@ -62,20 +62,33 @@ struct StoredSecret {
 type Secrets = BTreeMap<String, StoredSecret>;
 
 // Serialize threads on one vault before taking its stable companion-file lock,
-// which also protects against other wrapper processes. One mutex per vault file:
-// a write that waits for the disk must not hold up the readers of another vault
-// (a state read of another workspace, another test fixture). No mutable state
-// lives in these mutexes: after a panic it is safe to recover and revalidate the
-// on-disk snapshot. Each lives as long as the process, one per vault path opened.
-static VAULT_ACCESS: OnceLock<Mutex<BTreeMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
-fn access(path: &Path) -> MutexGuard<'static, ()> {
-    let vault: &'static Mutex<()> = VAULT_ACCESS
-        .get_or_init(Mutex::default)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(path.to_path_buf())
-        .or_insert_with(|| Box::leak(Box::default()));
-    vault.lock().unwrap_or_else(PoisonError::into_inner)
+// which also protects against other wrapper processes and against another
+// spelling of the same file. One lock per vault file: a write that waits for the
+// disk must not hold up the readers of another vault (a state read of another
+// workspace, another test fixture). A path is in VAULT_ACCESS only while a
+// thread holds it, so the table never outgrows the vaults in use. Releasing runs
+// in Drop, also while a panic unwinds; the on-disk snapshot is revalidated next.
+static VAULT_ACCESS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+static VAULT_RELEASED: Condvar = Condvar::new();
+struct Access(PathBuf);
+impl Drop for Access {
+    fn drop(&mut self) {
+        held_vaults().remove(&self.0);
+        VAULT_RELEASED.notify_all();
+    }
+}
+fn held_vaults() -> MutexGuard<'static, BTreeSet<PathBuf>> {
+    VAULT_ACCESS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+fn access(path: &Path) -> Access {
+    let mut held = held_vaults();
+    while held.contains(path) {
+        held = VAULT_RELEASED
+            .wait(held)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+    held.insert(path.to_path_buf());
+    Access(path.to_path_buf())
 }
 fn invalid(message: &str) -> Error {
     Error::InvalidInput(message.to_owned())
@@ -377,7 +390,7 @@ impl Vault {
         Ok(values)
     }
 
-    // Call only while holding this vault's VAULT_ACCESS mutex and its companion-file lock. Parse
+    // Call only while holding this vault's VAULT_ACCESS entry and its companion-file lock. Parse
     // errors must not echo input: serde diagnostics can contain secret strings.
     fn read(&self) -> Result<Secrets> {
         #[cfg(target_os = "macos")]
@@ -1117,6 +1130,18 @@ mod tests {
         assert!(!orphan.exists());
         assert!(unrelated.exists());
         assert!(directory.is_dir());
+    }
+
+    #[test]
+    fn the_access_table_forgets_a_vault_after_use_and_after_a_failed_open() {
+        let test = TestVault::new();
+        test.vault.set("TOKEN", "", "test-value").unwrap();
+        assert_eq!(test.vault.list().unwrap().len(), 1);
+        assert!(!held_vaults().contains(test.vault.path()));
+        let corrupt = test.vault.path().with_file_name("corrompu.secrets.json");
+        fs::write(&corrupt, b"{pas du json").unwrap();
+        assert!(Vault::open(&corrupt).is_err());
+        assert!(!held_vaults().contains(&corrupt));
     }
 
     #[test]

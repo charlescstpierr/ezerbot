@@ -7,6 +7,10 @@ Dans **Paramètres → Usage**, Ezerbot distingue deux mesures :
 
 Le quota du forfait est partagé avec les autres applications Codex. Les tokens locaux ne permettent donc pas de le calculer. L’historique local couvre toutes les connexions utilisées dans cet espace, y compris les bots supprimés. Il compte les réponses principales du moteur, pas les appels auxiliaires de titres, mémoire automatique, vision ou résumés. Les exécutions sans télémétrie sont signalées comme non mesurées, jamais estimées.
 
+## Coût d'une routine
+
+`GET /api/routines` et l'état des routines renvoient `routine.cost`, en tokens et jamais en prix : moyenne des 10 derniers passages terminés et mesurés, total des 7 derniers jours (sous-tâches déléguées comprises, chacune une fois) et prévision de l'horaire sur 7 jours (`forecast`, « impossible » pour GitHub, courriel, calendrier ou webhook). La prévision suit le planificateur (jours ouvrés, changements d'heure, groupes) ; une routine en pause n'a aucun passage prévu. La part du quota hebdomadaire (`quota_share`) vaut toujours `{"state":"unknown","reason":"quota_not_attributed"}`, sans nombre : les tokens locaux peuvent venir d'un autre compte Codex que celui dont le quota est lu, tant que chaque réponse ne note pas son compte.
+
 ## Lecture et confidentialité
 
 `GET /backend-api/wham/usage` utilise le Bearer et l’en-tête `chatgpt-account-id` de la session Codex propre à Ezerbot. Aucun fichier d’identifiants de pi, de Codex CLI ou d’un autre outil n’est lu. Le transport ne suit pas les redirections ; toute réponse hors 2xx est une erreur. Seuls les champs validés du quota atteignent l’interface ; ni jeton, ni corps d’erreur brut ne sont exposés.

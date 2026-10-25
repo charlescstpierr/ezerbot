@@ -309,6 +309,10 @@ def response_body(raw: bytes) -> bytes:
                 {"type": "response.completed", "response": {"output": [item]}},
             ]
         )
+    # Avant le titre : les instructions d'un passage de routine contiennent le mot « titre ».
+    routine = routine_turn(payload.get("input") if isinstance(payload.get("input"), list) else [])
+    if routine is not None:
+        return routine
     if instructions.startswith("Extraction de mémoire automatique."):
         return _sse(
             [
@@ -342,9 +346,6 @@ def response_body(raw: bytes) -> bytes:
     recall = recall_turn(items)
     if recall is not None:
         return recall
-    routine = routine_turn(items)
-    if routine is not None:
-        return routine
     outputs = [item for item in items if isinstance(item, dict) and item.get("type") == "function_call_output"]
     if outputs and outputs[-1].get("call_id") == "verify-context":
         call = {

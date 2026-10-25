@@ -688,3 +688,184 @@ fn the_save_path_of_a_document_masks_a_secret_registered_since() {
     assert!(text.contains("Desktop"), "{text}");
     assert!(!text.contains(LEAK), "{text}");
 }
+
+fn vault(f: &Fixture, name: &str, purpose: &str, value: &str) {
+    grokbot_forms::vault::Vault::open(&f.path.with_extension("secrets.json"))
+        .unwrap()
+        .set(name, purpose, value)
+        .unwrap();
+}
+
+/// L’aperçu d’un document créé avec `content`, avant puis après que le coffre apprend `secret`.
+fn previews(format: &str, content: &str, secret: &str) -> (String, String) {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.call(
+        &chat,
+        "d1",
+        "create_document",
+        json!({"name":"Rapport","format":format,"content":content}),
+    );
+    let url = link(&mut f, "document");
+    let before = body(&mut f, "GET", &url, json!(null));
+    vault(&f, "APERCU_TEST", "Secret de test", secret);
+    (before, body(&mut f, "GET", &url, json!(null)))
+}
+
+#[test]
+fn the_preview_masks_a_secret_whose_characters_are_escaped_in_svg() {
+    const SECRET: &str = "p&ss<w\"rd-apercu-5d03";
+    let (before, after) = previews("md", &format!("Accès : {SECRET}"), SECRET);
+    assert!(
+        before.contains("p&amp;ss&lt;w&quot;rd-apercu-5d03"),
+        "{before}"
+    );
+    assert!(
+        !after.contains("p&amp;ss&lt;w&quot;rd") && !after.contains(SECRET),
+        "{after}"
+    );
+    assert!(after.contains("Accès : [...]"), "{after}");
+}
+
+#[test]
+fn the_preview_masks_a_secret_cut_across_two_lines() {
+    const SECRET: &str = "apercu-coupe-0123456789abcdef0123456789abcdef0123456789";
+    let (before, after) = previews("md", &format!("Clé : {SECRET}"), SECRET);
+    assert!(
+        before.contains(&SECRET[..47])
+            && before.contains(&SECRET[47..])
+            && !before.contains(SECRET),
+        "le secret est réparti sur deux <text> : {before}"
+    );
+    assert!(
+        !after.contains(&SECRET[..12]) && !after.contains(&SECRET[47..]),
+        "{after}"
+    );
+    assert!(after.contains("Clé : [...]"), "{after}");
+}
+
+#[test]
+fn the_preview_masks_a_secret_cut_by_the_cell_width() {
+    const SECRET: &str = "apercu-cellule-a1b2c3d4e5f6a7b8c9d0e1f2";
+    let rows = json!([["Nom", "Jeton"], ["API", SECRET]]).to_string();
+    let (before, after) = previews("csv", &rows, SECRET);
+    assert!(
+        before.contains(&SECRET[..30]) && !before.contains(SECRET),
+        "la cellule coupe le secret : {before}"
+    );
+    assert!(!after.contains(&SECRET[..12]), "{after}");
+    assert!(after.contains(">[...]<"), "{after}");
+}
+
+#[test]
+fn a_secret_absent_from_the_text_leaves_the_preview_untouched() {
+    // Le coffre peut connaître une valeur qui figure aussi dans le balisage du SVG.
+    let (before, after) = previews("md", "Été à Québec", "font-family");
+    assert!(before.contains("font-family="), "{before}");
+    assert_eq!(after, before);
+}
+
+#[test]
+fn the_save_path_masks_only_the_file_name_never_the_home_folder() {
+    let home = std::env::var("HOME").unwrap();
+    let account = std::path::Path::new(&home)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        account.chars().count() >= 6,
+        "compte trop court : {account}"
+    );
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.call(
+        &chat,
+        "d1",
+        "create_document",
+        json!({"name":format!("Rapport-{account}"),"format":"md","content":"Bilan"}),
+    );
+    f.call(
+        &chat,
+        "d2",
+        "create_document",
+        json!({"name":"nom-tout-secret-77e1.md","format":"md","content":"Autre"}),
+    );
+    // Un identifiant de formulaire privé égal au nom du compte macOS.
+    vault(
+        &f,
+        "SITE_COMPTE",
+        "Formulaire de site privé",
+        &json!({"values":{"identifiant":account}}).to_string(),
+    );
+    vault(&f, "NOM_TEST", "Secret de test", "nom-tout-secret-77e1.md");
+    let desktop = std::path::Path::new(&home).join("Desktop");
+    let mut paths: Vec<String> = f
+        .list("type=document")
+        .iter()
+        .map(|item| {
+            let url = format!("/api/generated/{}/save-path", item["id"].as_str().unwrap());
+            f.app.api("GET", &url, b"").unwrap()["path"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        [
+            desktop.join("Rapport-[...].md").to_str().unwrap(),
+            desktop.join("[...].md").to_str().unwrap(),
+        ]
+    );
+}
+
+#[test]
+fn an_image_title_is_cut_after_masking_never_inside_a_secret() {
+    const SECRET: &str = "zq7x-titre-image-3c9a";
+    let filler: String = "Un phare au bord de la mer, "
+        .repeat(3)
+        .chars()
+        .take(76)
+        .collect();
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.image(&chat, "i1", &format!("{filler}{SECRET}"));
+    vault(&f, "TITRE_TEST", "Secret de test", SECRET);
+    let expected = format!("{filler}[...");
+    assert_eq!(f.list("type=image")[0]["title"], expected.as_str());
+    f.before_the_migration();
+    assert_eq!(f.list("type=image")[0]["title"], expected.as_str());
+}
+
+#[test]
+fn a_page_masks_a_secret_written_with_character_references() {
+    const SECRET: &str = "p&ss<w\"rd-page-8e41";
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    let source = PAGE.replace(
+        "Trois forfaits comparés.",
+        "Code p&amp;ss&lt;w&quot;rd-page-8e41",
+    );
+    f.call(
+        &chat,
+        "p1",
+        "write_page",
+        json!({"name":"bilan.page.tsx","title":format!("Bilan {SECRET}"),"source":source}),
+    );
+    vault(&f, "PAGE_TEST", "Secret de test", SECRET);
+    let url = link(&mut f, "page");
+    let page = f.app.api("GET", &url, b"").unwrap();
+    let text = page.to_string();
+    assert!(!text.contains("rd-page-8e41"), "{text}");
+    assert_eq!(page["page"]["title"], "Bilan [...]");
+    assert!(
+        page["page"]["preview"]
+            .as_str()
+            .unwrap()
+            .contains("Code [...]"),
+        "{text}"
+    );
+}

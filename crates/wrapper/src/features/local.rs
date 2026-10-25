@@ -1727,17 +1727,20 @@ fn shell(
                     }
                     std::thread::sleep(Duration::from_millis(150));
                 }
-                // Closed under the input lock before anything else: from here the
-                // task takes no more lines, and the reader sees its last echo.
+                // A stopped task is killed before its input closes: an end of file
+                // first would let `read` return and the rest of the command run.
+                // Whoever raised `stop` may not have killed the group yet.
+                if stop.load(Ordering::SeqCst) {
+                    super::shell_tasks::kill_group(pgid);
+                }
+                // Closed under the input lock: from here the task takes no more
+                // lines, and the reader sees its last echo.
                 drop(
                     wire.lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .take(),
                 );
                 finished.store(true, Ordering::SeqCst);
-                if stop.load(Ordering::SeqCst) {
-                    super::shell_tasks::kill_group(pgid);
-                }
                 let status = child.wait().ok();
                 drop(group);
                 let (stdout, t1, i1) = out.join().unwrap_or_else(|_| (String::new(), false, true));
@@ -2226,5 +2229,42 @@ mod tests {
         )
         .unwrap());
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// The reader feeds the program's output to the prompt detector in
+    /// whatever pieces the pipe returns. Every cut of a prompt, into two or
+    /// three pieces, must ask the same as the prompt in one piece.
+    #[test]
+    fn a_password_prompt_cut_at_any_byte_still_asks_for_the_password() {
+        fn asks(pieces: &[&[u8]]) -> bool {
+            let mut line = super::super::shell_tasks::PromptLine::default();
+            for piece in pieces {
+                line.push(piece);
+            }
+            line.asks_password()
+        }
+        let cases: [(&str, bool); 7] = [
+            ("Password:\n", true),
+            ("bob\nPassword: ", true),
+            ("Bienvenue\nMot de passe :\n\n", true),
+            ("Phrase secrète :\n", true),
+            ("Enter passphrase for key '/Users/x/.ssh/id': ", true),
+            ("Password: ok\nNom du projet : ", false),
+            ("Password:\nContinuer ? [y/N] ", false),
+        ];
+        for (output, expected) in cases {
+            let bytes = output.as_bytes();
+            assert_eq!(asks(&[bytes]), expected, "{output:?}");
+            for i in 0..=bytes.len() {
+                let (head, tail) = bytes.split_at(i);
+                assert_eq!(asks(&[head, tail]), expected, "{output:?} coupé à {i}");
+                for j in i..=bytes.len() {
+                    let pieces = [&bytes[..i], &bytes[i..j], &bytes[j..]];
+                    assert_eq!(asks(&pieces), expected, "{output:?} coupé à {i} et {j}");
+                }
+            }
+            let bytewise: Vec<&[u8]> = bytes.chunks(1).collect();
+            assert_eq!(asks(&bytewise), expected, "{output:?} octet par octet");
+        }
     }
 }

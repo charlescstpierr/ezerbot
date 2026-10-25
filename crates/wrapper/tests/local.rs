@@ -1700,6 +1700,61 @@ fn a_password_prompt_ending_with_a_newline_or_following_an_echo_still_refuses_th
 }
 
 #[test]
+fn a_stopped_task_is_killed_before_its_input_closes() {
+    // An input closed before the kill is an end of file: `read` returns and the
+    // rest of the command runs although the task was stopped.
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    start_background(&mut f, "eof", "read -r ligne; printf fin > apres.txt");
+    let root = f.root();
+    // Destroying the App raises the monitor's stop flag and nothing else: the
+    // monitor alone decides what the program sees first.
+    let Fixture { app, _dir, .. } = f;
+    drop(app);
+    assert!(
+        !root.join("apres.txt").exists(),
+        "la tâche arrêtée a continué après la fin de son entrée"
+    );
+}
+
+#[test]
+fn a_password_prompt_written_one_byte_at_a_time_still_refuses_the_secret() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    // The program pauses between bytes, so the host reads the prompt in as many
+    // pieces as it has bytes: every cut point arrives on its own.
+    let bytewise = "for c in P a s s w o r d :; do printf %s \"$c\"; sleep 0.02; done";
+    for (id, command, stream) in [
+        (
+            "octets",
+            format!("{bytewise}; echo; read -r secret; printf '%s' \"$secret\" > octets.txt"),
+            "stdout",
+        ),
+        (
+            "octets-echo",
+            format!("read -r user; {{ {bytewise}; printf ' '; }} >&2; read -r secret; printf '%s' \"$secret\" > octets-echo.txt"),
+            "stderr",
+        ),
+    ] {
+        start_background(&mut f, id, &command);
+        if stream == "stderr" {
+            task_input(&mut f, id, "bob").unwrap();
+        }
+        wait_output(&mut f, id, "l’invite n’est pas affichée", |o| {
+            o[stream].as_str().unwrap_or("").contains("Password:")
+        });
+        let error = task_input(&mut f, id, "hunter-octets").unwrap_err();
+        assert_eq!(error.status, 409, "{id} : {}", error.message);
+        assert!(error.message.contains("mot de passe"), "{id} : {}", error.message);
+        f.post(
+            "/api/local/tasks/stop",
+            json!({"run_id": f.run(id).run_id, "call_id": id}),
+        );
+        assert!(!f.root().join(format!("{id}.txt")).exists(), "{id}");
+    }
+}
+
+#[test]
 fn a_password_prompt_on_one_stream_stays_refused_while_the_other_stream_writes() {
     let mut f = Fixture::new();
     f.settings(true, false);

@@ -44,7 +44,15 @@ jiff = { workspace = true }
 # getpwuid_r sans unsafe dans cette crate (`forbid(unsafe_code)`).
 nix = { version = "0.29.0", default-features = false, features = ["fs", "signal", "user"] }
 
+[build-dependencies]
+flate2 = "1"
+brotli = "8"
+
 [dev-dependencies]
+# `progress_handler` counts every SQLite instruction of a read (routine_cost scale test).
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
+# Décode les réponses Brotli servies, comme le ferait le navigateur.
+brotli = "8"
 grokbot-test-support = { workspace = true }
 nix = { version = "0.29.0", default-features = false, features = ["fs", "user"] }
 # Relit le QR servi au Mac, comme le ferait l'appareil photo de l'iPhone.

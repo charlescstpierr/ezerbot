@@ -186,7 +186,7 @@ pub(super) fn tick(ctx: &Context<'_>) -> Result<(), ApiError> {
         }
         let path = ctx.db_path.to_owned();
         let provider = ctx.provider.clone();
-        std::thread::spawn(move || {
+        ctx.provider.spawn_background(move || {
             let result = provider.review(json!({
                 "model":record.model,"instructions":INSTRUCTIONS,
                 "input":[{"role":"user","content":safe.to_string()}],

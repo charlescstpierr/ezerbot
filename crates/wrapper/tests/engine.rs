@@ -285,8 +285,12 @@ fn converting_a_live_direct_chat_does_not_blindly_resume_its_uncertain_legacy_re
         json!({"conversation_id":c,"bot_id":"pair","command_id":"conversion"}),
     );
     let old = f.run("ancien-direct").run_id;
-    f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+    let restarted = App::open_with(&f.path, f.provider.clone()).unwrap();
+    // En production l'ancien processus disparaît avec son fil de lecture. Ici la destruction de
+    // l'ancienne App attend ce fil (#463) : la porte est donc levée après la reprise par la
+    // nouvelle App et avant la destruction de l'ancienne, ce qui garde l'ordre des événements.
     gate.release();
+    f.app = restarted;
     wait("ancien propriétaire libéré", || {
         f.provider.status()["titling"] == false
     });

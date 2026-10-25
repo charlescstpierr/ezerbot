@@ -256,6 +256,26 @@ def capture_turn(payload: dict, instructions: str, items: list) -> bytes | None:
     return None
 
 
+def routine_turn(items: list) -> bytes | None:
+    """Passage de routine : « rien_a_signaler » puis complete_task, ou un résultat tout de suite."""
+    if not items or not isinstance(items[-1], dict):
+        return None
+    usage = {"input_tokens": 1, "output_tokens": 2}
+    last = items[-1]
+    if last.get("type") == "function_call_output":
+        if last.get("call_id") != "verify-quiet":
+            return None
+        name, call_id, arguments = "complete_task", "verify-quiet-done", {"summary": "Rien de neuf."}
+    elif "preuve-rien-a-signaler" in _last_user_text(items):
+        name, call_id, arguments = "rien_a_signaler", "verify-quiet", {}
+    elif "preuve-resultat" in _last_user_text(items):
+        name, call_id, arguments = "complete_task", "verify-result", {"summary": "Trois nouveaux courriels."}
+    else:
+        return None
+    call = {"id": f"fc-{call_id}", "type": "function_call", "status": "completed", "call_id": call_id, "name": name, "arguments": json.dumps(arguments)}
+    return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed", "response": {"usage": usage}}])
+
+
 def parent_message(instructions: str) -> str:
     """Le message parent d'un sous-fil : bloc de données externes JSON dans les instructions."""
     for found in re.finditer(r"<external_data[^>]*>\n(.*?)\n</external_data>", instructions, re.S):
@@ -289,6 +309,10 @@ def response_body(raw: bytes) -> bytes:
                 {"type": "response.completed", "response": {"output": [item]}},
             ]
         )
+    # Avant le titre : les instructions d'un passage de routine contiennent le mot « titre ».
+    routine = routine_turn(payload.get("input") if isinstance(payload.get("input"), list) else [])
+    if routine is not None:
+        return routine
     if instructions.startswith("Extraction de mémoire automatique."):
         return _sse(
             [

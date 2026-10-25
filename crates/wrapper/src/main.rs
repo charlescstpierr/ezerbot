@@ -12,29 +12,250 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 
 mod signature;
 
-const INDEX: &str = include_str!("../../../app/ui/index.html");
-const FLOATING: &str = include_str!("../../../app/ui/floating.html");
-const STYLES: &str = include_str!("../../../app/ui/styles.css");
-const SCRIPT: &str = include_str!("../../../app/ui/app.js");
-const MASCOT_SCRIPT: &str = include_str!("../../../app/ui/mascot.js");
-const MASCOT_STYLES: &str = include_str!("../../../app/ui/mascot.css");
-// Built from app/web by `npm run build`.
-const CHAT_SCRIPT: &str = include_str!("../../../app/ui/chat.js");
-const CHAT_STYLES: &str = include_str!("../../../app/ui/chat.css");
-const PANELS_SCRIPT: &str = include_str!(concat!(env!("OUT_DIR"), "/panels.js"));
-const PANELS_STYLES: &str = include_str!(concat!(env!("OUT_DIR"), "/panels.css"));
+const HTML: &str = "text/html; charset=utf-8";
+const JS: &str = "text/javascript; charset=utf-8";
+const CSS: &str = "text/css; charset=utf-8";
+const WOFF2: &str = "font/woff2";
+
+/// A served static file. `gzip` and `brotli` are computed by build.rs. gzip is
+/// kept only when smaller than `identity`, Brotli only when smaller than the
+/// smallest other variant.
+struct Asset {
+    path: &'static str,
+    content_type: &'static str,
+    identity: &'static [u8],
+    gzip: Option<&'static [u8]>,
+    brotli: Option<&'static [u8]>,
+}
+
+impl Asset {
+    fn encodings(&self) -> Vec<Encoding> {
+        [(Encoding::Brotli, self.brotli), (Encoding::Gzip, self.gzip)]
+            .into_iter()
+            .filter_map(|(encoding, bytes)| bytes.map(|_| encoding))
+            .collect()
+    }
+
+    fn body(&self, encoding: Encoding) -> &'static [u8] {
+        match encoding {
+            Encoding::Identity => self.identity,
+            Encoding::Gzip => self.gzip.unwrap_or(self.identity),
+            Encoding::Brotli => self.brotli.unwrap_or(self.identity),
+        }
+    }
+}
+
+const fn variant(bytes: &'static [u8]) -> Option<&'static [u8]> {
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(bytes)
+    }
+}
+
+macro_rules! asset {
+    ($path:literal, $type:expr, $folder:literal, $key:literal, $name:literal) => {
+        Asset {
+            path: $path,
+            content_type: $type,
+            identity: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../app/",
+                $folder,
+                "/",
+                $name
+            )),
+            gzip: variant(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/gzip/",
+                $key,
+                "/",
+                $name,
+                ".gz"
+            ))),
+            brotli: variant(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/brotli/",
+                $key,
+                "/",
+                $name,
+                ".br"
+            ))),
+        }
+    };
+    ($path:literal, $type:expr, ui $name:literal) => {
+        asset!($path, $type, "ui", "ui", $name)
+    };
+    ($path:literal, $type:expr, public $name:literal) => {
+        asset!($path, $type, "web/public", "public", $name)
+    };
+    ($path:literal, $type:expr, built $name:literal) => {
+        Asset {
+            path: $path,
+            content_type: $type,
+            identity: include_bytes!(concat!(env!("OUT_DIR"), "/", $name)),
+            gzip: variant(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/gzip/",
+                $name,
+                ".gz"
+            ))),
+            brotli: variant(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/brotli/",
+                $name,
+                ".br"
+            ))),
+        }
+    };
+    ($path:literal, $type:expr, raw $folder:literal $name:literal) => {
+        Asset {
+            path: $path,
+            content_type: $type,
+            identity: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../app/",
+                $folder,
+                "/",
+                $name
+            )),
+            gzip: None,
+            brotli: None,
+        }
+    };
+}
+
+/// Every file the UI is served from. A new path is added here and only here.
+// chat.js and chat.css are built from app/web by `npm run build`.
+static ASSETS: &[Asset] = &[
+    asset!("/", HTML, ui "index.html"),
+    asset!("/floating", HTML, ui "floating.html"),
+    asset!("/styles.css", CSS, ui "styles.css"),
+    asset!("/app.js", JS, ui "app.js"),
+    asset!("/mascot.js", JS, ui "mascot.js"),
+    asset!("/mascot.css", CSS, ui "mascot.css"),
+    asset!("/chat.js", JS, ui "chat.js"),
+    asset!("/chat.css", CSS, ui "chat.css"),
+    asset!("/chat-code.js", JS, ui "chat-code.js"),
+    asset!("/chat-mermaid.js", JS, ui "chat-mermaid.js"),
+    asset!("/chat-math.js", JS, ui "chat-math.js"),
+    asset!("/panels.js", JS, built "panels.js"),
+    asset!("/panels.css", CSS, built "panels.css"),
+    asset!("/iphone.js", JS, ui "iphone.js"),
+    asset!("/iphone.css", CSS, ui "iphone.css"),
+    asset!("/sw.js", JS, public "sw.js"),
+    asset!("/manifest.webmanifest", "application/manifest+json", public "manifest.webmanifest"),
+    asset!("/icon-192.png", "image/png", raw "web/public" "icon-192.png"),
+    asset!("/icon-512.png", "image/png", raw "web/public" "icon-512.png"),
+    asset!("/katex/KaTeX_AMS-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_AMS-Regular.woff2"),
+    asset!("/katex/KaTeX_Caligraphic-Bold.woff2", WOFF2, raw "ui/katex" "KaTeX_Caligraphic-Bold.woff2"),
+    asset!("/katex/KaTeX_Caligraphic-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Caligraphic-Regular.woff2"),
+    asset!("/katex/KaTeX_Fraktur-Bold.woff2", WOFF2, raw "ui/katex" "KaTeX_Fraktur-Bold.woff2"),
+    asset!("/katex/KaTeX_Fraktur-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Fraktur-Regular.woff2"),
+    asset!("/katex/KaTeX_Main-Bold.woff2", WOFF2, raw "ui/katex" "KaTeX_Main-Bold.woff2"),
+    asset!("/katex/KaTeX_Main-BoldItalic.woff2", WOFF2, raw "ui/katex" "KaTeX_Main-BoldItalic.woff2"),
+    asset!("/katex/KaTeX_Main-Italic.woff2", WOFF2, raw "ui/katex" "KaTeX_Main-Italic.woff2"),
+    asset!("/katex/KaTeX_Main-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Main-Regular.woff2"),
+    asset!("/katex/KaTeX_Math-BoldItalic.woff2", WOFF2, raw "ui/katex" "KaTeX_Math-BoldItalic.woff2"),
+    asset!("/katex/KaTeX_Math-Italic.woff2", WOFF2, raw "ui/katex" "KaTeX_Math-Italic.woff2"),
+    asset!("/katex/KaTeX_SansSerif-Bold.woff2", WOFF2, raw "ui/katex" "KaTeX_SansSerif-Bold.woff2"),
+    asset!("/katex/KaTeX_SansSerif-Italic.woff2", WOFF2, raw "ui/katex" "KaTeX_SansSerif-Italic.woff2"),
+    asset!("/katex/KaTeX_SansSerif-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_SansSerif-Regular.woff2"),
+    asset!("/katex/KaTeX_Script-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Script-Regular.woff2"),
+    asset!("/katex/KaTeX_Size1-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Size1-Regular.woff2"),
+    asset!("/katex/KaTeX_Size2-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Size2-Regular.woff2"),
+    asset!("/katex/KaTeX_Size3-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Size3-Regular.woff2"),
+    asset!("/katex/KaTeX_Size4-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Size4-Regular.woff2"),
+    asset!("/katex/KaTeX_Typewriter-Regular.woff2", WOFF2, raw "ui/katex" "KaTeX_Typewriter-Regular.woff2"),
+];
+
+/// How an asset body travels. Brotli ranks above gzip on a tie.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Encoding {
+    #[default]
+    Identity,
+    Gzip,
+    Brotli,
+}
+
+impl Encoding {
+    fn token(self) -> Option<&'static str> {
+        match self {
+            Encoding::Identity => None,
+            Encoding::Gzip => Some("gzip"),
+            Encoding::Brotli => Some("br"),
+        }
+    }
+}
+
+/// The coding an Accept-Encoding value picks among the variants an asset has:
+/// the highest weight wins, Brotli then gzip break a tie, and a variant must weigh at
+/// least as much as an explicit `identity` weight. When every coding is refused the
+/// body still goes out as identity. An explicit coding beats `*`; q=0 refuses; an
+/// unreadable weight counts as a refusal.
+fn negotiate(accept_encoding: Option<&str>, available: &[Encoding]) -> Encoding {
+    let mut explicit: [Option<f32>; 3] = [None, None, None];
+    let mut wildcard = None;
+    for item in accept_encoding.unwrap_or("").split(',') {
+        let mut parts = item.split(';');
+        let coding = parts.next().unwrap_or("").trim();
+        let weight = parts
+            .filter_map(|parameter| parameter.split_once('='))
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case("q"))
+            .map_or(1.0, |(_, value)| {
+                value
+                    .trim()
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|weight| (0.0..=1.0).contains(weight))
+                    .unwrap_or(0.0)
+            });
+        if coding.eq_ignore_ascii_case("br") {
+            explicit[0].get_or_insert(weight);
+        } else if coding.eq_ignore_ascii_case("gzip") {
+            explicit[1].get_or_insert(weight);
+        } else if coding.eq_ignore_ascii_case("identity") {
+            explicit[2].get_or_insert(weight);
+        } else if coding == "*" {
+            wildcard.get_or_insert(weight);
+        }
+    }
+    let identity = explicit[2].unwrap_or(0.0);
+    let mut chosen = (Encoding::Identity, 0.0);
+    for (encoding, explicit) in [Encoding::Brotli, Encoding::Gzip].into_iter().zip(explicit) {
+        let weight = explicit.or(wildcard).unwrap_or(0.0);
+        if available.contains(&encoding) && weight > chosen.1 {
+            chosen = (encoding, weight);
+        }
+    }
+    if chosen.1 >= identity {
+        chosen.0
+    } else {
+        Encoding::Identity
+    }
+}
+
+/// What an asset reply adds to the shared headers.
+#[derive(Clone, Copy, Default)]
+struct Negotiated {
+    encoding: Encoding,
+    vary: bool,
+}
+
 const TICK_INTERVAL: Duration = Duration::from_millis(500);
 
 struct Options {
     port: u16,
     db: PathBuf,
     routine_wake: bool,
+    turns_summary: Option<String>,
 }
 
 fn options() -> Result<Option<Options>, String> {
     let mut args = std::env::args().skip(1);
     let mut port = 0;
     let mut routine_wake = false;
+    let mut turns_summary = None;
     let mut db = default_database_path();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -46,11 +267,14 @@ fn options() -> Result<Option<Options>, String> {
                     .parse()
                     .map_err(|_| "Port invalide.")?;
             }
+            "--turns-summary" => {
+                turns_summary = Some(args.next().ok_or("--turns-summary attend AAAA-MM-JJ.")?);
+            }
             "--db" => {
                 db = args.next().ok_or("--db attend un chemin SQLite.")?.into();
             }
             "--help" | "-h" => {
-                println!("grokbot-wrapper [--port 0] [--db chemin.sqlite] [--routine-wake]\nApplication locale, transport simulé. Écoute exclusivement 127.0.0.1.");
+                println!("grokbot-wrapper [--port 0] [--db chemin.sqlite] [--routine-wake] [--turns-summary AAAA-MM-JJ]\nApplication locale, transport simulé. Écoute exclusivement 127.0.0.1.\n--turns-summary imprime le résumé du journal des tours de ce jour (heure locale) et sort.");
                 return Ok(None);
             }
             _ => return Err(format!("Argument inconnu : {arg}")),
@@ -60,6 +284,7 @@ fn options() -> Result<Option<Options>, String> {
         port,
         db,
         routine_wake,
+        turns_summary,
     }))
 }
 
@@ -110,7 +335,7 @@ fn payload(
     port: u16,
     app: &mut App,
     remote: bool,
-) -> Result<ApiResponse, ApiError> {
+) -> Result<(ApiResponse, Negotiated), ApiError> {
     let method = request.method().as_str().to_owned();
     let path = request.url().to_owned();
     let headers: Vec<_> = request
@@ -139,55 +364,25 @@ fn payload(
         } else {
             path.as_str()
         };
-        let asset = match asset_path {
-            "/" => Some((INDEX, "text/html; charset=utf-8")),
-            "/floating" => Some((FLOATING, "text/html; charset=utf-8")),
-            "/styles.css" => Some((STYLES, "text/css; charset=utf-8")),
-            "/app.js" => Some((SCRIPT, "text/javascript; charset=utf-8")),
-            "/mascot.js" => Some((MASCOT_SCRIPT, "text/javascript; charset=utf-8")),
-            "/mascot.css" => Some((MASCOT_STYLES, "text/css; charset=utf-8")),
-            "/chat.js" => Some((CHAT_SCRIPT, "text/javascript; charset=utf-8")),
-            "/chat.css" => Some((CHAT_STYLES, "text/css; charset=utf-8")),
-            "/panels.js" => Some((PANELS_SCRIPT, "text/javascript; charset=utf-8")),
-            "/panels.css" => Some((PANELS_STYLES, "text/css; charset=utf-8")),
-            "/iphone.js" => Some((
-                include_str!("../../../app/ui/iphone.js"),
-                "text/javascript; charset=utf-8",
-            )),
-            "/iphone.css" => Some((
-                include_str!("../../../app/ui/iphone.css"),
-                "text/css; charset=utf-8",
-            )),
-            "/sw.js" => Some((
-                include_str!("../../../app/web/public/sw.js"),
-                "text/javascript; charset=utf-8",
-            )),
-            "/manifest.webmanifest" => Some((
-                include_str!("../../../app/web/public/manifest.webmanifest"),
-                "application/manifest+json",
-            )),
-            _ => None,
-        };
-        let icon = match path.as_str() {
-            "/icon-192.png" => {
-                Some(include_bytes!("../../../app/web/public/icon-192.png").as_slice())
-            }
-            "/icon-512.png" => {
-                Some(include_bytes!("../../../app/web/public/icon-512.png").as_slice())
-            }
-            _ => None,
-        };
-        if let Some(bytes) = icon {
-            return Ok(ApiResponse::Bytes {
-                content_type: "image/png".into(),
-                body: bytes.to_vec(),
-            });
-        }
-        if let Some((content, content_type)) = asset {
-            return Ok(ApiResponse::Bytes {
-                content_type: content_type.into(),
-                body: content.as_bytes().to_vec(),
-            });
+        if let Some(asset) = ASSETS.iter().find(|asset| asset.path == asset_path) {
+            let accept_encoding = headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("accept-encoding"))
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let available = asset.encodings();
+            let encoding = negotiate(Some(accept_encoding.as_str()), &available);
+            return Ok((
+                ApiResponse::Bytes {
+                    content_type: asset.content_type.into(),
+                    body: asset.body(encoding).to_vec(),
+                },
+                Negotiated {
+                    encoding,
+                    vary: !available.is_empty(),
+                },
+            ));
         }
     }
     let mut body = Vec::new();
@@ -205,6 +400,7 @@ fn payload(
     } else {
         app.api_response(&method, &path, &body)
     }
+    .map(|response| (response, Negotiated::default()))
 }
 
 /// tiny_http offers no read timeout, so a body reader lives until its sender
@@ -427,6 +623,16 @@ fn leave_on_quit(db: PathBuf) {
     });
 }
 
+/// Résumé du journal des tours sur la base ouverte en lecture seule : jamais d'écriture ni de migration.
+fn turns_summary(db: &std::path::Path, day: &str) -> Result<(), String> {
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let conn = rusqlite::Connection::open_with_flags(db, flags)
+        .map_err(|error| format!("Base illisible ({}) : {error}", db.display()))?;
+    let summary = grokbot_wrapper::features::turns::summary(&conn, day).map_err(|e| e.message)?;
+    println!("{summary}");
+    Ok(())
+}
+
 fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use grokbot_wrapper::features::routines_background::{self, Owner};
     // Acquire BEFORE App::open: its crash recovery must not interrupt a peer.
@@ -590,13 +796,14 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             app.set_state_client(remote, client.as_deref());
         }
         let mut cookie = None;
+        let mut negotiated = Negotiated::default();
         let (mut status, mut body, content_type) = match payload(
             &mut request,
             port,
             &mut app,
             remote,
         ) {
-            Ok(mut response) => {
+            Ok((mut response, reply)) => {
                 if remote && request.url() == "/api/iphone/exchange" {
                     if let ApiResponse::Json(ref mut value) = response {
                         if let Some(credential) = value
@@ -617,6 +824,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
                 let (body, content_type) = response.into_parts();
                 state_elapsed = state_started.map(|started| started.elapsed());
                 if header_safe(&content_type) {
+                    negotiated = reply;
                     (200, body, content_type)
                 } else {
                     eprintln!("Type de contenu invalide refusé.");
@@ -668,6 +876,16 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         ] {
             response.add_header(Header::from_bytes(name, value).expect("validated response header"));
         }
+        if negotiated.vary {
+            response.add_header(
+                Header::from_bytes("Vary", "Accept-Encoding").expect("validated response header"),
+            );
+        }
+        if let Some(token) = negotiated.encoding.token() {
+            response.add_header(
+                Header::from_bytes("Content-Encoding", token).expect("validated response header"),
+            );
+        }
         let result = if remote {
             respond_remote(request, response)
         } else {
@@ -678,6 +896,162 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         }
         if let Some(elapsed) = state_elapsed {
             app.log_state_served(elapsed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::{negotiate, Encoding, ASSETS};
+    use std::io::Read;
+
+    use Encoding::{Brotli, Gzip, Identity};
+
+    #[test]
+    fn the_encoding_is_chosen_from_accept_encoding_among_the_variants_that_exist() {
+        let both = [Encoding::Brotli, Encoding::Gzip];
+        for (value, expected) in [
+            (None, Identity),
+            (Some(""), Identity),
+            (Some("gzip"), Gzip),
+            (Some("GZip"), Gzip),
+            (Some("  gzip  "), Gzip),
+            (Some("br"), Brotli),
+            (Some("BR"), Brotli),
+            (Some("gzip, deflate, br"), Brotli),
+            (Some("br, gzip"), Brotli),
+            (Some("gzip;q=1, br;q=0.5"), Gzip),
+            (Some("gzip;q=0.5, br"), Brotli),
+            (Some("gzip;q=0.5, br;q=0.5"), Brotli),
+            (Some("br;q=0, gzip"), Gzip),
+            (Some("br;q=0"), Identity),
+            (Some("gzip;q=0, br;q=0"), Identity),
+            (Some("deflate, gzip;q=0.5"), Gzip),
+            (Some("gzip ; q = 0.001"), Gzip),
+            (Some("gzip;q=1"), Gzip),
+            (Some("gzip;q=0"), Identity),
+            (Some("gzip;q=0.0"), Identity),
+            (Some("gzip;Q=0"), Identity),
+            (Some("gzip;q=oops"), Identity),
+            (Some("br;q=oops, gzip"), Gzip),
+            (Some("deflate"), Identity),
+            (Some("identity"), Identity),
+            (Some("*"), Brotli),
+            (Some("*;q=0"), Identity),
+            (Some("identity;q=1, br;q=0.1"), Identity),
+            (Some("identity;q=0.5, gzip;q=0.8, br;q=0.2"), Gzip),
+            (Some("br;q=0.5, identity;q=0.5"), Brotli),
+            (Some("*;q=0.5, br;q=0.4"), Gzip),
+            (Some("identity;q=0, gzip;q=0, br;q=0"), Identity),
+            (Some("identity;q=0, br;q=0.1"), Brotli),
+            (Some("*;q=0.1, deflate"), Brotli),
+            (Some("gzip;q=0, *"), Brotli),
+            (Some("br;q=0, *"), Gzip),
+            (Some("*;q=0, gzip"), Gzip),
+            (Some("*;q=0, br"), Brotli),
+            (Some("gzip, *;q=0.5"), Gzip),
+            (Some("br;q=0.4, *;q=0.9"), Gzip),
+            (Some("gzipped"), Identity),
+            (Some("brotli"), Identity),
+        ] {
+            assert_eq!(negotiate(value, &both), expected, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_coding_the_asset_lacks_is_never_chosen() {
+        for (available, value, expected) in [
+            (&[Gzip][..], Some("gzip, deflate, br"), Gzip),
+            (&[Gzip], Some("br"), Identity),
+            (&[Gzip], Some("*"), Gzip),
+            (&[Gzip], Some("br;q=0, gzip"), Gzip),
+            (&[Gzip], Some("br, gzip;q=0.1"), Gzip),
+            (&[Brotli], Some("gzip"), Identity),
+            (&[Brotli], Some("gzip, br"), Brotli),
+            (&[Brotli], Some("*"), Brotli),
+            (&[Brotli], Some("br;q=0, *"), Identity),
+            (&[], Some("gzip, deflate, br"), Identity),
+            (&[], Some("*"), Identity),
+            (&[], None, Identity),
+        ] {
+            assert_eq!(
+                negotiate(value, available),
+                expected,
+                "{available:?} {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn served_paths_are_the_explicit_list_and_compressed_variants_decode_to_identity() {
+        let mut paths: Vec<_> = ASSETS.iter().map(|asset| asset.path).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            [
+                "/",
+                "/app.js",
+                "/chat-code.js",
+                "/chat-math.js",
+                "/chat-mermaid.js",
+                "/chat.css",
+                "/chat.js",
+                "/floating",
+                "/icon-192.png",
+                "/icon-512.png",
+                "/iphone.css",
+                "/iphone.js",
+                "/katex/KaTeX_AMS-Regular.woff2",
+                "/katex/KaTeX_Caligraphic-Bold.woff2",
+                "/katex/KaTeX_Caligraphic-Regular.woff2",
+                "/katex/KaTeX_Fraktur-Bold.woff2",
+                "/katex/KaTeX_Fraktur-Regular.woff2",
+                "/katex/KaTeX_Main-Bold.woff2",
+                "/katex/KaTeX_Main-BoldItalic.woff2",
+                "/katex/KaTeX_Main-Italic.woff2",
+                "/katex/KaTeX_Main-Regular.woff2",
+                "/katex/KaTeX_Math-BoldItalic.woff2",
+                "/katex/KaTeX_Math-Italic.woff2",
+                "/katex/KaTeX_SansSerif-Bold.woff2",
+                "/katex/KaTeX_SansSerif-Italic.woff2",
+                "/katex/KaTeX_SansSerif-Regular.woff2",
+                "/katex/KaTeX_Script-Regular.woff2",
+                "/katex/KaTeX_Size1-Regular.woff2",
+                "/katex/KaTeX_Size2-Regular.woff2",
+                "/katex/KaTeX_Size3-Regular.woff2",
+                "/katex/KaTeX_Size4-Regular.woff2",
+                "/katex/KaTeX_Typewriter-Regular.woff2",
+                "/manifest.webmanifest",
+                "/mascot.css",
+                "/mascot.js",
+                "/panels.css",
+                "/panels.js",
+                "/styles.css",
+                "/sw.js",
+            ]
+        );
+        for asset in ASSETS {
+            assert!(!asset.identity.is_empty(), "{}", asset.path);
+            assert!(
+                !asset.path.ends_with(".png") || (asset.gzip.is_none() && asset.brotli.is_none())
+            );
+            if let Some(gzip) = asset.gzip {
+                assert!(gzip.len() < asset.identity.len(), "{}", asset.path);
+                let mut decoded = Vec::new();
+                flate2::read::GzDecoder::new(gzip)
+                    .read_to_end(&mut decoded)
+                    .unwrap();
+                assert_eq!(decoded, asset.identity, "{}", asset.path);
+            }
+            if let Some(brotli) = asset.brotli {
+                let smallest = asset.gzip.map_or(asset.identity.len(), <[u8]>::len);
+                assert!(brotli.len() < smallest, "{}", asset.path);
+                let mut decoded = Vec::new();
+                brotli::Decompressor::new(brotli, 4096)
+                    .read_to_end(&mut decoded)
+                    .unwrap();
+                assert_eq!(decoded, asset.identity, "{}", asset.path);
+            }
         }
     }
 }
@@ -704,7 +1078,10 @@ mod fake_tests {
 
 fn main() {
     let result = match options() {
-        Ok(Some(options)) => serve(options).map_err(|error| error.to_string()),
+        Ok(Some(options)) => match options.turns_summary.as_deref() {
+            Some(day) => turns_summary(&options.db, day),
+            None => serve(options).map_err(|error| error.to_string()),
+        },
         Ok(None) => Ok(()),
         Err(error) => Err(error),
     };

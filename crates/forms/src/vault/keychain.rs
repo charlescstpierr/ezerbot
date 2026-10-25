@@ -116,18 +116,14 @@ pub(super) fn signature_notice(path: &Path) -> &'static str {
     }
 }
 impl Vault {
-    pub(super) fn with_keychain(mut self, target: Target) -> Result<Self> {
-        self.keychain = Some(target);
-        let _guard = access();
-        let _file = self.lock_file(true)?;
-        self.read()?; // First-start migration, even before the first HTTP request.
-        Ok(self)
-    }
     /// Test-only explicit file selection: no default keychain is ever searched.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn open_test_keychain(path: &Path, keychain: &Path) -> Result<Self> {
-        Self::open(path)?.with_keychain(Target::File(keychain.to_path_buf()))
+        let mut vault = Self::create(path)?;
+        vault.keychain = Some(Target::File(keychain.to_path_buf()));
+        vault.known_values()?; // First-start migration, as `open_app` does.
+        Ok(vault)
     }
 }
 
@@ -331,7 +327,7 @@ mod tests {
             fail_at: 2,
         };
         let mut state = State::default();
-        let _guard = access();
+        let _guard = access(test.vault.path());
         let _lock = test.vault.lock_file(true).unwrap();
         assert!(migrate(&test.vault, &fake, &mut state).is_err());
         assert!(!test.vault.read_file().unwrap().contains_key("FIRST"));

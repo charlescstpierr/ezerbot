@@ -370,9 +370,6 @@ fn failed_last_delegate_waits_for_its_admitted_sibling() {
     let mut context = args("child");
     context["selected_context"]["entry_ids"] = json!(["unreadable-entry"]);
     invalid.push(context);
-    let mut schema = args("child");
-    schema["unknown"] = json!(true);
-    invalid.push(schema);
     for bad in invalid {
         let mut f = Fixture::new(true);
         let c = f.conversation();
@@ -414,11 +411,22 @@ fn failed_last_delegate_waits_for_its_admitted_sibling() {
 
 #[test]
 fn non_object_last_delegate_cannot_own_the_batch_wait() {
+    last_delegate_cannot_own_the_batch_wait(json!([1]), "invalid arguments");
+}
+
+#[test]
+fn schema_invalid_last_delegate_cannot_own_the_batch_wait() {
+    let mut unknown = args("child");
+    unknown["unknown"] = json!(true);
+    last_delegate_cannot_own_the_batch_wait(unknown, "/unknown");
+}
+
+fn last_delegate_cannot_own_the_batch_wait(invalid: Value, reason: &str) {
     let mut f = Fixture::new(true);
     let c = f.conversation();
     f.events(vec![
         call("d1", "delegate", args("child")),
-        call("d2", "delegate", json!([1])),
+        call("d2", "delegate", invalid),
         completed(),
     ]);
     f.send(&c, "invalid-args", "Delegate work");
@@ -441,7 +449,7 @@ fn non_object_last_delegate_cannot_own_the_batch_wait() {
         .last()
         .unwrap()
         .to_string();
-    assert!(body.contains("Verified child summary") && body.contains("invalid arguments"));
+    assert!(body.contains("Verified child summary") && body.contains(reason));
     assert!(matches!(
         graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
         DelegationStatus::Done { .. }
@@ -4093,11 +4101,10 @@ mod captures {
         assert!(image(&mut f, &urls[0]).starts_with(b"\x89PNG"));
         f.post("/api/conversations/delete", json!({"id":thread}));
         f.tick();
-        // The screen pixels are purged with the thread and the card shows no reference at all.
-        assert_eq!(
-            f.app.api_response("GET", &urls[0], &[]).unwrap_err().status,
-            404
-        );
+        // The screen pixels and the attached image are purged with the thread and the card shows no reference at all.
+        for url in &urls {
+            assert_eq!(f.app.api_response("GET", url, &[]).unwrap_err().status, 404);
+        }
         let left: i64 = f
             .db()
             .query_row(
@@ -4109,6 +4116,27 @@ mod captures {
         assert_eq!(left, 0);
         assert!(card(&mut f, &edge)["status"].get("captures").is_none());
         assert_eq!(card(&mut f, &edge)["status"]["result"], "fini");
+    }
+
+    #[test]
+    fn an_image_the_parent_card_result_links_outlives_the_deleted_thread() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "lien", args("child"));
+        let thread = edge.conversation_id.clone().unwrap();
+        let linked = attached(&mut f, &thread);
+        let url = format!("/api/attachments/{linked}");
+        complete(&f, &format!("fini, voir {url}"), json!([]));
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        f.post("/api/conversations/delete", json!({"id":thread}));
+        assert!(card(&mut f, &edge)["status"]["result"]
+            .as_str()
+            .unwrap()
+            .contains(&url));
+        assert!(image(&mut f, &url).starts_with(b"\x89PNG"));
     }
 
     #[test]
@@ -4159,7 +4187,7 @@ mod captures {
             call(
                 "learn",
                 "remember",
-                json!({"text":secret,"sensitive":true}),
+                json!({"text":secret,"sensitive":true,"source":"model_inferred"}),
             ),
             call(
                 "finish-child",
@@ -4197,6 +4225,289 @@ mod captures {
             )
             .unwrap();
         assert!(!stored.contains(secret), "{stored}");
+    }
+
+    /// `results` finished subtasks of `root`, each with its own thread, its card in the root's
+    /// thread and `captures` images of its thread joined to its result (#328).
+    fn finished(f: &mut Fixture, root: &Run, results: usize, captures: usize) -> Run {
+        let template = suspended(f.tool(root, "modele", "delegate", args("child")));
+        let db = f.db();
+        for result in 0..results {
+            let thread = f.conversation();
+            let id = format!("delegation_lot_{result}");
+            let joined: Vec<_> = (0..captures)
+                .map(|n| {
+                    let image = format!("lot-{result}-{n}");
+                    db.execute(
+                        "INSERT INTO attachments_staged VALUES (?1,?1,'png',68,0)",
+                        [&image],
+                    )
+                    .unwrap();
+                    db.execute(
+                        "INSERT INTO attachments_message_links VALUES (?1,'joined',?2,?3)",
+                        rusqlite::params![thread, image, n],
+                    )
+                    .unwrap();
+                    capture(&image, ["avant", "après"][n % 2], "Page remplie")
+                })
+                .collect();
+            let status = json!({"status":"done","result":"fini","captures":joined});
+            db.execute(
+                "INSERT INTO delegation_graph SELECT ?1,parent_run_id,root_run_id,parent_bot,child_bot,depth,NULL,?2,selected_context,?3 FROM delegation_graph WHERE id=?4",
+                rusqlite::params![id, thread, status.to_string(), template],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO wrapper_delegation_calls SELECT ?1,parent_run_id,digest,objective,NULL,created_at FROM wrapper_delegation_calls WHERE id=?2",
+                [&id, &template],
+            )
+            .unwrap();
+            features::conversations::append_entry(&db, &root.conversation_id, "delegation", &id, 0)
+                .unwrap();
+        }
+        root.clone()
+    }
+    fn shown_captures(state: &Value) -> usize {
+        state["delegation"]["delegations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|d| d["status"]["captures"].as_array())
+            .map(Vec::len)
+            .sum()
+    }
+
+    /// Runs of statements of the app connection that name one of `TABLES`, while it lives.
+    struct Lookups {
+        db: *mut rusqlite::ffi::sqlite3,
+        count: Box<AtomicUsize>,
+    }
+    /// What resolving a capture reads: its thread, and the thread's captures and attachments.
+    const TABLES: [&str; 3] = [
+        "FROM wrapper_conversations WHERE account_id=?1 AND id=?2 AND deleted=0",
+        "wrapper_screen_shots",
+        "attachments_message_links",
+    ];
+    unsafe extern "C" fn looked_up(
+        _event: std::os::raw::c_uint,
+        count: *mut std::os::raw::c_void,
+        statement: *mut std::os::raw::c_void,
+        _elapsed: *mut std::os::raw::c_void,
+    ) -> std::os::raw::c_int {
+        let sql = std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_sql(statement.cast()));
+        if TABLES.iter().any(|t| sql.to_string_lossy().contains(t)) {
+            (*count.cast::<AtomicUsize>()).fetch_add(1, Ordering::SeqCst);
+        }
+        0
+    }
+    impl Lookups {
+        fn on(app: &App) -> Self {
+            let db = unsafe { app.feature_context().connection.handle() };
+            let count = Box::new(AtomicUsize::new(0));
+            let context = &*count as *const AtomicUsize as *mut std::os::raw::c_void;
+            let code = unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(
+                    db,
+                    rusqlite::ffi::SQLITE_TRACE_PROFILE as std::os::raw::c_uint,
+                    Some(looked_up),
+                    context,
+                )
+            };
+            assert_eq!(code, rusqlite::ffi::SQLITE_OK);
+            Self { db, count }
+        }
+    }
+    impl Drop for Lookups {
+        fn drop(&mut self) {
+            let code =
+                unsafe { rusqlite::ffi::sqlite3_trace_v2(self.db, 0, None, std::ptr::null_mut()) };
+            if code != rusqlite::ffi::SQLITE_OK {
+                // Still registered, the callback would reach the counter freed right after this.
+                std::process::abort();
+            }
+        }
+    }
+    /// One `/api/state` with `results` finished subtasks of `captures` captures each: what it
+    /// shows, its vault reads, its capture lookups, and the vault reads of the subtask cards
+    /// alone (`delegation::state`, rendered again on their own).
+    fn measured_state(results: usize, captures: usize) -> (Value, u64, usize, u64) {
+        let mut f = Fixture::new(false);
+        let root = f.root("lot");
+        let vault = Vault::open(&f.path.with_extension("secrets.json")).unwrap();
+        vault.set("legende", "test", "Page remplie").unwrap();
+        finished(&mut f, &root, results, captures);
+        let lookups = Lookups::on(&f.app);
+        let reads = grokbot_forms::vault::reads_on_this_thread();
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        let reads = grokbot_forms::vault::reads_on_this_thread() - reads;
+        let looked = lookups.count.load(Ordering::SeqCst);
+        drop(lookups);
+        assert_eq!(shown_captures(&state), results * captures);
+        assert!(!state.to_string().contains("Page remplie"));
+        let before = grokbot_forms::vault::reads_on_this_thread();
+        let cards = features::delegation::state(&f.app.feature_context());
+        let cards_reads = grokbot_forms::vault::reads_on_this_thread() - before;
+        assert_eq!(cards, state["delegation"]);
+        (state, reads, looked, cards_reads)
+    }
+
+    #[test]
+    fn a_state_read_of_fifty_results_of_four_captures_reads_the_vault_once_for_their_cards() {
+        let (_, one, _, cards_of_one) = measured_state(1, 4);
+        let (_, fifty, looked, cards) = measured_state(50, 4);
+        eprintln!("50 résultats × 4 captures : {fifty} lectures du coffre (1 résultat : {one}), cartes seules : {cards} (1 résultat : {cards_of_one}), {looked} requêtes de résolution");
+        assert_eq!(
+            (cards, cards_of_one),
+            (1, 1),
+            "les cartes des sous-tâches lisent le coffre plus d'une fois"
+        );
+        assert_eq!(
+            fifty, one,
+            "la lecture d'état relit le coffre par résultat ou par capture"
+        );
+    }
+
+    #[test]
+    fn resolving_the_captures_of_a_state_read_costs_as_many_queries_with_one_or_four_per_result() {
+        let (_, _, one, _) = measured_state(10, 1);
+        let (_, _, four, _) = measured_state(10, 4);
+        eprintln!("10 résultats : {one} requêtes à 1 capture, {four} à 4 captures");
+        assert_eq!(one, four, "chaque capture coûte ses requêtes");
+    }
+
+    #[test]
+    fn check_delegations_and_a_replayed_delegate_give_the_parent_no_reference_and_no_image() {
+        let mut f = Fixture::new(false);
+        let root = f.root("relu");
+        let id = suspended(f.tool(&root, "lance", "delegate", args("child")));
+        let thread = graph::get(&f.db(), &id)
+            .unwrap()
+            .unwrap()
+            .conversation_id
+            .unwrap();
+        shot(&f, &thread, "screen:run:before");
+        let after = attached(&mut f, &thread);
+        let done = serde_json::from_value(json!({"status":"done","result":"fini","captures":[
+            capture("screen:run:before", "avant", "Page vide"),
+            capture(&after, "après", "Page remplie"),
+        ]}))
+        .unwrap();
+        let db = f.db();
+        let tx = features::write_transaction(&db).unwrap();
+        graph::set_status(&tx, &id, &done).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            card(&mut f, &graph::get(&db, &id).unwrap().unwrap())["status"]["captures"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        for (call, name, arguments) in [
+            ("verifie", "check_delegations", json!({})),
+            ("lance", "delegate", args("child")),
+        ] {
+            let ToolOutcome::Done { output } = f.tool(&root, call, name, arguments) else {
+                panic!("{name} doit répondre");
+            };
+            let text = output.to_string();
+            assert!(
+                text.contains("2 captures jointes (avant, après)"),
+                "{name} : {text}"
+            );
+            for hidden in [
+                "screen:run:before",
+                after.as_str(),
+                "Page vide",
+                "Page remplie",
+                "base64",
+                "data:image",
+                "iVBOR",
+                "/api/",
+            ] {
+                assert!(!text.contains(hidden), "{name} donne « {hidden} »");
+            }
+        }
+    }
+
+    #[test]
+    fn forgetting_a_fact_also_clears_it_from_the_summary_the_card_shows() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let (_, edge) = f.begin(&c, "oubli-resume", args("child"));
+        let secret = "Allergique aux kumquats mauves.";
+        f.events(vec![
+            call(
+                "learn",
+                "remember",
+                json!({"text":secret,"sensitive":true,"source":"model_inferred"}),
+            ),
+            call(
+                "finish-child",
+                "complete_task",
+                json!({"summary":format!("fini. Retenu : {secret}")}),
+            ),
+            completed(),
+        ]);
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        assert!(card(&mut f, &edge)["status"]["result"]
+            .as_str()
+            .unwrap()
+            .contains(secret));
+        let fact = grokbot_memory::facts::list_active(&f.db(), "child").unwrap()[0]
+            .fact_id
+            .clone();
+        f.post(
+            "/api/memory/forget",
+            json!({"bot_id":"child","fact_id":fact}),
+        );
+        let result = card(&mut f, &edge)["status"]["result"].clone();
+        assert!(result.as_str().unwrap().starts_with("fini."), "{result}");
+        assert!(!result.as_str().unwrap().contains(secret), "{result}");
+        let state = f.app.api("GET", "/api/state", b"").unwrap().to_string();
+        assert!(!state.contains(secret), "/api/state still shows the fact");
+        let stored: String = f
+            .db()
+            .query_row(
+                "SELECT status FROM delegation_graph WHERE id=?1",
+                [&edge.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains(secret), "{stored}");
+    }
+
+    #[test]
+    fn forgetting_the_parent_fact_a_child_echoed_clears_it_from_the_parent_card() {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let secret = "Allergique aux kumquats mauves.";
+        let fact = match f
+            .app
+            .invoke_tool("grokbot", "remember", json!({"text":secret}))
+            .unwrap()
+        {
+            ToolOutcome::Done { output } => output["fact"]["fact_id"].clone(),
+            _ => panic!(),
+        };
+        let mut a = args("child");
+        a["selected_context"]["fact_ids"] = json!([fact]);
+        let (_, edge) = f.begin(&c, "oubli-parent", a);
+        complete(&f, &format!("fini. Retenu : {secret}"), json!([]));
+        f.tick();
+        wait("child done", || {
+            matches!(status(&f, &edge), DelegationStatus::Done { .. })
+        });
+        wait("child released", || f.provider.status()["titling"] == false);
+        f.post(
+            "/api/memory/forget",
+            json!({"bot_id":"grokbot","fact_id":fact}),
+        );
+        let result = card(&mut f, &edge)["status"]["result"].clone();
+        assert!(!result.as_str().unwrap().contains(secret), "{result}");
     }
 }
 

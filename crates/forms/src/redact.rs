@@ -105,14 +105,21 @@ pub fn app_patterns(path: &Path) -> Result<Patterns> {
     if let Some(patterns) = kept {
         return Ok(Patterns(patterns));
     }
-    let vault = Vault::open_app(path)?;
-    let patterns = known_patterns(&vault)?;
+    let (vault, values) = Vault::open_app_known(path)?;
+    let mut patterns = patterns_of(values)?;
     HELD.with_borrow_mut(|held| {
         if let Some(read) = held
             .as_mut()
             .and_then(|kept| kept.iter_mut().find(|read| read.vault.same_store(&vault)))
         {
             read.opened_as.push(path.to_owned());
+            patterns = read.patterns.clone();
+        } else if let Some(kept) = held {
+            kept.push(Held {
+                vault,
+                patterns: patterns.clone(),
+                opened_as: vec![path.to_owned()],
+            });
         }
     });
     Ok(Patterns(patterns))
@@ -194,8 +201,12 @@ fn known_patterns(vault: &Vault) -> Result<Vec<String>> {
 }
 
 fn read_patterns(vault: &Vault) -> Result<Vec<String>> {
+    patterns_of(vault.known_values()?)
+}
+
+fn patterns_of(values: Vec<String>) -> Result<Vec<String>> {
     let mut patterns = BTreeSet::new();
-    for value in vault.known_values()? {
+    for value in values {
         let encoded = serde_json::to_string(&value)?;
         // The serializer always adds ASCII quotes around a String. Retain the
         // interior so a tool result containing serialized JSON is also masked.

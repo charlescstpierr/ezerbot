@@ -555,6 +555,9 @@ fn record_recalled(conn: &Connection, run_id: &str, found: &[Value]) -> Result<(
 /// Ids des souvenirs rappelés pendant ce tour, dans l'ordre du rappel, sans ceux oubliés depuis
 /// (fait de bot effacé, fait de sujet supprimé) : le filtre se fait à la lecture, l'historique reste intact.
 pub(super) fn recalled_ids(conn: &Connection, run_id: &str) -> Result<Vec<String>, ApiError> {
+    if crate::projection_hints::no_recalled(run_id) {
+        return Ok(Vec::new());
+    }
     let mut statement = conn.prepare_cached(
         "SELECT r.fact_id FROM memory_recalled r WHERE r.run_id = ?1
          AND (EXISTS (SELECT 1 FROM memory_facts f WHERE f.fact_id = r.fact_id AND f.status <> 'forgotten')
@@ -969,6 +972,14 @@ pub(super) fn redact_traces(
             }
         }
     }
+    // A failure reason echoes the call's arguments as JSON, so a text can also sit in
+    // the journal in its escaped spelling.
+    let escaped: Vec<_> = texts
+        .iter()
+        .filter_map(|text| serde_json::to_string(text).ok())
+        .map(|json| json[1..json.len() - 1].to_owned())
+        .collect();
+    texts.extend(escaped);
     let mut covering = BTreeSet::new();
     let mut conversations = BTreeSet::new();
     for fact in &facts {
@@ -1198,11 +1209,21 @@ fn redact_run(conn: &Connection, run_id: &str, texts: &BTreeSet<String>) -> Resu
             ],
         )?;
     }
-    // A finished delegation keeps its own copy of the capture captions.
+    // A finished delegation keeps its own copy of the summary and capture
+    // captions, shown on the card of the run that started it.
+    let mut edges = conn
+        .prepare("SELECT id FROM delegation_graph WHERE parent_run_id=?1")?
+        .query_map([run_id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     if let Trigger::Delegation { delegation_id } = &run.trigger {
+        edges.push(delegation_id.clone());
+    }
+    for delegation_id in &edges {
         if let Some(mut edge) = grokbot_delegation::graph::get(conn, delegation_id)? {
-            if let DelegationStatus::Done { captures, .. } = &mut edge.status {
-                let mut changed = false;
+            if let DelegationStatus::Done { result, captures } = &mut edge.status {
+                let redacted = redact_string(result, texts);
+                let mut changed = redacted != *result;
+                *result = redacted;
                 for capture in captures {
                     let redacted = redact_string(&capture.caption, texts);
                     changed |= redacted != capture.caption;

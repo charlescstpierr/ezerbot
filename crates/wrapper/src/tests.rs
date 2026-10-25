@@ -2100,7 +2100,7 @@ fn a_secret_stored_while_the_replies_are_masked_never_leaves_in_clear() {
     // for it, a tool worker stores the renewed token, before the second reply is masked.
     let mut stored = false;
     let conversations = app
-        .conversations_settled(&mut || {
+        .conversations_settled(None, &mut || {
             if !stored {
                 vault.set("OAUTH_RENOUVELE", "", secret).unwrap();
                 stored = true;
@@ -2118,7 +2118,7 @@ fn a_secret_stored_while_the_replies_are_masked_never_leaves_in_clear() {
     // with a stale snapshot.
     let mut renewals = 0;
     let refused = app
-        .conversations_settled(&mut || {
+        .conversations_settled(None, &mut || {
             renewals += 1;
             vault
                 .set("OAUTH_RENOUVELE", "", &format!("{secret}-{renewals}"))
@@ -2126,6 +2126,32 @@ fn a_secret_stored_while_the_replies_are_masked_never_leaves_in_clear() {
         })
         .unwrap_err();
     assert_eq!(refused.status, 503);
+}
+
+#[test]
+fn a_send_response_projecting_one_conversation_is_masked_with_a_settled_vault() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let secret = "jeton-oauth-renouvele-pendant-la-reponse";
+    let id = history_quoting(&mut app, secret);
+    let vault = super::features::engine::event_vault(&app.connection).unwrap();
+    let mut stored = false;
+    let conversations = app
+        .conversations_settled(Some(&id), &mut || {
+            if !stored {
+                vault.set("OAUTH_RENOUVELE", "", secret).unwrap();
+                stored = true;
+            }
+        })
+        .unwrap();
+    assert!(stored, "the vault changed during the projection");
+    assert_eq!(conversations.len(), 1);
+    let replies = replies(&conversations);
+    assert_eq!(replies.len(), 2);
+    for reply in &replies {
+        assert!(!reply.contains(secret), "secret in clear: {reply}");
+        assert!(reply.contains("[...]"), "{reply}");
+    }
 }
 
 /// A conversation without any direct reply (#377): one routine reply (`engine_reply`) and one
@@ -2239,7 +2265,7 @@ fn a_secret_stored_while_routine_and_group_replies_are_masked_never_leaves_in_cl
     // renewed token, before the group reply is masked.
     let mut stored = false;
     let conversations = app
-        .conversations_settled(&mut || {
+        .conversations_settled(None, &mut || {
             if !stored {
                 vault.set("OAUTH_RENOUVELE", "", secret).unwrap();
                 stored = true;
@@ -2255,4 +2281,226 @@ fn a_secret_stored_while_routine_and_group_replies_are_masked_never_leaves_in_cl
     }
     let state = app.api("GET", "/api/state", b"").unwrap().to_string();
     assert!(!state.contains(secret));
+}
+
+/// `/api/state` looks up the side tables of the whole history at once (#515); one conversation
+/// read looks them up message by message. Both must project the same history, whichever side
+/// tables hold rows for it.
+#[test]
+fn a_state_read_projects_the_history_like_a_conversation_read_message_by_message() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let chat = conversation(&mut app);
+    let other = conversation(&mut app);
+    let gone = conversation(&mut app);
+    let lost = conversation(&mut app);
+    seed_attachments(&app);
+    for (conversation, message) in [
+        (&gone, "m6"),
+        (&lost, "m7"),
+        (&chat, "m1"),
+        (&chat, "m2"),
+        (&chat, "m3"),
+        (&chat, "m4"),
+        (&other, "m5"),
+    ] {
+        post(
+            &mut app,
+            "/api/send",
+            json!({"conversation_id": conversation, "message_id": message, "body": format!("Question {message}")}),
+        )
+        .unwrap();
+    }
+    let run_of = |app: &mut App, message: &str| -> String {
+        let state = app.api("GET", "/api/state", b"").unwrap();
+        state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c["messages"].as_array().unwrap())
+            .find(|m| m["id"] == format!("reply-{message}"))
+            .unwrap()["payload"]["run_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (run1, run2) = (run_of(&mut app, "m1"), run_of(&mut app, "m2"));
+    let run5 = run_of(&mut app, "m5");
+    {
+        let tx = super::features::write_transaction(&app.connection).unwrap();
+        grokbot_attachments::staging::link_attachments(&tx, &chat, "m1", &["image-a".into()])
+            .unwrap();
+        tx.execute("INSERT OR REPLACE INTO wrapper_group_inputs(account_id,conversation_id,message_id,mentions,targets,group_mode) VALUES (?1,?2,'m2','[\"grokbot\"]','[]',0)", rusqlite::params![super::ACCOUNT, chat]).unwrap();
+        tx.execute("INSERT INTO wrapper_voice_memos(id,conversation_id,message_id,transcript,language,duration_ms,audio,created_at) VALUES ('memo-1',?1,'m2','Bonjour','fr',1200,x'0102',1)", [&chat]).unwrap();
+        tx.execute("INSERT INTO wrapper_demonstrations(id,bot_id,conversation_id,identity,status,started_at,message_id) VALUES ('demo-1','grokbot',?1,'moi','done',1,'m2')", [&chat]).unwrap();
+        tx.execute("INSERT INTO wrapper_run_sources(run_id,n,key,kind,title) VALUES (?1,1,'k1','web','Une source')", [&run1]).unwrap();
+        tx.execute("INSERT INTO engine_response_usage(run_id,response,input_tokens,output_tokens,cached_input_tokens) VALUES (?1,1,10,5,2),(?1,2,7,3,0)", [&run2]).unwrap();
+        tx.execute(
+            "UPDATE wrapper_engine_runs SET notice='À noter' WHERE run_id=?1",
+            [&run2],
+        )
+        .unwrap();
+        // A meeting summary is not shown as a message of its own.
+        tx.execute("INSERT INTO wrapper_meetings(id,conversation_id,title,status,created_at,message_id) VALUES ('meeting-1',?1,'Réunion','ready',1,'m4')", [&chat]).unwrap();
+        let document =
+            grokbot_attachments::documents::prepare(&tx, "note.txt", b"Bonjour").unwrap();
+        grokbot_attachments::documents::save(&tx, &document).unwrap();
+        grokbot_attachments::documents::link(&tx, &chat, "m3", std::slice::from_ref(&document.id))
+            .unwrap();
+        tx.execute("INSERT INTO memory_facts(fact_id,bot_id,scope,text,provenance,learned_at,status,sensitive) VALUES ('fact-1','grokbot','private','Un souvenir','test',1,'active',0)", []).unwrap();
+        tx.execute(
+            "INSERT INTO memory_recalled(run_id,fact_id) VALUES (?1,'fact-1')",
+            [&run1],
+        )
+        .unwrap();
+        // A retry: the second attempt of m5 is the one shown, with its own events and errors.
+        tx.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) SELECT 'retry-run',bot_id,conversation_id,trigger_kind,trigger_ref,2,status,json_set(record,'$.run_id','retry-run','$.trigger.attempt',2) FROM engine_runs WHERE run_id=?1", [&run5]).unwrap();
+        tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model,notice) SELECT 'retry-run',input_json,live,model,'Deuxième essai' FROM wrapper_engine_runs WHERE run_id=?1", [&run5]).unwrap();
+        tx.execute("INSERT INTO engine_run_events(run_id,seq,kind,payload) SELECT 'retry-run',seq,kind,payload FROM engine_run_events WHERE run_id=?1", [&run5]).unwrap();
+        // A task run of a routine is projected as a card of its own: no user message started it.
+        tx.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) SELECT 'task-run',bot_id,conversation_id,'occurrence','occ-1',0,status,json_set(record,'$.run_id','task-run','$.kind','task','$.trigger',json('{\"kind\":\"occurrence\",\"occurrence_id\":\"occ-1\"}')) FROM engine_runs WHERE run_id=?1", [&run1]).unwrap();
+        tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model,notice) SELECT 'task-run',input_json,live,model,'Tâche' FROM wrapper_engine_runs WHERE run_id=?1", [&run1]).unwrap();
+        tx.execute("INSERT INTO engine_run_events(run_id,seq,kind,payload) SELECT 'task-run',seq,kind,payload FROM engine_run_events WHERE run_id=?1", [&run1]).unwrap();
+        tx.execute("INSERT INTO wrapper_run_sources(run_id,n,key,kind,title) VALUES ('task-run',1,'k2','web','Source de la tâche')", []).unwrap();
+        tx.execute("INSERT INTO engine_response_usage(run_id,response,input_tokens,output_tokens,cached_input_tokens) VALUES ('task-run',1,3,2,0)", []).unwrap();
+        super::features::conversations::append_entry(&tx, &chat, "engine_reply", "task-run", 5)
+            .unwrap();
+        tx.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) SELECT 'delegated-run',bot_id,conversation_id,'delegation','delegation-1',0,status,json_set(record,'$.run_id','delegated-run','$.kind','task','$.trigger',json('{\"kind\":\"delegation\",\"delegation_id\":\"delegation-1\"}')) FROM engine_runs WHERE run_id=?1", [&run1]).unwrap();
+        tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model,notice) SELECT 'delegated-run',input_json,live,model,'Délégation' FROM wrapper_engine_runs WHERE run_id=?1", [&run1]).unwrap();
+        tx.execute("INSERT INTO engine_run_events(run_id,seq,kind,payload) SELECT 'delegated-run',seq,kind,payload FROM engine_run_events WHERE run_id=?1", [&run1]).unwrap();
+        tx.execute(
+            "INSERT INTO memory_recalled(run_id,fact_id) VALUES ('delegated-run','fact-1')",
+            [],
+        )
+        .unwrap();
+        super::features::conversations::append_entry(
+            &tx,
+            &chat,
+            "engine_reply",
+            "delegated-run",
+            6,
+        )
+        .unwrap();
+        // The rows of a deleted conversation are not read for the projection.
+        tx.execute("INSERT INTO wrapper_run_sources(run_id,n,key,kind,title) SELECT run_id,1,'k3','web','Supprimée' FROM engine_runs WHERE conversation_id=?1", [&gone]).unwrap();
+        tx.commit().unwrap();
+    }
+    post(&mut app, "/api/conversations/delete", json!({"id": gone})).unwrap();
+    // A conversation without row of its own is shown as a recovered one.
+    app.connection
+        .execute("DELETE FROM wrapper_conversations WHERE id = ?1", [&lost])
+        .unwrap();
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    assert!(state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|c| c["id"] != gone));
+    assert_eq!(
+        state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == lost)
+            .unwrap()["title"],
+        "Conversation récupérée"
+    );
+    for id in [&chat, &other, &lost] {
+        let alone = serde_json::to_value(app.conversation(id).unwrap().unwrap()).unwrap();
+        let listed = state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == *id)
+            .unwrap();
+        assert_eq!(listed, &alone);
+    }
+    // The rows above do show: the comparison is not between two empty projections.
+    let messages = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == chat)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap();
+    let find = |id: &str| messages.iter().find(|m| m["id"] == id);
+    assert_eq!(find("m1").unwrap()["attachments"][0]["id"], "image-a");
+    assert_eq!(
+        find("m2").unwrap()["payload"]["mentions"],
+        json!(["grokbot"])
+    );
+    assert_eq!(find("m2").unwrap()["payload"]["demonstration_id"], "demo-1");
+    assert_eq!(find("m2").unwrap()["attachments"][0]["id"], "memo-1");
+    assert_eq!(
+        find("reply-m1").unwrap()["payload"]["sources"][0]["titre"],
+        "Une source"
+    );
+    assert_eq!(
+        find("reply-m2").unwrap()["payload"]["usage"],
+        json!({"input_tokens": 17, "output_tokens": 8, "cached_input_tokens": 2})
+    );
+    assert_eq!(find("reply-m2").unwrap()["notice"], "À noter");
+    assert!(find("m4").is_none() && find("reply-m4").is_none());
+    assert!(find("reply-m3").unwrap()["attachments"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(find("m3").unwrap()["payload"]["mentions"], json!([]));
+    assert!(find("reply-m3").unwrap()["payload"]["usage"].is_null());
+    assert_eq!(find("m3").unwrap()["attachments"][0]["name"], "note.txt");
+    assert_eq!(
+        find("reply-m1").unwrap()["payload"]["recalled_fact_ids"],
+        json!(["fact-1"])
+    );
+    assert_eq!(
+        find("reply-task-run").unwrap()["payload"]["sources"][0]["titre"],
+        "Source de la tâche"
+    );
+    assert_eq!(
+        find("reply-task-run").unwrap()["payload"]["usage"]["input_tokens"],
+        3
+    );
+    assert_eq!(
+        find("reply-delegated-run").unwrap()["payload"]["recalled_fact_ids"],
+        json!(["fact-1"])
+    );
+    let retried = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == other)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "reply-m5")
+        .unwrap()
+        .clone();
+    assert_eq!(retried["payload"]["run_id"], "retry-run");
+    assert_eq!(retried["notice"], "Deuxième essai");
+}
+
+/// An event `store::events` cannot decode fails the read of its run, as it did before the lookups
+/// were batched: the state reports the error of the conversation read, not a different one.
+#[test]
+fn an_undecodable_event_fails_a_state_read_like_a_conversation_read() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let chat = conversation(&mut app);
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id": chat, "message_id": "m1", "body": "Question"}),
+    )
+    .unwrap();
+    app.connection
+        .execute(
+            "INSERT INTO engine_run_events(run_id,seq,kind,payload) SELECT run_id,1000,'pas_un_evenement','{}' FROM engine_runs",
+            [],
+        )
+        .unwrap();
+    let alone = app.conversation(&chat).map(|_| ()).unwrap_err();
+    let state = app.api("GET", "/api/state", b"").unwrap_err();
+    assert_eq!((state.status, state.message), (alone.status, alone.message));
 }

@@ -1,7 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Streamdown } from "streamdown";
-import { createMermaidPlugin } from "@streamdown/mermaid";
-import { createMathPlugin } from "@streamdown/math";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { BookOpen, Check, Clock, Monitor, RefreshCw, Square, TriangleAlert } from "lucide-react";
 import { MessageMenu } from "./message-menu.jsx";
@@ -9,6 +7,9 @@ import { messageActions, messageMenuOpenId } from "./message-actions.js";
 import { MessageAttachments } from "./image-gallery.jsx";
 import { galleryImages, proseWithoutGallery } from "./image-gallery.js";
 import { code } from "./code.js";
+import { createMermaidPlugin } from "./mermaid.js";
+import { createMathPlugin } from "./math.js";
+import { arrivedBundles, subscribeBundles } from "./bundles.js";
 import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
 import { Card as FallbackCard } from "./cards/fallback.jsx";
@@ -19,6 +20,7 @@ import { splitMentionText } from "./mentions.js";
 import { isTeachMessage, isDemonstrationMessage } from "./teach.js";
 import { citeMarkdown, hasSources, textWithSources } from "./sources.js";
 import { SourcesContext, SourcesLine, citeComponents, citeTags } from "./sources.jsx";
+import { MemoryUsedPill } from "./memory-used.jsx";
 import { signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
 
 // A capability adds only cards/<name>.jsx exporting `kind` and `Card`.
@@ -29,7 +31,6 @@ const cards = new Map(Object.values(import.meta.glob("./cards/*.jsx", { eager: t
 const chatKinds = new Set([undefined, null, "message", "submission", "reply"]);
 
 const pendingStates = new Set(["queued", "dispatching", "unknown"]);
-const math = createMathPlugin({ singleDollarTextMath: true });
 
 const translations = {
   copyCode: "Copier le code",
@@ -268,7 +269,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
           )
           : queued && message.payload?.wait_reason === "signin" ? <SignInCard message={message} actions={actions} /> : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : "En attente"}</span> : streaming && !toolPreparing && <Dots />}
         <MessageAttachments message={message} align="start" markdown />
-        {!streaming && <SourcesLine message={message} onOpenSource={actions.onOpenSource} />}
+        {!streaming && <div className="gb-provenance"><SourcesLine message={message} onOpenSource={actions.onOpenSource} /><MemoryUsedPill message={message} onOpenMemory={actions.onOpenMemory} /></div>}
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
         {visibleNotice(message) && (!queued || message.payload?.parent_turn_id) && (toolPreparing ? <div className="gb-pending" role="status"><Clock /><div className="gb-pending-copy"><strong>Préparation d’un outil</strong><p>Aucune action n’a encore été exécutée.</p></div></div> : <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>)}
         {!streaming && (copyText || message.state === "stopped") && (
@@ -295,16 +296,19 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed, onOpenSource }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed, onOpenSource, onOpenMemory }) {
   const [openMenuId, setOpenMenuId] = useState(null);
   const onMenuOpenChange = (messageId, open) => setOpenMenuId((current) => messageMenuOpenId(current, messageId, open));
   const appearance = useAppearance();
   const overlay = useRef(null);
   const threadRoot = useRef(null);
   const portal = useRef(() => overlay.current).current;
-  const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
+  const mermaid = useMemo(() => mermaidPlugin(appearance), [appearance]);
+  // A new math plugin once chat-math.js arrives makes Streamdown typeset the formulas.
+  const arrived = useSyncExternalStore(subscribeBundles, arrivedBundles, arrivedBundles);
+  const plugins = useMemo(() => ({ code, mermaid, math: createMathPlugin() }), [mermaid, arrived]);
   const threadAction = isGroup || isTask ? undefined : onThread;
-  const actions = useMemo(() => ({ onCopy, onReact, onThread: threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource }), [onCopy, onReact, threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource]);
+  const actions = useMemo(() => ({ onCopy, onReact, onThread: threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource, onOpenMemory }), [onCopy, onReact, threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource, onOpenMemory]);
   const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);
   const last = ordered[ordered.length - 1];
   const findAnchor = useRef(null);

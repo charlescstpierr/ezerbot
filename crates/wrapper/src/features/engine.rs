@@ -7,9 +7,9 @@ use crate::*;
 use grokbot_domain::{ConversationId, DeliveryReceipt, MessageId, Refusal, TranscriptEntryId};
 use grokbot_engine::contracts::{
     component_version, set_component_version, ApprovalCheck, ContextBlock, ContextBudget,
-    ContextRequest, ContextSource, Error, HistoryItem, ImageInput, ModelEvent, ModelGateway,
-    ModelRequest, Role, RunBudgets, RunEvent, RunEventKind, RunKind, Summary, SuspendCause,
-    TaskStatus, ToolItem, ToolOutcome, ToolSpec, Trigger, TurnEnd,
+    ContextEstimate, ContextRequest, ContextSource, Error, HistoryItem, ImageInput, ModelEvent,
+    ModelGateway, ModelRequest, Role, RunBudgets, RunEvent, RunEventKind, RunKind, Summary,
+    SuspendCause, TaskStatus, ToolItem, ToolOutcome, ToolSpec, Trigger, TurnEnd,
 };
 use grokbot_engine::{
     compaction, context as assembler,
@@ -438,7 +438,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             };
             let has_prior = app
                 .reader
-                .list_submissions()?
+                .list_conversation_submissions(&conversation)?
                 .iter()
                 .any(|r| r.conversation_id == conversation && r.message_id != message);
             if !has_prior {
@@ -1120,7 +1120,12 @@ fn host_action_response(
 pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Result<(), ApiError> {
     ctx.provider.cancel_run(&run.run_id);
     let mut services = Services::new(ctx)?;
+    let ended = store::get(ctx.connection, &run.run_id)?.is_some_and(|r| r.status.is_terminal());
     run_loop::cancel(ctx.connection, &mut services, &run.run_id, end)?;
+    // Un tour suspendu n'a plus de worker pour l'écrire au journal.
+    if !ended {
+        let _ = super::turns::record(ctx.connection, &run.run_id);
+    }
     Ok(())
 }
 pub fn tick(ctx: &super::Context<'_>) {
@@ -1276,6 +1281,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
             &run.run_id,
             0,
             "signin_required",
+            None,
         );
         return Ok(());
     }
@@ -1338,7 +1344,8 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
     let path = ctx.db_path.to_path_buf();
     let provider = ctx.provider.clone();
     let id = run.run_id.clone();
-    std::thread::spawn(move || {
+    // Suivi par le fournisseur : détruire l'App attend la fin du tour (#463).
+    ctx.provider.spawn_background(move || {
         let _guard = guard;
         let result = (|| -> grokbot_engine::contracts::Result<()> {
             let conn = database(&path)?;
@@ -1389,6 +1396,9 @@ fn drive_owned(
         let result = run_loop::run(conn, gateway, services, id);
         let run = store::required(conn, id)?;
         if run.status.is_terminal() || run.status.is_suspended() || services.is_interrupted() {
+            if run.status.is_terminal() {
+                let _ = super::turns::record(conn, id);
+            }
             return Ok(());
         }
         if run.status == RunStatus::Interrupted
@@ -1451,6 +1461,9 @@ fn fail_host(
             &json!({"failed":true,"reason":"local_service_unavailable"}),
         )?;
         Ok(())
+    })
+    .inspect(|_| {
+        let _ = super::turns::record(conn, id);
     })
 }
 
@@ -1632,6 +1645,10 @@ impl RunServices for Services<'_> {
             .filter(|s| {
                 !super::screen::is_tool(&s.name)
                     || super::screen::enabled(self.connection, &run.bot_id)
+            })
+            .filter(|s| {
+                s.name != super::routines::QUIET_TOOL
+                    || matches!(run.trigger, Trigger::Occurrence { .. })
             })
             .map(gated)
             .collect()
@@ -2087,6 +2104,36 @@ struct RunGatewayCall<'a> {
     no_vision: &'a AtomicBool,
     captions_only: &'a AtomicBool,
 }
+/// The trigger's own count for one send, so the recorded number cannot drift from the decision.
+/// Tool definitions travel with the request but are measured apart, never added to `characters`.
+fn context_estimate(
+    eligible_from_start: &[HistoryItem],
+    instructions: &str,
+    summary: Option<&Summary>,
+    tools: &[ToolSpec],
+    budget: &ContextBudget,
+) -> grokbot_engine::contracts::Result<ContextEstimate> {
+    let history = eligible_from_start
+        .iter()
+        .map(assembler::input_characters)
+        .collect::<grokbot_engine::contracts::Result<Vec<_>>>()?
+        .into_iter()
+        .sum::<usize>();
+    let characters =
+        history + instructions.chars().count() + summary.map_or(0, |s| s.text.chars().count());
+    Ok(ContextEstimate {
+        characters: characters as u64,
+        characters_per_token: budget.characters_per_token as u64,
+        // Exactly the `tools` array of the Responses body; absent when empty.
+        tool_characters: if tools.is_empty() {
+            0
+        } else {
+            serde_json::to_string(&crate::gateway::wire_tools(tools))?
+                .chars()
+                .count() as u64
+        },
+    })
+}
 impl RunGatewayCall<'_> {
     /// A whole sending image suffix is useful only while it fits. Once a
     /// budget-bound preparation fails, allow normal rolling compaction rather
@@ -2293,10 +2340,7 @@ impl RunGatewayCall<'_> {
         if super::multibot::managed(self.connection, self.run_id) {
             summary = None;
         }
-        loop {
-            if super::multibot::managed(self.connection, self.run_id) {
-                break;
-            }
+        let estimate = loop {
             let start = summary
                 .as_ref()
                 .and_then(|s| {
@@ -2305,18 +2349,20 @@ impl RunGatewayCall<'_> {
                         .position(|i| i.entry_id == s.resume_from_entry_inclusive)
                 })
                 .unwrap_or(0);
-            let characters = eligible[start..]
-                .iter()
-                .map(assembler::input_characters)
-                .collect::<grokbot_engine::contracts::Result<Vec<_>>>()?
-                .into_iter()
-                .sum::<usize>()
-                + request.instructions.chars().count()
-                + summary.as_ref().map_or(0, |s| s.text.chars().count());
+            let estimate = context_estimate(
+                &eligible[start..],
+                &request.instructions,
+                summary.as_ref(),
+                &request.tools,
+                &budget,
+            )?;
+            if super::multibot::managed(self.connection, self.run_id) {
+                break estimate;
+            }
             if eligible.len().saturating_sub(start) < 2
-                || !compaction::should_compact(characters, &budget)?
+                || !compaction::should_compact(estimate.characters as usize, &budget)?
             {
-                break;
+                break estimate;
             }
             let mut services = Services {
                 path: self.path,
@@ -2345,7 +2391,7 @@ impl RunGatewayCall<'_> {
                 },
             )?;
             if !reserved {
-                break;
+                break estimate;
             }
             let revision = self.source_revision;
             let options = compaction::SummaryOptions {
@@ -2401,10 +2447,10 @@ impl RunGatewayCall<'_> {
                 .as_ref()
                 .is_some_and(|s| s.resume_from_entry_inclusive == next.resume_from_entry_inclusive)
             {
-                break;
+                break estimate;
             }
             summary = Some(next);
-        }
+        };
         // Keep built-in tool protocol with the app contract, BEFORE bot identity.
         let (instructions, protocol) = request
             .instructions
@@ -2497,6 +2543,9 @@ impl RunGatewayCall<'_> {
             metadata: Some((self.path, self.run_id)),
             turn: Some(self.run_id),
         };
+        emit(ModelEvent::ContextEstimate {
+            estimate: estimate.clone(),
+        })?;
         let mut deltas = RedactedDeltas::new(&vault)?;
         let mut forward = |event| {
             if let ModelEvent::TextDelta { text } = event {
@@ -2776,7 +2825,10 @@ fn projected_parts_with(
     Ok(parts)
 }
 fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiError> {
-    let events = store::events(conn, &run.run_id, 0)?;
+    let events = match crate::projection_hints::events_of(&run.run_id) {
+        Some(events) => events,
+        None => std::rc::Rc::new(store::events(conn, &run.run_id, 0)?),
+    };
     let sources = super::sources::registry(conn, &run.run_id)?;
     // One vault read for the whole reply, after what it masks. Under the hold of a state
     // read, the one read of the whole projection (#377).
@@ -2784,9 +2836,15 @@ fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiErr
     let parts = projected_parts_with(run, &events, &secrets)?;
     let body: String = parts.iter().map(|part| part.body.as_str()).collect();
     let citations = super::sources::citations_in(&sources, &body);
-    let mut metadata: (Option<String>, Option<String>, Option<String>) = conn
-        .prepare_cached("SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1")?
-        .query_row([&run.run_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    let mut metadata: (Option<String>, Option<String>, Option<String>) =
+        match crate::projection_hints::run_metadata(&run.run_id) {
+            Some(metadata) => metadata,
+            None => conn
+                .prepare_cached(
+                    "SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1",
+                )?
+                .query_row([&run.run_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?,
+        };
     if context_budget_failed(conn, run)? {
         metadata.0 = Some(CONTEXT_TOO_LARGE.into());
         metadata.1 = Some("context_budget".into());
@@ -2799,6 +2857,11 @@ fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiErr
         RunStatus::Cancelled => ("stopped", None),
         _ => ("echoed", None),
     };
+    let usage = match crate::projection_hints::usage(&run.run_id) {
+        crate::projection_hints::Known::Row(usage) => Some(usage),
+        crate::projection_hints::Known::Absent => None,
+        crate::projection_hints::Known::Unknown => store::token_usage(conn, &run.run_id)?,
+    };
     Ok(Message {
         id,
         role: "assistant",
@@ -2809,7 +2872,7 @@ fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiErr
         error_kind: metadata.1,
         notice: metadata.2,
         kind: "message".into(),
-        payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":store::token_usage(conn, &run.run_id)?,
+        payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":usage,
             "sources":secrets.value(&json!(sources))?,"citations":citations,
             "recalled_fact_ids":super::memory::recalled_ids(conn, &run.run_id)?}),
         attachments: vec![],
@@ -2832,10 +2895,14 @@ pub fn reply(
     conversation: &str,
     message: &str,
 ) -> Result<Option<Message>, ApiError> {
-    let Some(run) =
-        store::latest_run_for_trigger(ctx.connection, &user_trigger(conversation, message, 0))?
-            .filter(|r| r.conversation_id == conversation)
-    else {
+    let latest = match crate::projection_hints::user_run(conversation, message) {
+        crate::projection_hints::Known::Row(run) => Some(run),
+        crate::projection_hints::Known::Absent => None,
+        crate::projection_hints::Known::Unknown => {
+            store::latest_run_for_trigger(ctx.connection, &user_trigger(conversation, message, 0))?
+        }
+    };
+    let Some(run) = latest.filter(|r| r.conversation_id == conversation) else {
         return Ok(None);
     };
     Ok(Some(run_reply(
@@ -3059,9 +3126,7 @@ pub fn context(ctx: &super::Context<'_>, request: &ContextRequest) -> Vec<Contex
 pub fn context_preview(app: &App, conversation_id: &str) -> Result<Vec<ContextBlock>, ApiError> {
     app.require_conversation(conversation_id)?;
     let conversation = app
-        .conversations()?
-        .into_iter()
-        .find(|c| c.id == conversation_id)
+        .conversation(conversation_id)?
         .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?;
     let current = conversation
         .messages
@@ -3345,9 +3410,7 @@ fn message_ids(body: &[u8]) -> Result<(String, String), ApiError> {
 
 fn require_visible_message(app: &App, conversation: &str, message: &str) -> Result<(), ApiError> {
     let visible = app
-        .conversations()?
-        .into_iter()
-        .find(|item| item.id == conversation)
+        .conversation(conversation)?
         .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?
         .messages
         .into_iter()
@@ -3365,9 +3428,9 @@ fn submission_body(
     message: &MessageId,
 ) -> Result<String, ApiError> {
     app.reader
-        .list_submissions()?
+        .list_conversation_submissions(conversation)?
         .into_iter()
-        .find(|item| &item.conversation_id == conversation && &item.message_id == message)
+        .find(|item| &item.message_id == message)
         .map(|item| item.body)
         .ok_or_else(|| ApiError::new(404, "Message introuvable."))
 }
@@ -3937,6 +4000,77 @@ mod title_tests {
 fn gated(mut spec: ToolSpec) -> ToolSpec {
     spec.requires_approval |= grokbot_forms::forbidden::classify(&spec.name).is_some();
     spec
+}
+
+#[cfg(test)]
+mod estimate_tests {
+    use super::*;
+
+    fn tool(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.into(),
+            description: "Lit un fait.".into(),
+            schema: json!({"type": "object"}),
+            requires_approval: false,
+        }
+    }
+
+    fn summary(text: &str) -> Summary {
+        Summary {
+            summary_id: "s".into(),
+            conversation_id: "c".into(),
+            text: text.into(),
+            truncation_last_entry_inclusive: "a".into(),
+            resume_from_entry_inclusive: "b".into(),
+            previous_summary_id: None,
+            includes_tool_results: false,
+            strategy: "test".into(),
+        }
+    }
+
+    #[test]
+    fn tools_are_measured_apart_from_the_characters_the_trigger_compares() {
+        let history = vec![
+            item("a", Role::User, "Bonjour".into()),
+            item("b", Role::Assistant, "Salut".into()),
+        ];
+        let budget = ContextBudget::default();
+        let without = context_estimate(&history, "Règles.", None, &[], &budget).unwrap();
+        let with = context_estimate(
+            &history,
+            "Règles.",
+            None,
+            &[tool("lire"), tool("écrire")],
+            &budget,
+        )
+        .unwrap();
+        let documented = history
+            .iter()
+            .map(|entry| assembler::input_characters(entry).unwrap())
+            .sum::<usize>()
+            + "Règles.".chars().count();
+        assert_eq!(without.characters, documented as u64);
+        assert_eq!(with.characters, without.characters);
+        assert_eq!(without.tool_characters, 0);
+        let sent = r#"[{"description":"Lit un fait.","name":"lire","parameters":{"type":"object"},"strict":false,"type":"function"},{"description":"Lit un fait.","name":"écrire","parameters":{"type":"object"},"strict":false,"type":"function"}]"#;
+        assert_eq!(with.tool_characters, sent.chars().count() as u64);
+        let mut gated = tool("lire");
+        gated.requires_approval = true;
+        let unsent =
+            context_estimate(&history, "Règles.", None, &[gated, tool("écrire")], &budget).unwrap();
+        assert_eq!(unsent.tool_characters, with.tool_characters);
+        assert_eq!(with.characters_per_token, 4);
+    }
+
+    #[test]
+    fn the_summary_text_is_counted_once_in_characters() {
+        let history = vec![item("b", Role::User, "x".into())];
+        let budget = ContextBudget::default();
+        let plain = context_estimate(&history, "", None, &[], &budget).unwrap();
+        let summarized =
+            context_estimate(&history, "", Some(&summary("résumé")), &[], &budget).unwrap();
+        assert_eq!(summarized.characters, plain.characters + 6);
+    }
 }
 
 #[cfg(test)]

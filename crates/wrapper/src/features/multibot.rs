@@ -113,11 +113,10 @@ pub fn initialize(conn: &Connection, conversation: &str, bots: &[String]) -> Res
     Ok(())
 }
 pub fn is_group(conn: &Connection, conversation: &str) -> bool {
-    conn.query_row(
+    conn.prepare_cached(
         "SELECT kind='group' FROM wrapper_conversations WHERE account_id=?1 AND id=?2",
-        params![ACCOUNT, conversation],
-        |r| r.get(0),
     )
+    .and_then(|mut s| s.query_row(params![ACCOUNT, conversation], |r| r.get(0)))
     .unwrap_or(false)
 }
 #[derive(Deserialize)]
@@ -366,6 +365,13 @@ pub fn capture(
     Ok(())
 }
 pub fn mentions(conn: &Connection, conversation: &str, message: &str) -> Value {
+    match crate::projection_hints::mentions(conversation, message) {
+        crate::projection_hints::Known::Row(stored) => {
+            return serde_json::from_str(&stored).unwrap_or(json!([]));
+        }
+        crate::projection_hints::Known::Absent => return json!([]),
+        crate::projection_hints::Known::Unknown => {}
+    }
     conn.prepare_cached("SELECT mentions FROM wrapper_group_inputs WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3").and_then(|mut s|s.query_row(params![ACCOUNT,conversation,message],|r|r.get::<_,String>(0))).ok().and_then(|s|serde_json::from_str(&s).ok()).unwrap_or(json!([]))
 }
 pub fn enqueue(conn: &Connection, conversation: &str, message: &str) -> Result<bool, ApiError> {
@@ -706,7 +712,11 @@ fn drive(ctx: &super::Context<'_>) -> Result<(), ApiError> {
         // The catalogue loads asynchronously after startup. A turn which has
         // never contacted the provider remains durable and queued until ready.
         if live && super::engine::resolve_model(conn, ctx.provider)?.is_none() {
-            if ctx.provider.status()["models_ready"] == true {
+            // The catalogue may arrive between that resolution and this readiness
+            // check: fail only a turn that no model of a ready catalogue can serve.
+            if ctx.provider.status()["models_ready"] == true
+                && super::engine::resolve_model(conn, ctx.provider)?.is_none()
+            {
                 conn.execute("UPDATE wrapper_group_turns SET status='failed',error=?2 WHERE id=?1", params![id,"Aucun modèle ChatGPT n’est disponible pour cette connexion. Vérifiez la connexion dans les paramètres puis envoyez un nouveau message."])?;
             }
             continue;
@@ -854,7 +864,7 @@ fn publish_limits(conn: &Connection) -> Result<(), ApiError> {
 }
 
 pub fn notice_visible(conn: &Connection, id: &str) -> Result<bool, ApiError> {
-    Ok(conn.query_row("SELECT CASE WHEN n.body LIKE 'Limite de chaîne atteinte%' OR n.id=l.notice_id THEN COALESCE(l.published=1 AND l.notice_id=n.id,0) ELSE 1 END FROM wrapper_group_notices n LEFT JOIN wrapper_group_limits l ON l.account_id=?1 AND l.conversation_id=n.conversation_id AND l.root_id=n.root_id WHERE n.id=?2",params![ACCOUNT,id],|r|r.get(0)).optional()?.unwrap_or(true))
+    Ok(conn.prepare_cached("SELECT CASE WHEN n.body LIKE 'Limite de chaîne atteinte%' OR n.id=l.notice_id THEN COALESCE(l.published=1 AND l.notice_id=n.id,0) ELSE 1 END FROM wrapper_group_notices n LEFT JOIN wrapper_group_limits l ON l.account_id=?1 AND l.conversation_id=n.conversation_id AND l.root_id=n.root_id WHERE n.id=?2")?.query_row(params![ACCOUNT,id],|r|r.get(0)).optional()?.unwrap_or(true))
 }
 
 fn member_event(

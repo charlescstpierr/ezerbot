@@ -85,6 +85,13 @@ impl Provider {
         *lock(&self.primary.inner.account_used) = Some(hook);
     }
 
+    /// Test seam: `hook` runs once a model request holds its token, before it is used for anything.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn after_token(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *lock(&self.primary.inner.after_token) = Some(hook);
+    }
+
     pub fn connected(&self) -> bool {
         self.session().connected()
     }

@@ -831,18 +831,6 @@ fn the_tick_notes_the_account_whatever_the_quota_and_a_read_never_writes() {
             )
             .unwrap()
     };
-    // The connection check that a first state read starts is a model request: it notes the account.
-    c.app.api("GET", "/api/state", b"").unwrap();
-    wait("la vérification de connexion", || {
-        c.conn
-            .query_row(
-                "SELECT COUNT(*) FROM wrapper_routine_cost_account",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap()
-            == 1
-    });
     c.conn
         .execute(
             "INSERT OR REPLACE INTO wrapper_routine_cost_account(id,identity,since) VALUES (1,'account-b',0)",
@@ -850,6 +838,8 @@ fn the_tick_notes_the_account_whatever_the_quota_and_a_read_never_writes() {
         )
         .unwrap();
     assert_eq!(c.cost()["state"], "no_measure_yet");
+    // The connection check that the first state read starts is over: it must not have written either.
+    c.f.provider.wait_for_background_work().unwrap();
     assert_eq!(noted(&c), ("account-b".into(), 0)); // reading changed nothing
     let before = (now() * 1000) as i64;
     c.app.tick(before as u64);
@@ -859,6 +849,122 @@ fn the_tick_notes_the_account_whatever_the_quota_and_a_read_never_writes() {
     // Ticking again with the same account keeps its date.
     c.app.tick(before as u64 + 5000);
     assert_eq!(noted(&c), (identity, since));
+}
+
+#[test]
+fn the_account_noted_is_the_one_whose_token_was_sent_whoever_signs_in_before_the_note() {
+    let mut c = Cost::new(
+        weekly(20.0),
+        json!({"kind":"every","interval_ms":1_800_000}),
+    );
+    c.chat(50_000);
+    c.pass("a", "done", 3_600_000, Some(2000));
+    c.trust_account();
+    assert_eq!(c.cost()["quota_share"]["state"], "estimated");
+    c.f.provider.wait_for_background_work().unwrap();
+    // B signs in and the request takes B's token; A signs back in before anything else is done with it.
+    let session = c.f.dir.join("app.codex-auth.json");
+    let account_a = std::fs::read(&session).unwrap();
+    support::write_codex_session(&session, "account-b");
+    let (file, switched) = (session.clone(), Arc::new(AtomicBool::new(false)));
+    let flag = switched.clone();
+    c.f.provider.after_token(Arc::new(move || {
+        if !flag.swap(true, Ordering::SeqCst) {
+            std::fs::write(&file, &account_a).unwrap();
+        }
+    }));
+    c.chat_as_another_account();
+    assert!(switched.load(Ordering::SeqCst));
+    c.assert_account_unconfirmed();
+}
+
+#[test]
+fn a_passage_is_measured_when_any_run_of_its_delegation_tree_sent_usage() {
+    let mut c = Cost::every_30_minutes();
+    let subtask = |c: &Cost, id: &str, parent: &str| {
+        insert_run(&c.conn, id, &c.bot, &c.conversation, "delegation", 1);
+        (id.to_owned(), parent.to_owned())
+    };
+    let average = |c: &mut Cost| {
+        let cost = c.cost();
+        (
+            cost["average_tokens"].clone(),
+            cost["average_sample"].clone(),
+        )
+    };
+    // Finished without telemetry of its own, then its subtask sends 1 750 tokens.
+    c.pass("root", "done", 3 * 3_600_000, None);
+    let (child, parent) = subtask(&c, "child", "root");
+    edge(&c.conn, &parent, &child);
+    assert_eq!(average(&mut c), (Value::Null, json!(0)));
+    add_usage(&c.conn, &child, 825, 50, 0);
+    assert_eq!(average(&mut c), (json!(1750), json!(1)));
+    // The subtask's tokens were sent before the link to its passage was written.
+    c.pass("linked-late", "done", 2 * 3_600_000, None);
+    let (child, parent) = subtask(&c, "late-child", "linked-late");
+    add_usage(&c.conn, &child, 1_075, 50, 0);
+    edge(&c.conn, &parent, &child);
+    assert_eq!(average(&mut c), (json!(2000), json!(2)));
+    // The passage finishes after its subtask sent tokens, two levels down.
+    c.pass("running", "running", 3_600_000, None);
+    let (child, parent) = subtask(&c, "child-1", "running");
+    edge(&c.conn, &parent, &child);
+    let (grandchild, parent) = subtask(&c, "child-2", "child-1");
+    edge(&c.conn, &parent, &grandchild);
+    add_usage(&c.conn, &grandchild, 1_325, 50, 0);
+    assert_eq!(average(&mut c), (json!(2000), json!(2)));
+    c.conn
+        .execute(
+            "UPDATE scheduler_occurrences SET status='done' WHERE occurrence_id='running'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(average(&mut c), (json!(2250), json!(3)));
+}
+
+#[test]
+fn deleting_a_passage_takes_it_out_of_the_average_and_the_eleventh_comes_back() {
+    let mut c = Cost::every_30_minutes();
+    c.pass("oldest", "done", 12 * 3_600_000, Some(1000));
+    for n in 0..10 {
+        c.pass(&format!("p{n}"), "done", (10 - n) * 3_600_000, Some(2000));
+    }
+    let cost = c.cost();
+    assert_eq!(
+        (&cost["average_tokens"], &cost["average_sample"]),
+        (&json!(2000), &json!(10))
+    );
+    c.conn
+        .execute(
+            "DELETE FROM scheduler_occurrences WHERE occurrence_id='p9'",
+            [],
+        )
+        .unwrap();
+    let cost = c.cost();
+    assert_eq!(
+        (&cost["average_tokens"], &cost["average_sample"]),
+        (&json!(1900), &json!(10)),
+        "{cost}"
+    );
+}
+
+#[test]
+fn a_cold_state_read_and_its_connection_check_never_write_the_account() {
+    let mut c = Cost::new(json!({}), json!({"kind":"every","interval_ms":1_800_000}));
+    let rows = |c: &Cost| -> i64 {
+        c.conn
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_routine_cost_account",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(rows(&c), 0);
+    c.app.api("GET", "/api/state", b"").unwrap();
+    c.f.provider.wait_for_background_work().unwrap();
+    c.cost();
+    assert_eq!(rows(&c), 0);
 }
 
 fn is_money(key: &str) -> bool {

@@ -370,6 +370,9 @@ struct Inner {
     quota: Mutex<codex::UsageCache>,
     /// Told the account whose credentials a model request is about to use, request by request.
     account_used: Mutex<Option<AccountUsed>>,
+    /// Test seam: runs on the sending thread once a model request holds its token.
+    #[cfg(debug_assertions)]
+    after_token: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     mcp: crate::mcp::Manager,
     /// Fils réseau de fond (sonde de connexion, catalogue, quota, lecture d'un tour), gardés
     /// seulement pour qu'un test attende leur fin. Compilé dans les versions de développement et
@@ -865,6 +868,8 @@ impl Session {
                 catalog: Mutex::new(Catalog::default()),
                 quota: Mutex::new(codex::UsageCache::default()),
                 account_used: Mutex::new(None),
+                #[cfg(debug_assertions)]
+                after_token: Mutex::new(None),
                 mcp: crate::mcp::Manager::default(),
                 #[cfg(debug_assertions)]
                 background: Mutex::new(Vec::new()),
@@ -2044,6 +2049,10 @@ impl Session {
         loop {
             if abandoned.load(Ordering::SeqCst) {
                 return Err(Failure::other("Réponse annulée."));
+            }
+            #[cfg(debug_assertions)]
+            if let Some(hook) = lock(&self.inner.after_token).clone() {
+                hook();
             }
             self.note_account_used();
             let mut request = self.request(&token, &mut body)?;

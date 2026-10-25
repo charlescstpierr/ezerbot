@@ -309,6 +309,62 @@ test("un rafraîchissement identique ne reconstruit pas la Page et garde le focu
   assert.match(main.textContent, /Offre choisie : Confort/);
 });
 
+test("un document masqué à version identique retire le contenu du DOM, de l’état choisi et des clics", async () => {
+  const privateValue = "CANARI_PAGE_CACHE_C7_482";
+  const mask = "[masqué]";
+  const page = {
+    id: "page_cache_mask",
+    title: "Choix synthétiques",
+    filename: "choix.page.tsx",
+    status: "ready",
+    diagnostic: null,
+    preview: "",
+    source_version: "v1",
+    document: {
+      states: [{ name: "choix", initial: "Aucun" }],
+      view: {
+        type: "element", tag: "article", children: [
+          { type: "element", tag: "p", children: [{ type: "text", text: "Choix : " }, { type: "state", name: "choix" }] },
+          { type: "element", tag: "p", children: [{ type: "text", text: `Détail : ${privateValue}` }] },
+          { type: "element", tag: "button", click: { state: "choix", value: privateValue }, children: [{ type: "text", text: "Choisir" }] },
+          { type: "map", items: [[privateValue]], node: {
+            type: "element", tag: "div", children: [
+              { type: "field", index: 0 },
+              { type: "element", tag: "button", click: { state: "choix", index: 0 }, children: [{ type: "text", text: "Choisir une ligne" }] },
+            ],
+          } },
+        ],
+      },
+    },
+  };
+  const { panels, main, use } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  buttons(canvasOf(main)).find((button) => button.textContent === "Choisir").click();
+  assert.equal(canvasOf(main).querySelector("p").textContent, `Choix : ${privateValue}`);
+  const selectedButtons = buttons(canvasOf(main));
+
+  use(JSON.parse(JSON.stringify(page)));
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(canvasOf(main).querySelector("p").textContent, `Choix : ${privateValue}`);
+  const unchangedButtons = buttons(canvasOf(main));
+  assert.equal(unchangedButtons.length, 2);
+  assert.equal(unchangedButtons.every((button, index) => button === selectedButtons[index]), true);
+
+  use({ ...page, document: JSON.parse(JSON.stringify(page.document).replaceAll(privateValue, mask)) });
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(main.textContent.includes(privateValue), false, "le rafraîchissement retire le contenu et l’état privés précédents");
+  assert.equal(canvasOf(main).querySelector("p").textContent, "Choix : Aucun");
+  assert.equal(canvasOf(main).textContent.includes(`Détail : ${mask}`), true);
+
+  for (const label of ["Choisir", "Choisir une ligne"]) {
+    const choice = buttons(canvasOf(main)).find((button) => button.textContent === label);
+    assert.ok(choice, `le bouton ${label} reste disponible après masque`);
+    choice.click();
+    assert.equal(canvasOf(main).querySelector("p").textContent, `Choix : ${mask}`);
+    assert.equal(main.textContent.includes(privateValue), false, `le clic ${label} ne réexpose pas la valeur privée`);
+  }
+});
+
 test("une Page écrite par un autre participant d’un groupe s’affiche avec le fil du groupe", async () => {
   const page = { id: "page_ready", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "ready", diagnostic: null, preview: "", source_version: "v1", document: readyDocument };
   const { panels, main, sidebar } = harness(page);

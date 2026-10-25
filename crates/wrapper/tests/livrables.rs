@@ -908,3 +908,307 @@ fn finding_the_text_of_a_preview_does_not_grow_with_the_history() {
     );
     eprintln!("VmStep source de l’aperçu : 1000 événements {small}, 10000 {large}");
 }
+
+fn rendered_page(page: &Value, chosen: Option<&str>) -> String {
+    fn click(node: &Value, row: &Value) -> Option<(String, Value)> {
+        if let Some(state) = node["click"]["state"].as_str() {
+            let value = node["click"]["index"].as_u64().map_or_else(
+                || node["click"]["value"].clone(),
+                |index| row[index as usize].clone(),
+            );
+            return Some((state.to_owned(), value));
+        }
+        if node["type"] == "map" {
+            return node["items"].as_array()?.iter().find_map(|row| click(&node["node"], row));
+        }
+        node["children"].as_array()?.iter().find_map(|child| click(child, row))
+    }
+    fn render(node: &Value, states: &Value, row: &Value) -> String {
+        match node["type"].as_str().unwrap_or("") {
+            "text" => node["text"].as_str().unwrap_or("").to_owned(),
+            "state" => states[node["name"].as_str().unwrap()]
+                .as_str()
+                .unwrap_or("")
+                .to_owned(),
+            "field" => row[node["index"].as_u64().unwrap() as usize]
+                .as_str()
+                .unwrap_or("")
+                .to_owned(),
+            "map" => node["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| render(&node["node"], states, row))
+                .collect(),
+            "element" => node["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|child| render(child, states, row))
+                .collect(),
+            _ => String::new(),
+        }
+    }
+    let mut states = json!({});
+    for state in page["document"]["states"].as_array().into_iter().flatten() {
+        states[state["name"].as_str().unwrap()] = state["initial"].clone();
+    }
+    if chosen.is_some() {
+        if let Some((name, value)) = click(&page["document"]["view"], &Value::Null) {
+            states[&name] = value;
+        }
+    }
+    render(&page["document"]["view"], &states, &Value::Null)
+}
+
+#[test]
+fn r5_page_fragments_cannot_reassemble_a_private_value_on_any_response() {
+    let secret = "synthetic-fragments-281";
+    for source in [
+        "export default function Page() { return (<article><span>synthetic-</span><span>fragments-281</span></article>); }",
+        "export default function Page() { const [choice, setChoice] = useState(\"public\"); const rows = [[\"fragments-281\"]]; return (<article><p>synthetic-{choice}</p>{rows.map((row) => (<button onClick={() => setChoice(row[0])}>Choisir</button>))}</article>); }",
+    ] {
+        let mut f = Fixture::new();
+        let chat = f.chat("alpha");
+        f.call(&chat, "p1", "write_page", json!({"name":"fragments.page.tsx","title":"Fragments","source":source}));
+        let item = f.list("type=page")[0].clone();
+        let id = item["id"].as_str().unwrap().to_owned();
+        f.call(&chat, "p2", "write_page", json!({"name":"fragments.page.tsx","title":"Fragments","source":source.replace("article", "div")}));
+        vault(&f, "FRAGMENTS_TEST", "Secret synthétique", secret);
+        for (method, path, payload) in [
+            ("GET", format!("/api/pages/{id}"), json!(null)),
+            ("POST", "/api/pages/rename".into(), json!({"id":id,"title":"Renommée"})),
+            ("POST", "/api/pages/revert".into(), json!({"id":id})),
+        ] {
+            let result = f.app.api(method, &path, payload.to_string().as_bytes()).unwrap();
+            for chosen in [None, Some("fragments-281")] {
+                let shown = rendered_page(&result["page"], chosen);
+                assert!(!shown.contains(secret), "a private value was reconstructed by the Page");
+            }
+        }
+    }
+}
+
+#[test]
+fn r5_revert_diagnostic_hides_private_source_and_keeps_the_page_unchanged() {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.page(&chat, "p1", "diagnostic.page.tsx", "Diagnostic");
+    let id = f.list("type=page")[0]["id"].as_str().unwrap().to_owned();
+    let secret = "privateSyntheticTag281";
+    let previous = format!("export default function Page() {{ return (<{secret}>x</{secret}>); }}");
+    f.db()
+        .execute(
+            "UPDATE bot_pages SET previous_source=?1 WHERE id=?2",
+            rusqlite::params![previous, id],
+        )
+        .unwrap();
+    vault(&f, "DIAGNOSTIC_TEST", "Secret synthétique", secret);
+    let err = f
+        .app
+        .api(
+            "POST",
+            "/api/pages/revert",
+            json!({"id":id}).to_string().as_bytes(),
+        )
+        .unwrap_err();
+    assert_eq!(err.status, 400);
+    assert!(
+        !err.message.contains(secret),
+        "the failed revert exposed its private tag"
+    );
+    let after: String = f
+        .db()
+        .query_row(
+            "SELECT previous_source FROM bot_pages WHERE id=?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(after, previous);
+}
+
+#[test]
+fn r5_canonical_unicode_is_masked_in_list_page_anchor_and_save_path() {
+    for (secret, spelling) in [
+        ("synthétique-281", "synthe\u{301}tique-281"),
+        ("synthe\u{301}tique-281", "synthétique-281"),
+    ] {
+        let mut f = Fixture::new();
+        let chat = f.chat("alpha");
+        f.call(&chat, "p1", "write_page", json!({"name":"unicode.page.tsx","title":spelling,"source":PAGE.replace("Trois forfaits comparés.",spelling)}));
+        f.document(&chat, "d1", spelling, "md");
+        let id = f.list("type=page")[0]["id"].as_str().unwrap().to_owned();
+        f.db().execute("INSERT INTO wrapper_page_anchors(page_id,message_id,conversation_id,passage,source_version,state,created_at) VALUES (?1,'anchor-r5',?2,?3,'version','open',1)",rusqlite::params![id,chat,spelling]).unwrap();
+        vault(&f, "UNICODE_TEST", "Secret synthétique", secret);
+        let list = f.list("");
+        let page = body(&mut f, "GET", &format!("/api/pages/{id}"), json!(null));
+        let doc = list.iter().find(|item| item["type"] == "document").unwrap();
+        let path = body(
+            &mut f,
+            "GET",
+            &format!("/api/generated/{}/save-path", doc["id"].as_str().unwrap()),
+            json!(null),
+        );
+        for shown in [json!(list).to_string(), page, path] {
+            assert!(
+                !shown.replace("e\u{301}", "é").contains("synthétique-281"),
+                "canonically equivalent private text was exposed"
+            );
+        }
+    }
+}
+
+#[test]
+fn r5_masked_copies_stay_masked_after_vault_removal_rotation_and_restart() {
+    for rotate in [false, true] {
+        let (mut f, _) = leaky();
+        let page_id = f.list("type=page")[0]["id"].as_str().unwrap().to_owned();
+        let doc_id = f.list("type=document")[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let page_url = format!("/api/pages/{page_id}");
+        let save_url = format!("/api/generated/{doc_id}/save-path");
+        f.db()
+            .execute("UPDATE bot_pages SET previous_source=source", [])
+            .unwrap();
+        for url in [&page_url, &save_url] {
+            assert!(!body(&mut f, "GET", url, json!(null)).contains(LEAK));
+        }
+        let v = grokbot_forms::vault::Vault::open(&f.path.with_extension("secrets.json")).unwrap();
+        if rotate {
+            v.set(
+                "LIENS_TEST",
+                "Secret synthétique",
+                "replacement-synthetic-281",
+            )
+            .unwrap();
+        } else {
+            v.remove("LIENS_TEST").unwrap();
+        }
+        for restarted in [false, true] {
+            if restarted {
+                f.before_the_migration();
+            }
+            let list = f.app.api("GET", "/api/livrables", b"").unwrap();
+            assert!(
+                !list.to_string().contains(LEAK),
+                "the list redisclosed a previously masked title"
+            );
+            for url in [&page_url, &save_url] {
+                assert!(
+                    !body(&mut f, "GET", url, json!(null)).contains(LEAK),
+                    "a previously masked copy reappeared"
+                );
+            }
+            let renamed = f.post(
+                "/api/pages/rename",
+                json!({"id":page_id,"title":format!("Renommée {LEAK}")}),
+            );
+            assert!(
+                !renamed.to_string().contains(LEAK),
+                "rename redisclosed private text"
+            );
+        }
+        let reverted = f.post("/api/pages/revert", json!({"id":page_id}));
+        assert!(
+            !reverted.to_string().contains(LEAK),
+            "revert redisclosed private text"
+        );
+    }
+}
+
+#[test]
+fn r5_sensitive_envelope_or_identity_is_refused_without_a_broken_contract() {
+    for target in ["livrables", "bot_id", "id", "entry_id", "open_url", "date"] {
+        let mut f = Fixture::new();
+        let chat = f.chat("alpha");
+        f.document(&chat, "d1", "Public", "md");
+        let item = f.list("")[0].clone();
+        let secret = match target {
+            "livrables" => "livrables".to_owned(),
+            "bot_id" => {
+                f.db()
+                    .execute(
+                        "UPDATE wrapper_bots SET id='private-bot-281' WHERE id='alpha'",
+                        [],
+                    )
+                    .unwrap();
+                f.db()
+                    .execute("UPDATE wrapper_livrables SET bot_id='private-bot-281'", [])
+                    .unwrap();
+                "private-bot-281".into()
+            }
+            "date" => item["date"].to_string(),
+            _ => item[target].as_str().unwrap().to_owned(),
+        };
+        vault(&f, "CONTRACT_TEST", "Secret synthétique", &secret);
+        match f.app.api("GET", "/api/livrables", b"") {
+            Err(e) => assert!(
+                !e.message.contains(&secret),
+                "the refusal exposed private text"
+            ),
+            Ok(value) => {
+                assert!(
+                    !value.to_string().contains(&secret),
+                    "post-processing recreated private text"
+                );
+                assert!(
+                    value["livrables"].is_array(),
+                    "the list contract was corrupted"
+                );
+                for item in value["livrables"].as_array().unwrap() {
+                    assert!(item["date"].is_number());
+                    f.opens(item);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn r5_save_path_does_not_recompose_another_private_value() {
+    let (mut f, _) = leaky();
+    vault(&f, "SECOND_PATH_TEST", "Secret synthétique", "[...].md");
+    let id = f.list("type=document")[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let response = f
+        .app
+        .api("GET", &format!("/api/generated/{id}/save-path"), b"");
+    match response {
+        Ok(value) => {
+            let path = std::path::Path::new(value["path"].as_str().unwrap());
+            assert!(
+                !path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .contains("[...].md"),
+                "the extension reconstructed another private value"
+            );
+            assert_eq!(
+                path.parent().unwrap(),
+                std::path::Path::new(&std::env::var("HOME").unwrap()).join("Desktop")
+            );
+        }
+        Err(e) => assert!(!e.message.contains("[...].md")),
+    }
+}
+
+#[test]
+fn r5_state_and_the_historical_card_mask_a_late_private_value() {
+    let (mut f, _) = leaky();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert!(
+        !state["pages"].to_string().contains(LEAK),
+        "the alternate Page list exposed a private title"
+    );
+    assert!(
+        !state["conversations"].to_string().contains(LEAK),
+        "the historical card exposed a private value"
+    );
+}

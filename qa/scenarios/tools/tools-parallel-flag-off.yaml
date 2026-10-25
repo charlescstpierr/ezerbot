@@ -1,0 +1,30 @@
+title: Drapeau d'appels parallèles désactivé
+
+scenario:
+  id: tools-parallel-flag-off
+  surface: tools
+  coverage:
+    primary:
+      - tools.sequential-tool-calls
+  objective: Vérifier que chaque requête au modèle annonce des appels d'outils un par un, et qu'aucun appel n'est perdu quand le modèle en renvoie plusieurs.
+  successCriteria:
+    - Chaque requête au modèle qui contient des outils porte parallel_tool_calls à false.
+    - Les appels d'outils sont exécutés dans l'ordre où le moteur les reçoit.
+    - Aucun appel d'outil demandé par le modèle n'est perdu.
+  codeRefs:
+    - crates/wrapper/src/provider/codex.rs
+    - crates/engine/src/run_loop.rs
+  execution:
+    kind: flow
+    summary: Un message qui demande deux lectures indépendantes (agenda et courriel) sur faux connecteurs ; notation mécanique sur la trace.
+    providerMode: live-codex
+    timeoutMs: 120000
+    retryCount: 0
+    config:
+      fakeConnectors: [calendar, mail]
+      messages:
+        - "Dis-moi mon prochain rendez-vous et le sujet de mon dernier courriel."
+      checks:
+        - every_request.parallel_tool_calls == false
+        - tool_calls_executed_in_order
+        - no_tool_call_dropped

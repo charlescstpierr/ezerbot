@@ -45,7 +45,7 @@ pub fn tick(ctx: &Context<'_>) {
     manager.3.store(now.saturating_add(200), Ordering::Release);
     let provider = ctx.provider.clone();
     let path = ctx.db_path.to_path_buf();
-    std::thread::spawn(move || {
+    ctx.provider.spawn_background(move || {
         struct Reset(crate::Provider);
         impl Drop for Reset {
             fn drop(&mut self) {

@@ -29,7 +29,7 @@
         // Les souvenirs s'ouvrent en éventail vers l'extérieur, sept par rang.
         const rank = Math.floor(j / 7), size = Math.min(7, group.facts.length - rank * 7), theta = angle + 0.42 * ((j % 7) - (size - 1) / 2), reach = 72 + 20 * rank;
         const bot = (bots || []).find((item) => item.id === fact.bot_id), links = related.get(String(fact.fact_id)) ?? 0;
-        graph.nodes.push({ id: String(fact.fact_id), group: group.id, scope: group.scope, bot: bot?.name || "Bot", label: String(fact.text ?? ""), links, conversation: window.EzerbotMemoryLinks?.conversationOf(fact) ?? "", r: window.EzerbotMemoryLinks?.radius(links) ?? 6, x: round(gx + reach * Math.cos(theta)), y: round(gy + reach * Math.sin(theta)) });
+        graph.nodes.push({ id: String(fact.fact_id), group: group.id, scope: group.scope, bot: bot?.name || "Bot", label: String(fact.text ?? ""), review: fact.needs_review === true, links, conversation: window.EzerbotMemoryLinks?.conversationOf(fact) ?? "", r: window.EzerbotMemoryLinks?.radius(links) ?? 6, x: round(gx + reach * Math.cos(theta)), y: round(gy + reach * Math.sin(theta)) });
         graph.edges.push({ from: group.id, to: String(fact.fact_id) });
       });
     });
@@ -110,8 +110,10 @@
     nodeLayer.append(center,
       ...graph.groups.map((group) => add(group, "group", group.scope, 20, `${group.label}, ${group.count} souvenir${group.count > 1 ? "s" : ""}`, short(group.label))),
       ...graph.nodes.map((node) => {
-        const hit = Boolean(matches?.has(node.id)), el = add(node, "point", node.scope, node.r, `${node.bot}, ${SCOPE_LABELS[node.scope]} : ${node.label.slice(0, 120)}`);
+        const hit = Boolean(matches?.has(node.id)), el = add(node, "point", node.scope, node.r, `${node.bot}, ${SCOPE_LABELS[node.scope]}${node.review ? ", à revoir" : ""} : ${node.label.slice(0, 120)}`);
         el.classList.toggle("is-match", hit);
+        el.classList.toggle("is-review", node.review);
+        if (node.review) el.append(make("circle", { class: "memory-graph-halo", cx: node.x, cy: node.y, r: node.r + 5 })); // le halo orange d'un souvenir à revoir : le drapeau vient du moteur
         if (hit) { // le texte se pose vers l'extérieur de son groupe, loin de l'étiquette du groupe
           const g = at.get(node.group), d = Math.hypot(node.x - g.x, node.y - g.y) || 1, ux = (node.x - g.x) / d, uy = (node.y - g.y) / d, side = Math.abs(ux) > 0.5 ? Math.sign(ux) : 0;
           el.append(make("text", { class: "memory-graph-label", x: node.x + side * 10, y: node.y, dy: Math.abs(uy) > 0.5 ? (uy > 0 ? "1.6em" : "-0.9em") : "0.35em", style: `text-anchor:${side > 0 ? "start" : side < 0 ? "end" : "middle"}` }, excerpt(node.label)));
@@ -161,6 +163,11 @@
     for (const scope of ["private", "team", "topic"]) {
       const item = html("li", "memory-graph-key");
       item.append(html("span", `memory-graph-swatch is-${scope}`), html("span", "memory-graph-key-name", SCOPE_LABELS[scope]));
+      legend.append(item);
+    }
+    if (graph.nodes.some((node) => node.review)) {
+      const item = html("li", "memory-graph-key");
+      item.append(html("span", "memory-graph-swatch is-review"), html("span", "memory-graph-key-name", "À revoir"));
       legend.append(item);
     }
     const root = html("div", "memory-graph");

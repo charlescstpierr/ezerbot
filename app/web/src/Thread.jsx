@@ -1,7 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Streamdown } from "streamdown";
-import { createMermaidPlugin } from "@streamdown/mermaid";
-import { createMathPlugin } from "@streamdown/math";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { BookOpen, Check, Clock, Monitor, RefreshCw, Square, TriangleAlert } from "lucide-react";
 import { MessageMenu } from "./message-menu.jsx";
@@ -9,6 +7,9 @@ import { messageActions, messageMenuOpenId } from "./message-actions.js";
 import { MessageAttachments } from "./image-gallery.jsx";
 import { galleryImages, proseWithoutGallery } from "./image-gallery.js";
 import { code } from "./code.js";
+import { createMermaidPlugin } from "./mermaid.js";
+import { createMathPlugin } from "./math.js";
+import { arrivedBundles, subscribeBundles } from "./bundles.js";
 import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
 import { Card as FallbackCard } from "./cards/fallback.jsx";
@@ -30,7 +31,6 @@ const cards = new Map(Object.values(import.meta.glob("./cards/*.jsx", { eager: t
 const chatKinds = new Set([undefined, null, "message", "submission", "reply"]);
 
 const pendingStates = new Set(["queued", "dispatching", "unknown"]);
-const math = createMathPlugin({ singleDollarTextMath: true });
 
 const translations = {
   copyCode: "Copier le code",
@@ -305,7 +305,10 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThr
   const overlay = useRef(null);
   const threadRoot = useRef(null);
   const portal = useRef(() => overlay.current).current;
-  const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
+  const mermaid = useMemo(() => mermaidPlugin(appearance), [appearance]);
+  // A new math plugin once chat-math.js arrives makes Streamdown typeset the formulas.
+  const arrived = useSyncExternalStore(subscribeBundles, arrivedBundles, arrivedBundles);
+  const plugins = useMemo(() => ({ code, mermaid, math: createMathPlugin() }), [mermaid, arrived]);
   const threadAction = isGroup || isTask ? undefined : onThread;
   const actions = useMemo(() => ({ onCopy, onReact, onThread: threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource }), [onCopy, onReact, threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource]);
   const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);

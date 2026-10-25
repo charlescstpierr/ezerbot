@@ -6,11 +6,11 @@
 //! storage. The wrapper supplies the companion path used for migration and fallback.
 use grokbot_engine::contracts::{Error, Result, SecretRef};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const VAULT_FILE_MODE: u32 = 0o600;
@@ -61,14 +61,34 @@ struct StoredSecret {
 }
 type Secrets = BTreeMap<String, StoredSecret>;
 
-// Serialize threads before taking the stable companion-file lock, which also
-// protects against other wrapper processes. No mutable state lives in this mutex:
-// after a panic it is safe to recover and revalidate the on-disk snapshot.
-static VAULT_ACCESS: Mutex<()> = Mutex::new(());
-fn access() -> MutexGuard<'static, ()> {
-    VAULT_ACCESS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+// Serialize threads on one vault before taking its stable companion-file lock,
+// which also protects against other wrapper processes and against another
+// spelling of the same file. One lock per vault file: a write that waits for the
+// disk must not hold up the readers of another vault (a state read of another
+// workspace, another test fixture). A path is in VAULT_ACCESS only while a
+// thread holds it, so the table never outgrows the vaults in use. Releasing runs
+// in Drop, also while a panic unwinds; the on-disk snapshot is revalidated next.
+static VAULT_ACCESS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+static VAULT_RELEASED: Condvar = Condvar::new();
+struct Access(PathBuf);
+impl Drop for Access {
+    fn drop(&mut self) {
+        held_vaults().remove(&self.0);
+        VAULT_RELEASED.notify_all();
+    }
+}
+fn held_vaults() -> MutexGuard<'static, BTreeSet<PathBuf>> {
+    VAULT_ACCESS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+fn access(path: &Path) -> Access {
+    let mut held = held_vaults();
+    while held.contains(path) {
+        held = VAULT_RELEASED
+            .wait(held)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+    held.insert(path.to_path_buf());
+    Access(path.to_path_buf())
 }
 fn invalid(message: &str) -> Error {
     Error::InvalidInput(message.to_owned())
@@ -110,11 +130,11 @@ impl Vault {
     /// atomic. Recover a zero-length file left by an interrupted older initializer;
     /// refuse all other corrupt content. Missing data after open fails closed.
     pub fn open(path: &Path) -> Result<Self> {
-        let guard = access();
         let path = std::env::current_dir()?.join(path);
         if path.file_name().is_none() {
             return Err(invalid("secret vault requires a file path"));
         }
+        let guard = access(&path);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -128,9 +148,8 @@ impl Vault {
         };
         let _file_guard = vault.lock_file(true)?;
         // The companion lock keeps every other opener of this vault out, so the
-        // thread mutex is released before the scan of the parent directory. That
-        // scan costs time proportional to the directory, and holding the
-        // process-wide mutex through it made every other vault wait for it.
+        // thread mutex is released before the scan of the parent directory, whose
+        // cost grows with the directory.
         drop(guard);
         vault.cleanup_temporaries()?;
         let initialize = match checked_file(&vault.path, false) {
@@ -258,19 +277,19 @@ impl Vault {
     /// its public name matches. Call `get_for_bot` for that value.
     pub fn get(&self, name: &str) -> Result<Option<String>> {
         let name = canonical_secret_name(name)?;
-        let _guard = access();
+        let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
         Ok(self.read()?.remove(&name).map(|secret| secret.value))
     }
     /// Bot-owned value at `bot:{bot_id}:{NAME}`. This is the only read of that key.
     pub fn get_for_bot(&self, bot_id: &str, name: &str) -> Result<Option<String>> {
         let key = storage_key(bot_id, name)?;
-        let _guard = access();
+        let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
         Ok(self.read()?.remove(&key).map(|secret| secret.value))
     }
     pub fn list(&self) -> Result<Vec<SecretMetadata>> {
-        let _guard = access();
+        let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
         Ok(self
             .read()?
@@ -292,7 +311,7 @@ impl Vault {
     }
     /// Metadata grouped by bot. Values stay in the vault.
     pub fn bot_secrets(&self) -> Result<BTreeMap<String, Vec<BotSecretMetadata>>> {
-        let _guard = access();
+        let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
         let mut grouped: BTreeMap<String, Vec<BotSecretMetadata>> = BTreeMap::new();
         for secret in self.read()?.into_values() {
@@ -324,7 +343,7 @@ impl Vault {
     }
     /// Restricted to redaction, not model context construction.
     pub(crate) fn known_values(&self) -> Result<Vec<String>> {
-        let _guard = access();
+        let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
         let mut values = Vec::new();
         for (name, secret) in self.read()? {
@@ -371,7 +390,7 @@ impl Vault {
         Ok(values)
     }
 
-    // Call only while holding VAULT_ACCESS and the companion-file lock. Parse
+    // Call only while holding this vault's VAULT_ACCESS entry and its companion-file lock. Parse
     // errors must not echo input: serde diagnostics can contain secret strings.
     fn read(&self) -> Result<Secrets> {
         #[cfg(target_os = "macos")]
@@ -392,7 +411,7 @@ impl Vault {
         Ok(secrets)
     }
     fn write_secret(&self, key: String, mut secret: StoredSecret) -> Result<()> {
-        let _guard = access();
+        let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
         let mut secrets = self.read()?;
         if secret.created_at == 0 {
@@ -425,7 +444,7 @@ impl Vault {
     /// row. A refusal is an error. Absence from a file vault is idempotent.
     /// The key is exact: a public name never selects another row.
     fn remove_exact(&self, key: &str) -> Result<()> {
-        let _guard = access();
+        let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
         #[cfg(debug_assertions)]
         if self.refuse_keychain {
@@ -1114,15 +1133,57 @@ mod tests {
     }
 
     #[test]
-    fn vault_mutex_poison_does_not_disable_other_vaults() {
-        assert!(std::panic::catch_unwind(|| {
-            let _guard = access();
-            panic!("simulated interruption under the vault mutex");
-        })
-        .is_err());
+    fn the_access_table_forgets_a_vault_after_use_and_after_a_failed_open() {
         let test = TestVault::new();
         test.vault.set("TOKEN", "", "test-value").unwrap();
         assert_eq!(test.vault.list().unwrap().len(), 1);
+        assert!(!held_vaults().contains(test.vault.path()));
+        let corrupt = test.vault.path().with_file_name("corrompu.secrets.json");
+        fs::write(&corrupt, b"{pas du json").unwrap();
+        assert!(Vault::open(&corrupt).is_err());
+        assert!(!held_vaults().contains(&corrupt));
+    }
+
+    #[test]
+    fn vault_mutex_poison_does_not_disable_this_or_other_vaults() {
+        let test = TestVault::new();
+        let path = test.vault.path().to_path_buf();
+        assert!(std::panic::catch_unwind(move || {
+            let _guard = access(&path);
+            panic!("simulated interruption under the vault mutex");
+        })
+        .is_err());
+        test.vault.set("TOKEN", "", "test-value").unwrap();
+        assert_eq!(test.vault.list().unwrap().len(), 1);
+        let other = TestVault::new();
+        other.vault.set("TOKEN", "", "test-value").unwrap();
+        assert_eq!(other.vault.list().unwrap().len(), 1);
+    }
+
+    /// A write that waits for the disk holds its vault's mutex. Another vault's
+    /// reader (a state read of another workspace) must not wait for it.
+    #[test]
+    fn a_held_vault_does_not_hold_up_another_vault() {
+        let busy = TestVault::new();
+        let other = TestVault::new();
+        other.vault.set("TOKEN", "", "test-value").unwrap();
+        let held = access(busy.vault.path());
+        let (done, finished) = std::sync::mpsc::channel();
+        let path = other.vault.path().to_path_buf();
+        let reader = std::thread::spawn(move || {
+            done.send(
+                Vault::open(&path)
+                    .and_then(|vault| vault.list())
+                    .map(|l| l.len()),
+            )
+            .unwrap();
+        });
+        let listed = finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the other vault waited for the held one");
+        drop(held);
+        reader.join().unwrap();
+        assert_eq!(listed.unwrap(), 1);
     }
 
     #[test]

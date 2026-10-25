@@ -165,7 +165,7 @@ impl Session {
     }
 
     /// Point commun à TOUTES les requêtes (chat, outils, images, titres, mémoire,
-    /// revue des approbations). Seule la variante Codex adapte le corps Responses.
+    /// revue des approbations). Seule la variante Codex adapte le reste du corps Responses.
     pub(super) fn request(&self, token: &str, body: &mut Value) -> Result<ureq::Request, Failure> {
         if self.inner.local_revoked.load(Ordering::SeqCst) {
             return Err(Failure::other(
@@ -182,6 +182,7 @@ impl Session {
             .build()
             .post(&format!("{}/responses", self.inner.endpoints.api))
             .set("Authorization", &format!("Bearer {token}"));
+        one_tool_call_at_a_time(body);
         if self.inner.codex {
             prepare_body(body)?;
             request = account_headers(request, token)?
@@ -526,6 +527,25 @@ impl Session {
     }
 }
 
+/// The engine runs one tool call at a time (`run_loop::drive`), so the model must
+/// not plan several. The Responses API allows parallel calls when the field is
+/// absent, so the local endpoint path needs it too. Set it back to `true` only
+/// when the engine runs calls in parallel.
+fn one_tool_call_at_a_time(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    if object
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty())
+    {
+        object.insert("parallel_tool_calls".into(), json!(false));
+    } else {
+        object.remove("parallel_tool_calls");
+    }
+}
+
 fn prepare_body(body: &mut Value) -> Result<(), Failure> {
     let object = body
         .as_object_mut()
@@ -549,10 +569,8 @@ fn prepare_body(body: &mut Value) -> Result<(), Failure> {
         .is_some_and(|tools| !tools.is_empty())
     {
         object.insert("tool_choice".into(), json!("auto"));
-        object.insert("parallel_tool_calls".into(), json!(true));
     } else {
         object.remove("tool_choice");
-        object.remove("parallel_tool_calls");
     }
     // Le backend Codex refuse ces champs, même dans les petits appels internes.
     object.remove("max_output_tokens");
@@ -630,6 +648,7 @@ mod tests {
             "input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}],
             "tools":[{"type":"function","name":"remember","parameters":{"type":"object"}}],
             "prompt_cache_key":"conversation", "reasoning":{"effort":"high"}, "max_output_tokens":900});
+        one_tool_call_at_a_time(&mut body);
         prepare_body(&mut body).unwrap();
         assert_eq!(body["store"], false);
         assert_eq!(body["stream"], true);
@@ -638,7 +657,7 @@ mod tests {
         assert_eq!(body["input"][0]["content"][0]["type"], "input_image");
         assert_eq!(body["tools"][0]["name"], "remember");
         assert_eq!(body["tool_choice"], "auto");
-        assert_eq!(body["parallel_tool_calls"], true);
+        assert_eq!(body["parallel_tool_calls"], false);
         assert_eq!(body["prompt_cache_key"], "conversation");
         assert!(body.get("max_output_tokens").is_none());
     }
@@ -652,12 +671,14 @@ mod tests {
             "tool_choice": "required",
             "parallel_tool_calls": true
         });
+        one_tool_call_at_a_time(&mut body);
         prepare_body(&mut body).unwrap();
         assert!(body.get("tool_choice").is_none(), "{body}");
         assert!(body.get("parallel_tool_calls").is_none(), "{body}");
         assert!(body.get("tools").is_none());
 
         let mut empty = json!({"model": DEFAULT_MODEL, "instructions": "Consignes", "tools": []});
+        one_tool_call_at_a_time(&mut empty);
         prepare_body(&mut empty).unwrap();
         assert!(empty.get("tool_choice").is_none(), "{empty}");
         assert!(empty.get("parallel_tool_calls").is_none(), "{empty}");

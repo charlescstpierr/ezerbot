@@ -303,6 +303,30 @@ pub enum ToolOutcome {
     Suspend { cause: SuspendCause },
 }
 
+/// Classe fixe d'un appel d'outil réglé, pour le journal local : jamais le texte de la raison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCode {
+    Ok,
+    Failed,
+    InvalidArguments,
+    UnknownTool,
+    FollowUpPending,
+    ApprovalDenied,
+    ApprovalPending,
+    Uncertain,
+    NotExecuted,
+}
+
+impl ToolCode {
+    pub fn of(outcome: &ToolOutcome) -> Self {
+        match outcome {
+            ToolOutcome::Done { .. } | ToolOutcome::Suspend { .. } => Self::Ok,
+            ToolOutcome::Failed { .. } => Self::Failed,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WakeCause {

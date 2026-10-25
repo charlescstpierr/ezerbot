@@ -7,6 +7,7 @@
 //! main-conversation user decisions and persisted allow/auto-review (REA
 //! `goal-permissions-secrets.md` PS05–PS06). No routine-specific gate is added here.
 use self::with_run_events as commit;
+use crate::contracts::ToolCode;
 use crate::contracts::{
     ApprovalCheck, AuthorizedBy, CaptureRef, ContextEstimate, Error, HistoryItem, ModelEvent,
     ModelGateway, ModelRequest, Result, Role, RunEvent, RunEventKind, RunKind, SuspendCause,
@@ -20,7 +21,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(any(test, debug_assertions))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,6 +167,18 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
+}
+
+/// Code fixe et durée d'un `ToolResult`, pour le journal des tours. Sans `started`, ou pour un
+/// appel incertain, rien n'a été exécuté cette fois : pas de durée.
+fn stamp(mut payload: Value, code: ToolCode, started: Option<Instant>) -> Value {
+    payload["code"] = json!(code);
+    if let Some(started) = started.filter(|_| code != ToolCode::Uncertain) {
+        let elapsed = started.elapsed().as_millis() as u64;
+        payload["started_ms"] = json!(now_ms() - elapsed as i64);
+        payload["elapsed_ms"] = json!(elapsed);
+    }
+    payload
 }
 
 fn busy(error: &Error) -> bool {
@@ -427,7 +440,12 @@ fn settle_pending(conn: &Connection, run_id: &str, reason: &str) -> Result<()> {
                 reason: format!("not executed: {reason}"),
             }
         };
-        let mut payload = json!({"call_id": call.call_id, "outcome": outcome});
+        let code = match &stored {
+            Some((Some(_), _)) => ToolCode::of(&outcome),
+            _ if stored.is_some() || mcp_admitted => ToolCode::Uncertain,
+            _ => ToolCode::NotExecuted,
+        };
+        let mut payload = json!({"call_id": call.call_id, "outcome": outcome, "code": code});
         if let Some((_, Some(by))) = &stored {
             payload["authorized_by"] = serde_json::from_str(by)?;
         }
@@ -755,6 +773,7 @@ fn execute_external(
     call: &ToolCall,
     protected: Option<bool>,
 ) -> Result<Option<RunProgress>> {
+    let started = Some(Instant::now());
     enum Start {
         Complete(Option<RunProgress>),
         Admitted(Box<Run>, Option<AuthorizedBy>),
@@ -780,7 +799,7 @@ fn execute_external(
                 conn,
                 run_id,
                 RunEventKind::ToolResult,
-                &json!({"call_id":call.call_id,"authorized_by":external_authorization(conn,run_id,call)?,"outcome":ToolOutcome::Failed {reason:"L’appel externe a été interrompu après son autorisation. Son effet est incertain ; vérifiez-le avant de le relancer.".into()}}),
+                &json!({"call_id":call.call_id,"code":ToolCode::Uncertain,"authorized_by":external_authorization(conn,run_id,call)?,"outcome":ToolOutcome::Failed {reason:"L’appel externe a été interrompu après son autorisation. Son effet est incertain ; vérifiez-le avant de le relancer.".into()}}),
             )?;
             return Ok(Start::Complete(None));
         }
@@ -797,7 +816,11 @@ fn execute_external(
                 conn,
                 run_id,
                 RunEventKind::ToolResult,
-                &json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason}}),
+                &stamp(
+                    json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason}}),
+                    ToolCode::UnknownTool,
+                    started,
+                ),
             )?;
             return Ok(Start::Complete(None));
         };
@@ -817,7 +840,11 @@ fn execute_external(
                             conn,
                             run_id,
                             RunEventKind::ToolResult,
-                            &json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason:APPROVAL_PENDING_REASON.into()}}),
+                            &stamp(
+                                json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason:APPROVAL_PENDING_REASON.into()}}),
+                                ToolCode::ApprovalPending,
+                                started,
+                            ),
                         )?;
                         return Ok(Start::Complete(None));
                     }
@@ -832,7 +859,11 @@ fn execute_external(
                         conn,
                         run_id,
                         RunEventKind::ToolResult,
-                        &json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason}}),
+                        &stamp(
+                            json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason}}),
+                            ToolCode::ApprovalDenied,
+                            started,
+                        ),
                     )?;
                     return Ok(Start::Complete(None));
                 }
@@ -891,7 +922,11 @@ fn execute_external(
                 conn,
                 run_id,
                 RunEventKind::ToolResult,
-                &json!({"call_id":call.call_id,"outcome":outcome,"authorized_by":by}),
+                &stamp(
+                    json!({"call_id":call.call_id,"outcome":outcome,"authorized_by":by}),
+                    ToolCode::of(&outcome),
+                    started,
+                ),
             )?;
         }
         Ok(None)
@@ -907,13 +942,18 @@ fn execute_journaled_external(
     run_id: &str,
     call: &ToolCall,
 ) -> Result<Option<RunProgress>> {
+    let started = Some(Instant::now());
     enum Admission {
         Run,
         Result(ToolOutcome),
         Wait(RunProgress),
     }
     let specs = tool_specs(services, &store::required(conn, run_id)?);
+    // Code d'un refus décidé à l'admission (sinon il se déduit de l'issue de l'appel) ; un appel
+    // déjà réglé avant un redémarrage n'est pas exécuté cette fois, donc sans durée.
+    let (mut code, mut recovered) = (None, false);
     let admission = commit(conn, services, run_id, |conn, services| {
+        (code, recovered) = (None, false);
         let mut run = store::required(conn, run_id)?;
         if run.status != RunStatus::Running || services.is_cancelled(run_id) {
             return Err(invalid("run stopped before external admission"));
@@ -926,6 +966,7 @@ fn execute_journaled_external(
             )
             .optional()?;
         if let Some(outcome) = existing {
+            (code, recovered) = (outcome.is_none().then_some(ToolCode::Uncertain), true);
             return Ok(Admission::Result(match outcome {
                 Some(value) => serde_json::from_str(&value)?,
                 None => ToolOutcome::Failed { reason: "Résultat inconnu après interruption. Action non relancée ; vérifiez son effet avant de réessayer.".into() },
@@ -933,6 +974,7 @@ fn execute_journaled_external(
         }
         let spec = specs.iter().find(|s| s.name == call.name);
         if !call.arguments.is_object() || spec.is_none() {
+            code = Some(spec.map_or(ToolCode::UnknownTool, |_| ToolCode::InvalidArguments));
             return Ok(Admission::Result(ToolOutcome::Failed {
                 reason: if spec.is_none() {
                     services.external_unavailable_reason(&run, call)
@@ -964,13 +1006,15 @@ fn execute_journaled_external(
                             "INSERT INTO engine_external_tools(run_id,call_id,authorized_by,outcome) VALUES (?1,?2,NULL,?3)",
                             rusqlite::params![run_id, call.call_id, serde_json::to_string(&outcome)?],
                         )?;
+                        code = Some(ToolCode::ApprovalPending);
                         return Ok(Admission::Result(outcome));
                     }
                     suspend(conn, &mut run, call, &cause, true)?;
                     return Ok(Admission::Wait(RunProgress::Suspended(cause)));
                 }
                 ApprovalCheck::Denied { reason } => {
-                    return Ok(Admission::Result(ToolOutcome::Failed { reason }))
+                    code = Some(ToolCode::ApprovalDenied);
+                    return Ok(Admission::Result(ToolOutcome::Failed { reason }));
                 }
                 ApprovalCheck::Authorized { by: authority } => by = Some(authority),
             }
@@ -1011,6 +1055,8 @@ fn execute_journaled_external(
             services.call_journaled_external_tool(&run, call)
         }
     };
+    let code = code.unwrap_or_else(|| ToolCode::of(&outcome));
+    let started = started.filter(|_| !recovered);
     commit(conn, services, run_id, |conn, _| {
         conn.execute(
             "UPDATE engine_external_tools SET outcome=?3 WHERE run_id=?1 AND call_id=?2",
@@ -1038,6 +1084,7 @@ fn execute_journaled_external(
             store::save_budget_usage(conn, run_id, &usage)?;
         }
         let mut payload = json!({"call_id":call.call_id,"outcome":outcome});
+        payload = stamp(payload, code, started);
         if let Some(by) = by {
             payload["authorized_by"] = serde_json::from_str(&by)?;
         }
@@ -1090,6 +1137,7 @@ fn execute(
                 .map(|s| s.requires_approval),
         );
     }
+    let started = Some(Instant::now());
     commit(conn, services, run_id, |conn, services| {
         let mut run = store::required(conn, run_id)?;
         if run.status != RunStatus::Running || services.is_cancelled(run_id) {
@@ -1146,6 +1194,8 @@ fn execute(
         let mut usage = store::budget_usage(conn, run_id, now_ms())?;
         usage.tool_calls += 1;
         store::save_budget_usage(conn, run_id, &usage)?;
+        let denied = approval.is_some();
+        let follow_up = call.name == "complete_task" && pending_input(conn, run_id)?;
         let outcome = if !call.arguments.is_object() {
             ToolOutcome::Failed {
                 reason: if call.name.starts_with("mcp_") {
@@ -1172,7 +1222,7 @@ fn execute(
                     format!("unknown tool {}", call.name)
                 },
             }
-        } else if call.name == "complete_task" && pending_input(conn, run_id)? {
+        } else if follow_up {
             ToolOutcome::Failed {
                 reason:
                     "Un suivi utilisateur vient d’arriver. Lisez-le avant de terminer la tâche."
@@ -1189,7 +1239,16 @@ fn execute(
             // Roll back internal effects, budget reservation and approval consumption.
             return Err(invalid("run stopped during tool execution"));
         }
+        let code = match () {
+            _ if spec.is_none() => ToolCode::UnknownTool,
+            _ if !valid_arguments => ToolCode::InvalidArguments,
+            _ if waiting => ToolCode::ApprovalPending,
+            _ if denied => ToolCode::ApprovalDenied,
+            _ if follow_up => ToolCode::FollowUpPending,
+            _ => ToolCode::of(&outcome),
+        };
         let mut payload = json!({"call_id": call.call_id, "outcome": outcome});
+        payload = stamp(payload, code, started);
         if let Some(by) = authorized_by {
             payload["authorized_by"] = serde_json::to_value(by)?;
         }
@@ -1543,6 +1602,7 @@ mod tests {
         standing: Option<AuthorizedBy>,
         allowed: bool,
         deny: bool,
+        failing: Option<String>,
         suspend: Option<SuspendCause>,
         cancel: Arc<AtomicBool>,
         cancel_in_tool: bool,
@@ -1615,6 +1675,11 @@ mod tests {
             }
             if self.error_in_tool {
                 return Err(invalid("effect failed"));
+            }
+            if self.failing.as_deref() == Some(call.name.as_str()) {
+                return Ok(ToolOutcome::Failed {
+                    reason: "broken".into(),
+                });
             }
             Ok(match self.suspend.clone() {
                 Some(cause) => ToolOutcome::Suspend { cause },
@@ -2142,6 +2207,79 @@ mod tests {
         assert_eq!(count(&conn, "engine_run_events"), 1);
         commit(&conn, &mut services, "run", checkpoint_effect)?;
         assert_eq!(count(&conn, "effects"), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn every_tool_result_carries_a_fixed_code_and_the_duration_of_the_call() -> Result<()> {
+        for journaled in [false, true] {
+            let conn = database(false, RunBudgets::default())?;
+            let gateway = Scripted::new(vec![
+                response(vec![
+                    call("fine", "work", json!({})),
+                    call("broken", "flaky", json!({})),
+                    call("ghost", "missing", json!({})),
+                    call("guarded", "locked", json!({})),
+                    call("text", "work", json!("pas un objet")),
+                ]),
+                response(vec![]),
+            ]);
+            let mut services = Services {
+                journaled_external: journaled,
+                deny: true,
+                failing: Some("flaky".into()),
+                specs: vec![
+                    spec("work", false),
+                    spec("flaky", false),
+                    spec("locked", true),
+                ],
+                ..Services::default()
+            };
+            run(&conn, &gateway, &mut services, "run")?;
+            let results: HashMap<String, Value> = store::events(&conn, "run", 0)?
+                .into_iter()
+                .filter(|e| e.kind == RunEventKind::ToolResult)
+                .map(|e| (e.payload["call_id"].as_str().unwrap().to_owned(), e.payload))
+                .collect();
+            let mode = format!("journaled={journaled}");
+            let code = |id: &str| results[id]["code"].as_str().unwrap_or("absent").to_owned();
+            assert_eq!(code("fine"), "ok", "{mode}");
+            assert_eq!(code("ghost"), "unknown_tool", "{mode}");
+            assert_eq!(code("guarded"), "approval_denied", "{mode}");
+            assert_eq!(code("text"), "invalid_arguments", "{mode}");
+            assert_eq!(
+                code("broken"),
+                if journaled { "ok" } else { "failed" },
+                "{mode}"
+            );
+            for id in ["fine", "ghost", "guarded", "text", "broken"] {
+                assert!(results[id]["elapsed_ms"].is_u64(), "{mode} {id}");
+                assert!(results[id]["started_ms"].is_u64(), "{mode} {id}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_unfinished_call_settled_at_the_end_of_the_task_is_coded_not_executed() -> Result<()> {
+        let conn = database(true, RunBudgets::default())?;
+        let gateway = Scripted::new(vec![response(vec![
+            call("done", "complete_task", json!({"summary":"fini"})),
+            call("late", "work", json!({})),
+        ])]);
+        let mut services = Services {
+            specs: vec![spec("work", false)],
+            ..Services::default()
+        };
+        run(&conn, &gateway, &mut services, "run")?;
+        let results: HashMap<String, Value> = store::events(&conn, "run", 0)?
+            .into_iter()
+            .filter(|e| e.kind == RunEventKind::ToolResult)
+            .map(|e| (e.payload["call_id"].as_str().unwrap().to_owned(), e.payload))
+            .collect();
+        assert_eq!(results["done"]["code"], "ok");
+        assert_eq!(results["late"]["code"], "not_executed");
+        assert!(results["late"].get("elapsed_ms").is_none());
         Ok(())
     }
 

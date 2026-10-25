@@ -54,6 +54,53 @@
   const botCleanups = [];
   // Keep the original extras until a queued submission settles, even if state refresh replaces its DTO.
   const pendingSends = new Map();
+  const draftMemory = new Map();
+  const draftWarnings = new Set();
+  const missingConversations = new Set();
+  let creatingDraft = null;
+  try {
+    for (const attempt of JSON.parse(localStorage.getItem("grokbot.pending") || "[]")) {
+      if (attempt.messageId && attempt.conversationId && typeof attempt.body === "string" && attempt.extras) {
+        pendingSends.set(attempt.messageId, { ...attempt, captured: new Map(), consumed: false });
+      }
+    }
+  } catch { /* A malformed old record is not a submission. */ }
+  function persistAttempts() {
+    const attempts = [...pendingSends.values()].filter((item) => !item.consumed).map(({ messageId, conversationId, body, extras }) => ({ messageId, conversationId, body, extras }));
+    localStorage.setItem("grokbot.pending", JSON.stringify(attempts));
+  }
+  function forgetAttempt(id) {
+    pendingSends.delete(id);
+    try { persistAttempts(); } catch { notifyDraft("La reprise de cet envoi ne peut pas être actualisée dans le stockage du navigateur."); }
+  }
+  function notifyDraft(message) { draftWarnings.add(message); notify(message); }
+  const composerKey = () => selectedId || `new:${chosenBot()?.id || "grokbot"}`;
+  async function ensureDraftConversation(create) {
+    if (currentConversation()) return currentConversation();
+    if (creatingDraft?.key === composerKey()) return creatingDraft.promise;
+    const key = composerKey();
+    const botId = chosenBot()?.id;
+    const promise = (async () => {
+      const conversation = create ? await create(botId) : (await api("/api/conversations", { bot_id: botId })).conversation;
+      if (!conversation?.id) throw new Error("La conversation créée ne peut pas encore être ouverte. Le brouillon est conservé.");
+      upsertConversation(conversation);
+      if (composerKey() !== key) throw new Error("La conversation créée reste dans la liste. Revenez-y pour reprendre ce brouillon.");
+      const destination = { ...panelContext(), conversation, bot: botById(conversation.bot_id) };
+      for (const panel of panels.values()) {
+        try { panel.composer?.transfer?.({ from: key, to: conversation.id }, destination); }
+        catch (error) { panelError(panel.id, error); notifyDraft("Un élément du brouillon n’a pas pu suivre la nouvelle conversation."); }
+      }
+      selectedId = conversation.id;
+      writePreference("grokbot.selected", selectedId);
+      removePreference(draftKey(null)); removePreference(`${draftKey(null)}.document`);
+      draftMemory.delete(draftKey(null));
+      saveDraft(); render();
+      return conversation;
+    })();
+    creatingDraft = { key, promise };
+    try { return await promise; }
+    finally { if (creatingDraft?.promise === promise) creatingDraft = null; }
+  }
   const approvalFollow = window.GrokbotChat.createApprovalFollow();
   async function openRatings() {
     const bridge = window.webkit?.messageHandlers?.ezerbotRatings;
@@ -111,12 +158,13 @@
   function observeSavedConversation(conversation) {
     for (const message of conversation.messages) {
       const pending = pendingSends.get(message.id);
-      if (!pending) continue;
+      if (!pending || pending.conversationId !== conversation.id) continue;
       if (!pending.consumed) {
         pending.consumed = true;
         for (const panel of panels.values()) panelCall(panel, panel.composer?.onSent, { messageId: message.id, extras: pending.extras, captured: pending.captured.get(panel.id) });
       }
       if (message.state !== "queued") pendingSends.delete(message.id);
+      try { persistAttempts(); } catch { notifyDraft("La reprise de cet envoi ne peut pas être actualisée dans le stockage du navigateur."); }
     }
   }
   function sendExtras() {
@@ -226,7 +274,7 @@
     get state() { return state; },
     get connected() { return connected; },
     get busy() { return busy; },
-    api, refresh, notify, copyText, createBotMascot, botSummary,
+    api, refresh, notify, notifyDraft, ensureDraftConversation, copyText, createBotMascot, botSummary,
     followVoiceReply(conversationId) {
       if (window.EzerbotVoiceMode?.active() && currentConversation()?.id === conversationId) render(true);
     },
@@ -410,7 +458,7 @@
     anchor.append(ui.toast);
     ui.toast.style.setProperty("--toast-left", `${box.left + box.width / 2}px`);
     ui.toast.style.setProperty("--toast-bottom", `${bottom}px`);
-    ui.toast.textContent = message;
+    ui.toast.textContent = [...new Set([message, ...draftWarnings])].join(" ");
     ui.toast.hidden = false;
     ui.toast.showPopover?.();
     toastTimer = setTimeout(() => {
@@ -474,7 +522,18 @@
     const wasLive = Boolean(streamingMessage(previous));
     const previousTail = previous?.messages.at(-1)?.id;
     state = await api("/api/state");
-    for (const conversation of state.conversations) observeSavedConversation(conversation);
+    for (const conversation of state.conversations) { missingConversations.delete(conversation.id); observeSavedConversation(conversation); }
+    for (const [id, pending] of pendingSends) {
+      const owner = state.conversations.find((item) => item.id === pending.conversationId);
+      if (owner && !pending.consumed && !owner.messages.some((item) => item.id === id)) {
+        owner.messages.push({ ...pending.extras, id, body: pending.body, role: "user", state: "queued", created_at: new Date().toISOString(), payload: { page_anchor: pending.extras.page_anchor } });
+      }
+    }
+    if (previous && !state.conversations.some((item) => item.id === previous.id) && (busy || ui.input.value || sendExtras().attachments?.length)) {
+      state.conversations.unshift(previous);
+      missingConversations.add(previous.id);
+      notifyDraft("Cette conversation n’est plus disponible. Son brouillon reste affiché pour copier le texte ; ses fichiers ne peuvent plus être envoyés ici.");
+    }
     if (!preferencesLoaded) {
       preferencesLoaded = true;
       applyTheme(state.preferences?.theme || themeChoice);
@@ -529,6 +588,7 @@
   }
 
   function showConnectionError(error) {
+    const changed = connected || connectionStatus !== (error?.accessDisabled ? "disabled" : "offline");
     connected = false;
     connectionStatus = error?.accessDisabled ? "disabled" : "offline";
     ui.bannerText.textContent = error?.accessDisabled
@@ -537,7 +597,7 @@
       ? "Mac injoignable. Vérifiez que le Mac est allumé, Ezerbot ouvert et Tailscale connecté. Reconnexion automatique…"
       : "Le moteur local ne répond plus. Vos conversations enregistrées sont conservées.";
     ui.banner.hidden = false;
-    render();
+    if (changed) render();
     for (const panel of panels.values()) panelCall(panel, panel.onConnection, false);
     schedulePoll();
     if (error) console.warn("Ezerbot local connection:", error.message);
@@ -561,6 +621,7 @@
   }
 
   function saveDraft() {
+    draftMemory.set(draftKey(), { text: ui.input.value, document: ui.input.document });
     if (ui.input.value) {
       writePreference(draftKey(), ui.input.value);
       writePreference(`${draftKey()}.document`, JSON.stringify(ui.input.document));
@@ -588,10 +649,7 @@
     ui.input.setReadOnly(taskFinished);
     ui.input.setPlaceholder(task ? "Écrire un suivi pour cette sous-tâche…" : "Qu’avez-vous en tête ?");
     if (taskFinished) {
-      if (ui.input.value) setComposerText("");
-      removePreference(draftKey());
-      removePreference(`${draftKey()}.document`);
-      for (const panel of panels.values()) panelCall(panel, panel.composer?.discard);
+      if (ui.input.value || sendExtras().attachments?.length) notifyDraft("Cette sous-tâche est terminée. Le brouillon et ses fichiers restent affichés, mais aucun nouveau suivi ne peut être envoyé.");
       if (document.activeElement?.closest?.(".composer-area")) document.querySelector(".gb-delegation-bar p")?.focus();
     }
     const tooLong = new TextEncoder().encode(ui.input.value.trim()).length > 16 * 1024;
@@ -604,7 +662,7 @@
       live: !task && Boolean(streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments)) });
     const live = control.live;
     const noMembers = group && !currentConversation().member_ids?.length;
-    ui.send.disabled = control.offline || taskFinished || (live ? ((group || task) && (control.busy || !connected)) : control.busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
+    ui.send.disabled = missingConversations.has(selectedId) || control.offline || taskFinished || (live ? ((group || task) && (control.busy || !connected)) : control.busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
     ui.send.dataset.mode = control.mode;
     ui.send.title = control.title;
     ui.send.setAttribute("aria-label", control.label);
@@ -628,14 +686,16 @@
   function notifyNavigation() { for (const panel of panels.values()) panelCall(panel, panel.onNavigate); }
 
   function selectConversation(id, focus = false) {
+    draftWarnings.clear();
     navigationGeneration++;
     notifyNavigation();
     approvalFollow.cancel();
     saveDraft();
     selectedId = id;
     writePreference("grokbot.selected", id || "");
-    setComposerText(readPreference(draftKey(), ""));
-    restoreDraftDocument();
+    const saved = draftMemory.get(draftKey());
+    setComposerText(saved?.text ?? readPreference(draftKey(), ""));
+    if (saved) ui.input.document = saved.document; else restoreDraftDocument();
     closeMenu();
     closeSidebar();
     render(true);
@@ -650,12 +710,15 @@
   function leaveEmptyThread() {
     if (!currentConversation() || currentConversation().messages.length || stagedOnEmptyThread()) return;
     const draft = ui.input.value;
+    const document = ui.input.document;
     // Move the text, not a copy: selectConversation will remove the old draft key.
     setComposerText("");
     selectConversation(null);
     const welcome = ui.input.value;
+    const welcomeDocument = ui.input.document;
     if (draft) {
       setComposerText(welcome ? `${welcome}\n${draft}` : draft);
+      ui.input.document = welcome ? { type: "doc", content: [...welcomeDocument.content, ...document.content] } : document;
       saveDraft();
     }
   }
@@ -974,7 +1037,7 @@
         ? await api("/api/bots/update", { id: existing.id, ...changes })
         : await api("/api/bots", { id: draftBotId, ...changes });
       upsertBot(bot);
-      const keepStagedBot = !existing && stagedOnEmptyThread();
+      const keepStagedBot = !existing && (busy || stagedOnEmptyThread());
       if (!existing) {
         draftBotId = null;
         if (!keepStagedBot) {
@@ -986,7 +1049,8 @@
       $("bot-dialog").close();
       render();
       notify(existing ? "Bot enregistré." : keepStagedBot
-        ? `${bot.name} est prêt. Retirez les pièces jointes pour le choisir, ou envoyez-les à ${currentBot()?.name || "ce bot"}.`
+        ? busy ? `${bot.name} est prêt. Terminez cet envoi pour le choisir.`
+          : `${bot.name} est prêt. Retirez les pièces jointes pour le choisir, ou envoyez-les à ${currentBot()?.name || "ce bot"}.`
         : `${bot.name} est prêt.`);
     } catch (error) { notify(error.message); }
     finally { $("bot-save").disabled = false; }
@@ -1024,7 +1088,7 @@
 
   const thread = {
     createMascot: threadMascot("galet"),
-    onRetry: (message) => message.state === "queued" ? resumeQueued(message) : reconcile(message.id),
+    onRetry: (message) => message.state === "queued" || pendingSends.get(message.id)?.consumed === false ? resumeQueued(message) : reconcile(message.id),
     onReact: (message, emoji) => reactToMessage(message, emoji),
     onThread: (message) => { void openThread(message); },
     onResend: (message) => resendMessage(message),
@@ -1363,6 +1427,7 @@
         parent_conversation_id: conversation.parent_id,
         task_id: window.GrokbotDelegation?.taskId(conversation.id),
         message_id: messageId, body, attachments: extras.attachments || [],
+        ...(extras.attachment_selections ? { attachment_selections: extras.attachment_selections } : {}),
       });
     }
     return api("/api/send", { ...extras, conversation_id: conversation.id, message_id: messageId, body, simulate_loss: loss });
@@ -1393,6 +1458,7 @@
     const live = streamingMessage();
     if (live && ui.send.dataset.mode === "stop") { await generation("/api/stop", currentConversation()?.kind === "group" ? "groupe" : live.id.replace(/^reply-/, "")); return; }
     if (ui.send.disabled) return;
+    draftWarnings.clear();
     const submittedScrollGeneration = scrollGeneration;
     const submittedDraft = ui.input.value;
     const submittedDocument = ui.input.document;
@@ -1407,7 +1473,7 @@
     let messageId;
     let delivered = false;
     const previousDraftKey = draftKey();
-    const restoreDraft = () => {
+    const restoreDraft = async () => {
       const remainder = ui.input.value;
       const remainderDocument = ui.input.document;
       setComposerText(submittedDraft && remainder ? `${submittedDraft}\n${remainder}` : submittedDraft || remainder);
@@ -1415,6 +1481,12 @@
         ? { type: "doc", content: [...submittedDocument.content, ...remainderDocument.content] }
         : submittedDraft ? submittedDocument : remainderDocument;
       saveDraft();
+      for (const panel of panels.values()) {
+        try {
+          const warning = await panel.composer?.restore?.({ messageId, extras, captured: captured.get(panel.id) }, panelContext());
+          if (warning) notifyDraft(warning);
+        } catch { notifyDraft("Un élément du brouillon n’a pas pu être restauré. Vérifiez la citation et les pièces jointes avant de réessayer."); }
+      }
     };
     try {
       // Consume only the submitted text, before creation can yield to another edit.
@@ -1422,15 +1494,16 @@
       removePreference(previousDraftKey);
       removePreference(`${previousDraftKey}.document`);
       if (!conversation) {
-        const created = await api("/api/conversations", { bot_id: chosenBot()?.id });
-        upsertConversation(created.conversation);
-        conversation = created.conversation;
-        selectedId = conversation.id;
-        writePreference("grokbot.selected", selectedId);
+        conversation = await ensureDraftConversation();
         approvalFollow.bind(conversation.id);
       }
       messageId = crypto.randomUUID();
-      pendingSends.set(messageId, { extras, captured, consumed: false });
+      pendingSends.set(messageId, { messageId, conversationId: conversation.id, body, extras, captured, consumed: false });
+      try { persistAttempts(); }
+      catch {
+        pendingSends.delete(messageId); messageId = null;
+        throw new Error("Le stockage du navigateur est indisponible. Le brouillon est conservé ; rétablissez le stockage avant d’envoyer.");
+      }
       conversation.messages.push({ ...extras, ...(conversation.kind === "task" ? { payload: { source: "follow_up" } } : {}), id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       removePreference(previousDraftKey);
       removePreference(`${previousDraftKey}.document`);
@@ -1445,26 +1518,22 @@
       schedulePoll();
     } catch (error) {
       if (messageId) {
-        try {
-          await refresh();
-          const savedMessage = currentConversation()?.messages.find((message) => message.id === messageId);
-          if (!savedMessage) { pendingSends.delete(messageId); restoreDraft(); }
-          notify(error.message);
-        } catch {
-          const optimisticMessage = currentConversation()?.messages.find((message) => message.id === messageId);
-          const confirmed = optimisticMessage && ["accepted", "echoed"].includes(optimisticMessage.state);
-          if (!confirmed) {
-            if (error.accessDisabled) {
-              const owner = state.conversations.find((item) => item.messages.some((message) => message.id === messageId));
-              if (owner) owner.messages = owner.messages.filter((message) => message.id !== messageId);
-              pendingSends.delete(messageId);
-            } else if (optimisticMessage) optimisticMessage.state = "unknown";
-            restoreDraft();
-          }
-          render();
-          showConnectionError(error);
+        let refreshed = false;
+        try { await refresh(); refreshed = true; } catch { showConnectionError(error); }
+        const pending = pendingSends.get(messageId);
+        const owner = state.conversations.find((item) => item.id === conversation.id);
+        const message = owner?.messages.find((item) => item.id === messageId);
+        const held = pending?.consumed || (!pending && message);
+        if (!held) {
+          const refused = error.accessDisabled || (error.status >= 400 && error.status < 500);
+          if (refused) {
+            if (owner) owner.messages = owner.messages.filter((item) => item.id !== messageId);
+            forgetAttempt(messageId);
+          } else if (message) message.state = refreshed ? "queued" : "unknown";
+          await restoreDraft();
         }
-      } else { restoreDraft(); notify(error.message); }
+      } else await restoreDraft();
+      notify(error.message);
     } finally {
       busy = false;
       submissionActivity = null;
@@ -1498,7 +1567,7 @@
     return extras.attachments || (message.attachments || []).map((item) => typeof item === "string" ? item : item.id || item.attachment_id).filter(Boolean);
   }
 
-  // Après un rechargement, pendingSends est vide : l'ancre enregistrée avec le message reste celle du premier envoi, que le moteur exige à l'identique.
+  // Le DTO enregistré reste la source de l’ancre lorsque la tentative locale est déjà acquittée.
   function resendExtras(message) {
     const pending = pendingSends.get(message.id)?.extras;
     if (pending) return pending;
@@ -1548,7 +1617,8 @@
       const response = await api("/api/messages/thread", { conversation_id: conversation.id, message_id: message.id });
       upsertConversation(response.conversation);
       state.threads = { ...(state.threads || {}), [response.conversation.id]: response.thread };
-      selectConversation(response.conversation.id, true);
+      if (!busy) selectConversation(response.conversation.id, true);
+      else notify("Le sous-fil est prêt dans la liste. Terminez cet envoi avant de l’ouvrir.");
     } catch (error) { notify(error.message); }
   }
 
@@ -1957,6 +2027,7 @@
   $("copy-link-button").addEventListener("click", () => { const conversation = currentConversation(); if (conversation) void copyLink("thread", { id: conversation.id }); });
   $("bot-copy-link").addEventListener("click", () => { if (editingBotId) void copyLink("agent", { id: editingBotId }); });
   $("restore-link-draft").addEventListener("click", () => {
+    if (busy) return;
     try {
       const previous = previousLinkDrafts().pop();
       if (!previous) return;

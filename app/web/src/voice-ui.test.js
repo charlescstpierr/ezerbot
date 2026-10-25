@@ -38,7 +38,16 @@ function fixture() {
       storage.set("grokbot.draft.new.document", JSON.stringify(richDocument));
       assert.equal(storage.get(`grokbot.draft.${id}.document`), JSON.stringify(richDocument), "rich text must be handed off before opening");
       ctx.conversation={id}; registration.onState(ctx.state, ctx); return true;
-    }, notify(text) { notices.push(text); }, draft() {return draft;}, draftDocument() {return richDocument;} };
+    },
+    async ensureDraftConversation() {
+      const { conversation } = await this.api("/api/conversations", { bot_id: ctx.bot.id });
+      storage.set(`grokbot.draft.${conversation.id}`, draft);
+      storage.set(`grokbot.draft.${conversation.id}.document`, JSON.stringify(richDocument));
+      registration.composer.transfer({ from: `new:${ctx.bot.id}`, to: conversation.id }, { ...ctx, conversation });
+      this.openConversation(conversation.id);
+      storage.delete("grokbot.draft.new"); storage.delete("grokbot.draft.new.document");
+      return conversation;
+    }, notify(text) { notices.push(text); }, notifyDraft(text) { notices.push(text); }, draft() {return draft;}, draftDocument() {return richDocument;} };
   const document = {documentElement:{lang:"fr"},createElement:tag=>new Element(tag), createTextNode:text=>Object.assign(new Element("text"),{textContent:text}), getElementById:()=>send, addEventListener(name, fn) { if (name === "keydown") keydown = fn; }};
   const window = {GrokbotPanels:host,EzerbotVoiceMode:{active:()=>conversationVoice},webkit:{messageHandlers:{ezerbotVoice:{postMessage:bridge}}},addEventListener() {}};
   runInNewContext(readFileSync(new URL("../../ui/panels/voice.js", import.meta.url),"utf8"), {

@@ -16,7 +16,7 @@ const cls = (n,c) => all(n).find(x => x.className === c);
 function fixture() {
   let startExtras={}, notices=[], panel, timer, keydown, source={status:"idle",transcript:"",utterance_id:0,barged:0}, scenario="", nextSend, refusal="";
   const calls=[], sends=[], follows=[], held=[], holding=new Set();
-  let script;
+  let script, refreshFails = false;
   const limits=[];
   let dictationRefreshes=0, clock=0, bargeOnSpeak=false, refuseSpeak=false;
   const root=new Element("div"), send=new Element("button"), settings=new Element("div"), composer=new Element("div"), controls=new Element("div");controls.className="voice-controls";root.append(controls,send,settings,composer);
@@ -57,8 +57,18 @@ function fixture() {
   const failWith=status=>{cut();source.status=status;};
   const panels={
     register(p){ panel=p;p.composer.mount(composer,context);p.onState(context.state,context);},
-    composerChanged(){}, notify(text){notices.push(text);}, async refresh(){}, async api(path,body){calls.push({path,...body});if(path==="/api/voice/bot"&&refusal)throw new Error(refusal);if(path==="/api/conversations")return {conversation:{id:"created"}};},
+    composerChanged(){}, notify(text){notices.push(text);}, async refresh(){if(refreshFails)throw new Error("Refresh interrompu");}, async api(path,body){calls.push({path,...body});if(path==="/api/voice/bot"&&refusal)throw new Error(refusal);if(path==="/api/conversations")return {conversation:{id:"created",messages:[]}};},
     openConversation(id){context={...context,conversation:{id,messages:[]}};panel.onState(context.state,context);return true;},
+    async ensureDraftConversation(){
+      const {conversation}=await this.api("/api/conversations",{bot_id:context.bot.id});
+      this.transfer(conversation);
+      return conversation;
+    },
+    transfer(conversation){
+      const next={...context,conversation};
+      panel.composer.transfer?.({from:context.conversation?.id || `new:${context.bot.id}`,to:conversation.id},next);
+      context=next;panel.onState(context.state,context);
+    },
     async sendVoice(text,id){sends.push({text,id});nextSend?.();},
     followVoiceReply(id){follows.push(id);},
   };
@@ -69,8 +79,24 @@ function fixture() {
   });
   const section=bot=>{const container=new Element("div");const cleanup=panel.botSection(bot,container,context);return {container,cleanup};};
   return {section,heard,talk,failWith,set clock(ms){clock=ms;},set bargeOnSpeak(value){bargeOnSpeak=value;},set refuseSpeak(value){refuseSpeak=value;},hold(...commands){holding.clear();for(const command of commands)holding.add(command);},set script(fn){script=fn;},release(...commands){if(!commands.length)holding.clear();for(const late of held.splice(0))if(!commands.length||commands.includes(late.command))late.resolve();else held.push(late);},set refusal(text){refusal=text;},root,calls,sends,follows,notices,panel,set startExtras(value){startExtras=value;},setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
-    setContext(c){context=c;panel.onState(c.state,c);},tick:async()=>timer?.(),keydown:e=>keydown(e),expire(){limits.forEach((fn,i)=>{limits[i]=null;fn?.();});}};
+    transfer:conversation=>panels.transfer(conversation),set refreshFails(value){refreshFails=value;},setContext(c){context=c;panel.onState(c.state,c);},tick:async()=>timer?.(),keydown:e=>keydown(e),expire(){limits.forEach((fn,i)=>{limits[i]=null;fn?.();});}};
 }
+test("R32 voice session follows an automatic transfer while listening on the welcome draft",async()=>{
+  const f=fixture();f.setContext({...f.context,conversation:null});
+  await cls(f.root,"voice-session-toggle").onclick();
+  f.transfer({id:"text-send",messages:[]});
+  f.source.final_text="Une phrase ajoutée après la création.";f.source.utterance_id=1;
+  await f.tick();
+  assert.deepEqual(f.sends,[{text:"Une phrase ajoutée après la création.",id:"text-send"}]);
+  assert.equal(f.calls.filter(c=>c.command==="start").length,1);
+});
+test("R32 welcome voice sends using the created conversation even when refresh is unavailable",async()=>{
+  const f=fixture();f.setContext({...f.context,conversation:null});f.refreshFails=true;
+  await cls(f.root,"voice-session-toggle").onclick();
+  f.source.final_text="Phrase conservée.";f.source.utterance_id=1;
+  await f.tick();
+  assert.deepEqual(f.sends,[{text:"Phrase conservée.",id:"created"}]);
+});
 test("end-to-end voice sends only the recognized utterance once, reads streamed sentences, pauses on approval",async()=>{
   const f=fixture(); await cls(f.root,"voice-session-toggle").onclick();
   f.source.transcript="Bonjour";f.source.barged=1;await f.tick();

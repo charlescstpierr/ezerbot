@@ -17,7 +17,7 @@ function fixture({ dialogs = [], popover = true } = {}) {
   const composer = host("div", { left: 278, width: 854, top: 595, bottom: 780 });
   const sheets = dialogs.map((footer) => host("dialog", { left: 335, width: 470, top: 20, bottom: 760 }, footer));
   const notify = runInNewContext(`(${source})`, {
-    ui: { toast }, toastTimer: null, innerHeight: 780,
+    ui: { toast }, toastTimer: null, draftWarnings: new Set(), innerHeight: 780,
     document: { querySelectorAll: () => sheets, querySelector: () => composer },
     clearTimeout: (id) => timers.delete(id),
     setTimeout(callback, delay) { assert.equal(delay, 4000); timers.set(++nextTimer, callback); return nextTimer; },

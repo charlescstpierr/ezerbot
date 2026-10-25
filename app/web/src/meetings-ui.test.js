@@ -28,7 +28,14 @@ function fixture() {
       transcript: partial ? "Décision : jeudi.\n[Passage non transcrit de 1:00 à 2:00]\nAlice prépare la démo." : "Décision : jeudi. Alice prépare la démo.", partial, missing_segments: partial ? 1 : 0, data: status === "no_audio" ? "" : "UklGRg==", elapsed_ms: status === "too_long" ? 600000 : 4200, too_long: status === "too_long" };
   };
   const host = { register(panel) { registration = panel; }, composerChanged() {}, notify(message) { notices.push(message); }, draft: () => "", draftDocument: () => ({}),
-    async refresh() {}, openConversation(id) { context.conversation = {id}; registration.onState(context.state, context); return true; },
+    get state() { return context.state; },
+    async ensureDraftConversation(create) {
+      if (context.conversation) return context.conversation;
+      const conversation = await create(context.bot.id);
+      host.openConversation(conversation.id);
+      return conversation;
+    },
+    async refresh() { context.state.conversations = [{ id: "created" }]; }, openConversation(id) { context.conversation = {id}; registration.onState(context.state, context); return true; },
     async api(path, body) { requests.push({path,body}); if (path === "/api/meetings/start") return { id: "meeting_one", conversation_id: body.conversation_id || "created", title: body.title }; return {}; },
   };
   const document = { createElement: tag => new Element(tag), createTextNode: text => Object.assign(new Element("text"),{textContent:text}), getElementById: id => id === "welcome" ? welcome : panels, querySelector: () => top };
@@ -173,4 +180,31 @@ test("meeting surfaces never invoke native confirm or browser media; unavailable
   const source=readFileSync(new URL("../../ui/panels/meetings.js",import.meta.url),"utf8"); assert.doesNotMatch(source,/\bconfirm\s*\(|navigator\.mediaDevices|new (?:webkit)?SpeechRecognition/);
   const card=readFileSync(new URL("./cards/meeting.jsx",import.meta.url),"utf8"); assert.match(card,/message\.body && <p[^>]+>Résumé généré/); assert.match(card,/month: "long"/); assert.match(card,/<audio controls preload="metadata"/);
   const app=readFileSync(new URL("../../ui/app.js",import.meta.url),"utf8"); assert.match(app,/composer\?\.blockedReason/); assert.match(app,/typeof blockedReason === "string" \? blockedReason/);
+});
+
+test("welcome meeting transfers the staged composer through the shared creation before capture", async () => {
+  const f = fixture(); f.context.conversation = null;
+  f.registration.onState(f.context.state, f.context);
+  let stagedConversation = "new:grokbot";
+  const ensure = f.host.ensureDraftConversation;
+  f.host.ensureDraftConversation = async (create) => ensure(async (bot) => {
+    const conversation = await create(bot);
+    stagedConversation = conversation.id;
+    return conversation;
+  });
+  await f.start();
+  assert.equal(stagedConversation, "created");
+  assert.equal(f.calls[0].command, "start");
+  assert.equal(f.context.conversation.id, stagedConversation);
+});
+
+test("welcome meeting whose refresh fails remains available for explicit cleanup", async () => {
+  const f = fixture(); f.context.conversation = null;
+  f.registration.onState(f.context.state, f.context);
+  f.host.refresh = async () => { throw new Error("Lecture indisponible"); };
+  await f.start();
+  assert.equal(f.id("meeting-recording").hidden, false);
+  assert.equal(f.id("meeting-recording").dataset.phase, "failed");
+  assert.ok(f.notices.includes("Lecture indisponible"));
+  assert.equal(f.calls.length, 0);
 });

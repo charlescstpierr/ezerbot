@@ -11,6 +11,7 @@ const shell = readFileSync(new URL("../../ui/app.js", import.meta.url), "utf8");
 // Permissive stand-in for a DOM element: a few real fields, anything else is a callable no-op fake.
 function fake() {
   const own = Object.assign(() => {}, { dataset: {}, children: [], classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    getBoundingClientRect: () => ({ top: 600, bottom: 780, left: 0, width: 800 }),
     textContent: "", value: "", querySelector: fake, querySelectorAll: () => [], closest: () => null, contains: () => false, getAttribute: () => null });
   return new Proxy(own, { get: (target, key) => key in target || typeof key === "symbol" ? target[key] : (target[key] = fake()) });
 }
@@ -34,7 +35,7 @@ async function composer() {
   await new Promise((resolve) => setImmediate(resolve));
   panels.register({ id: "attachments", composer: { discard: ({ conversation }) => discarded.push(conversation.id) } });
   removed.length = 0;
-  return { ctx, removed, discarded, mascots, panels, update: () => panels.composerChanged(), ui: { input, send: document.getElementById("send-button"), hint: document.getElementById("composer-hint") },
+  return { ctx, removed, discarded, mascots, panels, update: () => panels.composerChanged(), ui: { input, toast: document.getElementById("toast"), send: document.getElementById("send-button"), hint: document.getElementById("composer-hint") },
     get conversation() { return panels.state.conversations.find((item) => item.id === storage.get("grokbot.selected")); } };
 }
 
@@ -49,14 +50,15 @@ test("a running task composer only sends follow-ups; cancellation stays in the b
   assert.equal(c.ui.send.dataset.mode, "send");
 });
 
-test("a finished task clears drafts and attachments, is read-only and is no longer attentive", async () => {
+test("a finished task retains its draft and attachments, explains the refusal and becomes read-only", async () => {
   const c = await composer(); c.ctx.active = false;
   c.ui.input.value = "Brouillon qui ne peut plus partir"; c.update();
-  assert.equal(c.ui.input.value, "");
+  assert.equal(c.ui.input.value, "Brouillon qui ne peut plus partir");
   assert.equal(c.ui.input.readOnly, true);
   assert.equal(c.ui.send.disabled, true);
-  assert.deepEqual(c.removed, ["grokbot.draft.thread", "grokbot.draft.thread.document"]);
-  assert.deepEqual(c.discarded, ["thread"]);
+  assert.deepEqual(c.removed, []);
+  assert.deepEqual(c.discarded, []);
+  assert.match(c.ui.toast.textContent, /brouillon et ses fichiers restent affichés/);
   assert.equal(c.mascots.at(-1).drafting, false);
   assert.equal(c.mascots.at(-1).activity, null);
 });

@@ -4357,3 +4357,96 @@ fn the_voice_mark_leaves_with_its_undelivered_message_and_with_its_conversation(
     f.post("/api/conversations/delete", json!({"id":c}));
     assert_eq!(voice_marks(&f), 0, "la conversation est supprimée");
 }
+
+#[test]
+fn task_send_consumes_only_its_attachment_selection_and_replay_keeps_the_next_draft() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    for document in [false, true] {
+        let mut f = Fixture::new(false);
+        let root = f.root("attachment-selections");
+        f.tool(&root, "selected-child", "delegate", args("child"));
+        let edge = f.children(&root).remove(0);
+        let conversation = edge.conversation_id.as_deref().unwrap();
+        let upload = |f: &mut Fixture, token: &str| -> Value {
+            if document {
+                f.post("/api/documents", json!({"name":"sample.txt","data":STANDARD.encode("sample"),"draft_id":conversation,"upload_id":token}))["id"].clone()
+            } else {
+                let png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x01\0\0\0\x01sample";
+                f.app
+                    .api(
+                        "POST",
+                        &format!(
+                            "/api/attachments?draft_id={}&upload_id={token}",
+                            conversation
+                        ),
+                        png,
+                    )
+                    .unwrap()["id"]
+                    .clone()
+            }
+        };
+        let id = upload(&mut f, "old-selection");
+        f.post(
+            "/api/storage/drafts",
+            json!({"draft_id":conversation,"attachments":[],"cancelled_uploads":["old-selection"]}),
+        );
+        assert_eq!(upload(&mut f, "new-selection"), id);
+        let input = json!({"parent_conversation_id":root.conversation_id,"task_id":edge.id,"message_id":"attachment-note","body":"sample","attachments":[id],"attachment_selections":{id.as_str().unwrap():["old-selection"]}});
+        f.post("/api/delegation/send", input.clone());
+        f.post("/api/delegation/send", input);
+        f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        assert_eq!(state["storage"]["drafts"][conversation][0]["id"], id);
+        assert_eq!(
+            state["storage"]["drafts"][conversation][0]["upload_tokens"],
+            json!(["new-selection"])
+        );
+    }
+}
+
+#[test]
+fn late_removal_of_a_legacy_draft_keeps_a_new_upload_of_the_same_file() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    for document in [false, true] {
+        let mut f = Fixture::new(false);
+        let conversation = f.conversation();
+        let upload = |f: &mut Fixture, token: Option<&str>| -> Value {
+            if document {
+                let mut input = json!({"name":"sample.txt","data":STANDARD.encode("sample"),"draft_id":conversation});
+                if let Some(token) = token {
+                    input["upload_id"] = json!(token);
+                }
+                f.post("/api/documents", input)["id"].clone()
+            } else {
+                let png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x01\0\0\0\x01sample";
+                let mut route = format!("/api/attachments?draft_id={conversation}");
+                if let Some(token) = token {
+                    route.push_str(&format!("&upload_id={token}"));
+                }
+                f.app.api("POST", &route, png).unwrap()["id"].clone()
+            }
+        };
+        let id = upload(&mut f, None);
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        assert_eq!(
+            state["storage"]["drafts"][&conversation][0]["upload_tokens"],
+            json!([])
+        );
+        let removal = json!({"draft_id":conversation,"attachments":[],"removed":[id],"removed_selections":{id.as_str().unwrap():[]}});
+        assert_eq!(upload(&mut f, Some("new-upload")), id);
+        f.post("/api/storage/drafts", removal);
+        f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        assert_eq!(state["storage"]["drafts"][&conversation][0]["id"], id);
+        assert_eq!(
+            state["storage"]["drafts"][&conversation][0]["upload_tokens"],
+            json!(["new-upload"])
+        );
+        f.post(
+            "/api/storage/drafts",
+            json!({"draft_id":conversation,"attachments":[],"removed":[id]}),
+        );
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        assert!(state["storage"]["drafts"][&conversation].is_null());
+    }
+}

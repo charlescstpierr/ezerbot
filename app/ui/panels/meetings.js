@@ -126,18 +126,14 @@
     if (panels.voiceActive?.()) { panels.notify("Une dictée est en cours. Arrêtez-la avant d’enregistrer une réunion."); return; }
     begin.disabled = true; dialogError.textContent = "";
     try {
-      const welcome = !context.conversation, draft = panels.draft();
-      session = await panels.api("/api/meetings/start", { conversation_id: context.conversation?.id || null, bot_id: context.bot?.id, title: title.value, consent: consent.checked });
-      const rev = ++generation; phase = "authorizing"; keep.checked = false; pending = null;
-      if (welcome) {
-        if (draft) {
-          localStorage.setItem(`grokbot.draft.${session.conversation_id}`, draft);
-          localStorage.setItem(`grokbot.draft.${session.conversation_id}.document`, JSON.stringify(panels.draftDocument()));
-        }
+      let created = null;
+      const conversation = await panels.ensureDraftConversation(async (botId) => {
+        session = created = await panels.api("/api/meetings/start", { conversation_id: null, bot_id: botId, title: title.value, consent: consent.checked });
         await panels.refresh();
-        if (!panels.openConversation(session.conversation_id)) throw new Error("Ouvrez la conversation créée avant d’enregistrer.");
-        localStorage.removeItem("grokbot.draft.new"); localStorage.removeItem("grokbot.draft.new.document");
-      }
+        return panels.state.conversations.find((item) => item.id === created.conversation_id);
+      });
+      session = created || await panels.api("/api/meetings/start", { conversation_id: conversation.id, bot_id: context.bot?.id, title: title.value, consent: consent.checked });
+      const rev = ++generation; phase = "authorizing"; keep.checked = false; pending = null;
       dialog.close(); render(); await accept(await bridge("start"), rev);
     } catch (error) {
       dialogError.textContent = error.message; panels.notify(error.message);

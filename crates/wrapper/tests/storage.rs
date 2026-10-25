@@ -1059,3 +1059,79 @@ fn expired_preview_never_authorizes_deletion() {
     );
     assert!(f.blob(&image).exists());
 }
+
+#[test]
+fn reselected_attachment_occurrences_survive_old_send_commit_and_restart() {
+    for document in [false, true] {
+        for upload_first in [true, false] {
+            let mut f = Fixture::new();
+            let upload = |f: &mut Fixture, token: &str| -> String {
+                let value = if document {
+                    f.post("/api/documents", json!({"name":"sample.txt","data":STANDARD.encode("sample"),"draft_id":"thread","upload_id":token}))
+                } else {
+                    f.app
+                        .api(
+                            "POST",
+                            &format!("/api/attachments?draft_id=thread&upload_id={token}"),
+                            PNG,
+                        )
+                        .unwrap()
+                };
+                value["id"].as_str().unwrap().to_owned()
+            };
+            let id = upload(&mut f, "old-upload");
+            f.post(
+                "/api/storage/drafts",
+                json!({"draft_id":"thread","attachments":[],"cancelled_uploads":["old-upload"]}),
+            );
+            if upload_first {
+                assert_eq!(upload(&mut f, "new-upload"), id);
+            }
+            let request = json!({"conversation_id":"thread","message_id":"old-send","body":"sample","attachments":[id],"attachment_selections":{id.clone():["old-upload"]}});
+            f.post("/api/send", request.clone());
+            if !upload_first {
+                assert_eq!(upload(&mut f, "new-upload"), id);
+            }
+            f.restart();
+            let state = f.app.api("GET", "/api/state", b"").unwrap();
+            assert_eq!(state["storage"]["drafts"]["thread"][0]["id"], id);
+            assert_eq!(
+                state["storage"]["drafts"]["thread"][0]["upload_tokens"],
+                json!(["new-upload"])
+            );
+            f.post("/api/send", request);
+            f.restart();
+            let state = f.app.api("GET", "/api/state", b"").unwrap();
+            assert_eq!(state["storage"]["drafts"]["thread"][0]["id"], id);
+            f.post("/api/send", json!({"conversation_id":"thread","message_id":"new-send","body":"sample","attachments":[id],"attachment_selections":{id.clone():["new-upload"]}}));
+            f.restart();
+            let state = f.app.api("GET", "/api/state", b"").unwrap();
+            assert!(state["storage"]["drafts"]["thread"].is_null());
+        }
+    }
+}
+
+#[test]
+fn legacy_send_consumes_draft_once_and_replay_preserves_a_new_selection() {
+    let mut f = Fixture::new();
+    let route = "/api/attachments?draft_id=thread&upload_id=legacy-upload";
+    let id = f.app.api("POST", route, PNG).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let request = json!({"conversation_id":"thread","message_id":"legacy-send","body":"sample","attachments":[id]});
+    f.post("/api/send", request.clone());
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert!(state["storage"]["drafts"]["thread"].is_null());
+    f.app
+        .api(
+            "POST",
+            "/api/attachments?draft_id=thread&upload_id=new-upload",
+            PNG,
+        )
+        .unwrap();
+    f.post("/api/send", request);
+    f.restart();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(state["storage"]["drafts"]["thread"][0]["id"], id);
+}

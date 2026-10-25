@@ -37,6 +37,8 @@ struct SendMessage {
     #[serde(default)]
     attachments: Vec<String>,
     #[serde(default)]
+    attachment_selections: Option<super::attachments::DraftSelections>,
+    #[serde(default)]
     mentions: Vec<super::multibot::Mention>,
     #[serde(default)]
     simulate_loss: bool,
@@ -428,6 +430,14 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     &input.message_id,
                     &input.attachments,
                 )?;
+                if !resend {
+                    super::attachments::consume_draft(
+                        &tx,
+                        &input.conversation_id,
+                        &input.attachments,
+                        input.attachment_selections.as_ref(),
+                    )?;
+                }
             }
             tx.commit()?;
             let state = match prepared {

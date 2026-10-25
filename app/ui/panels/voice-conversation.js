@@ -166,18 +166,9 @@
   }
   async function ensureConversation(rev) {
     if (conversationId) return;
-    const {conversation} = await panels.api("/api/conversations", {bot_id:ctx.bot?.id});
-    await panels.refresh();
+    const conversation = await panels.ensureDraftConversation();
     if (rev !== epoch) return;
-    const draft = panels.draft?.();
-    if (draft) {
-      localStorage.setItem(`grokbot.draft.${conversation.id}`, draft);
-      localStorage.setItem(`grokbot.draft.${conversation.id}.document`, JSON.stringify(panels.draftDocument()));
-    }
-    // Bind before openConversation publishes the new selection to panel observers.
     conversationId = conversation.id; scopeKey = conversation.id;
-    if (!panels.openConversation(conversation.id)) throw new Error("Ouvrez la conversation créée pour poursuivre le mode voix.");
-    try { localStorage.removeItem("grokbot.draft.new"); localStorage.removeItem("grokbot.draft.new.document"); } catch { /* The draft is already handed off. */ }
   }
   function schedule(rev) { clearTimeout(timer); if (active() && rev === epoch) timer = setTimeout(() => tick(rev), 100); }
   async function tick(rev) {
@@ -365,6 +356,7 @@
         window.addEventListener("grokbot:voice-call-change", render);
         render();
       },
+      transfer({ from, to }) { if (active() && scopeKey === from) { scopeKey = to; conversationId = to; } },
       discard() { if (active()) exit(); },
     },
     onState(state, context) { observe(context); },

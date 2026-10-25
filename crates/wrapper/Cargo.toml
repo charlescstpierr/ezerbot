@@ -50,6 +50,8 @@ flate2 = "1"
 brotli = "8"
 
 [dev-dependencies]
+# `progress_handler` counts every SQLite instruction of a read (routine_cost scale test).
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 # Décode les réponses Brotli servies, comme le ferait le navigateur.
 brotli = "8"
 grokbot-test-support = { workspace = true }

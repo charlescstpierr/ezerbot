@@ -7,6 +7,7 @@
 //! main-conversation user decisions and persisted allow/auto-review (REA
 //! `goal-permissions-secrets.md` PS05–PS06). No routine-specific gate is added here.
 use self::with_run_events as commit;
+use crate::contracts::ToolCode;
 use crate::contracts::{
     ApprovalCheck, AuthorizedBy, CaptureRef, ContextEstimate, Error, HistoryItem, ModelEvent,
     ModelGateway, ModelRequest, Result, Role, RunEvent, RunEventKind, RunKind, SuspendCause,
@@ -20,9 +21,20 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(any(test, debug_assertions))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunEventPoint {
+    BeforeBegin,
+    BeforeCommit,
+}
 
 pub trait RunServices {
+    #[cfg(any(test, debug_assertions))]
+    fn transaction_checkpoint(&mut self, _run_id: &str, _point: RunEventPoint) -> Result<()> {
+        Ok(())
+    }
     /// Base context, excluding this run's events: the loop adds its committed
     /// text, function calls and outputs on EVERY request (`store:false`). Rebuild
     /// from storage on each call so redaction/forgetting cannot leave stale input.
@@ -157,6 +169,18 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Code fixe et durée d'un `ToolResult`, pour le journal des tours. Sans `started`, ou pour un
+/// appel incertain, rien n'a été exécuté cette fois : pas de durée.
+fn stamp(mut payload: Value, code: ToolCode, started: Option<Instant>) -> Value {
+    payload["code"] = json!(code);
+    if let Some(started) = started.filter(|_| code != ToolCode::Uncertain) {
+        let elapsed = started.elapsed().as_millis() as u64;
+        payload["started_ms"] = json!(now_ms() - elapsed as i64);
+        payload["elapsed_ms"] = json!(elapsed);
+    }
+    payload
+}
+
 fn busy(error: &Error) -> bool {
     matches!(error, Error::Sqlite(rusqlite::Error::SqliteFailure(error, _))
         if matches!(error.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
@@ -178,6 +202,8 @@ pub fn with_run_events<T>(
     for attempt in 0..5 {
         let mut hook_failed = false;
         let result = (|| {
+            #[cfg(any(test, debug_assertions))]
+            services.transaction_checkpoint(run_id, RunEventPoint::BeforeBegin)?;
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let seq: u64 = tx.query_row(
                 "SELECT COALESCE(MAX(seq),0) FROM engine_run_events WHERE run_id=?1",
@@ -191,6 +217,8 @@ pub fn with_run_events<T>(
                     return Err(error);
                 }
             }
+            #[cfg(any(test, debug_assertions))]
+            services.transaction_checkpoint(run_id, RunEventPoint::BeforeCommit)?;
             tx.commit()?;
             Ok(value)
         })();
@@ -412,7 +440,12 @@ fn settle_pending(conn: &Connection, run_id: &str, reason: &str) -> Result<()> {
                 reason: format!("not executed: {reason}"),
             }
         };
-        let mut payload = json!({"call_id": call.call_id, "outcome": outcome});
+        let code = match &stored {
+            Some((Some(_), _)) => ToolCode::of(&outcome),
+            _ if stored.is_some() || mcp_admitted => ToolCode::Uncertain,
+            _ => ToolCode::NotExecuted,
+        };
+        let mut payload = json!({"call_id": call.call_id, "outcome": outcome, "code": code});
         if let Some((_, Some(by))) = &stored {
             payload["authorized_by"] = serde_json::from_str(by)?;
         }
@@ -740,6 +773,7 @@ fn execute_external(
     call: &ToolCall,
     protected: Option<bool>,
 ) -> Result<Option<RunProgress>> {
+    let started = Some(Instant::now());
     enum Start {
         Complete(Option<RunProgress>),
         Admitted(Box<Run>, Option<AuthorizedBy>),
@@ -765,7 +799,7 @@ fn execute_external(
                 conn,
                 run_id,
                 RunEventKind::ToolResult,
-                &json!({"call_id":call.call_id,"authorized_by":external_authorization(conn,run_id,call)?,"outcome":ToolOutcome::Failed {reason:"L’appel externe a été interrompu après son autorisation. Son effet est incertain ; vérifiez-le avant de le relancer.".into()}}),
+                &json!({"call_id":call.call_id,"code":ToolCode::Uncertain,"authorized_by":external_authorization(conn,run_id,call)?,"outcome":ToolOutcome::Failed {reason:"L’appel externe a été interrompu après son autorisation. Son effet est incertain ; vérifiez-le avant de le relancer.".into()}}),
             )?;
             return Ok(Start::Complete(None));
         }
@@ -782,7 +816,11 @@ fn execute_external(
                 conn,
                 run_id,
                 RunEventKind::ToolResult,
-                &json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason}}),
+                &stamp(
+                    json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason}}),
+                    ToolCode::UnknownTool,
+                    started,
+                ),
             )?;
             return Ok(Start::Complete(None));
         };
@@ -802,7 +840,11 @@ fn execute_external(
                             conn,
                             run_id,
                             RunEventKind::ToolResult,
-                            &json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason:APPROVAL_PENDING_REASON.into()}}),
+                            &stamp(
+                                json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason:APPROVAL_PENDING_REASON.into()}}),
+                                ToolCode::ApprovalPending,
+                                started,
+                            ),
                         )?;
                         return Ok(Start::Complete(None));
                     }
@@ -817,7 +859,11 @@ fn execute_external(
                         conn,
                         run_id,
                         RunEventKind::ToolResult,
-                        &json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason}}),
+                        &stamp(
+                            json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason}}),
+                            ToolCode::ApprovalDenied,
+                            started,
+                        ),
                     )?;
                     return Ok(Start::Complete(None));
                 }
@@ -876,7 +922,11 @@ fn execute_external(
                 conn,
                 run_id,
                 RunEventKind::ToolResult,
-                &json!({"call_id":call.call_id,"outcome":outcome,"authorized_by":by}),
+                &stamp(
+                    json!({"call_id":call.call_id,"outcome":outcome,"authorized_by":by}),
+                    ToolCode::of(&outcome),
+                    started,
+                ),
             )?;
         }
         Ok(None)
@@ -892,13 +942,18 @@ fn execute_journaled_external(
     run_id: &str,
     call: &ToolCall,
 ) -> Result<Option<RunProgress>> {
+    let started = Some(Instant::now());
     enum Admission {
         Run,
         Result(ToolOutcome),
         Wait(RunProgress),
     }
     let specs = tool_specs(services, &store::required(conn, run_id)?);
+    // Code d'un refus décidé à l'admission (sinon il se déduit de l'issue de l'appel) ; un appel
+    // déjà réglé avant un redémarrage n'est pas exécuté cette fois, donc sans durée.
+    let (mut code, mut recovered) = (None, false);
     let admission = commit(conn, services, run_id, |conn, services| {
+        (code, recovered) = (None, false);
         let mut run = store::required(conn, run_id)?;
         if run.status != RunStatus::Running || services.is_cancelled(run_id) {
             return Err(invalid("run stopped before external admission"));
@@ -911,6 +966,7 @@ fn execute_journaled_external(
             )
             .optional()?;
         if let Some(outcome) = existing {
+            (code, recovered) = (outcome.is_none().then_some(ToolCode::Uncertain), true);
             return Ok(Admission::Result(match outcome {
                 Some(value) => serde_json::from_str(&value)?,
                 None => ToolOutcome::Failed { reason: "Résultat inconnu après interruption. Action non relancée ; vérifiez son effet avant de réessayer.".into() },
@@ -918,6 +974,7 @@ fn execute_journaled_external(
         }
         let spec = specs.iter().find(|s| s.name == call.name);
         if !call.arguments.is_object() || spec.is_none() {
+            code = Some(spec.map_or(ToolCode::UnknownTool, |_| ToolCode::InvalidArguments));
             return Ok(Admission::Result(ToolOutcome::Failed {
                 reason: if spec.is_none() {
                     services.external_unavailable_reason(&run, call)
@@ -949,13 +1006,15 @@ fn execute_journaled_external(
                             "INSERT INTO engine_external_tools(run_id,call_id,authorized_by,outcome) VALUES (?1,?2,NULL,?3)",
                             rusqlite::params![run_id, call.call_id, serde_json::to_string(&outcome)?],
                         )?;
+                        code = Some(ToolCode::ApprovalPending);
                         return Ok(Admission::Result(outcome));
                     }
                     suspend(conn, &mut run, call, &cause, true)?;
                     return Ok(Admission::Wait(RunProgress::Suspended(cause)));
                 }
                 ApprovalCheck::Denied { reason } => {
-                    return Ok(Admission::Result(ToolOutcome::Failed { reason }))
+                    code = Some(ToolCode::ApprovalDenied);
+                    return Ok(Admission::Result(ToolOutcome::Failed { reason }));
                 }
                 ApprovalCheck::Authorized { by: authority } => by = Some(authority),
             }
@@ -996,6 +1055,8 @@ fn execute_journaled_external(
             services.call_journaled_external_tool(&run, call)
         }
     };
+    let code = code.unwrap_or_else(|| ToolCode::of(&outcome));
+    let started = started.filter(|_| !recovered);
     commit(conn, services, run_id, |conn, _| {
         conn.execute(
             "UPDATE engine_external_tools SET outcome=?3 WHERE run_id=?1 AND call_id=?2",
@@ -1023,6 +1084,7 @@ fn execute_journaled_external(
             store::save_budget_usage(conn, run_id, &usage)?;
         }
         let mut payload = json!({"call_id":call.call_id,"outcome":outcome});
+        payload = stamp(payload, code, started);
         if let Some(by) = by {
             payload["authorized_by"] = serde_json::from_str(&by)?;
         }
@@ -1075,6 +1137,7 @@ fn execute(
                 .map(|s| s.requires_approval),
         );
     }
+    let started = Some(Instant::now());
     commit(conn, services, run_id, |conn, services| {
         let mut run = store::required(conn, run_id)?;
         if run.status != RunStatus::Running || services.is_cancelled(run_id) {
@@ -1131,6 +1194,8 @@ fn execute(
         let mut usage = store::budget_usage(conn, run_id, now_ms())?;
         usage.tool_calls += 1;
         store::save_budget_usage(conn, run_id, &usage)?;
+        let denied = approval.is_some();
+        let follow_up = call.name == "complete_task" && pending_input(conn, run_id)?;
         let outcome = if !call.arguments.is_object() {
             ToolOutcome::Failed {
                 reason: if call.name.starts_with("mcp_") {
@@ -1157,7 +1222,7 @@ fn execute(
                     format!("unknown tool {}", call.name)
                 },
             }
-        } else if call.name == "complete_task" && pending_input(conn, run_id)? {
+        } else if follow_up {
             ToolOutcome::Failed {
                 reason:
                     "Un suivi utilisateur vient d’arriver. Lisez-le avant de terminer la tâche."
@@ -1174,7 +1239,16 @@ fn execute(
             // Roll back internal effects, budget reservation and approval consumption.
             return Err(invalid("run stopped during tool execution"));
         }
+        let code = match () {
+            _ if spec.is_none() => ToolCode::UnknownTool,
+            _ if !valid_arguments => ToolCode::InvalidArguments,
+            _ if waiting => ToolCode::ApprovalPending,
+            _ if denied => ToolCode::ApprovalDenied,
+            _ if follow_up => ToolCode::FollowUpPending,
+            _ => ToolCode::of(&outcome),
+        };
         let mut payload = json!({"call_id": call.call_id, "outcome": outcome});
+        payload = stamp(payload, code, started);
         if let Some(by) = authorized_by {
             payload["authorized_by"] = serde_json::to_value(by)?;
         }
@@ -1483,8 +1557,10 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender},
         Arc, Mutex,
     };
+    use std::time::Instant;
 
     struct Scripted {
         rounds: Mutex<VecDeque<Vec<ModelEvent>>>,
@@ -1526,6 +1602,7 @@ mod tests {
         standing: Option<AuthorizedBy>,
         allowed: bool,
         deny: bool,
+        failing: Option<String>,
         suspend: Option<SuspendCause>,
         cancel: Arc<AtomicBool>,
         cancel_in_tool: bool,
@@ -1543,8 +1620,24 @@ mod tests {
         detach: bool,
         own_captures: Vec<String>,
         seen_arguments: Vec<Value>,
+        checkpoints: Option<TransactionCheckpoints>,
     }
     impl RunServices for Services {
+        fn transaction_checkpoint(&mut self, run_id: &str, point: RunEventPoint) -> Result<()> {
+            let Some(control) = self.checkpoints.as_mut() else {
+                return Ok(());
+            };
+            if run_id != control.run_id || control.points.front() != Some(&point) {
+                return Ok(());
+            }
+            control.points.pop_front();
+            checkpoint_remaining(control.deadline)?;
+            control
+                .arrived
+                .send(point)
+                .map_err(|_| invalid("transaction checkpoint disconnected"))?;
+            checkpoint_receive(&control.resume, control.deadline)
+        }
         fn is_own_capture(&self, _: &Connection, _: &Run, id: &str) -> Result<bool> {
             Ok(self.own_captures.iter().any(|own| own == id))
         }
@@ -1582,6 +1675,11 @@ mod tests {
             }
             if self.error_in_tool {
                 return Err(invalid("effect failed"));
+            }
+            if self.failing.as_deref() == Some(call.name.as_str()) {
+                return Ok(ToolOutcome::Failed {
+                    reason: "broken".into(),
+                });
             }
             Ok(match self.suspend.clone() {
                 Some(cause) => ToolOutcome::Suspend { cause },
@@ -1839,6 +1937,350 @@ mod tests {
             row.get(0)
         })
         .unwrap()
+    }
+
+    struct TransactionCheckpoints {
+        run_id: &'static str,
+        points: VecDeque<RunEventPoint>,
+        arrived: Sender<RunEventPoint>,
+        resume: Receiver<()>,
+        deadline: Instant,
+    }
+    struct CheckpointHandle {
+        arrived: Receiver<RunEventPoint>,
+        resume: Sender<()>,
+        deadline: Instant,
+    }
+    impl CheckpointHandle {
+        fn expect(&self, point: RunEventPoint) -> Result<()> {
+            assert_eq!(checkpoint_receive(&self.arrived, self.deadline)?, point);
+            Ok(())
+        }
+        fn resume(&self) {
+            self.resume.send(()).unwrap();
+        }
+    }
+    fn checkpoint_remaining(deadline: Instant) -> Result<Duration> {
+        deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| invalid("transaction checkpoint deadline expired"))
+    }
+    fn checkpoint_receive<T>(receiver: &Receiver<T>, deadline: Instant) -> Result<T> {
+        receiver
+            .recv_timeout(checkpoint_remaining(deadline)?)
+            .map_err(|error| invalid(format!("transaction checkpoint {error}")))
+    }
+    fn checkpoint_pair(
+        points: &[RunEventPoint],
+        deadline: Instant,
+    ) -> (TransactionCheckpoints, CheckpointHandle) {
+        let (arrived, arrivals) = mpsc::channel();
+        let (resume, resumes) = mpsc::channel();
+        (
+            TransactionCheckpoints {
+                run_id: "run",
+                points: points.iter().copied().collect(),
+                arrived,
+                resume: resumes,
+                deadline,
+            },
+            CheckpointHandle {
+                arrived: arrivals,
+                resume,
+                deadline,
+            },
+        )
+    }
+    struct CheckpointWorker {
+        control: Option<CheckpointHandle>,
+        finished: Receiver<std::thread::Result<Result<()>>>,
+        worker: Option<std::thread::JoinHandle<()>>,
+        deadline: Instant,
+    }
+    impl CheckpointWorker {
+        fn start(
+            conn: Connection,
+            points: &[RunEventPoint],
+            operation: impl FnOnce(&Connection, &mut Services) -> Result<()> + Send + 'static,
+        ) -> Self {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (checkpoints, control) = checkpoint_pair(points, deadline);
+            let (finished, completion) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut services = Services {
+                        checkpoints: Some(checkpoints),
+                        ..Default::default()
+                    };
+                    operation(&conn, &mut services)
+                }));
+                drop(conn);
+                let _ = finished.send(outcome);
+            });
+            Self {
+                control: Some(control),
+                finished: completion,
+                worker: Some(worker),
+                deadline,
+            }
+        }
+        fn finish(&mut self) -> Result<()> {
+            let outcome = checkpoint_receive(&self.finished, self.deadline)?;
+            self.worker.take().unwrap().join().unwrap();
+            outcome.unwrap()
+        }
+    }
+    impl Drop for CheckpointWorker {
+        fn drop(&mut self) {
+            self.control.take();
+            if let Some(worker) = self.worker.take() {
+                match checkpoint_receive(&self.finished, self.deadline) {
+                    Ok(_) => worker.join().unwrap(),
+                    Err(error) if std::thread::panicking() => {
+                        eprintln!("transaction checkpoint cleanup failed: {error}");
+                    }
+                    Err(error) => panic!("transaction checkpoint cleanup failed: {error}"),
+                }
+            }
+        }
+    }
+    fn checkpoint_effect(conn: &Connection, _: &mut dyn RunServices) -> Result<()> {
+        conn.execute("INSERT INTO effects VALUES ('checkpoint')", [])?;
+        store::append_event(
+            conn,
+            "run",
+            RunEventKind::TextDelta,
+            &json!({"text":"checkpoint"}),
+        )?;
+        Ok(())
+    }
+    fn writer_available(conn: &Connection) -> Result<()> {
+        Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?.rollback()?;
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_checkpoints_hold_the_writer_only_between_begin_and_commit() -> Result<()> {
+        let directory = grokbot_test_support::TestDir::new("engine-checkpoints");
+        let path = directory.join("engine.sqlite");
+        let conn = setup(Connection::open(&path)?, false, RunBudgets::default())?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.busy_timeout(Duration::ZERO)?;
+        let observer = Connection::open(&path)?;
+        observer.busy_timeout(Duration::ZERO)?;
+        let mut worker = CheckpointWorker::start(
+            conn,
+            &[RunEventPoint::BeforeBegin, RunEventPoint::BeforeCommit],
+            |conn, services| {
+                commit(conn, services, "other-run", |conn, _| {
+                    conn.execute("INSERT INTO effects VALUES ('other-run')", [])?;
+                    Ok(())
+                })?;
+                commit(conn, services, "run", checkpoint_effect)?;
+                commit(conn, services, "run", |_, _| Ok(()))
+            },
+        );
+        let control = worker.control.as_ref().unwrap();
+        control.expect(RunEventPoint::BeforeBegin)?;
+        assert_eq!(count(&observer, "effects"), 1);
+        writer_available(&observer)?;
+        commit(&observer, &mut Services::default(), "run", |conn, _| {
+            conn.execute("INSERT INTO effects VALUES ('other-instance')", [])?;
+            Ok(())
+        })?;
+        control.resume();
+        control.expect(RunEventPoint::BeforeCommit)?;
+        let error = Transaction::new_unchecked(&observer, TransactionBehavior::Immediate)
+            .expect_err("writer must remain locked before COMMIT");
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert_eq!(count(&observer, "effects"), 2);
+        assert_eq!(count(&observer, "hook_effects"), 0);
+        control.resume();
+        worker.finish()?;
+        writer_available(&observer)?;
+        assert_eq!(count(&observer, "effects"), 3);
+        assert_eq!(count(&observer, "hook_effects"), 1);
+        assert_eq!(count(&Connection::open(path)?, "engine_run_events"), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_checkpoint_operation_error_discards_the_unreached_commit_point() -> Result<()> {
+        let directory = grokbot_test_support::TestDir::new("engine-checkpoint-error");
+        let path = directory.join("engine.sqlite");
+        let conn = setup(Connection::open(&path)?, false, RunBudgets::default())?;
+        conn.busy_timeout(Duration::ZERO)?;
+        let mut worker = CheckpointWorker::start(
+            conn,
+            &[RunEventPoint::BeforeBegin, RunEventPoint::BeforeCommit],
+            |conn, services| {
+                let error = commit(conn, services, "run", |conn, services| {
+                    checkpoint_effect(conn, services)?;
+                    Err::<(), _>(invalid("operation failed"))
+                })
+                .unwrap_err();
+                assert_eq!(count(conn, "effects"), 0);
+                assert_eq!(count(conn, "engine_run_events"), 1);
+                services.checkpoints.take();
+                commit(conn, services, "run", checkpoint_effect)?;
+                Err(error)
+            },
+        );
+        let control = worker.control.as_ref().unwrap();
+        control.expect(RunEventPoint::BeforeBegin)?;
+        control.resume();
+        assert!(
+            matches!(worker.finish(), Err(Error::InvalidInput(message)) if message == "operation failed")
+        );
+        assert!(matches!(
+            worker.control.as_ref().unwrap().arrived.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        let observer = Connection::open(path)?;
+        observer.busy_timeout(Duration::ZERO)?;
+        writer_available(&observer)?;
+        assert_eq!(count(&observer, "effects"), 1);
+        assert_eq!(count(&observer, "hook_effects"), 1);
+        assert_eq!(count(&observer, "engine_run_events"), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn dropping_transaction_checkpoint_handle_rolls_back_and_releases_the_writer() -> Result<()> {
+        let directory = grokbot_test_support::TestDir::new("engine-checkpoint-drop");
+        let path = directory.join("engine.sqlite");
+        let conn = setup(Connection::open(&path)?, false, RunBudgets::default())?;
+        conn.busy_timeout(Duration::ZERO)?;
+        let mut worker =
+            CheckpointWorker::start(conn, &[RunEventPoint::BeforeCommit], |conn, services| {
+                commit(conn, services, "run", checkpoint_effect)
+            });
+        worker
+            .control
+            .as_ref()
+            .unwrap()
+            .expect(RunEventPoint::BeforeCommit)?;
+        drop(worker.control.take());
+        assert!(matches!(worker.finish(), Err(Error::InvalidInput(_))));
+        let observer = Connection::open(path)?;
+        observer.busy_timeout(Duration::ZERO)?;
+        assert_eq!(count(&observer, "effects"), 0);
+        assert_eq!(count(&observer, "hook_effects"), 0);
+        assert_eq!(count(&observer, "engine_run_events"), 1);
+        commit(
+            &observer,
+            &mut Services::default(),
+            "run",
+            checkpoint_effect,
+        )?;
+        assert_eq!(count(&observer, "effects"), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn expired_transaction_checkpoint_fails_explicitly_without_starting_an_operation() -> Result<()>
+    {
+        let directory = grokbot_test_support::TestDir::new("engine-checkpoint-expired");
+        let conn = setup(
+            Connection::open(directory.join("engine.sqlite"))?,
+            false,
+            RunBudgets::default(),
+        )?;
+        conn.busy_timeout(Duration::ZERO)?;
+        let (checkpoints, control) = checkpoint_pair(&[RunEventPoint::BeforeBegin], Instant::now());
+        let mut services = Services {
+            checkpoints: Some(checkpoints),
+            ..Default::default()
+        };
+        let result = commit(&conn, &mut services, "run", checkpoint_effect);
+        assert!(
+            matches!(result, Err(Error::InvalidInput(message)) if message == "transaction checkpoint deadline expired")
+        );
+        assert!(matches!(
+            control.arrived.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(count(&conn, "effects"), 0);
+        assert_eq!(count(&conn, "engine_run_events"), 1);
+        commit(&conn, &mut services, "run", checkpoint_effect)?;
+        assert_eq!(count(&conn, "effects"), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn every_tool_result_carries_a_fixed_code_and_the_duration_of_the_call() -> Result<()> {
+        for journaled in [false, true] {
+            let conn = database(false, RunBudgets::default())?;
+            let gateway = Scripted::new(vec![
+                response(vec![
+                    call("fine", "work", json!({})),
+                    call("broken", "flaky", json!({})),
+                    call("ghost", "missing", json!({})),
+                    call("guarded", "locked", json!({})),
+                    call("text", "work", json!("pas un objet")),
+                ]),
+                response(vec![]),
+            ]);
+            let mut services = Services {
+                journaled_external: journaled,
+                deny: true,
+                failing: Some("flaky".into()),
+                specs: vec![
+                    spec("work", false),
+                    spec("flaky", false),
+                    spec("locked", true),
+                ],
+                ..Services::default()
+            };
+            run(&conn, &gateway, &mut services, "run")?;
+            let results: HashMap<String, Value> = store::events(&conn, "run", 0)?
+                .into_iter()
+                .filter(|e| e.kind == RunEventKind::ToolResult)
+                .map(|e| (e.payload["call_id"].as_str().unwrap().to_owned(), e.payload))
+                .collect();
+            let mode = format!("journaled={journaled}");
+            let code = |id: &str| results[id]["code"].as_str().unwrap_or("absent").to_owned();
+            assert_eq!(code("fine"), "ok", "{mode}");
+            assert_eq!(code("ghost"), "unknown_tool", "{mode}");
+            assert_eq!(code("guarded"), "approval_denied", "{mode}");
+            assert_eq!(code("text"), "invalid_arguments", "{mode}");
+            assert_eq!(
+                code("broken"),
+                if journaled { "ok" } else { "failed" },
+                "{mode}"
+            );
+            for id in ["fine", "ghost", "guarded", "text", "broken"] {
+                assert!(results[id]["elapsed_ms"].is_u64(), "{mode} {id}");
+                assert!(results[id]["started_ms"].is_u64(), "{mode} {id}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_unfinished_call_settled_at_the_end_of_the_task_is_coded_not_executed() -> Result<()> {
+        let conn = database(true, RunBudgets::default())?;
+        let gateway = Scripted::new(vec![response(vec![
+            call("done", "complete_task", json!({"summary":"fini"})),
+            call("late", "work", json!({})),
+        ])]);
+        let mut services = Services {
+            specs: vec![spec("work", false)],
+            ..Services::default()
+        };
+        run(&conn, &gateway, &mut services, "run")?;
+        let results: HashMap<String, Value> = store::events(&conn, "run", 0)?
+            .into_iter()
+            .filter(|e| e.kind == RunEventKind::ToolResult)
+            .map(|e| (e.payload["call_id"].as_str().unwrap().to_owned(), e.payload))
+            .collect();
+        assert_eq!(results["done"]["code"], "ok");
+        assert_eq!(results["late"]["code"], "not_executed");
+        assert!(results["late"].get("elapsed_ms").is_none());
+        Ok(())
     }
 
     #[test]

@@ -409,3 +409,19 @@ test("une navigation refusée pendant une réponse prévient au lieu d’affiche
   assert.equal(notices.length, 1);
   assert.equal(descendants(main).some((el) => el.classes.includes("page-canvas") && el.children.length > 0), false);
 });
+
+
+test("renommer applique immédiatement le document masqué reçu, sans attendre un poll", async () => {
+  const privateValue = "CANARI_RENAME_CACHE_281";
+  const document = { states: [], view: { type: "element", tag: "article", children: [{ type: "text", text: privateValue }] } };
+  const page = { id: "page_rename_mask", title: "Avant", status: "ready", source_version: "v1", document };
+  const { panels, main, use } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  assert.equal(main.textContent.includes(privateValue), true);
+  use({ ...page, document: JSON.parse(JSON.stringify(document).replaceAll(privateValue,"[...]")) });
+  const input = descendants(main).find((element) => element.tagName === "input");
+  input.value = "Après";
+  await input.listeners.change();
+  assert.equal(main.textContent.includes(privateValue),false);
+  assert.equal(canvasOf(main).textContent,"[...]");
+});

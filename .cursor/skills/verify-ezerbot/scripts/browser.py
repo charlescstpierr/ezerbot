@@ -268,6 +268,7 @@ def ensure_headless(run: dict, *, headed: bool = False) -> dict:
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-extensions",
+        "--force-device-scale-factor=1",
         "--incognito",
         "--use-mock-keychain",
         "--password-store=basic",

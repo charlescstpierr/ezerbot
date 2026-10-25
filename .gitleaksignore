@@ -1,2 +1,6 @@
 # Valeur factice d’un test (#65), remplacée au commit suivant : jamais un secret.
 09d31f7ae488a213f97ca88fe5266620636c9bf2:crates/wrapper/tests/recall.rs:generic-api-key:1329
+
+# #281 : deux canaris inventés des contre-épreuves rouges, jamais des identifiants réels.
+53ac51fe9cb5d3574ffa3b9cc596f51b001a1189:crates/wrapper/tests/livrables.rs:generic-api-key:966
+53ac51fe9cb5d3574ffa3b9cc596f51b001a1189:crates/wrapper/tests/livrables.rs:generic-api-key:998

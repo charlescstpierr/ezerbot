@@ -35,7 +35,7 @@ async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFai
   const nodes = { sidebar, "conversation-title": new Element("h1"), "workspace-label": new Element("button") };
   const document = { createElement: (tag) => new Element(tag), createElementNS: (_, tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (s) => (s === ".main-panel" ? main : s === "dialog[open]" ? null : dock), addEventListener: (_, action) => keys.push(action), get activeElement() { return Element.active; }, body: new Element("body") };
   let facts = start.map((item) => ({ ...item })), n = 0;
-  const cache = { seen: null, work: null }, calls = { api: [], opened: [], refresh: 0 }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); }, touch: (id) => { facts = facts.map((item) => (item.fact_id === id ? { ...item, needs_review: true } : item)); } };
+  const cache = { seen: null, work: null }, calls = { api: [], opened: [], refresh: 0 }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); }, add: (item) => { facts = [item, ...facts]; }, touch: (id) => { facts = facts.map((item) => (item.fact_id === id ? { ...item, needs_review: true } : item)); } };
   const panels = {
     register: (panel) => registered.push(panel), leaveConversation() {},
     // L'état partagé de l'application (fils en cache, reçus) : comme app.js, une lecture déjà en vol est partagée, et elle rend l'état tel qu'il était à son départ.
@@ -493,6 +493,20 @@ test("au survol d'un point, tous les souvenirs de sa conversation s'allument, le
   assert.deepEqual(["l2", "l3", "l4", "l5"].map(dim), [false, false, false, false]);
   h.point("l4").fire("mouseenter");
   assert.deepEqual(chain(), [true, true], "un souvenir d'une autre conversation estompe les traits de celle-ci");
+});
+test("un souvenir lié qui arrive pendant la confirmation d'oubli ne déplace pas le focus sur « Oublier ce souvenir »", async () => {
+  const h = await harness({ start: CHAIN });
+  h.item("l4").click();
+  h.panel().querySelectorAll("button").find((b) => b.textContent === "Oublier…").click();
+  assert.equal(Element.active.textContent, "Annuler", "après « Oublier… », le focus est sur Annuler");
+  h.panel().querySelectorAll("button").find((b) => b.textContent === "Annuler").click();
+  h.panel().querySelectorAll("button").find((b) => b.textContent === "Oublier…").click();
+  h.net.add(fact("l6", "grokbot", "private", "Autre souvenir de la conversation c2", "automatic", "c2"));
+  h.reload();
+  await h.settle();
+  assert.equal(h.panel().querySelectorAll(".memory-detail-link-item").length, 1, "le souvenir lié est arrivé dans le panneau");
+  assert.equal(Element.active.textContent, "Annuler", "le focus est resté sur Annuler");
+  assert.deepEqual(h.mutations(), [], "rien n'a été oublié");
 });
 test("un clic sur un souvenir lié ouvre ce souvenir dans le panneau", async () => {
   const h = await harness({ start: CHAIN });

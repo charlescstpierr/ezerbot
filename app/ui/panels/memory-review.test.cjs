@@ -63,7 +63,7 @@ async function harness({ facts: seed = FACTS, down = false } = {}) {
     },
   };
   const context = vm.createContext({ window: { GrokbotPanels: panels }, document, setInterval: () => 0, JSON, Number, String, Date, Promise, Object, Array, Boolean, Math, Set, Map });
-  for (const file of ["memory-detail.js", "memory-filter.js", "memory-graph.js", "memory-review.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
+  for (const file of ["memory-detail.js", "memory-filter.js", "memory-links.js", "memory-graph.js", "memory-review.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
   const settle = async () => { for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
   Element.active = null;
   const state = { bots: [{ id: "grokbot", name: "Ezerbot" }, { id: "chef", name: "Chef" }], memory_auto: { revision: 1 } };
@@ -249,4 +249,14 @@ test("fermer le panneau de détail ouvert depuis « À revoir » rend le focus a
   h.point("f2").click();
   h.escape();
   assert.equal(Element.active, h.point("f2"), "ouvert depuis le graphe, le focus revient toujours au point");
+});
+
+test("le halo entoure un point agrandi par les liens de #265 : il garde une marge autour du rayon du point", async () => {
+  const same = FACTS.map((item) => (item.fact_id === "f3" ? item : { ...item, provenance: { ...item.provenance, conversation_id: "c1" } }));
+  const h = await harness({ facts: same });
+  h.tab("graph");
+  const radius = (el, cls) => Number(el.querySelectorAll("circle").find((c) => (cls ? c.classes.includes(cls) : !c.classes.includes("memory-graph-halo"))).attributes.r);
+  const point = h.point("f1");
+  assert.ok(radius(point) > 6, "relié à un autre souvenir : le point est plus grand");
+  assert.ok(radius(point, "memory-graph-halo") >= radius(point) + 4, "le halo l'entoure");
 });

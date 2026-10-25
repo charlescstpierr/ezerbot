@@ -1493,6 +1493,7 @@ mod tests {
         cancel: Arc<AtomicBool>,
         cancel_in_tool: bool,
         interrupt: Arc<AtomicBool>,
+        interrupt_after: Option<String>,
         journaled_external: bool,
         external_calls: usize,
         cancel_in_context: bool,
@@ -1536,6 +1537,9 @@ mod tests {
             conn.execute("INSERT INTO effects VALUES (?1)", [&call.call_id])?;
             if self.cancel_in_tool {
                 self.cancel.store(true, Ordering::SeqCst);
+            }
+            if self.interrupt_after.as_ref() == Some(&call.call_id) {
+                self.interrupt.store(true, Ordering::SeqCst);
             }
             if self.error_in_tool {
                 return Err(invalid("effect failed"));
@@ -3415,8 +3419,19 @@ mod tests {
         ]);
         let mut services = Services {
             specs: vec![spec("work", false)],
+            interrupt_after: Some("first".into()),
             ..Services::default()
         };
+        assert!(run(&conn, &gateway, &mut services, "run").is_err());
+        assert_eq!(services.calls, ["first"]);
+        assert_eq!(count(&conn, "effects"), 1);
+        let pending: Vec<_> = pending_calls(&store::events(&conn, "run", 0)?)?
+            .into_iter()
+            .map(|call| call.call_id)
+            .collect();
+        assert_eq!(pending, ["second"]);
+        services.interrupt_after = None;
+        services.interrupt.store(false, Ordering::SeqCst);
         run(&conn, &gateway, &mut services, "run")?;
         assert_eq!(services.calls, ["first", "second"]);
         assert_eq!(count(&conn, "effects"), 2);

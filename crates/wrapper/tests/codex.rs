@@ -14,7 +14,7 @@ use std::{
         Arc, Mutex,
     },
 };
-use support::{form, wait, FakeOpenAi, ScriptedResponse, Seen};
+use support::{ask_before_acting, form, wait, FakeOpenAi, ScriptedResponse, Seen};
 const CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 static OAUTH: Mutex<()> = Mutex::new(());
 
@@ -828,6 +828,7 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
     let f = Fixture::new();
     f.login();
     let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    ask_before_acting(&mut app);
     post(
         &mut app,
         "/api/bots",
@@ -871,6 +872,7 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
     assert_eq!(refused.status, 409);
     assert!(refused.message.contains("avant de changer de connexion"));
     assert_eq!(f.provider.status()["backend"], "codex");
+    let mut approvals = 0;
     wait("délégation Codex terminée", || {
         tick(&mut app);
         let state = app.api("GET", "/api/state", b"").unwrap();
@@ -899,6 +901,7 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
             .collect();
         if !pending.is_empty() {
             for (entry, conversation) in pending {
+                approvals += 1;
                 post(
                     &mut app,
                     "/api/approvals/resolve",
@@ -927,6 +930,7 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
                     && message["body"] == "Le relecteur a terminé."
             })
     });
+    assert!(approvals > 0, "la délégation a demandé une approbation");
     let routine = post(&mut app, "/api/routines", json!({"bot_id":"grokbot","name":"Routine Codex","prompt":"Fais un bilan","schedule":"@every 1m"}))["routine"].clone();
     f.reply(ScriptedResponse::events(&[
         json!({"type":"response.output_text.delta","delta":"Bilan Codex."}),

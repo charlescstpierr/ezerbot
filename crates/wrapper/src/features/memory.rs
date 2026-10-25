@@ -1198,11 +1198,21 @@ fn redact_run(conn: &Connection, run_id: &str, texts: &BTreeSet<String>) -> Resu
             ],
         )?;
     }
-    // A finished delegation keeps its own copy of the capture captions.
+    // A finished delegation keeps its own copy of the summary and capture
+    // captions, shown on the card of the run that started it.
+    let mut edges = conn
+        .prepare("SELECT id FROM delegation_graph WHERE parent_run_id=?1")?
+        .query_map([run_id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     if let Trigger::Delegation { delegation_id } = &run.trigger {
+        edges.push(delegation_id.clone());
+    }
+    for delegation_id in &edges {
         if let Some(mut edge) = grokbot_delegation::graph::get(conn, delegation_id)? {
-            if let DelegationStatus::Done { captures, .. } = &mut edge.status {
-                let mut changed = false;
+            if let DelegationStatus::Done { result, captures } = &mut edge.status {
+                let redacted = redact_string(result, texts);
+                let mut changed = redacted != *result;
+                *result = redacted;
                 for capture in captures {
                     let redacted = redact_string(&capture.caption, texts);
                     changed |= redacted != capture.caption;

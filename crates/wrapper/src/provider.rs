@@ -34,9 +34,11 @@ const APP_NAME: &str = "Ezerbot";
 const CALLBACK_PORTS: std::ops::RangeInclusive<u16> = 1455..=1465;
 const CALLBACK_PATH: &str = "/auth/callback";
 const SIGN_IN_WINDOW: Duration = Duration::from_secs(300);
-/// Borne de l'attente des fils de fond dans les tests (jamais compilée dans la version livrée).
+/// Borne de l'attente des fils de fond (jamais compilée dans la version livrée). Un tour en vol à
+/// la destruction de l'`App` peut légitimement finir une commande au premier plan, qui dure
+/// 120 s au plus : la borne laisse cette durée et une marge, puis l'attente échoue.
 #[cfg(debug_assertions)]
-const BACKGROUND_WAIT_LIMIT: Duration = Duration::from_secs(60);
+const BACKGROUND_WAIT_LIMIT: Duration = Duration::from_secs(150);
 const REFRESH_MARGIN: u64 = 300;
 /// Attente courte : un flock tenu par un processus vivant n’est jamais volé.
 const REFRESH_LOCK_WAIT: Duration = Duration::from_millis(400);
@@ -369,11 +371,25 @@ struct Inner {
     catalog: Mutex<Catalog>,
     quota: Mutex<codex::UsageCache>,
     mcp: crate::mcp::Manager,
-    /// Fils réseau de fond (sonde de connexion, catalogue, quota, lecture d'un tour), gardés
-    /// seulement pour qu'un test attende leur fin. Compilé dans les versions de développement et
-    /// de test uniquement : la version livrée n'a ni ce champ ni cette attente.
+    /// Fils de fond du produit (sonde de connexion, catalogue, quota, lecture d'un tour, tour du
+    /// moteur, suivis de fond), gardés seulement pour que la destruction de l'`App` ou un test
+    /// attende leur fin. Compilé dans les versions de développement et de test uniquement : la
+    /// version livrée n'a ni ce champ ni cette attente.
     #[cfg(debug_assertions)]
-    background: Mutex<Vec<thread::JoinHandle<()>>>,
+    background: Mutex<Vec<Background>>,
+    /// Nombre d'attentes de fils de fond commencées : un test sait ainsi que la destruction de
+    /// l'`App` est en cours sans deviner un délai.
+    #[cfg(debug_assertions)]
+    waits_started: AtomicUsize,
+}
+
+/// Un fil de fond retenu. `stop` est l'indicateur que le fil observe pour finir de lui-même :
+/// les attentes longues (retour OAuth, code d'appareil GitHub) le reçoivent, les autres fils
+/// ont une durée bornée par leurs propres délais réseau.
+#[cfg(debug_assertions)]
+struct Background {
+    handle: thread::JoinHandle<()>,
+    stop: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Clone)]
@@ -875,29 +891,74 @@ impl Session {
                 mcp: crate::mcp::Manager::default(),
                 #[cfg(debug_assertions)]
                 background: Mutex::new(Vec::new()),
+                #[cfg(debug_assertions)]
+                waits_started: AtomicUsize::new(0),
             }),
         }
     }
 
-    /// Lance un fil réseau de fond détaché, comme `thread::spawn` : l'appelant n'attend jamais
-    /// sa fin. En développement et en test, la poignée est retenue pour `wait_background`.
-    fn spawn_background(&self, work: impl FnOnce() + Send + 'static) {
-        let handle = thread::spawn(work);
+    /// Lance un fil de fond détaché, comme `thread::spawn` : l'appelant n'attend jamais sa fin.
+    /// En développement et en test, la poignée est retenue pour `wait_background`, que la
+    /// destruction de l'`App` appelle. Dans la version livrée la poignée est lâchée : le produit
+    /// ne joint rien et l'arrêt de l'application ne change pas.
+    pub(crate) fn spawn_background(&self, work: impl FnOnce() + Send + 'static) {
+        self.track(None, None, work)
+            .expect("le système refuse de créer un fil de fond");
+    }
+
+    /// Comme `spawn_background`, avec le nom du fil, et sans paniquer si le système refuse de
+    /// le créer : l'appelant a un repli.
+    pub(crate) fn try_spawn_background(
+        &self,
+        name: &str,
+        work: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<()> {
+        self.track(Some(name), None, work)
+    }
+
+    /// Comme `spawn_background`, pour un fil qui attend un événement externe (retour du
+    /// navigateur, autorisation GitHub) : `stop` est levé par `wait_background` pour qu'il finisse.
+    pub(crate) fn spawn_background_stoppable(
+        &self,
+        stop: Arc<AtomicBool>,
+        work: impl FnOnce() + Send + 'static,
+    ) {
+        self.track(None, Some(stop), work)
+            .expect("le système refuse de créer un fil de fond");
+    }
+
+    fn track(
+        &self,
+        name: Option<&str>,
+        stop: Option<Arc<AtomicBool>>,
+        work: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<()> {
+        let mut builder = thread::Builder::new();
+        if let Some(name) = name {
+            builder = builder.name(name.to_owned());
+        }
+        let handle = builder.spawn(work)?;
         #[cfg(debug_assertions)]
         {
             let mut handles = lock(&self.inner.background);
-            handles.retain(|handle| !handle.is_finished());
-            handles.push(handle);
+            handles.retain(|background| !background.handle.is_finished());
+            handles.push(Background { handle, stop });
         }
         #[cfg(not(debug_assertions))]
-        drop(handle);
+        {
+            let _ = stop;
+            drop(handle);
+        }
+        Ok(())
     }
 
     /// Attend la fin de tous les fils de fond lancés par cette session, y compris ceux que la fin
-    /// d'un autre fil vient de lancer (le fil OAuth de connexion relance un catalogue). Réservé
-    /// aux tests, qui veulent supprimer leur dossier seulement quand plus rien ne peut y écrire ;
-    /// jamais appelé par le produit. L'attente est bornée : un fil qui ne finit pas est une fuite,
-    /// elle échoue avec un message au lieu de bloquer le test.
+    /// d'un autre fil vient de lancer (le fil OAuth de connexion relance un catalogue), après avoir
+    /// levé l'indicateur d'arrêt de ceux qui attendent un événement externe. Appelée par la
+    /// destruction de l'`App` et par les tests, pour que plus rien n'écrive dans le dossier de
+    /// l'application une fois détruite ; jamais appelée par la version livrée. L'attente est
+    /// bornée : un fil qui ne finit pas est une fuite, elle échoue avec un message au lieu de
+    /// bloquer.
     #[cfg(debug_assertions)]
     pub(crate) fn wait_background(&self) -> Result<(), String> {
         self.wait_background_within(BACKGROUND_WAIT_LIMIT)
@@ -905,27 +966,38 @@ impl Session {
 
     #[cfg(debug_assertions)]
     pub(crate) fn wait_background_within(&self, limit: Duration) -> Result<(), String> {
+        self.inner.waits_started.fetch_add(1, Ordering::SeqCst);
         let current = thread::current().id();
         let deadline = Instant::now() + limit;
         loop {
             let pending: Vec<_> = std::mem::take(&mut *lock(&self.inner.background))
                 .into_iter()
-                .filter(|handle| handle.thread().id() != current)
+                .filter(|background| background.handle.thread().id() != current)
                 .collect();
             if pending.is_empty() {
                 return Ok(());
             }
-            for handle in pending {
-                while !handle.is_finished() {
+            for background in &pending {
+                if let Some(stop) = &background.stop {
+                    stop.store(true, Ordering::SeqCst);
+                }
+            }
+            let mut pending = pending.into_iter();
+            while let Some(background) = pending.next() {
+                while !background.handle.is_finished() {
                     if Instant::now() >= deadline {
+                        // Les fils non finis restent suivis : une attente suivante les revoit.
+                        let mut kept = lock(&self.inner.background);
+                        kept.push(background);
+                        kept.extend(pending);
                         return Err(format!(
                             "un fil de fond du fournisseur n'a pas fini après {limit:?} : \
-                             il écrirait encore dans le dossier du test"
+                             il écrirait encore dans le dossier de l'application"
                         ));
                     }
                     thread::sleep(Duration::from_millis(5));
                 }
-                let _ = handle.join();
+                let _ = background.handle.join();
             }
         }
     }
@@ -1263,7 +1335,10 @@ impl Session {
         }
         let provider = self.clone();
         // Suivi comme les autres fils de fond : à la fin il relance le catalogue des modèles.
-        self.spawn_background(move || provider.await_callback(server, attempt, cancel));
+        let stop = cancel.clone();
+        self.spawn_background_stoppable(stop, move || {
+            provider.await_callback(server, attempt, cancel)
+        });
         if self.inner.open_browser {
             // L'adresse peut contenir `id_token_hint` : elle va au navigateur, jamais dans un journal.
             let _ = std::process::Command::new("/usr/bin/open")
@@ -1617,6 +1692,7 @@ impl Session {
             "oauth",
             200,
             "token_refresh_saved",
+            None,
         );
         if self.inner.codex {
             codex::update_profile(&mut credentials, &tokens)?;
@@ -3268,18 +3344,7 @@ mod tests {
     fn a_return_sent_after_a_cancelled_sign_in_on_a_connection_it_accepted_is_answered() {
         use std::io::Read;
         use std::net::TcpStream;
-        struct Scratch(PathBuf);
-        impl Drop for Scratch {
-            fn drop(&mut self) {
-                let _ = fs::remove_dir_all(&self.0);
-            }
-        }
-        let scratch = Scratch(std::env::temp_dir().join(format!(
-            "ezerbot-signin-{}-{}",
-            std::process::id(),
-            random_token(8)
-        )));
-        fs::create_dir_all(&scratch.0).unwrap();
+        let scratch = grokbot_test_support::TestDir::new("ezerbot-signin");
         // Nothing is exchanged: the sign-in is cancelled before its return.
         let base = "http://127.0.0.1:9";
         let endpoints = Endpoints {
@@ -3290,8 +3355,7 @@ mod tests {
             issuer: base.to_owned(),
             api: format!("{base}/v1"),
         };
-        let provider =
-            Provider::with_endpoints(&scratch.0.join("ezerbot.sqlite"), endpoints, false);
+        let provider = Provider::with_endpoints(&scratch.join("ezerbot.sqlite"), endpoints, false);
         let query = parse_query(&provider.start_signin().unwrap());
         let port: u16 = query["redirect_uri"]
             .trim_end_matches(CALLBACK_PATH)

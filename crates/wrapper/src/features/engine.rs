@@ -1276,6 +1276,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
             &run.run_id,
             0,
             "signin_required",
+            None,
         );
         return Ok(());
     }
@@ -1338,7 +1339,8 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
     let path = ctx.db_path.to_path_buf();
     let provider = ctx.provider.clone();
     let id = run.run_id.clone();
-    std::thread::spawn(move || {
+    // Suivi par le fournisseur : détruire l'App attend la fin du tour (#463).
+    ctx.provider.spawn_background(move || {
         let _guard = guard;
         let result = (|| -> grokbot_engine::contracts::Result<()> {
             let conn = database(&path)?;

@@ -33,6 +33,21 @@ fn post(base: &str, path: &str, body: Value) -> ureq::Response {
             .send_json(body),
     )
 }
+fn raw_get(port: u16, path: &str, accept_encoding: &str) -> (String, Vec<u8>) {
+    use std::io::{Read, Write};
+    let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(socket, "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept-Encoding: {accept_encoding}\r\nConnection: close\r\n\r\n").unwrap();
+    let mut raw = Vec::new();
+    socket.read_to_end(&mut raw).unwrap();
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    (
+        String::from_utf8(raw[..split].to_vec()).unwrap(),
+        raw[split + 4..].to_vec(),
+    )
+}
 #[test]
 fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
     let guard = grokbot_test_support::TestDir::new("iphone-http");
@@ -98,6 +113,28 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
         assert_eq!(r.header("Connection"), Some("close"));
         assert_eq!(r.header("Cache-Control"), Some("no-store"));
     }
+    // The private listener compresses too. Read the wire bytes, ureq would decode them.
+    for path in ["/iphone.js", "/sw.js"] {
+        let (head, packed) = raw_get(iphone_port, path, "gzip");
+        for line in [
+            "Content-Encoding: gzip",
+            "Vary: Accept-Encoding",
+            "Connection: close",
+            "Cache-Control: no-store",
+        ] {
+            assert!(head.contains(line), "{path}: {line}\n{head}");
+        }
+        assert!(head.contains(&format!("Content-Length: {}", packed.len())));
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(packed.as_slice())
+            .read_to_end(&mut decoded)
+            .unwrap();
+        let (head, plain) = raw_get(iphone_port, path, "identity");
+        assert!(!head.contains("Content-Encoding"), "{path}\n{head}");
+        assert!(head.contains("Vary: Accept-Encoding"), "{path}\n{head}");
+        assert!(packed.len() < plain.len(), "{path}");
+        assert_eq!(decoded, plain, "{path}");
+    }
     // A fresh browser can load these together over persistent HTTP/1.1 sockets.
     // Exercise the actual host, framing and connection reuse, not source strings.
     let readers: Vec<_> = (0..16)
@@ -114,8 +151,13 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
                     } else {
                         ("/iphone.js", "text/javascript; charset=utf-8")
                     };
-                    let reply = agent.get(&format!("{remote}{path}")).call().unwrap();
+                    let reply = agent
+                        .get(&format!("{remote}{path}"))
+                        .set("Accept-Encoding", "identity")
+                        .call()
+                        .unwrap();
                     assert_eq!(reply.status(), 200);
+                    assert_eq!(reply.header("Content-Encoding"), None);
                     assert_eq!(reply.header("Content-Type"), Some(mime));
                     let length: usize = reply.header("Content-Length").unwrap().parse().unwrap();
                     let mut bytes = Vec::new();

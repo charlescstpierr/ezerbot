@@ -275,7 +275,7 @@ pub(super) fn tick(ctx: &Context<'_>) -> Result<(), ApiError> {
         return Ok(());
     }
     let path = ctx.db_path.to_path_buf();
-    std::thread::spawn(move || {
+    ctx.provider.spawn_background(move || {
         let _reset = reset;
         let Ok(conn) = Connection::open(path) else {
             return;

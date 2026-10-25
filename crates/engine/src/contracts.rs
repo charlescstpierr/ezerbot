@@ -885,19 +885,11 @@ mod contracts_tests {
         assert_eq!(Error::NotFound("missing".into()).to_string(), "missing");
     }
 
-    struct WalDatabase(std::path::PathBuf);
+    struct WalDatabase(grokbot_test_support::TestDir);
 
     impl WalDatabase {
         fn new() -> Self {
-            let mut random = [0; 8];
-            getrandom::getrandom(&mut random).unwrap();
-            let directory = std::env::temp_dir().join(format!(
-                "grokbot-contracts-{}-{:x}",
-                std::process::id(),
-                u64::from_ne_bytes(random)
-            ));
-            std::fs::create_dir(&directory).unwrap();
-            let db = Self(directory);
+            let db = Self(grokbot_test_support::TestDir::new("grokbot-contracts"));
             let conn = db.open();
             conn.pragma_update(None, "journal_mode", "WAL").unwrap();
             conn.execute_batch(
@@ -912,12 +904,6 @@ mod contracts_tests {
             conn.busy_timeout(std::time::Duration::from_secs(5))
                 .unwrap();
             conn
-        }
-    }
-
-    impl Drop for WalDatabase {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 

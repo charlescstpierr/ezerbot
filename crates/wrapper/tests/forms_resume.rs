@@ -24,10 +24,7 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
@@ -38,17 +35,12 @@ struct Fixture {
     server: FakeOpenAi,
     path: PathBuf,
     conversation: String,
+    _dir: grokbot_test_support::TestDir,
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir()
-            .join(format!(
-                "grokbot-forms-resume-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ))
-            .join("app.sqlite");
+        let guard = grokbot_test_support::TestDir::new("grokbot-forms-resume");
+        let path = guard.to_path_buf().join("app.sqlite");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -73,6 +65,7 @@ impl Fixture {
             server,
             path,
             conversation,
+            _dir: guard,
         }
     }
     fn db(&self) -> Connection {
@@ -192,11 +185,6 @@ impl Fixture {
             requests::resolved_values(&self.db(), &receipt.resolution_id).unwrap(),
             json!({"city":"Ocean blue"})
         );
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 fn form_args() -> Value {

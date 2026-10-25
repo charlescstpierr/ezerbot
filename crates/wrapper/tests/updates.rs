@@ -3,7 +3,8 @@ use grokbot_wrapper::App;
 
 #[test]
 fn la_route_expose_la_version_sans_toucher_aux_sessions() {
-    let root = std::env::temp_dir().join(format!("ezerbot-route-updates-{}", std::process::id()));
+    let guard = grokbot_test_support::TestDir::new("ezerbot-route-updates");
+    let root = guard.to_path_buf();
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let db = root.join("workspace.sqlite");

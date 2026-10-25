@@ -124,7 +124,7 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<Document>> {
     record.map(|s| stored_document(&s)).transpose()
 }
 pub fn for_message(conn: &Connection, conversation: &str, message: &str) -> Result<Vec<Document>> {
-    let mut query = conn.prepare("SELECT d.record FROM attachments_document_links l JOIN attachments_documents d ON d.id=l.document_id WHERE conversation_id=?1 AND message_id=?2 ORDER BY ordinal")?;
+    let mut query = conn.prepare_cached("SELECT d.record FROM attachments_document_links l JOIN attachments_documents d ON d.id=l.document_id WHERE conversation_id=?1 AND message_id=?2 ORDER BY ordinal")?;
     let rows = query.query_map(params![conversation, message], |r| r.get::<_, String>(0))?;
     rows.map(|s| stored_document(&s?)).collect()
 }

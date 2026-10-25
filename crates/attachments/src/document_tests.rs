@@ -251,13 +251,7 @@ fn invalid_encrypted_oversized_and_bombs_are_french_errors() {
 #[test]
 fn concurrent_staging_deduplicates_durable_extraction_and_links() {
     use std::sync::{Arc, Barrier};
-    let mut nonce = [0; 16];
-    getrandom::getrandom(&mut nonce).unwrap();
-    let directory = std::env::temp_dir().join(format!(
-        "documents-concurrent-{}",
-        crate::staging::digest(&nonce)
-    ));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = grokbot_test_support::TestDir::new("documents-concurrent");
     let path = directory.join("workspace.sqlite");
     let conn = Connection::open(&path).unwrap();
     migrate(&conn).unwrap();
@@ -311,7 +305,6 @@ fn concurrent_staging_deduplicates_durable_extraction_and_links() {
         Some(documents[0].clone())
     );
     drop(reopened);
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -395,8 +388,8 @@ fn legacy_csv_encodings_are_explicit_and_old_notes_refresh_without_reparsing() {
 
 #[test]
 fn extracted_text_and_links_persist_without_parsing_again() {
-    let path =
-        std::env::temp_dir().join(format!("documents-persist-{}.sqlite", std::process::id()));
+    let directory = grokbot_test_support::TestDir::new("documents-persist");
+    let path = directory.join("documents.sqlite");
     let conn = Connection::open(&path).unwrap();
     migrate(&conn).unwrap();
     let mut doc = stage(&conn, "persist.txt", b"Texte original").unwrap();
@@ -419,7 +412,6 @@ fn extracted_text_and_links_persist_without_parsing_again() {
     );
     assert_eq!(for_message(&reopened, "a", "same").unwrap(), vec![doc]);
     drop(reopened);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]

@@ -1,30 +1,15 @@
 // Run with: node --test app/ui/voice-call-header.test.cjs
 // Optional: CHROME_BIN=/path/to/chrome node --test app/ui/voice-call-header.test.cjs
 const assert = require("node:assert/strict");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { after, test } = require("node:test");
+const { chromeBinary } = require("./chrome-binary.cjs");
 
 const UI = __dirname;
-const CHROME_CANDIDATES = [
-  "google-chrome",
-  "google-chrome-stable",
-  "chromium",
-  "chromium-browser",
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-];
-
-function chromeBinary() {
-  if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
-  const found = CHROME_CANDIDATES.find((command) => command.includes("/")
-    ? existsSync(command)
-    : spawnSync("which", [command], { stdio: "ignore" }).status === 0);
-  return found || "google-chrome";
-}
-
 // The header of the app as it stands at 820 px: the Notifications bell, Créer un groupe, Membres,
 // the ChatGPT badge and the menu. With the call, the real voice-call.js mounts into it.
 function page(withCall) {

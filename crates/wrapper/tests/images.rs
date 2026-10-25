@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -32,6 +32,7 @@ struct Fixture {
     root: PathBuf,
     chat: String,
     token: String,
+    _dir: grokbot_test_support::TestDir,
 }
 
 fn now() -> u64 {
@@ -43,12 +44,8 @@ fn now() -> u64 {
 
 impl Fixture {
     fn open() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "ezerbot-image-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let guard = grokbot_test_support::TestDir::new("ezerbot-image");
+        let root = guard.to_path_buf();
         std::fs::create_dir_all(root.join("data")).unwrap();
         let root = root.canonicalize().unwrap();
         let path = root.join("data/workspace.sqlite");
@@ -98,6 +95,7 @@ impl Fixture {
             root,
             chat,
             token,
+            _dir: guard,
         }
     }
 

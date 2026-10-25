@@ -4,7 +4,7 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,16 +12,11 @@ use grokbot_wrapper::{Endpoints, Provider};
 use serde_json::{json, Value};
 use support::{form, wait, FakeOpenAi, Seen, CLIENT};
 
-fn scratch(label: &str) -> PathBuf {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "ezerbot-session-{label}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::SeqCst)
-    ));
-    let _ = fs::remove_dir_all(&path);
-    fs::create_dir_all(&path).unwrap();
-    path
+fn scratch(label: &str) -> grokbot_test_support::TestDir {
+    // Les fils de fond du fournisseur (sonde de connexion, catalogue, quota, retour OAuth)
+    // écrivent le journal et le verrou du dossier : `Guarded` les attend avant que le dossier
+    // soit supprimé, test échoué compris.
+    grokbot_test_support::TestDir::new(&format!("ezerbot-session-{label}"))
 }
 
 fn now() -> u64 {
@@ -55,12 +50,45 @@ fn saved(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
-fn provider(db: &Path, server: &FakeOpenAi) -> Provider {
-    Provider::with_endpoints(db, server.endpoints(), false)
+/// Un fournisseur de test qui attend ses fils de fond quand il est détruit. `Drop` s'exécute aussi
+/// pendant l'unwinding d'une assertion qui échoue : l'attente a donc lieu avant la destruction de
+/// ce qui a été déclaré avant lui (le faux serveur, puis le dossier). Il se déclare après eux.
+struct Guarded(Provider);
+
+impl Guarded {
+    /// Attend maintenant les fils de fond (point de synchronisation au milieu d'un test).
+    fn settle(&self) {
+        if let Err(message) = self.0.wait_for_background_work() {
+            panic!("{message}");
+        }
+    }
 }
 
-fn codex_provider(db: &Path, server: &FakeOpenAi) -> Provider {
-    Provider::with_backends(
+impl std::ops::Deref for Guarded {
+    type Target = Provider;
+    fn deref(&self) -> &Provider {
+        &self.0
+    }
+}
+
+impl Drop for Guarded {
+    fn drop(&mut self) {
+        match self.0.wait_for_background_work() {
+            Ok(()) => {}
+            // Une seconde panique pendant l'unwinding abattrait tout le binaire : l'échec du test
+            // est déjà en cours, on dit seulement que la fuite existe aussi.
+            Err(message) if std::thread::panicking() => eprintln!("{message}"),
+            Err(message) => panic!("{message}"),
+        }
+    }
+}
+
+fn provider(db: &Path, server: &FakeOpenAi) -> Guarded {
+    Guarded(Provider::with_endpoints(db, server.endpoints(), false))
+}
+
+fn codex_provider(db: &Path, server: &FakeOpenAi) -> Guarded {
+    Guarded(Provider::with_backends(
         db,
         server.endpoints(),
         Endpoints {
@@ -68,7 +96,7 @@ fn codex_provider(db: &Path, server: &FakeOpenAi) -> Provider {
             ..server.endpoints()
         },
         false,
-    )
+    ))
 }
 
 /// Flock tenu par ce processus, distinct du descripteur de la bibliothèque.
@@ -243,7 +271,8 @@ fn a_refused_refresh_does_not_delete_a_token_saved_by_the_other_process() {
 
 #[test]
 fn legacy_sibling_folder_is_renamed_once_and_not_duplicated() {
-    let root = scratch("legacy").join("Library/Application Support");
+    let root_scratch = scratch("legacy");
+    let root = root_scratch.join("Library/Application Support");
     let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
     write_auth(
         &legacy,
@@ -277,7 +306,8 @@ fn legacy_sibling_folder_is_renamed_once_and_not_duplicated() {
         .join("NotGrokbot/workspace.chatgpt-auth.json")
         .exists());
 
-    let backwards = scratch("backwards").join("Library/Application Support");
+    let backwards_scratch = scratch("backwards");
+    let backwards = backwards_scratch.join("Library/Application Support");
     write_auth(
         &backwards.join("Grokbot/workspace.chatgpt-auth.json"),
         &auth("real-refresh", now().saturating_add(86_400)),
@@ -296,7 +326,8 @@ fn legacy_sibling_folder_is_renamed_once_and_not_duplicated() {
 
 #[test]
 fn charles_codex_file_in_application_support_is_found_without_reconnect() {
-    let root = scratch("charles").join("Library/Application Support/Grokbot");
+    let root_scratch = scratch("charles");
+    let root = root_scratch.join("Library/Application Support/Grokbot");
     let db = root.join("workspace.sqlite");
     let auth_path = root.join("workspace.codex-auth.json");
     write_auth(
@@ -314,7 +345,7 @@ fn charles_codex_file_in_application_support_is_found_without_reconnect() {
     );
     let seen = Arc::new(Mutex::new(Seen::default()));
     let server = FakeOpenAi::new(seen.clone());
-    let session = Provider::with_backends(
+    let session = Guarded(Provider::with_backends(
         &db,
         server.endpoints(),
         grokbot_wrapper::Endpoints {
@@ -322,7 +353,7 @@ fn charles_codex_file_in_application_support_is_found_without_reconnect() {
             ..server.endpoints()
         },
         false,
-    );
+    ));
     assert!(session.connected());
     assert_eq!(session.status()["signin"], "idle");
     assert_eq!(session.status()["backend"], "codex");
@@ -561,7 +592,8 @@ fn sign_in_write_requires_the_lock_and_keeps_a_newer_pair() {
 
 #[test]
 fn legacy_refresh_is_merged_when_the_destination_has_no_token() {
-    let root = scratch("merge").join("Library/Application Support");
+    let root_scratch = scratch("merge");
+    let root = root_scratch.join("Library/Application Support");
     let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
     write_auth(
         &legacy,
@@ -594,7 +626,8 @@ fn legacy_refresh_is_merged_when_the_destination_has_no_token() {
 
 #[test]
 fn destination_refresh_wins_and_the_source_is_tombstoned() {
-    let root = scratch("dest-wins").join("Library/Application Support");
+    let root_scratch = scratch("dest-wins");
+    let root = root_scratch.join("Library/Application Support");
     let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
     let mut older = auth("legacy-refresh", now().saturating_add(86_400));
     older["saved_at"] = json!(10);
@@ -615,7 +648,8 @@ fn destination_refresh_wins_and_the_source_is_tombstoned() {
 
 #[test]
 fn a_newer_source_refresh_replaces_the_older_destination() {
-    let root = scratch("source-newer").join("Library/Application Support");
+    let root_scratch = scratch("source-newer");
+    let root = root_scratch.join("Library/Application Support");
     let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
     let mut newer = auth("new-refresh", now().saturating_add(86_400));
     newer["saved_at"] = json!(80);
@@ -649,7 +683,8 @@ fn a_newer_source_refresh_replaces_the_older_destination() {
 
 #[test]
 fn migration_locks_the_source_before_moving_the_token() {
-    let root = scratch("migrate-lock").join("Library/Application Support");
+    let root_scratch = scratch("migrate-lock");
+    let root = root_scratch.join("Library/Application Support");
     let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
     write_auth(
         &legacy,
@@ -700,6 +735,7 @@ fn a_newer_temporary_is_adopted_on_the_next_startup() {
     assert_ne!(outcome.kind, "signin");
     assert!(seen.lock().unwrap().forms.is_empty());
     assert_eq!(session.status()["signin"], "idle");
+    session.settle();
 
     let stale_tmp = auth_path.with_extension("json.tmp");
     write_auth(
@@ -787,7 +823,11 @@ fn flock_child() {
     } else {
         outcome.kind.to_owned()
     };
-    fs::write(result, label).unwrap();
+    // Écriture atomique : le parent sonde `result.exists()` et lit aussitôt ; un fichier créé
+    // mais pas encore rempli lui rendrait une chaîne vide.
+    let partial = result.with_extension("partial");
+    fs::write(&partial, label).unwrap();
+    fs::rename(&partial, result).unwrap();
 }
 
 #[test]

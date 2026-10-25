@@ -21,6 +21,7 @@
     // mode : "view" (lecture), "edit" (édition ; intacte tant que le brouillon égale le texte du souvenir, modifiée sinon),
     // "forget" (confirmation d'oubli) ou "discard" (confirmation d'abandon d'une édition modifiée).
     let id = null, mode = "view", busy = false, draft = "", note = "", problem = "", shown = null, epoch = 0;
+    let opener = null; // le bouton d'où le panneau « À revoir » a ouvert le souvenir : la fermeture lui rend le focus
     let after = null; const saved = new Map(); // after : ce que la sortie demandée fera si l'on abandonne ; saved : souvenir → brouillon, pour un écran quitté en pleine modification
     const moved = new Map(); // ancien identifiant → identifiant du souvenir qui le remplace (réponse du moteur à une correction)
     const root = node("aside", "memory-detail");
@@ -150,8 +151,9 @@
       root.replaceChildren();
       mark();
       delete root.parentElement.dataset.detail;
-      const back = find(was) || root.parentElement.querySelector('.memory-space-tab[aria-pressed="true"]');
-      if (restore) (back?.querySelector("button") || back)?.focus(); // une ligne de la Liste se focalise par son bouton
+      const back = find(was) || root.parentElement.querySelector('.memory-space-tab[aria-pressed="true"]'), from = opener?.isConnected !== false ? opener : null;
+      opener = null;
+      if (restore) (from || back?.querySelector("button") || back)?.focus(); // une ligne de la Liste se focalise par son bouton ; le panneau « À revoir » reprend son propre bouton
     }
     // Appelé par l'écran quand la liste a changé : un souvenir disparu ferme le panneau ; la saisie en cours n'est jamais écrasée.
     function refresh() {
@@ -169,15 +171,18 @@
       if (mode === "discard") { resume(); return; } // Échap répond « Continuer »
       leave(mode === "edit" ? () => render("edit") : () => close(true)); // en édition, Échap ne quitte que l'édition
     });
-    function open(factId) {
+    // `start` : "edit" ou "forget" ouvre directement Modifier ou la confirmation d'Oublier (le panneau « À revoir »), `from` : le bouton à refocaliser à la fermeture ; un souvenir de sujet ne se modifie pas.
+    function open(factId, start = "view", from = null) {
       if (busy || (factId === id && (mode === "edit" || mode === "discard"))) return; // re-cliquer le souvenir en cours de modification ne l'efface pas
       leave(() => {
         if (id !== factId && !(facts() || []).some((item) => item.fact_id === factId)) { render("title"); return; } // le souvenir visé a disparu pendant la confirmation : le panneau reste où il est
-        const kept = saved.get(factId) ?? null;
+        const kept = saved.get(factId) ?? null, fact = (facts() || []).find((item) => item.fact_id === factId);
+        const first = kept !== null || (start === "edit" && fact?.scope !== "topic") ? "edit" : start === "forget" ? "forget" : "view";
         epoch += 1;
         saved.delete(factId);
-        [id, mode, draft, note, problem] = [factId, kept === null ? "view" : "edit", kept ?? "", kept === null ? "" : "Brouillon retrouvé : Enregistrer ou Annuler.", ""];
-        render(kept === null ? "title" : "body");
+        opener = from;
+        [id, mode, draft, note, problem] = [factId, first, kept ?? (first === "edit" ? String(fact?.text ?? "") : ""), kept === null ? "" : "Brouillon retrouvé : Enregistrer ou Annuler.", ""];
+        render(first === "edit" ? "body" : first === "forget" ? "back" : "title");
       });
     }
     // Un clic n'importe où sur la carte ouvre le souvenir ; au clavier, le bouton du texte s'en charge.

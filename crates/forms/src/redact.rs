@@ -584,4 +584,21 @@ mod tests {
             "a secret replaced by one of the same length"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hold_whose_vault_lost_its_permissions_refuses_the_rendering() {
+        use std::os::unix::fs::PermissionsExt;
+        let test = TestVault::new();
+        test.vault.set("TOKEN", "", "private-value").unwrap();
+        let held = hold();
+        app_patterns(test.vault.path()).unwrap();
+        let mode = |bits| std::fs::Permissions::from_mode(bits);
+        std::fs::set_permissions(test.vault.path(), mode(0o000)).unwrap();
+        let unreadable = std::fs::File::open(test.vault.path()).is_err();
+        let settled = held.settled();
+        std::fs::set_permissions(test.vault.path(), mode(0o600)).unwrap();
+        // Root opens any file: there the check reads the vault again and finds it unchanged.
+        assert_eq!(settled.is_err(), unreadable);
+    }
 }

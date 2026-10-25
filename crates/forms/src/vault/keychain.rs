@@ -255,6 +255,7 @@ pub(super) fn set(vault: &Vault, target: &Target, name: &str, secret: &StoredSec
     let mut states = states();
     let state = states.entry(vault.path.clone()).or_default();
     let mut file = vault.read_file()?;
+    vault.write(&file)?; // Moves the `Stamp` even if the keychain takes only part of the write.
     let accepted = target
         .connect(&vault.path)
         .and_then(|backend| backend.put_verified(name, secret))
@@ -271,7 +272,9 @@ pub(super) fn set(vault: &Vault, target: &Target, name: &str, secret: &StoredSec
 pub(super) fn remove(vault: &Vault, target: &Target, name: &str) -> Result<()> {
     let mut states = states();
     let state = states.entry(vault.path.clone()).or_default();
-    // Never report a deletion that might reappear when the trousseau unlocks.
+    let mut file = vault.read_file()?;
+    vault.write(&file)?; // Moves the `Stamp` even if the keychain takes only part of the deletion.
+                         // Never report a deletion that might reappear when the trousseau unlocks.
     if target
         .connect(&vault.path)
         .and_then(|backend| backend.delete(name))
@@ -282,7 +285,6 @@ pub(super) fn remove(vault: &Vault, target: &Target, name: &str) -> Result<()> {
             "Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez.",
         ));
     }
-    let mut file = vault.read_file()?;
     file.remove(name);
     vault.write(&file)?;
     state.cached.remove(name);

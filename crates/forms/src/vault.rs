@@ -96,10 +96,12 @@ pub fn reads_on_this_thread() -> u64 {
     READS.get()
 }
 /// The vault file as it is on disk, without a read of the secrets. Every write renames a new
-/// file over it (`Vault::write`), a keychain write too (`keychain::set`, `keychain::remove`), so
-/// a write of this process or of another wrapper process changes the stamp.
+/// file over it (`Vault::write`), and a keychain write renames it before it touches the keychain
+/// (`keychain::set`, `keychain::remove`): any write of this process or of another wrapper
+/// process, even one the keychain took only in part, changes the stamp. So does a change of
+/// owner or permissions, after which reading the vault again fails closed.
 #[derive(PartialEq)]
-pub(crate) struct Stamp(u64, u64, Option<std::time::SystemTime>);
+pub(crate) struct Stamp([i64; 9]);
 // 0: explicit file-only library fixture; 1: host lacks a stable signer; 2: admitted.
 static OS_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -223,10 +225,22 @@ impl Vault {
     pub(crate) fn stamp(&self) -> Result<Stamp> {
         let metadata = fs::symlink_metadata(&self.path)?;
         #[cfg(unix)]
-        let inode = std::os::unix::fs::MetadataExt::ino(&metadata);
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(Stamp([
+                metadata.ino() as i64,
+                metadata.size() as i64,
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+                metadata.mode().into(),
+                metadata.uid().into(),
+                metadata.gid().into(),
+            ]))
+        }
         #[cfg(not(unix))]
-        let inode = 0;
-        Ok(Stamp(inode, metadata.len(), metadata.modified().ok()))
+        Err(invalid("secret vault requires Unix file metadata"))
     }
     /// Whether both handles read the same secrets: same file, same backend.
     pub(crate) fn same_store(&self, other: &Self) -> bool {
@@ -550,6 +564,9 @@ impl Vault {
         let result = (|| -> Result<()> {
             owner_only(&file)?;
             serde_json::to_writer(&mut file, secrets)?;
+            // The file system clock is too coarse to tell two quick writes apart, and a freed
+            // inode comes back: without this, a `Stamp` could see no change after two writes.
+            file.set_modified(std::time::SystemTime::now())?;
             file.sync_all()?;
             fs::rename(&temporary, &self.path)?;
             File::open(self.path.parent().unwrap())?.sync_all()?;

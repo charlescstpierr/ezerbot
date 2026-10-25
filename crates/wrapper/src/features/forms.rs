@@ -106,6 +106,10 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
 
 /// Match the provider's <directory>/<database-stem> companion-file convention.
 pub fn vault(ctx: &Context<'_>) -> Result<Vault, ApiError> {
+    Ok(Vault::open_app(&vault_path(ctx))?)
+}
+
+pub fn vault_path(ctx: &Context<'_>) -> std::path::PathBuf {
     let directory = ctx
         .db_path
         .parent()
@@ -116,9 +120,7 @@ pub fn vault(ctx: &Context<'_>) -> Result<Vault, ApiError> {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("grokbot");
-    Ok(Vault::open_app(
-        &directory.join(format!("{stem}.secrets.json")),
-    )?)
+    directory.join(format!("{stem}.secrets.json"))
 }
 
 #[derive(Deserialize)]

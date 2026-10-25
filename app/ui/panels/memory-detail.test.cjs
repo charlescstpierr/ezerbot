@@ -86,6 +86,9 @@ async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFai
     button: (label) => h.panel().querySelectorAll("button").find((b) => b.textContent === label),
     points: () => main.querySelectorAll(".memory-graph-point").length,
     items: () => main.querySelectorAll(".memory-space-item").length,
+    leaveScreen: () => registered[0].onNavigate(), enterScreen: () => sidebar.querySelector(".memory-entry").click(),
+    field: () => h.panel().querySelector(".memory-detail-field"),
+    write(text) { h.field().value = text; h.field().fire("input"); },
     escape: () => keys.forEach((key) => key({ key: "Escape", preventDefault() {} })),
     mutations: () => calls.api.filter(([path]) => path !== "/api/memory/all"),
     async type(label, text) { const field = h.panel().querySelector(".memory-detail-field"); field.value = text; field.fire("input"); h.button(label).click(); await settle(); },
@@ -458,6 +461,179 @@ test("un souvenir de sujet s'oublie par /api/topics/memory/forget, sans Modifier
   assert.equal(ok.open(), false, "Échap ferme aussi pendant l'envoi");
   await ok.settle();
   assert.deepEqual([ok.mutations(), ok.open(), ok.items()], [[["/api/topics/memory/forget", { fact_id: "f3" }]], false, 2]);
+});
+
+// #342 : Échap, Fermer et un autre souvenir ne font plus perdre le texte d'une modification en cours.
+const ORIGINAL = "Aime le café <b>noir</b>";
+async function editing(options) {
+  const h = await harness(options);
+  h.item("f1").click();
+  h.button("Modifier").click();
+  return h;
+}
+
+test("Échap sur une édition sans changement ferme seulement l'édition ; hors édition, Échap ferme le panneau", async () => {
+  const h = await editing();
+  h.escape();
+  assert.deepEqual([h.open(), h.panel().querySelector(".memory-detail-field"), h.text("text"), h.mutations()], [true, null, ORIGINAL, []]);
+  assert.equal(h.panel().textContent.includes("Abandonner"), false, "aucune confirmation quand rien n'a changé");
+  assert.equal(Element.active, h.button("Modifier"), "le focus revient à Modifier");
+  h.escape();
+  assert.deepEqual([h.open(), h.main.querySelector(".memory-space").dataset.detail], [false, undefined], "hors édition, Échap ferme le panneau");
+  const forget = await harness();
+  forget.item("f1").click();
+  forget.button("Oublier…").click();
+  forget.escape();
+  assert.equal(forget.open(), false, "comme avant, Échap ferme aussi le panneau pendant la confirmation d'oubli");
+});
+
+test("Échap sur une édition modifiée demande « Abandonner la modification ? » : Continuer garde le texte et le focus, Abandonner remet le texte d'origine", async () => {
+  const h = await editing();
+  h.write("Aime le thé");
+  h.escape();
+  assert.equal(h.open(), true);
+  assert.match(h.text("warning"), /^Abandonner la modification \?/);
+  assert.deepEqual(h.panel().querySelector(".memory-detail-actions").querySelectorAll("button").map((b) => [b.textContent, b.classes.includes("danger-button")]), [["Abandonner", true], ["Continuer", false]]);
+  assert.deepEqual([h.field().value, h.field().readOnly, Element.active === h.button("Continuer")], ["Aime le thé", true, true], "le texte reste visible ; le focus est sur le choix sans danger");
+  h.button("Continuer").click();
+  assert.deepEqual([h.field().value, h.field().readOnly, Element.active === h.field(), h.mutations()], ["Aime le thé", false, true, []]);
+  h.escape();
+  h.escape(); // Échap sur la confirmation répond « Continuer »
+  assert.deepEqual([h.field().value, Element.active === h.field()], ["Aime le thé", true]);
+  h.escape();
+  h.button("Abandonner").click();
+  assert.deepEqual([h.open(), h.panel().querySelector(".memory-detail-field"), h.text("text"), h.mutations(), Element.active === h.button("Modifier")], [true, null, ORIGINAL, [], true]);
+  h.button("Modifier").click();
+  assert.equal(h.field().value, ORIGINAL, "la modification suivante repart du texte d'origine");
+  h.write("Aime le thé");
+  h.write(ORIGINAL);
+  h.escape();
+  assert.equal(h.panel().querySelector(".memory-detail-field"), null, "revenir au texte d'origine à la main compte comme sans changement");
+});
+
+test("la confirmation d'abandon résiste à une relecture de la liste ; la modification reste enregistrable après Continuer", async () => {
+  const h = await editing();
+  h.write("Aime le thé");
+  h.escape();
+  h.reload("Zéphyr");
+  await h.settle();
+  assert.deepEqual([h.cells()[0], h.button("Abandonner") !== undefined, h.field().value], ["Zéphyr", true, "Aime le thé"]);
+  h.button("Continuer").click();
+  await h.type("Enregistrer", "Aime le thé");
+  assert.deepEqual([h.mutations(), h.text("text")], [[["/api/memory/correct", { bot_id: "grokbot", fact_id: "f1", text: "Aime le thé" }]], "Aime le thé"]);
+});
+
+test("Fermer pendant une édition modifiée passe par la même confirmation ; sans changement, il ferme tout de suite", async () => {
+  const h = await editing();
+  h.button("Fermer").click();
+  assert.equal(h.open(), false, "édition intacte : rien à perdre");
+  h.item("f1").click();
+  h.button("Modifier").click();
+  h.write("Aime le thé");
+  h.button("Fermer").click();
+  assert.deepEqual([h.open(), h.field().value, Element.active === h.button("Continuer")], [true, "Aime le thé", true]);
+  h.button("Continuer").click();
+  assert.deepEqual([h.open(), h.field().value], [true, "Aime le thé"]);
+  h.button("Fermer").click();
+  h.button("Abandonner").click();
+  assert.deepEqual([h.open(), h.mutations(), h.item("f1").contains(Element.active)], [false, [], true], "Abandonner fait ce que Fermer demandait");
+  h.item("f1").click();
+  assert.equal(h.text("text"), ORIGINAL, "rouvert, le souvenir est intact");
+});
+
+test("ouvrir un autre souvenir pendant une édition modifiée demande confirmation ; re-cliquer le même ne l'efface pas", async () => {
+  const h = await editing();
+  h.write("Aime le thé");
+  h.item("f1").click();
+  assert.deepEqual([h.field().value, h.panel().textContent.includes("Abandonner")], ["Aime le thé", false], "le souvenir en cours de modification garde sa saisie");
+  h.item("f2").click();
+  assert.deepEqual([h.cells()[0], h.button("Abandonner") !== undefined, h.item("f2").classes.includes("is-selected")], ["Ezerbot", true, false], "la confirmation s'affiche, f1 reste ouvert");
+  h.button("Continuer").click();
+  assert.equal(h.field().value, "Aime le thé");
+  h.item("f2").click();
+  h.button("Abandonner").click();
+  assert.deepEqual([h.text("text"), h.cells()[0], h.item("f2").classes.includes("is-selected"), h.mutations()], ["L’équipe déjeune à midi", "Chef", true, []]);
+  h.item("f1").click();
+  assert.equal(h.text("text"), ORIGINAL);
+});
+
+test("quitter l'écran Mémoire pendant une édition modifiée garde le brouillon pour le retour sur ce souvenir seulement", async () => {
+  const h = await editing();
+  h.write("Aime le thé");
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f2").click();
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f1").click();
+  assert.deepEqual([h.field().value, Element.active === h.field(), h.mutations()], ["Aime le thé", true, []], "brouillon retrouvé, rien d'envoyé");
+  assert.match(h.panel().textContent, /Brouillon retrouvé/);
+  h.write(ORIGINAL);
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f1").click();
+  assert.equal(h.text("text"), ORIGINAL, "sans changement, rien n'est gardé");
+  h.button("Modifier").click();
+  h.write("Aime le thé");
+  h.escape();
+  h.button("Abandonner").click();
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f1").click();
+  assert.equal(h.text("text"), ORIGINAL, "un brouillon abandonné ne revient pas");
+});
+
+test("deux brouillons laissés en quittant l'écran sont gardés chacun pour son souvenir", async () => {
+  const h = await editing();
+  h.write("Brouillon A");
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f2").click();
+  h.button("Modifier").click();
+  h.write("Brouillon B");
+  h.leaveScreen();
+  h.enterScreen();
+  await h.settle();
+  h.item("f1").click();
+  assert.equal(h.field().value, "Brouillon A");
+  h.escape();
+  h.button("Abandonner").click();
+  h.item("f2").click();
+  assert.equal(h.field().value, "Brouillon B");
+});
+
+test("le souvenir visé disparaît pendant la confirmation d'abandon : le panneau reste sur la modification abandonnée, sans se figer", async () => {
+  const h = await editing();
+  h.write("Brouillon A");
+  h.item("f2").click();
+  h.net.drop("f2");
+  h.reload();
+  await h.settle();
+  h.button("Abandonner").click();
+  assert.deepEqual([h.open(), h.panel().querySelector(".memory-detail-field"), h.text("text"), h.cells()[0], h.mutations()], [true, null, ORIGINAL, "Ezerbot", []]);
+  h.button("Modifier").click();
+  assert.equal(h.field().value, ORIGINAL, "le panneau répond à nouveau");
+});
+
+test("Échap et Fermer pendant l'envoi ne font rien : la saisie part ou reste, l'erreur du moteur la rend", async () => {
+  const h = await editing({ refuse: "Texte refusé par le moteur." });
+  let release;
+  h.net.hold = new Promise((resolve) => { release = resolve; });
+  await h.type("Enregistrer", "Aime le thé");
+  h.escape();
+  assert.deepEqual([h.open(), h.field().value, h.field().disabled, h.button("Fermer").disabled], [true, "Aime le thé", true, true]);
+  h.button("Fermer").click();
+  assert.equal(h.open(), true);
+  release();
+  await h.settle();
+  assert.deepEqual([h.text("error"), h.field().value, Element.active === h.field()], ["Texte refusé par le moteur.", "Aime le thé", true]);
+  h.escape();
+  assert.match(h.text("warning"), /Abandonner la modification/, "après l'erreur, Échap redemande");
 });
 
 test("styles : jetons seulement, aucun texte sous 11,5 px", () => {

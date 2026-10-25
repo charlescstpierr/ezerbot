@@ -8,7 +8,7 @@ La mémoire automatique est un réglage par bot dans Paramètres. La mémoire du
 - `memoire-liste` ouvre la section « Mémoire du bot » avec la recherche.
 - `memoire-vide` affiche zéro fait actif, sans en inventer.
 - `memoire-espace` : l’entrée « Mémoire » sous « Rechercher » (`.memory-entry`, compteur `.memory-entry-count`) ouvre `.memory-space` (« Espace personnel / Mémoire · N souvenirs », Graphe `.memory-graph` avec un `.memory-graph-point` par souvenir, un `.memory-graph-group` par groupe et les boutons Zoom avant / Zoom arrière / Recadrer, ou Liste, lus depuis `GET /api/memory/all`). Pas une sphère de `drive.sh` : se pilote à la main avec `browser.sh eval`.
-- `memoire-detail` : un clic sur un `.memory-graph-point` ou une `.memory-space-item` ouvre `.memory-detail` à droite (texte, Bot, Origine, Appris le, Provenance, Portée, Modifier, Oublier…). Oublier demande confirmation dans le panneau (`.memory-detail-warning`) puis relit `GET /api/memory/all` ; un souvenir de sujet n’a pas de Modifier. Échap ferme, le focus revient au point.
+- `memoire-detail` : un clic sur un `.memory-graph-point` ou une `.memory-space-item` ouvre `.memory-detail` à droite (texte, Bot, Origine, Appris le, Provenance, Portée, Modifier, Oublier…). Oublier demande confirmation dans le panneau (`.memory-detail-warning`) puis relit `GET /api/memory/all` ; un souvenir de sujet n’a pas de Modifier. Échap ferme, le focus revient au point ; pendant Modifier, Échap quitte seulement l’édition, et si le texte a changé le panneau demande « Abandonner la modification ? » (Abandonner / Continuer, `.memory-detail-warning`).
 
 ## How to get to it (user POV)
 

@@ -1,7 +1,8 @@
 //! Local housekeeping, not a recovered Grok server retention policy (REA CM07,
 //! CM11–13). Roots are conservative: every durable text field, including skill
-//! history, delegated selections, run snapshots and deleted conversations. Only
-//! attachment metadata/cache and our own housekeeping journal are not roots.
+//! history, delegated selections and run snapshots. Only attachment
+//! metadata/cache, our own housekeeping journal and the rows of a deleted
+//! conversation, which nothing restores or shows, are not roots.
 //!
 //! Commit metadata removal + a deletion intent BEFORE unlinking an orphan blob.
 //! Restart replays intents under the same SQLite writer lock as staging/linking;
@@ -135,7 +136,21 @@ fn roots(conn: &Connection) -> Result<HashSet<String>, ApiError> {
         }
         // Quote identifiers from SQLite, never interpolate user input as SQL.
         let quoted = format!("\"{}\"", table.replace('"', "\"\""));
-        let mut statement = conn.prepare(&format!("SELECT * FROM {quoted}"))?;
+        let has = |column: &str| -> rusqlite::Result<bool> {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                params![table, column],
+                |r| r.get(0),
+            )
+        };
+        let live = if has("conversation_id")? {
+            " WHERE NOT EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.deleted=1 AND c.id=t.conversation_id)"
+        } else if has("run_id")? {
+            " WHERE NOT EXISTS(SELECT 1 FROM engine_runs r JOIN wrapper_conversations c ON c.id=r.conversation_id WHERE c.deleted=1 AND r.run_id=t.run_id)"
+        } else {
+            ""
+        };
+        let mut statement = conn.prepare(&format!("SELECT * FROM {quoted} t{live}"))?;
         let columns = statement.column_count();
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
@@ -420,6 +435,35 @@ pub(super) fn discard_conversation_draft(conn: &Connection, draft: &str) -> Resu
     Ok(())
 }
 
+/// A deleted conversation is never restored. Its images are erased now unless
+/// another conversation, a draft or a durable text still refers to them.
+pub(super) fn discard_conversation_images(
+    conn: &Connection,
+    conversation: &str,
+) -> Result<(), ApiError> {
+    let candidates = conn
+        .prepare("SELECT DISTINCT a.id, a.byte_length FROM attachments_message_links l JOIN attachments_staged a ON a.id=l.attachment_id WHERE l.conversation_id=?1")?
+        .query_map([conversation], |r| {
+            Ok(Candidate {
+                id: r.get(0)?,
+                kind: "image".into(),
+                bytes: r.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    conn.execute(
+        "DELETE FROM attachments_message_links WHERE conversation_id=?1",
+        [conversation],
+    )?;
+    conn.execute(
+        "DELETE FROM wrapper_attachment_order WHERE conversation_id=?1",
+        [conversation],
+    )?;
+    let orphans = orphan_candidates(conn, candidates)?;
+    queue(conn, &orphans, "conversation_deleted")?;
+    Ok(())
+}
+
 fn prune_invalid_drafts(conn: &Connection) -> Result<(), ApiError> {
     conn.execute("UPDATE wrapper_storage_uploads SET cancelled=1,created_at=?2 WHERE cancelled=0 AND NOT EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=wrapper_storage_uploads.draft_id AND c.deleted=0)",params![ACCOUNT,crate::now() as i64])?;
     conn.execute("DELETE FROM wrapper_storage_drafts WHERE NOT EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=wrapper_storage_drafts.draft_id AND c.deleted=0)",[ACCOUNT])?;
@@ -580,7 +624,7 @@ fn queue(conn: &Connection, items: &[Candidate], reason: &str) -> Result<Vec<i64
     }
     Ok(sequences)
 }
-fn replay(conn: &Connection, base: &Path) -> Result<usize, ApiError> {
+pub(super) fn replay(conn: &Connection, base: &Path) -> Result<usize, ApiError> {
     let tx = write_transaction(conn)?;
     let rows = tx
         .prepare("SELECT seq,id,kind FROM wrapper_storage_deletions WHERE state='pending'")?

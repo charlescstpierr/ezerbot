@@ -113,11 +113,18 @@ class AxiOwnershipTests(unittest.TestCase):
             ["bash", str(SCRIPTS / script), "--evidence", str(self.evidence), *arguments],
             env={**self.env, **environment}, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
+        with (self.directory / "cli-started.jsonl").open("a") as log:
+            log.write(json.dumps({"pid": process.pid, "script": script, "arguments": arguments}) + "\n")
         def finish():
-            if process.poll() is None:
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
                 process.kill()
-            process.communicate(timeout=5)
+                process.communicate(timeout=5)
         self.addCleanup(finish)
+        for name in ("AXI_BARRIER", "WRITE_BARRIER", "BUILD_BARRIER"):
+            if name in environment:
+                self.addCleanup(Path(environment[name] + ".release").touch)
         return process
 
     def wait_for(self, predicate) -> None:
@@ -133,6 +140,7 @@ class AxiOwnershipTests(unittest.TestCase):
 from pathlib import Path
 original_write = Path.write_text
 original_flock = fcntl.flock
+original_replace = Path.replace
 def write(path, *args, **kwargs):
     barrier = os.environ.get("WRITE_BARRIER")
     if barrier and path.name.startswith("browser.json"):
@@ -148,7 +156,12 @@ def flock(fd, operation):
             marker = os.environ.get("LOCK_BLOCKED")
             if marker: Path(marker).touch()
     return original_flock(fd, operation)
+def replace(path, target):
+    if os.environ.get("FAIL_REPLACE") == Path(target).name:
+        raise OSError("publication refusée par le test")
+    return original_replace(path, target)
 Path.write_text = write
+Path.replace = replace
 fcntl.flock = flock
 ''')
         self.env["PYTHONPATH"] = str(hooks)
@@ -165,6 +178,7 @@ fcntl.flock = flock
         barrier = str(self.directory / "write")
         browser = self.start_cli("browser.sh", "pages", WRITE_BARRIER=barrier)
         self.wait_for(lambda: Path(barrier + ".ready").exists())
+        self.assertEqual(json.loads((self.run_root / "browser.json").read_text())["session"], "pm-i545")
         blocked = self.directory / "cleanup-blocked"
         cleanup = self.start_cli("cleanup.sh", LOCK_BLOCKED=str(blocked))
         try:
@@ -250,6 +264,87 @@ fcntl.flock = flock
         self.cleanup()
         self.assertEqual(json.loads(self.sessions.read_text()),
                          {"pm-i545": False, "verify-ezerbot": True, "pm-other": True})
+
+    def test_failed_browser_publication_preserves_previous_attribution(self) -> None:
+        self.open_browser()
+        self.install_barriers()
+        before = (self.run_root / "browser.json").read_bytes()
+        result = self.cli("browser.sh", "pages", FAIL_REPLACE="browser.json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.run_root / "browser.json").read_bytes(), before)
+        self.assertEqual(len(self.calls()), 1)
+        self.cleanup()
+        self.assert_session_stopped()
+
+    def test_failed_cleanup_publication_has_no_external_effect(self) -> None:
+        self.open_browser()
+        self.install_barriers()
+        result = self.cli("cleanup.sh", FAIL_REPLACE="run.json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertTrue(self.home.exists())
+        self.assertFalse(json.loads((self.evidence / "run.json").read_text()).get("cleaning", False))
+        self.cleanup()
+        self.assert_session_stopped()
+
+    def test_missing_axi_binary_preserves_retry(self) -> None:
+        self.open_browser()
+        result = self.cli("cleanup.sh", EZERBOT_VERIFY_AXI=str(self.directory / "absent"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.run_root.exists())
+        self.assertNotEqual(self.cli("browser.sh", "open").returncode, 0)
+        self.cleanup()
+        self.assert_session_stopped()
+
+    def test_launch_refuses_active_and_cleaned_evidence(self) -> None:
+        original = (self.evidence / "run.json").read_bytes()
+        self.assertNotEqual(self.cli("launch.sh").returncode, 0)
+        self.assertEqual((self.evidence / "run.json").read_bytes(), original)
+        self.cleanup()
+        original = (self.evidence / "run.json").read_bytes()
+        self.assertNotEqual(self.cli("launch.sh").returncode, 0)
+        self.assertEqual((self.evidence / "run.json").read_bytes(), original)
+        self.assertEqual(self.calls(), [])
+
+    def test_cleanup_waits_for_launch_before_first_run_publication(self) -> None:
+        self.install_barriers()
+        self.evidence = self.directory / "new-evidence"
+        self.evidence.mkdir()
+        barrier = str(self.directory / "build")
+        build = self.directory / "fake-build"
+        build.write_text(
+            f"#!{sys.executable}\n"
+            "import os, time\nfrom pathlib import Path\n"
+            "barrier = os.environ['BUILD_BARRIER']\n"
+            "Path(barrier + '.ready').touch()\n"
+            "while not Path(barrier + '.release').exists(): time.sleep(0.01)\n"
+            "raise SystemExit(1)\n"
+        )
+        build.chmod(0o700)
+        launch_process = self.start_cli("launch.sh", EZERBOT_VERIFY_CARGO=str(build), BUILD_BARRIER=barrier)
+        self.wait_for(lambda: Path(barrier + ".ready").exists())
+        blocked = self.directory / "cleanup-blocked"
+        cleanup = self.start_cli("cleanup.sh", LOCK_BLOCKED=str(blocked))
+        try:
+            self.wait_for(lambda: blocked.exists() or cleanup.poll() is not None)
+            self.assertTrue(blocked.exists(), "cleanup doit attendre launch, même sans run.json")
+        finally:
+            Path(barrier + ".release").touch()
+        launch_process.communicate(timeout=10)
+        self.assertNotEqual(launch_process.returncode, 0)
+        out, err = cleanup.communicate(timeout=10)
+        self.assertEqual(cleanup.returncode, 0, out + err)
+        self.assertFalse((self.evidence / "run.json").exists())
+        self.assertEqual(self.calls(), [])
+
+    def test_headless_mode_cannot_replace_an_axi_attribution(self) -> None:
+        self.open_browser()
+        result = self.cli("browser.sh", "open", EZERBOT_VERIFY_BROWSER="chrome-headless",
+                          EZERBOT_VERIFY_CHROME=str(self.fake))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(self.calls()), 1)
+        self.cleanup()
+        self.assert_session_stopped()
 
     def test_cleanup_uses_owned_session_after_environment_changes_and_is_idempotent(self) -> None:
         self.open_browser()

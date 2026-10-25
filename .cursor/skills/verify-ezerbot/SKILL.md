@@ -58,6 +58,8 @@ CHROME_DEVTOOLS_AXI_SESSION=verify-ezerbot \
 
 Le script écrit `<preuves>/run.json` (pid, port, URL, commit, empreinte du binaire). Il lie aussi la session axi et son `HOME` au répertoire du run par une signature HMAC. Il ne lance pas `Ezerbot.app`.
 
+Choisir un dossier de preuves neuf pour chaque lancement. Un dossier qui contient déjà `run.json`, même après nettoyage, est refusé.
+
 ## Doctor
 
 Contrôle en lecture seule, à lancer dès que quelque chose semble faux. Il ne tue rien et n’écrit rien.
@@ -84,6 +86,8 @@ La dernière ligne est `doctor: ok` ou `doctor: echec`.
 Harness : `chrome-devtools-axi`, avec `CHROME_DEVTOOLS_AXI_SESSION` égal à l’identifiant du run. Les commandes observées dans ce dépôt sont `open`, `resize`, `screenshot`, `eval`, `pages`, `selectpage`, `newpage`, `closepage`. `eval` imprime `result: <json>`. Si cette valeur est une chaîne qui contient encore du JSON, elle est décodée jusqu’à l’objet.
 
 Utiliser `browser.sh` pour attribuer la session axi au run. Le pilote valide la session signée et le `HOME` axi du lancement avant toute commande. Il enregistre cette utilisation dans `browser.json` sous le répertoire signé. Un changement de session ou de `HOME` est refusé.
+
+Lancement, commandes navigateur et nettoyage partagent un verrou conservé dans le dossier de preuves. Les métadonnées sont publiées par remplacement atomique. Le nettoyage attend la fin d'une commande déjà commencée. Dès que le nettoyage commence, le pilote refuse toute nouvelle commande et tout changement de mode navigateur.
 
 ```bash
 bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> open http://127.0.0.1:<port>
@@ -146,6 +150,8 @@ Ne jamais tuer par nom de processus. Le nettoyage ne signale `SIGTERM` puis `SIG
 À la fin d’un nettoyage accepté, la commande `chrome-devtools-axi stop` utilise la session et le `HOME` axi signés du run. Le nettoyage exige aussi un `browser.json` attribué au même run par `browser.sh`. Les variables courantes de l’appelant ne choisissent pas la session à arrêter. Un nettoyage refusé n’envoie pas cette commande.
 
 Sans attribution validable, aucun arrêt axi n’est envoyé. Cela couvre les anciens runs sans signature de session, les runs sans utilisation d’axi et les métadonnées incohérentes ou illisibles. Le nettoyage des PID enregistrés et du dossier signé reste possible. Ne pas déduire une session à fermer de l’environnement. Un second nettoyage n’envoie aucune nouvelle commande. Le dossier de preuves, y compris `report.md` et les PNG, reste.
+
+Si axi est absent ou si son arrêt échoue, le nettoyage échoue et conserve le répertoire signé et l'attribution pour une nouvelle tentative. Le navigateur reste interdit pendant cet état. Relancer `cleanup.sh` avec axi disponible. Après un nettoyage réussi, un second nettoyage n'envoie aucune nouvelle commande.
 
 ```bash
 bash .cursor/skills/verify-ezerbot/scripts/cleanup.sh --evidence <preuves>

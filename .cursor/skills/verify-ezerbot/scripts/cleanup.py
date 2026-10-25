@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import subprocess
@@ -26,6 +25,8 @@ from verify_lib import (
     pid_alive,
     require_absolute,
     run_path,
+    run_lock,
+    save_json,
     save_run,
     terminate_recorded,
 )
@@ -89,9 +90,17 @@ def main() -> None:
     parser.add_argument("--evidence", type=Path)
     args = parser.parse_args()
     evidence = args.evidence or (Path(os.environ["EZERBOT_VERIFY_EVIDENCE_DIR"]) if os.environ.get("EZERBOT_VERIFY_EVIDENCE_DIR") else None)
-    if evidence is None or not run_path(evidence).is_file():
+    if evidence is None or not evidence.is_dir():
         print("cleanup: rien à arrêter")
         return
+    with run_lock(evidence):
+        if not run_path(evidence).is_file():
+            print("cleanup: rien à arrêter")
+            return
+        cleanup_run(evidence)
+
+
+def cleanup_run(evidence: Path) -> None:
     run = load_run(evidence)
     if run.get("cleaned"):
         print("cleanup: déjà fait")
@@ -107,6 +116,8 @@ def main() -> None:
     except SystemExit:
         browser = None
     axi_session = run["session"] if browser is not None and owns_axi_session(run, browser) else None
+    run["cleaning"] = True
+    save_run(evidence, run)
     results = {}
     for name in ("wrapper", "fake"):
         pid = int(run.get(f"{name}_pid") or 0)
@@ -119,19 +130,20 @@ def main() -> None:
             identity["pgid"] = identity.get("pgid") or pid
         results[name] = terminate_recorded(pid, identity) if pid else "absent"
     results["chrome"] = kill_chrome(browser)
+    results["axi"] = stop_run_axi_session(axi_session, run)
+    if results["axi"]["result"] in ("absent", "echec"):
+        save_json(evidence / "cleanup.json", {"cleaned": False, "killed": results})
+        raise SystemExit("cleanup: arrêt axi incomplet; réessayer le nettoyage")
     removed_home = False
-    try:
-        if verified_home.is_dir():
-            shutil.rmtree(verified_home)
-            removed_home = True
-        for name in ("wrapper.log", "chrome.log"):
-            log = verified_root / name
-            if log.is_file():
-                tail = log.read_text(errors="replace").splitlines()[-200:]
-                (evidence / name).write_text("\n".join(tail) + ("\n" if tail else ""))
-        shutil.rmtree(verified_root)
-    finally:
-        results["axi"] = stop_run_axi_session(axi_session, run)
+    if verified_home.is_dir():
+        shutil.rmtree(verified_home)
+        removed_home = True
+    for name in ("wrapper.log", "chrome.log"):
+        log = verified_root / name
+        if log.is_file():
+            tail = log.read_text(errors="replace").splitlines()[-200:]
+            (evidence / name).write_text("\n".join(tail) + ("\n" if tail else ""))
+    shutil.rmtree(verified_root)
     still = {
         name: pid_alive(int(run.get(f"{name}_pid") or 0)) and identity_matches(int(run.get(f"{name}_pid") or 0), run.get(f"{name}_identity"))
         for name in ("wrapper", "fake")
@@ -147,7 +159,7 @@ def main() -> None:
         "url": run.get("url"),
     }
     save_run(evidence, tombstone)
-    (evidence / "cleanup.json").write_text(json.dumps(tombstone, indent=2, ensure_ascii=False) + "\n")
+    save_json(evidence / "cleanup.json", tombstone)
     print("cleanup: ok")
 
 

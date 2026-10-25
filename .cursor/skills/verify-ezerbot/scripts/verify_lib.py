@@ -8,6 +8,7 @@ Grokbot application-support directory. Evidence stays outside the repo.
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import hmac
 import json
 import os
@@ -22,6 +23,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from contextlib import contextmanager
 
 MAC_REAL_HOME = "/Users/cstpierrecharles"
 MAC_APP_SUPPORT = "/Users/cstpierrecharles/Library/Application Support/Grokbot"
@@ -167,10 +169,29 @@ def load_run(evidence: Path) -> dict:
 
 
 def save_run(evidence: Path, record: dict) -> None:
-    path = run_path(evidence)
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(record, indent=2) + "\n")
-    temporary.replace(path)
+    save_json(run_path(evidence), record)
+
+
+def save_json(path: Path, record: dict) -> None:
+    descriptor, name = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    os.close(descriptor)
+    temporary = Path(name)
+    try:
+        temporary.write_text(json.dumps(record, indent=2) + "\n")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def run_lock(evidence: Path):
+    # Evidence survives cleanup, so every waiter keeps locking the same inode.
+    with (evidence / ".run.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def load_browser(run: dict) -> dict | None:

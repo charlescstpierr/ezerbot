@@ -40,6 +40,8 @@ from verify_lib import (
     repo_root,
     resolve_commit,
     save_run,
+    run_lock,
+    run_path,
     session_id,
     sha256_file,
     sign_run_directory,
@@ -124,6 +126,13 @@ def main() -> None:
     repo = repo_root()
     session = session_id()
     evidence = evidence_dir(session, str(args.evidence) if args.evidence else None)
+    with run_lock(evidence):
+        if run_path(evidence).exists():
+            raise SystemExit("refus: ce dossier de preuves contient déjà un run; choisir un dossier neuf")
+        launch_run(args, repo, session, evidence)
+
+
+def launch_run(args: argparse.Namespace, repo: Path, session: str, evidence: Path) -> None:
     if not compiled_sources_clean(repo):
         raise SystemExit(
             "refus: crates/, app/ui/, app/web/ ou Cargo.lock diffèrent du commit. "

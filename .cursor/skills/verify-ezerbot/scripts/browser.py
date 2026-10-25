@@ -37,6 +37,8 @@ from verify_lib import (
     proc_identity,
     require_absolute,
     run_session,
+    run_lock,
+    save_json,
     session_id,
 )
 
@@ -220,8 +222,7 @@ def browser_state_path(run: dict) -> Path:
 
 
 def save_browser(run: dict, state: dict) -> None:
-    path = browser_state_path(run)
-    path.write_text(json.dumps(state, indent=2) + "\n")
+    save_json(browser_state_path(run), state)
 
 
 def ensure_headless(run: dict) -> dict:
@@ -486,11 +487,20 @@ def main() -> None:
     evidence = args.evidence or (Path(os.environ["EZERBOT_VERIFY_EVIDENCE_DIR"]) if os.environ.get("EZERBOT_VERIFY_EVIDENCE_DIR") else None)
     if evidence is None:
         raise SystemExit("EZERBOT_VERIFY_EVIDENCE_DIR ou --evidence est requis")
-    run = load_run(evidence)
-    if browser_mode() == "chrome-headless":
-        run_headless(run, command)
-    else:
-        run_axi(run, command)
+    with run_lock(evidence):
+        run = load_run(evidence)
+        if run.get("cleaned") or run.get("cleaning"):
+            raise SystemExit("refus: le nettoyage de ce run a commencé")
+        root = assert_created_run_root(require_absolute(run.get("run_root"), "run_root"), run)
+        assert_created_home(require_absolute(run.get("home"), "HOME"), root)
+        mode = browser_mode()
+        state = load_browser(run)
+        if state is not None and state.get("mode") != mode:
+            raise SystemExit("refus: ce run utilise déjà un autre mode de navigateur")
+        if mode == "chrome-headless":
+            run_headless(run, command)
+        else:
+            run_axi(run, command)
 
 
 if __name__ == "__main__":

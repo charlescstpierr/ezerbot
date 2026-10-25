@@ -26,7 +26,7 @@ use grokbot_engine::{
 };
 use grokbot_forms::{
     approvals::args_digest,
-    redact::{redact, redact_value, Patterns},
+    redact::{app_patterns, redact, redact_value, Patterns},
 };
 use grokbot_memory::facts;
 use grokbot_skills::library;
@@ -2009,7 +2009,7 @@ fn context_checked(ctx: &Context<'_>, request: &ContextRequest) -> Result<Vec<Co
 }
 
 pub fn state(ctx: &Context<'_>) -> Value {
-    let Ok(vault) = super::engine::redaction_patterns(ctx.connection) else {
+    let Ok(vault) = app_patterns(&super::forms::vault_path(ctx)) else {
         return json!({"error":"Delegation state is unavailable"});
     };
     let mut counts = serde_json::Map::new();
@@ -2107,7 +2107,7 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         return None;
     }
     let edge = graph::get(ctx.connection, id).ok()??;
-    let vault = super::engine::redaction_patterns(ctx.connection).ok()?;
+    let vault = app_patterns(&super::forms::vault_path(ctx)).ok()?;
     let mut payload = vault.value(&card_edge(ctx.connection, &edge).ok()?).ok()?;
     attach_references(ctx.connection, &vault, &edge, &mut payload);
     if ctx.conversation_id != payload["parent_conversation_id"].as_str() {

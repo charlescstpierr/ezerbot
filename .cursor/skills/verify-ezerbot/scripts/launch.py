@@ -109,7 +109,7 @@ def allocate_run_root(evidence: Path) -> tuple[Path, Path, dict[str, str]]:
         assert_outside_repo(run_root, "répertoire jetable")
         assert_not_under(evidence, home, "preuves")
         assert_not_under(evidence, run_root, "preuves")
-        signature = sign_run_directory(run_root)
+        signature = sign_run_directory(run_root, session_id())
     except BaseException:
         shutil.rmtree(run_root, ignore_errors=True)
         raise

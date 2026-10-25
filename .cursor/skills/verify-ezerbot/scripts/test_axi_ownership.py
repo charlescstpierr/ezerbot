@@ -34,7 +34,7 @@ class AxiOwnershipTests(unittest.TestCase):
             "from pathlib import Path\n"
             "session = os.environ.get('CHROME_DEVTOOLS_AXI_SESSION')\n"
             "with open(os.environ['AXI_LOG'], 'a') as log:\n"
-            "    log.write(json.dumps({'session': session, 'args': sys.argv[1:]}) + '\\n')\n"
+            "    log.write(json.dumps({'session': session, 'home': os.environ.get('HOME'), 'args': sys.argv[1:]}) + '\\n')\n"
             "if sys.argv[1:] == ['stop']:\n"
             "    path = Path(os.environ['AXI_SESSIONS'])\n"
             "    sessions = json.loads(path.read_text())\n"
@@ -44,6 +44,7 @@ class AxiOwnershipTests(unittest.TestCase):
         self.fake.chmod(0o700)
         self.env = os.environ.copy()
         self.env.update({
+            "HOME": str(self.directory),
             "CHROME_DEVTOOLS_AXI_SESSION": "pm-i545",
             "EZERBOT_VERIFY_AXI": str(self.fake),
             "EZERBOT_VERIFY_BROWSER": "chrome-devtools-axi",
@@ -88,10 +89,10 @@ class AxiOwnershipTests(unittest.TestCase):
 
     def test_cleanup_uses_owned_session_after_environment_changes_and_is_idempotent(self) -> None:
         self.open_browser()
-        cleanup = self.cleanup(CHROME_DEVTOOLS_AXI_SESSION="pm-other")
+        cleanup = self.cleanup(CHROME_DEVTOOLS_AXI_SESSION="pm-other", HOME=str(self.directory / "foreign-home"))
         self.assertEqual(self.calls(), [
-            {"session": "pm-i545", "args": ["open", "http://127.0.0.1:45678"]},
-            {"session": "pm-i545", "args": ["stop"]},
+            {"session": "pm-i545", "home": self.env["HOME"], "args": ["open", "http://127.0.0.1:45678"]},
+            {"session": "pm-i545", "home": self.env["HOME"], "args": ["stop"]},
         ])
         self.assertEqual(json.loads(self.sessions.read_text()),
                          {"pm-i545": False, "verify-ezerbot": True, "pm-other": True})
@@ -108,7 +109,27 @@ class AxiOwnershipTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.calls(), [])
 
+    def test_browser_refuses_environment_home_changed_since_launch(self) -> None:
+        result = self.cli("browser.sh", "pages", HOME=str(self.directory / "foreign-home"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls(), [])
+
+    def test_changed_axi_home_does_not_authorize_foreign_stop(self) -> None:
+        self.open_browser()
+        self.record["axi_home"] = str(self.directory / "foreign-home")
+        self.write_run()
+        self.cleanup()
+        self.assert_no_stop()
+
     def test_cleanup_without_browser_use_does_not_stop_a_session(self) -> None:
+        self.cleanup()
+        self.assert_no_stop()
+
+    def test_browser_metadata_write_failure_does_not_call_axi(self) -> None:
+        (self.run_root / "browser.json").mkdir()
+        result = self.cli("browser.sh", "pages")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls(), [])
         self.cleanup()
         self.assert_no_stop()
 
@@ -180,6 +201,22 @@ class AxiOwnershipTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                 process.wait(timeout=5)
+
+    def test_headless_cleanup_stops_only_recorded_chrome_without_axi(self) -> None:
+        chrome = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            (self.run_root / "browser.json").write_text(json.dumps({
+                "mode": "chrome-headless", "session": "pm-i545", "started_by": "verify-ezerbot",
+                "chrome_pid": chrome.pid, "identity": proc_identity(chrome.pid), "pgid": chrome.pid,
+            }))
+            cleanup = self.cleanup()
+            chrome.wait(timeout=5)
+            self.assertEqual(cleanup["killed"]["chrome"], "arrete")
+            self.assert_no_stop()
+        finally:
+            if chrome.poll() is None:
+                chrome.kill()
+            chrome.wait(timeout=5)
 
 
 if __name__ == "__main__":

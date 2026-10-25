@@ -258,7 +258,9 @@ test("a ps slower than the bound makes the cleanup fail at the bound, is killed,
     if (inspector) await until(() => gone(inspector), "the slow ps must be killed at the bound", 2000);
   });
   const started = Date.now();
+  let cleanupFailure;
   await assert.rejects(close({ stopMs: 1000 }), (error) => {
+    cleanupFailure = error.message;
     assert.match(error.message, /directory .* kept|deletion is indeterminate/);
     assert.match(error.message, /ps|check|deadline|bound|timed out/);
     return true;
@@ -266,7 +268,7 @@ test("a ps slower than the bound makes the cleanup fail at the bound, is killed,
   const elapsed = Date.now() - started;
   assert.ok(elapsed < 4000, `the bound holds while ps is slow (${elapsed} ms)`);
   assert.ok(existsSync(root));
-  assert.ok(existsSync(marker), "the cleanup launched its slow process-table inspection");
+  assert.ok(existsSync(marker), `the cleanup launched its slow process-table inspection; ${cleanupFailure}`);
   inspector = Number(readFileSync(marker, "utf8"));
   assert.ok(Number.isSafeInteger(inspector) && inspector > 1);
   await until(() => gone(inspector), "the slow ps must be killed at the bound", 2000);

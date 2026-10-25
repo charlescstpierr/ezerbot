@@ -7,7 +7,7 @@ on:
     paths:
       - app/ui/wrapper-chrome-*.cjs
       - app/ui/chrome-binary*.cjs
-      - app/ui/fixture-lifetime.cjs
+      - app/ui/fixture-lifetime*.cjs
       - app/ui/fixture-process-owner*
       - app/ui/fixture-process-ownership.md
       - app/ui/local-api-client.cjs

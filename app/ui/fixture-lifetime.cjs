@@ -104,6 +104,7 @@ class OwnedProcess extends EventEmitter {
   #exited = false;
   #closed = false;
   #ended = new Set();
+  #notifications = [];
 
   constructor(kill) {
     super();
@@ -122,6 +123,17 @@ class OwnedProcess extends EventEmitter {
     return this.#kill();
   }
 
+  _publish() {
+    const pending = this.#notifications;
+    this.#notifications = null;
+    for (const [event, ...args] of pending) this.emit(event, ...args);
+  }
+
+  _notify(event, ...args) {
+    if (this.#notifications) this.#notifications.push([event, ...args]);
+    else this.emit(event, ...args);
+  }
+
   _data(stream, chunk) {
     if (!this.#closed && !this.#ended.has(stream)) this[stream].write(Buffer.from(chunk, "base64"));
   }
@@ -138,11 +150,11 @@ class OwnedProcess extends EventEmitter {
     this.#exited = true;
     this.exitCode = code;
     this.signalCode = signal;
-    this.emit("exit", code, signal);
+    this._notify("exit", code, signal);
     this._maybeClose();
   }
 
-  _error(message) { this.emit("error", new Error(message)); }
+  _error(message) { this._notify("error", new Error(message)); }
 
   _lost(message) {
     if (this.#closed) return;
@@ -155,7 +167,7 @@ class OwnedProcess extends EventEmitter {
   _maybeClose() {
     if (this.#closed || !this.#exited || this.#ended.size !== 2) return;
     this.#closed = true;
-    this.emit("close", this.exitCode, this.signalCode);
+    this._notify("close", this.exitCode, this.signalCode);
   }
 }
 
@@ -243,6 +255,8 @@ async function createFixtureOwner({ root, start = spawn }) {
         }
         owned.pid = message.pid;
         entry.resolve(owned);
+        // IPC can batch terminal messages before the caller's await has received the handle.
+        setImmediate(() => owned._publish());
       } else if (message.ok === true) entry.resolve(message.result);
       else entry.reject(new Error(typeof message.error === "string" ? message.error : "fixture owner request failed"));
       return;

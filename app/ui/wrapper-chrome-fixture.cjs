@@ -303,11 +303,18 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
     const port = await debuggingPort(chromeDir, chrome);
     const target = await pageTarget(port);
     cdp = await beforeDeadline(connectCdp(target.webSocketDebuggerUrl), Date.now() + 10000, "the devtools websocket did not open within 10 s");
+    const pageEvents = { domContentLoaded: 0, loaded: 0, runtimeExceptions: 0, failedResponses: 0 };
+    cdp.on("Page.domContentEventFired", () => { pageEvents.domContentLoaded++; });
+    cdp.on("Page.loadEventFired", () => { pageEvents.loaded++; });
+    cdp.on("Runtime.exceptionThrown", () => { pageEvents.runtimeExceptions++; });
+    cdp.on("Fetch.requestPaused", (event) => {
+      if (event.responseErrorReason || event.responseStatusCode >= 400) pageEvents.failedResponses++;
+    });
     const evaluate = async (expression) => {
       const result = await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
       if (result.exceptionDetails) {
         const exception = result.exceptionDetails.exception;
-        throw new Error(exception?.description || exception?.value || result.exceptionDetails.text);
+        throw new Error(`${exception?.description || exception?.value || result.exceptionDetails.text}; browser events ${JSON.stringify(pageEvents)}`);
       }
       return result.result.value;
     };

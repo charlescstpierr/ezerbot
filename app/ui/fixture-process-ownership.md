@@ -4,6 +4,8 @@
 
 The lifetime owns admission, all native supervisors, writer inspection, and one removal worker. Its root identity is the original device, inode, and canonical path. Closing admission is terminal. Repeated `close()` calls return the same promise. No caller supplies a PID as signal authority.
 
+`await owner.spawn()` publishes its process handle before delivering `error`, `exit`, or `close`. IPC may batch all of those messages with the launch acknowledgment. The client records terminal state immediately and queues lifecycle notifications until the caller can attach listeners. A process that has already ended cannot regain signal authority during that publication interval.
+
 ## Signal authority
 
 Each native supervisor creates its own session and forks an anchor. The anchor becomes the leader of a separate group and stays unreaped until the supervisor has sent its last group signal. The useful child joins that group before the supervisor releases its exec barrier. A dead but unreaped anchor still reserves its identifier. The supervisor never uses a group identifier after retiring that reservation.
@@ -38,4 +40,4 @@ The Chromium source basis is tag `155.0.8059.12`. The official distribution pin 
 - [Launch options](https://chromium.googlesource.com/chromium/src/+/refs/tags/155.0.8059.12/base/process/launch.h) and [Mac child launcher](https://chromium.googlesource.com/chromium/src/+/refs/tags/155.0.8059.12/content/browser/child_process_launcher_helper_mac.cc) preserve ordinary group membership.
 - [Linux zygote host](https://chromium.googlesource.com/chromium/src/+/refs/tags/155.0.8059.12/content/browser/zygote_host/zygote_host_impl_linux.cc) and [zygote fork path](https://chromium.googlesource.com/chromium/src/+/refs/tags/155.0.8059.12/content/zygote/zygote_linux.cc) retain the inherited group for this no-sandbox invocation.
 
-`fixture-process-owner.test.cjs` checks the native admission and reservation protocol. `wrapper-chrome-fixture.test.cjs` checks root lifetime, writer extinction, runner death, foreign witnesses, and bounds. Neither diagnostic PID mutation nor numeric-command injection is a demonstration of actual kernel PID reuse. `generated-dialogs.test.js` exercises the real wrapper and shell through authenticated HTTP and CDP.
+`fixture-process-owner.test.cjs` checks the native admission and reservation protocol. `fixture-lifetime-publication.test.cjs` delivers batched lifecycle messages through an in-memory transport and verifies that the caller observes them after acquiring the handle. `wrapper-chrome-fixture.test.cjs` checks root lifetime, writer extinction, runner death, foreign witnesses, and bounds. Neither diagnostic PID mutation nor numeric-command injection is a demonstration of actual kernel PID reuse. `generated-dialogs.test.js` exercises the real wrapper and shell through authenticated HTTP and CDP.

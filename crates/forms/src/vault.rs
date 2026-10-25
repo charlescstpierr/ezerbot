@@ -102,11 +102,19 @@ pub struct Vault {
     signature_notice: Option<&'static str>,
     /// Test double of an active keychain that refuses mutations. Production
     /// hosts leave this false; macOS uses `keychain` instead.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     refuse_keychain: bool,
 }
 #[cfg(target_os = "macos")]
 mod keychain;
+std::thread_local! {
+    static READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// Reads of a vault's contents on this thread, file or keychain alike: what a test counts to
+/// show that one rendering reads the vault once (#328).
+pub fn reads_on_this_thread() -> u64 {
+    READS.get()
+}
 // 0: explicit file-only library fixture; 1: host lacks a stable signer; 2: admitted.
 static OS_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -130,6 +138,12 @@ impl Vault {
     /// atomic. Recover a zero-length file left by an interrupted older initializer;
     /// refuse all other corrupt content. Missing data after open fails closed.
     pub fn open(path: &Path) -> Result<Self> {
+        let vault = Self::create(path)?;
+        vault.known_values()?;
+        Ok(vault)
+    }
+    /// `open` without its read of the secrets, which the caller does next and fails closed on.
+    fn create(path: &Path) -> Result<Self> {
         let path = std::env::current_dir()?.join(path);
         if path.file_name().is_none() {
             return Err(invalid("secret vault requires a file path"));
@@ -143,7 +157,7 @@ impl Vault {
             #[cfg(target_os = "macos")]
             keychain: None,
             signature_notice: None,
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, debug_assertions))]
             refuse_keychain: false,
         };
         let _file_guard = vault.lock_file(true)?;
@@ -160,7 +174,6 @@ impl Vault {
         if initialize {
             vault.write(&Secrets::new())?;
         }
-        vault.read()?;
         Ok(vault)
     }
     /// Application entry point. macOS release hosts prefer Keychain; development
@@ -168,24 +181,25 @@ impl Vault {
     /// The empty legacy file remains a recovery container. ChatGPT credentials
     /// are never opened by this code.
     pub fn open_app(path: &Path) -> Result<Self> {
-        let vault = Self::open(path)?;
+        Ok(Self::open_app_known(path)?.0)
+    }
+    /// `open_app` and what its one read found, keychain migration included: redaction masks with
+    /// it instead of reading the vault again (`redact::app_patterns`, #328).
+    pub(crate) fn open_app_known(path: &Path) -> Result<(Self, Vec<String>)> {
+        let vault = Self::create(path)?;
         #[cfg(target_os = "macos")]
         let mut vault = vault;
         #[cfg(target_os = "macos")]
         match OS_MODE.load(std::sync::atomic::Ordering::Relaxed) {
             1 => vault.signature_notice = Some(keychain::signature_notice(&vault.path)),
-            2 => {
-                if let Some(target) = keychain::Target::for_app() {
-                    return vault.with_keychain(target);
-                }
-            }
+            2 => vault.keychain = keychain::Target::for_app(),
             _ => (),
         }
-        Ok(vault)
+        let values = vault.known_values()?;
+        Ok((vault, values))
     }
-    /// Active keychain that refuses writes and deletions. Debug tests only:
-    /// nothing is stored in the plaintext file.
-    #[cfg(debug_assertions)]
+    /// Simulates keychain refusal without falling back to plaintext storage.
+    #[cfg(any(test, debug_assertions))]
     #[doc(hidden)]
     pub fn open_refusing_keychain(path: &Path) -> Result<Self> {
         let mut vault = Self::open(path)?;
@@ -214,7 +228,7 @@ impl Vault {
             #[cfg(target_os = "macos")]
             keychain: self.keychain.clone(),
             signature_notice: self.signature_notice,
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, debug_assertions))]
             refuse_keychain: self.refuse_keychain,
         }
     }
@@ -393,6 +407,7 @@ impl Vault {
     // Call only while holding this vault's VAULT_ACCESS entry and its companion-file lock. Parse
     // errors must not echo input: serde diagnostics can contain secret strings.
     fn read(&self) -> Result<Secrets> {
+        READS.set(READS.get() + 1);
         #[cfg(target_os = "macos")]
         if let Some(target) = &self.keychain {
             return keychain::snapshot(self, target);
@@ -425,7 +440,7 @@ impl Vault {
         self.persist(&secrets, &key)
     }
     fn persist(&self, secrets: &Secrets, key: &str) -> Result<()> {
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         if self.refuse_keychain {
             let mut file = self.read_file()?;
             commit_keychain_secret(&mut file, key, secrets.get(key).unwrap(), false)?;
@@ -436,7 +451,7 @@ impl Vault {
         if let Some(target) = &self.keychain {
             return keychain::set(self, target, key, secrets.get(key).unwrap());
         }
-        #[cfg(not(any(debug_assertions, target_os = "macos")))]
+        #[cfg(not(any(test, debug_assertions, target_os = "macos")))]
         let _ = key;
         self.write(secrets)
     }
@@ -446,7 +461,7 @@ impl Vault {
     fn remove_exact(&self, key: &str) -> Result<()> {
         let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         if self.refuse_keychain {
             return Err(invalid(
                 "Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez.",
@@ -550,7 +565,7 @@ impl Vault {
 
 /// Record a verified keychain write by dropping the plaintext copy. A refusal
 /// leaves the file untouched and returns an error: no plaintext fallback.
-#[cfg(any(debug_assertions, target_os = "macos"))]
+#[cfg(any(test, debug_assertions, target_os = "macos"))]
 fn commit_keychain_secret(
     file: &mut Secrets,
     name: &str,

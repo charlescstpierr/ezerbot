@@ -934,6 +934,8 @@ fn execute_journaled_external(
     enum Admission {
         Run,
         Result(ToolCode, ToolOutcome),
+        /// Already settled before a restart: not run now, so no duration.
+        Recovered(ToolCode, ToolOutcome),
         Wait(RunProgress),
     }
     let specs = tool_specs(services, &store::required(conn, run_id)?);
@@ -953,7 +955,7 @@ fn execute_journaled_external(
             return Ok(match outcome {
                 Some(value) => {
                     let outcome: ToolOutcome = serde_json::from_str(&value)?;
-                    Admission::Result(ToolCode::of(&outcome), outcome)
+                    Admission::Recovered(ToolCode::of(&outcome), outcome)
                 }
                 None => Admission::Result(ToolCode::Uncertain, ToolOutcome::Failed { reason: "Résultat inconnu après interruption. Action non relancée ; vérifiez son effet avant de réessayer.".into() }),
             });
@@ -1029,9 +1031,10 @@ fn execute_journaled_external(
         )?;
         Ok(Admission::Run)
     })?;
-    let (code, outcome) = match admission {
+    let (code, outcome, clock) = match admission {
         Admission::Wait(progress) => return Ok(Some(progress)),
-        Admission::Result(code, outcome) => (code, outcome),
+        Admission::Result(code, outcome) => (code, outcome, Some(clock)),
+        Admission::Recovered(code, outcome) => (code, outcome, None),
         Admission::Run => {
             let run = store::required(conn, run_id)?;
             if services.is_cancelled(run_id)
@@ -1047,7 +1050,7 @@ fn execute_journaled_external(
                 return Ok(None);
             }
             let outcome = services.call_journaled_external_tool(&run, call);
-            (ToolCode::of(&outcome), outcome)
+            (ToolCode::of(&outcome), outcome, Some(clock))
         }
     };
     commit(conn, services, run_id, |conn, _| {
@@ -1076,7 +1079,7 @@ fn execute_journaled_external(
             usage.tool_calls += 1;
             store::save_budget_usage(conn, run_id, &usage)?;
         }
-        let mut payload = tool_result(&call.call_id, &outcome, code, Some(clock));
+        let mut payload = tool_result(&call.call_id, &outcome, code, clock);
         if let Some(by) = by {
             payload["authorized_by"] = serde_json::from_str(&by)?;
         }
@@ -1163,7 +1166,11 @@ fn execute(
         store::save_budget_usage(conn, run_id, &usage)?;
         let (code, outcome) = if !valid_arguments {
             (
-                ToolCode::InvalidArguments,
+                if spec.is_some() {
+                    ToolCode::InvalidArguments
+                } else {
+                    ToolCode::UnknownTool
+                },
                 ToolOutcome::Failed {
                     reason: if call.name.starts_with("mcp_") {
                         "Arguments MCP invalides : un objet JSON est requis.".into()

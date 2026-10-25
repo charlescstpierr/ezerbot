@@ -114,7 +114,8 @@ fn safe_name(name: &str, code: ToolCode) -> String {
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'));
-    if plain && code != ToolCode::UnknownTool {
+    // Un appel jamais validé (inconnu ou réglé sans exécution) peut porter n'importe quel nom.
+    if plain && !matches!(code, ToolCode::UnknownTool | ToolCode::NotExecuted) {
         name.to_owned()
     } else {
         "-".into()
@@ -361,6 +362,7 @@ mod tests {
         assert_eq!(safe_name("é", ToolCode::Ok), "-");
         assert_eq!(safe_name(&"a".repeat(65), ToolCode::Ok), "-");
         assert_eq!(safe_name("a", ToolCode::UnknownTool), "-");
+        assert_eq!(safe_name("a", ToolCode::NotExecuted), "-");
         assert_eq!(safe_name("", ToolCode::Ok), "-");
     }
 }

@@ -299,6 +299,34 @@ fn a_failed_tool_and_a_denied_approval_appear_with_their_code() {
 }
 
 #[test]
+fn a_turn_stopped_while_it_waits_for_an_approval_is_logged() {
+    let mut f = Fixture::new();
+    f.local_shell();
+    f.post("/api/yolo/mode", json!({"mode":"ask"}));
+    f.turn(
+        "attente",
+        "Lance une commande",
+        &[("cmd", "run_shell", f.shell("echo attente"))],
+        json!({"input_tokens":10,"output_tokens":1}),
+    );
+    let run = f.run_id("attente");
+    wait("carte d'approbation", || {
+        grokbot_forms::requests::list_for_run(&f.db(), &run)
+            .map(|cards| !cards.is_empty())
+            .unwrap_or(false)
+    });
+    let chat = f.chat.clone();
+    f.post(
+        "/api/stop",
+        json!({"conversation_id":chat,"message_id":"attente"}),
+    );
+    let turn = f.logged("attente");
+    assert_eq!(turn["status"], "cancelled");
+    assert_eq!(turn["tools"][0]["code"], "not_executed");
+    assert_eq!(turn["tools"][0]["result"], "annulé");
+}
+
+#[test]
 fn the_log_keeps_no_message_argument_output_reason_secret_or_token() {
     let mut f = Fixture::new();
     f.local_shell();
@@ -323,6 +351,11 @@ fn the_log_keeps_no_message_argument_output_reason_secret_or_token() {
                 &format!("outil_{}", TRAPS[6]),
                 json!({"x":TRAPS[1]}),
             ),
+            (
+                "texte",
+                &format!("autre_{}", TRAPS[6]),
+                json!("pas un objet"),
+            ),
         ],
         json!({"input_tokens":10,"output_tokens":1}),
     );
@@ -333,9 +366,11 @@ fn the_log_keeps_no_message_argument_output_reason_secret_or_token() {
         "le moteur voit bien la sortie et la raison pièges : {outcomes}"
     );
     let turn = f.logged("pieges");
-    assert_eq!(turn["tools"].as_array().unwrap().len(), 3);
-    assert_eq!(turn["tools"][2]["name"], "-");
-    assert_eq!(turn["tools"][2]["code"], "unknown_tool");
+    assert_eq!(turn["tools"].as_array().unwrap().len(), 4);
+    for unknown in [2, 3] {
+        assert_eq!(turn["tools"][unknown]["name"], "-");
+        assert_eq!(turn["tools"][unknown]["code"], "unknown_tool");
+    }
     let day: String = f
         .db()
         .query_row(

@@ -1121,6 +1121,8 @@ pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Res
     ctx.provider.cancel_run(&run.run_id);
     let mut services = Services::new(ctx)?;
     run_loop::cancel(ctx.connection, &mut services, &run.run_id, end)?;
+    // Un tour suspendu n'a plus de worker pour l'écrire au journal.
+    let _ = super::turns::record(ctx.connection, &run.run_id);
     Ok(())
 }
 pub fn tick(ctx: &super::Context<'_>) {

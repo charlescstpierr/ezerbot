@@ -331,8 +331,8 @@ fn documents_and_images_from_before_the_migration_are_found_without_error() {
     f.image(&chat, "i1", "un vieux phare");
     let before = f.list("");
     assert_eq!(before.len(), 2);
-    // Un document récent dont plus aucune run ne se souvient : origine inconnue (au-delà de 24 h, le démarrage nettoie un tel orphelin).
-    f.db().execute("INSERT INTO attachments_generated VALUES ('generated_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',?1,x'00','<svg/>',?2)", rusqlite::params![json!({"id":"generated_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"Orphelin.pdf","format":"pdf","byte_length":1,"pages":1,"preview_url":"/api/generated/generated_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/preview"}).to_string(), now()]).unwrap();
+    // Un ancien document dont plus aucune run ne se souvient : origine inconnue.
+    f.db().execute("INSERT INTO attachments_generated VALUES ('generated_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',?1,x'00','<svg/>',?2)", rusqlite::params![json!({"id":"generated_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"Orphelin.pdf","format":"pdf","byte_length":1,"pages":1,"preview_url":"/api/generated/generated_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/preview"}).to_string(), 5]).unwrap();
     f.before_the_migration();
     let after = f.list("");
     assert_eq!(after.len(), 3, "{after:?}");
@@ -364,21 +364,60 @@ fn documents_and_images_from_before_the_migration_are_found_without_error() {
 }
 
 #[test]
-fn an_unknown_origin_document_stays_cleanable_by_the_storage_screen() {
+fn an_old_document_without_history_survives_the_startup_cleanup_and_opens() {
     let mut f = Fixture::new();
-    f.db().execute("INSERT INTO attachments_generated VALUES ('generated_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',?1,x'00','<svg/>',?2)", rusqlite::params![json!({"id":"generated_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","name":"Vieux.pdf","format":"pdf","byte_length":1,"pages":1,"preview_url":"/api/generated/generated_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/preview"}).to_string(), now()]).unwrap();
+    f.db().execute("INSERT INTO attachments_generated VALUES ('generated_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',?1,x'00','<svg/>',?2)", rusqlite::params![json!({"id":"generated_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","name":"Vieux.pdf","format":"pdf","byte_length":1,"pages":1,"preview_url":"/api/generated/generated_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/preview"}).to_string(), 5]).unwrap();
     f.reopen_without_marker();
+    let items = f.list("");
+    assert_eq!(items.len(), 1, "le nettoyage du démarrage l’a emporté");
+    assert!(items[0]["bot_id"].is_null());
+    f.opens(&items[0]);
+    f.reopen();
     assert_eq!(f.list("").len(), 1);
-    let plan = f.post("/api/storage/preview", json!({}));
-    assert_eq!(plan["count"], 1, "{plan}");
-    f.post(
-        "/api/storage/clean",
-        json!({"token":plan["token"],"confirm":true}),
+}
+
+#[test]
+fn a_page_from_before_the_migration_gets_the_card_of_its_last_write_back() {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.page(&chat, "p1", "bilan.page.tsx", "Bilan");
+    f.page(&chat, "p2", "bilan.page.tsx", "Bilan");
+    let before = f.list("type=page");
+    let card = before[0]["entry_id"].as_str().unwrap().to_owned();
+    assert!(card.starts_with(&f.run("p2").run_id), "{card}");
+    f.db()
+        .execute("UPDATE bot_pages SET entry_id=NULL", [])
+        .unwrap();
+    f.reopen_without_marker();
+    let after = f.list("type=page");
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0]["entry_id"], card.as_str());
+}
+
+#[test]
+fn a_page_never_announces_the_card_of_another_conversation() {
+    let mut f = Fixture::new();
+    let c1 = f.chat("alpha");
+    let c2 = f.chat("alpha");
+    f.page(&c1, "p1", "bilan.page.tsx", "Bilan");
+    f.call(
+        &c2,
+        "p2",
+        "write_page",
+        json!({"name":"bilan.page.tsx","title":"Bilan","source":BROKEN_PAGE}),
     );
-    assert!(
-        f.list("").is_empty(),
-        "plus de lien vers un fichier supprimé"
-    );
+    let id = f
+        .db()
+        .query_row("SELECT id FROM bot_pages", [], |r| r.get::<_, String>(0))
+        .unwrap();
+    f.post("/api/pages/revert", json!({"id": id}));
+    let items = f.list("type=page");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["conversation_id"], c2.as_str());
+    if let Some(card) = items[0]["entry_id"].as_str() {
+        let known: bool = f.db().query_row("SELECT EXISTS(SELECT 1 FROM wrapper_messages WHERE conversation_id=?1 AND message_id=?2)", [&c2, card], |r| r.get(0)).unwrap();
+        assert!(known, "carte {card} absente de la conversation {c2}");
+    }
 }
 
 impl Fixture {

@@ -108,19 +108,18 @@ pub fn app_patterns(path: &Path) -> Result<Patterns> {
     let (vault, values) = Vault::open_app_known(path)?;
     let mut patterns = patterns_of(values)?;
     HELD.with_borrow_mut(|held| {
-        let Some(kept) = held else {
-            return;
-        };
-        match kept.iter_mut().find(|read| read.vault.same_store(&vault)) {
-            Some(read) => {
-                read.opened_as.push(path.to_owned());
-                patterns = read.patterns.clone();
-            }
-            None => kept.push(Held {
+        if let Some(read) = held
+            .as_mut()
+            .and_then(|kept| kept.iter_mut().find(|read| read.vault.same_store(&vault)))
+        {
+            read.opened_as.push(path.to_owned());
+            patterns = read.patterns.clone();
+        } else if let Some(kept) = held {
+            kept.push(Held {
                 vault,
                 patterns: patterns.clone(),
                 opened_as: vec![path.to_owned()],
-            }),
+            });
         }
     });
     Ok(Patterns(patterns))

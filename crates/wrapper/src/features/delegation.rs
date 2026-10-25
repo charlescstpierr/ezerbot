@@ -1209,23 +1209,16 @@ fn model_status(status: &DelegationStatus, limit: usize) -> Value {
     }
     value
 }
-/// The card gets each reference that still exists in the task thread, with its
-/// thumbnail route. Added after the vault masking: ids and routes are generated
-/// by the host, never a secret, and masking them would break the thumbnails.
-fn attach_references(
-    conn: &Connection,
-    vault: &Patterns,
-    edge: &Delegation,
-    edge_json: &mut Value,
-) {
+/// `screen::exists_in_thread` for every capture of the card in one query, in a live thread.
+/// Looked up before the vault read that masks the captions, as main did per caption (#328).
+fn live_captures(conn: &Connection, edge: &Delegation) -> HashSet<String> {
     let (DelegationStatus::Done { captures, .. }, Some(conversation)) =
         (&edge.status, &edge.conversation_id)
     else {
-        return;
+        return HashSet::new();
     };
-    // `screen::exists_in_thread` for every capture at once, in a live thread (#328).
     let ids: Vec<_> = captures.iter().map(|c| &c.id).collect();
-    let live: HashSet<String> = conn
+    conn
         .prepare_cached(
             "SELECT p.value FROM json_each(?1) p
             WHERE EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id=?2 AND id=?3 AND deleted=0)
@@ -1236,19 +1229,29 @@ fn attach_references(
             let ids = json!(ids).to_string();
             found.query_map(params![ids, ACCOUNT, conversation], |r| r.get(0))?.collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+/// The card gets each reference that still exists in the task thread, with its
+/// thumbnail route. Added after the vault masking: ids and routes are generated
+/// by the host, never a secret, and masking them would break the thumbnails.
+fn attach_references(live: &HashSet<String>, mask: &Patterns, edge: &Delegation, card: &mut Value) {
+    let (DelegationStatus::Done { captures, .. }, Some(conversation)) =
+        (&edge.status, &edge.conversation_id)
+    else {
+        return;
+    };
     let shown: Vec<Value> = captures
         .iter()
         .filter(|c| live.contains(&c.id))
         .filter_map(|c| {
             Some(
-                json!({"id":c.id,"label":c.label,"caption":vault.text(&c.caption).ok()?,
+                json!({"id":c.id,"label":c.label,"caption":mask.text(&c.caption).ok()?,
                 "url":capture_url(conversation,&c.id)}),
             )
         })
         .collect();
     if !shown.is_empty() {
-        edge_json["status"]["captures"] = shown.into();
+        card["status"]["captures"] = shown.into();
     }
 }
 /// A screen capture has its conversation-filtered thumbnail route; an attached
@@ -2012,7 +2015,10 @@ pub fn state(ctx: &Context<'_>) -> Value {
     let cards: Vec<_> = state_edges(ctx.connection)
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|edge| Some((card_edge(ctx.connection, &edge).ok()?, edge)))
+        .filter_map(|edge| {
+            let card = card_edge(ctx.connection, &edge).ok()?;
+            Some((card, live_captures(ctx.connection, &edge), edge))
+        })
         .collect();
     // Read once all the cards are loaded: never older than the read per card it replaces (#328).
     let Ok(vault) = app_patterns(&super::forms::vault_path(ctx)) else {
@@ -2021,9 +2027,9 @@ pub fn state(ctx: &Context<'_>) -> Value {
     let mut counts = serde_json::Map::new();
     let delegations: Vec<_> = cards
         .into_iter()
-        .filter_map(|(card, edge)| {
+        .filter_map(|(card, live, edge)| {
             let mut value = vault.value(&card).ok()?;
-            attach_references(ctx.connection, &vault, &edge, &mut value);
+            attach_references(&live, &vault, &edge, &mut value);
             if matches!(
                 edge.status,
                 DelegationStatus::Queued | DelegationStatus::Running
@@ -2113,9 +2119,10 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
     }
     let edge = graph::get(ctx.connection, id).ok()??;
     let card = card_edge(ctx.connection, &edge).ok()?;
+    let live = live_captures(ctx.connection, &edge);
     let vault = app_patterns(&super::forms::vault_path(ctx)).ok()?;
     let mut payload = vault.value(&card).ok()?;
-    attach_references(ctx.connection, &vault, &edge, &mut payload);
+    attach_references(&live, &vault, &edge, &mut payload);
     if ctx.conversation_id != payload["parent_conversation_id"].as_str() {
         return None;
     }

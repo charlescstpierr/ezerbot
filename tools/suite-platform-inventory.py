@@ -135,7 +135,7 @@ def source_inventory(path, source, inherited=None):
                     continue
                 names = [name for begin, finish, name in modules if begin < index < finish]
                 external.append((names + [values[index + 1]], state(index)))
-    result = {key: [] for key in ("absent", "partial", "runtime_branches", "ignored")}
+    result = {key: [] for key in ("absent", "partial", "runtime_branches", "ignored", "linux_present")}
     for _, attribute, target, _ in attributes:
         head = attribute[:attribute.index("(")] if "(" in attribute else attribute
         if head[-1:] == ["test"] and head != ["test"]:
@@ -150,13 +150,15 @@ def source_inventory(path, source, inherited=None):
         end = pairs[opening]
         name = "::".join([name for begin, finish, name in modules if begin < target < finish] + [values[target + 1]])
         identity = path + "::" + name
+        if state(target)[0]:
+            result["linux_present"].append(identity)
         absent = state(target) == (False, True)
         partial = state(target) == (True, True) and any(target < begin < end and state(begin) == (False, True) for begin, _, _, _ in spans)
         if absent:
             result["absent"].append(identity)
         elif partial:
             result["partial"].append(identity)
-        if not absent:
+        if state(target) == (True, True):
             for index in range(opening + 1, end - 2):
                 if values[index:index + 3] == ["cfg", "!", "("]:
                     expression = values[index + 3:pairs[index + 2]]
@@ -185,12 +187,10 @@ def inventory(ref="HEAD"):
         children = []
         for names, child_gate in external:
             file = PurePosixPath(path)
-            base = file.parent if file.stem in ("lib", "main", "mod") or file.parent.name == "tests" and gate is None else file.with_suffix("")
+            root = gate is None and (file.stem in ("lib", "main") or file.parent.name == "tests")
+            base = file.parent if file.stem == "mod" or root else file.with_suffix("")
             module = base.joinpath(*names)
             candidates = [str(module.with_suffix(".rs")), str(module / "mod.rs")]
-            if file.parent.name == "tests" and gate is None and file.stem != "mod":
-                nested = file.with_suffix("").joinpath(*names)
-                candidates.extend((str(nested.with_suffix(".rs")), str(nested / "mod.rs")))
             found = [candidate for candidate in candidates if candidate in sources]
             if not found and child_gate == (True, True):
                 continue
@@ -200,20 +200,29 @@ def inventory(ref="HEAD"):
         return report, children
     initial = {path: read(path) for path in sources}
     descendants = {child for _, children in initial.values() for child, _ in children}
-    pending = [(path, None) for path in sources if path not in descendants]
+    modules = set()
+    while shared := {path for path in descendants - modules if PurePosixPath(path).parent.name == "tests"}:
+        for path in shared:
+            modules.add(path)
+            _, children = read(path, (True, True))
+            descendants.update(child for child, _ in children)
+    pending = [(path, None) for path in sources if path not in descendants or PurePosixPath(path).parent.name == "tests"]
     while pending:
         path, gate = pending.pop()
-        previous = inherited.get(path, (False, False))
+        context = path, gate is None
+        previous = inherited.get(context, (False, False))
         combined = tuple(before or after for before, after in zip(previous, gate or (True, True)))
-        if path in inherited and previous == combined:
+        if context in inherited and previous == combined:
             continue
-        inherited[path] = combined
-        reports[path], children = read(path, None if gate is None else combined)
+        inherited[context] = combined
+        reports[context], children = read(path, None if gate is None else combined)
         pending.extend(children)
-    if descendants - inherited.keys():
+    if descendants - {path for path, _ in inherited}:
         raise ValueError("unreachable platform module graph")
     keys = ("absent", "partial", "runtime_branches", "ignored")
-    return {key: sorted({entry for report in reports.values() for entry in report.get(key, [])}) for key in keys}
+    result = {key: {entry for report in reports.values() for entry in report.get(key, [])} for key in keys}
+    result["absent"] -= {entry for report in reports.values() for entry in report.get("linux_present", [])}
+    return {key: sorted(entries) for key, entries in result.items()}
 
 
 if __name__ == "__main__":

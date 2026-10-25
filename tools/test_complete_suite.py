@@ -157,6 +157,14 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
                         return "\n".join(sources) if command[1] == "ls-tree" else sources[command[-1].split(":", 1)[1]]
                     with patch.object(module.subprocess, "check_output", side_effect=read):
                         self.assertEqual(len(module.inventory()["absent"]), expected)
+        sources = {
+            "crates/sample/tests/entry.rs": '#[cfg(target_os="macos")] mod support;',
+            "crates/sample/tests/support.rs": "mod child; #[test] fn shared() {}",
+            "crates/sample/tests/child.rs": "#[test] fn root_child() {}",
+            "crates/sample/tests/support/child.rs": "#[test] fn module_child() {}",
+        }
+        with patch.object(module.subprocess, "check_output", side_effect=read):
+            self.assertEqual(module.inventory()["absent"], ["crates/sample/tests/support/child.rs::module_child"])
 
 
 if __name__ == "__main__":

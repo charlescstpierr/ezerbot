@@ -35,6 +35,8 @@ jobs:
         run: rustup show active-toolchain
       - name: Vérifier le producteur du rapport
         run: python3 -m unittest discover -s tools -p test_complete_suite.py
+      - name: Libérer les SDK inutilisés de la VM éphémère
+        run: sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |

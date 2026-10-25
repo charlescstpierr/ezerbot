@@ -15,6 +15,10 @@ cherchent le binaire dans `target/debug`, ce qui impose `CARGO_TARGET_DIR=target
 Le runner limite Cargo à trois tâches, désactive sccache et refuse une compilation
 avec moins de 20 Gio libres. Une nouvelle exécution attend alors de disposer
 d'assez de disque.
+Les runners standard ne garantissent que
+[14 Go de stockage](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+Le workflow enlève les SDK Android, .NET et Haskell inutilisés de sa VM éphémère
+avant de restaurer le cache. Il ne touche pas les outils de la box partagée.
 
 Le runner Python exécute, dans cet ordre, les commandes suivantes. Il poursuit
 les phases de tests après un échec et ne relance aucun test.

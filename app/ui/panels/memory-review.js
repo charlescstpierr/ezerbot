@@ -33,20 +33,21 @@
       const list = node("ul", "memory-review-list");
       list.setAttribute("aria-label", "Souvenirs à revoir");
       for (const fact of rows) {
-        const item = node("li", "memory-review-item"), meta = node("div", "memory-space-meta");
+        const item = node("li", "memory-review-item"), meta = node("div", "memory-space-meta"), text = node("div", "memory-review-body");
         item.dataset.reviewId = fact.fact_id;
-        meta.append(node("span", "memory-space-chip", label.bot(fact)), node("span", "memory-space-chip", label.scope(fact)));
+        meta.append(node("span", "memory-review-reason", reason(fact, label.date)), node("span", "memory-space-chip", label.bot(fact)), node("span", "memory-space-chip", label.scope(fact)));
+        text.append(node("p", "memory-review-text", String(fact.text ?? "")), meta);
         const actions = node("div", "memory-review-actions");
         actions.append(node("span", "memory-review-ask", "Encore vrai ?"), button("Oui", "primary-button", () => confirm(fact), "Oui, ce souvenir est encore vrai"));
         if (detail && fact.scope !== "topic") actions.append(button("Modifier", "secondary-button", () => detail.open(fact.fact_id, "edit")));
         if (detail) actions.append(button("Oublier…", "secondary-button", () => detail.open(fact.fact_id, "confirm")));
-        item.append(node("p", "memory-review-text", String(fact.text ?? "")), node("p", "memory-review-reason", reason(fact, label.date)), meta, actions);
+        item.append(text, actions);
         list.append(item);
       }
       const status = node("p", "memory-review-note", note), alert = node("p", "memory-review-error", problem);
       status.setAttribute("role", "status");
       alert.setAttribute("role", "alert");
-      root.replaceChildren(title, ...(rows.length ? [node("p", "memory-review-help", "Ces souvenirs n’ont pas été confirmés depuis un moment."), list] : []), status, alert);
+      root.replaceChildren(title, ...(rows.length ? [list] : []), status, alert);
       root.hidden = !rows.length && !note && !problem;
       if (held && !root.contains(document.activeElement) && !root.hidden) title.focus(); // la ligne focalisée a disparu : le focus ne se perd pas
     }

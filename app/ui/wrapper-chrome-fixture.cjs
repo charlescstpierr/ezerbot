@@ -193,7 +193,7 @@ function watchChild(name, child, details = () => "") {
 // A detached child outlives a runner that dies, so the guard (see `startGuard`) must know the group
 // before the command runs. The child starts as /bin/sh, which waits for one line on fd 3 and only
 // then execs the command, keeping its pid and group. `register(pid)` runs in between and may return
-// a promise; the line is written once it settles. If the runner dies before that, sh reads the end
+// a promise. If the runner dies before release, sh reads the end
 // of the pipe and exits without running anything, so there is no window where an unregistered
 // command runs.
 const HOLD = 'IFS= read -r go <&3 && [ "$go" = go ] || exit 1; exec "$0" "$@" 3<&-';
@@ -206,7 +206,7 @@ function spawnGroup(command, args, options = {}, register = () => {}, start = sp
   const hold = child.stdio[3];
   hold?.on("error", () => {});
   const go = () => hold?.end("go\n");
-  if (child.pid) Promise.resolve().then(() => register(child.pid)).then(go, go);
+  if (child.pid) Promise.resolve().then(() => register(child.pid)).then(go, () => hold?.end());
   else go();
   return child;
 }
@@ -389,7 +389,7 @@ function startGuard(root) {
   guard.on("error", () => {});
   guard.stdin.write(`root ${root}\n`);
   return {
-    register(name, pid) { return new Promise((resolve) => guard.stdin.write(`group ${name} ${pid}\n`, () => resolve())); },
+    register(name, pid) { return new Promise((resolve, reject) => guard.stdin.write(`group ${name} ${pid}\n`, (error) => error ? reject(error) : resolve())); },
     release() { guard.stdin.end("done\n"); },
   };
 }

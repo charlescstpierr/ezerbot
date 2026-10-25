@@ -5,8 +5,7 @@
 // macOS that prefers the pinned chrome-headless-shell the repository installs itself
 // (`node tools/install-chrome-headless-shell.cjs`, #438): full Chrome sometimes freezes right
 // after it starts there, the shell has no NSApplication and never does. The tests that drive
-// Chrome over the debugging port keep the full browser. The wrapper fixture separately
-// requires pinnedFixtureShell(), including its installation receipt and executable digest.
+// Chrome over the debugging port keep the full browser.
 const { spawnSync } = require("node:child_process");
 const { createHash } = require("node:crypto");
 const { accessSync, constants, existsSync, lstatSync, readFileSync } = require("node:fs");
@@ -62,7 +61,7 @@ function shellVersion(binary) {
   return version;
 }
 
-// The wrapper fixture requires this exact verified shell, regardless of CHROME_BIN.
+// Strict selection never substitutes CHROME_BIN for the verified artifact.
 function pinnedFixtureShell(options = {}) {
   try {
     const platform = shellPlatform(options.platform, options.arch);

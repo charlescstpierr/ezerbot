@@ -258,7 +258,12 @@ test("a group that only holds a zombie counts as gone", async (t) => {
   const zombie = Number(await lineWithin(parent));
   const row = () => execFileSync("ps", ["-o", "pgid=,stat=", "-p", String(zombie)], { encoding: "utf8", timeout: 5000 }).trim().split(/\s+/);
   await until(() => row()[1]?.startsWith("Z"), "the child never became a zombie");
-  assert.throws(() => process.kill(-zombie, 0), { code: "EPERM" }, "the zombie still holds its group");
+  assert.equal(Number(row()[0]), zombie, "the unreaped child still owns its group");
+  try {
+    assert.equal(process.kill(-zombie, 0), true, "signal 0 still finds the zombie group");
+  } catch (error) {
+    assert.equal(error.code, "EPERM", "only permission denial also establishes that the group exists");
+  }
   await cleanUpFixture({ root, groups: [{ name: "zombie", pid: zombie }], stopMs: 3000 });
   assert.ok(!existsSync(root));
 });
@@ -334,4 +339,34 @@ test("the wait for a page target holds its bound when the debugging port never a
   const started = Date.now();
   await assert.rejects(beforeDeadline(pageTarget(server.address().port, 300), Date.now() + 5000, "pageTarget outlived its bound"), /^Error: chrome did not open a page target$/);
   assert.ok(Date.now() - started < 3000);
+});
+
+
+test("a rejected guard registration never releases a useful child", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
+  const child = spawnGroup(process.execPath, ["-e", "console.log('unexpected launch')"], {
+    stdio: ["ignore", "pipe", "ignore"],
+  }, () => Promise.reject(Object.assign(new Error("registration failed"), { code: "EPIPE" })));
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  const closed = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => resolve(code));
+  });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await beforeDeadline(closed, Date.now() + 3000, "owned launcher did not exit during teardown");
+    await cleanUpFixture({ root, groups: [] });
+  });
+  assert.equal(await beforeDeadline(closed, Date.now() + 3000, "unregistered launcher did not exit"), 1);
+  assert.equal(output, "", "the held command never executes after rejected registration");
+});
+
+
+test("registering on a closed guard rejects its failed write", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
+  t.after(() => cleanUpFixture({ root, groups: [] }));
+  const guard = startGuard(root);
+  guard.release();
+  await assert.rejects(guard.register("closed", process.pid), { code: "ERR_STREAM_WRITE_AFTER_END" });
 });

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Installe la version ÉPINGLÉE de chrome-headless-shell (Chrome for Testing) que les tests UI
-// wrapper utilisent sur macOS et Linux x86_64, et --dump-dom sur macOS (#438). Si le binaire est
+// de faisabilité utilisent sur macOS et Linux x86_64, et --dump-dom sur macOS (#438). Si le binaire est
 // déjà là et que son empreinte correspond, rien n'est téléchargé. Le zip est vérifié par son
 // SHA-256 (tools/chrome-headless-shell-pin.json) avant d'être extrait ; un zip qui ne
 // correspond pas n'est jamais installé.

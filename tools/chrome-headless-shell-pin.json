@@ -1,5 +1,5 @@
 {
-  "comment": "Version exacte de chrome-headless-shell (Chrome for Testing) pour la fixture wrapper sur macOS et Linux x86_64, et pour --dump-dom sur macOS. Pour changer de version : vérifier les archives officielles, mettre à jour version et les sha256, puis relancer node tools/install-chrome-headless-shell.cjs.",
+  "comment": "Version exacte de chrome-headless-shell (Chrome for Testing) pour la sonde de faisabilité wrapper sur macOS et Linux x86_64, et pour --dump-dom sur macOS. Pour changer de version : vérifier les archives officielles, mettre à jour version et les sha256, puis relancer node tools/install-chrome-headless-shell.cjs.",
   "version": "155.0.8059.12",
   "urlBase": "https://storage.googleapis.com/chrome-for-testing-public",
   "platforms": {

@@ -130,25 +130,22 @@ fn roots(conn: &Connection) -> Result<HashSet<String>, ApiError> {
                 | "attachments_caption_cache"
                 | "attachments_caption_uses"
                 | "wrapper_attachment_retry"
+                | "wrapper_attachment_jobs"
         ) || table.starts_with("wrapper_storage_") && table != "wrapper_storage_drafts"
         {
             continue;
         }
         // Quote identifiers from SQLite, never interpolate user input as SQL.
         let quoted = format!("\"{}\"", table.replace('"', "\"\""));
-        let has = |column: &str| -> rusqlite::Result<bool> {
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
-                params![table, column],
-                |r| r.get(0),
-            )
-        };
-        let live = if has("conversation_id")? {
-            " WHERE NOT EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.deleted=1 AND c.id=t.conversation_id)"
-        } else if has("run_id")? {
-            " WHERE NOT EXISTS(SELECT 1 FROM engine_runs r JOIN wrapper_conversations c ON c.id=r.conversation_id WHERE c.deleted=1 AND r.run_id=t.run_id)"
-        } else {
-            ""
+        // A deleted conversation's own row, transcript and run journal keep no
+        // file alive. Tables that only name a conversation (a page, a topic
+        // fact, a routine) stay roots.
+        let live = match table.as_str() {
+            "wrapper_conversations" => " WHERE t.deleted=0",
+            "wrapper_messages" | "submissions" | "wrapper_remote" | "engine_runs"
+            | "engine_summaries" | "delegation_graph" => " WHERE NOT EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.deleted=1 AND c.id=t.conversation_id)",
+            "engine_run_events" | "wrapper_engine_runs" => " WHERE NOT EXISTS(SELECT 1 FROM engine_runs r JOIN wrapper_conversations c ON c.id=r.conversation_id WHERE c.deleted=1 AND r.run_id=t.run_id)",
+            _ => "",
         };
         let mut statement = conn.prepare(&format!("SELECT * FROM {quoted} t{live}"))?;
         let columns = statement.column_count();

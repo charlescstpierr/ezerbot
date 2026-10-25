@@ -459,7 +459,15 @@ fn store(
         .run_id
         .and_then(|id| grokbot_engine::store::required(&tx, id).ok())
         .is_some_and(|run| run.status == grokbot_engine::model::RunStatus::Running);
-    if cancel.load(Ordering::SeqCst) || !running {
+    // Deleting the thread does not stop its run at once; it must not regain an image.
+    let live = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id=?1 AND id=?2 AND deleted=0)",
+            params![crate::ACCOUNT, conversation],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if cancel.load(Ordering::SeqCst) || !running || !live {
         return failed(FAILED);
     }
     let staged = match staging::stage(

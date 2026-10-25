@@ -29,12 +29,12 @@ const fact = (id, bot, scope, text, source, conversation, extra = {}) => ({ fact
 const FACTS = [fact("f1", "grokbot", "private", "Aime le café <b>noir</b>", "user_stated", "c1"), fact("f2", "chef", "team", "L’équipe déjeune à midi", "model_inferred", null), fact("f3", "chef", "topic", "Le garde-meuble ferme à 18 h", "user_stated", null, { topic_id: "t1", topic_name: "Déménagement" })];
 // `refuse` : le moteur répond à toute action par cette erreur ; `opened` : les fils que l'application sait ouvrir.
 // `lose` : le moteur applique l'action mais la réponse se perd (erreur réseau sans `status`).
-async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFails = false } = {}) {
+async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFails = false, start = FACTS } = {}) {
   const sidebar = new Element("aside"), main = new Element("main"), dock = new Element("div"), bots = new Element("div"), keys = [], registered = [];
   bots.className = "sidebar-bots"; dock.className = "composer-dock"; sidebar.append(bots); main.append(dock);
   const nodes = { sidebar, "conversation-title": new Element("h1"), "workspace-label": new Element("button") };
   const document = { createElement: (tag) => new Element(tag), createElementNS: (_, tag) => new Element(tag), getElementById: (id) => nodes[id] || null, querySelector: (s) => (s === ".main-panel" ? main : s === "dialog[open]" ? null : dock), addEventListener: (_, action) => keys.push(action), get activeElement() { return Element.active; }, body: new Element("body") };
-  let facts = FACTS.map((item) => ({ ...item })), n = 0;
+  let facts = start.map((item) => ({ ...item })), n = 0;
   const cache = { seen: null, work: null }, calls = { api: [], opened: [], refresh: 0 }, net = { down: false, drop: (id) => { facts = facts.filter((item) => item.fact_id !== id); }, touch: (id) => { facts = facts.map((item) => (item.fact_id === id ? { ...item, needs_review: true } : item)); } };
   const panels = {
     register: (panel) => registered.push(panel), leaveConversation() {},
@@ -57,7 +57,7 @@ async function harness({ refuse = null, opened = ["c1"], lose = null, refreshFai
     },
   };
   const context = vm.createContext({ window: { GrokbotPanels: panels }, document, setInterval: () => 0, JSON, Number, String, Date, Promise, Object, Array, Boolean, Math, Set, Map });
-  for (const file of ["memory-detail.js", "memory-filter.js", "memory-graph.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
+  for (const file of ["memory-detail.js", "memory-filter.js", "memory-links.js", "memory-graph.js", "memory-space.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context);
   const settle = async () => { for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
   Element.active = null;
   registered[0].onState({ bots: [{ id: "grokbot", name: "Ezerbot" }, { id: "chef", name: "Chef" }], memory_auto: { revision: 1 } }, {});
@@ -460,6 +460,46 @@ test("un souvenir de sujet s'oublie par /api/topics/memory/forget, sans Modifier
   assert.deepEqual([ok.mutations(), ok.open(), ok.items()], [[["/api/topics/memory/forget", { fact_id: "f3" }]], false, 2]);
 });
 
+// Les liens (#265) : même conversation = « Lié à » dans le détail.
+const CHAIN = [fact("l1", "grokbot", "private", "Aime le café noir", "automatic", "c1"), fact("l2", "chef", "team", "Déjeune à midi", "automatic", "c1"), fact("l3", "chef", "topic", "Garde-meuble fermé le soir", "user_stated", "c1", { topic_id: "t1", topic_name: "Déménagement" }), fact("l4", "grokbot", "private", "Préfère le thé le soir", "automatic", "c2"), fact("l5", "grokbot", "private", "Seul, sans conversation", "automatic", null)];
+const linkedTexts = (h) => h.panel().querySelectorAll(".memory-detail-link-item").map((item) => item.textContent);
+test("le détail liste « Lié à » : les autres souvenirs de la même conversation, pas lui-même ni ceux d'ailleurs", async () => {
+  const h = await harness({ start: CHAIN });
+  h.tab("graph");
+  h.point("l1").click();
+  assert.equal(h.panel().querySelector(".memory-detail-links-title").textContent, "Lié à");
+  assert.deepEqual(linkedTexts(h), ["Déjeune à midi", "Garde-meuble fermé le soir"], "un souvenir d'équipe et un souvenir de sujet de la même conversation");
+  for (const id of ["l4", "l5"]) { h.point(id).click(); assert.equal(h.panel().querySelector(".memory-detail-links"), null, `${id} est isolé : pas de section « Lié à »`); }
+});
+test("le graphe dessine un trait fin par lien, et un souvenir plus lié a un point un peu plus gros", async () => {
+  const h = await harness({ start: CHAIN });
+  h.tab("graph");
+  const lines = h.main.querySelectorAll(".memory-graph-edge");
+  assert.equal(lines.filter((line) => line.classes.includes("is-link")).length, 3, "trois souvenirs d'une même conversation : trois liens");
+  assert.equal(lines.length, 3 + (3 + 5), "trois liens, plus les traits vous → groupe (3) et groupe → souvenir (5)");
+  const r = (id) => Number(h.point(id).querySelector("circle").attributes.r);
+  assert.ok(r("l1") > r("l4") && r("l4") === r("l5"), "lié deux fois > isolés");
+});
+test("un clic sur un souvenir lié ouvre ce souvenir dans le panneau", async () => {
+  const h = await harness({ start: CHAIN });
+  h.item("l1").click();
+  h.panel().querySelectorAll(".memory-detail-link-item").find((item) => item.textContent === "Déjeune à midi").click();
+  assert.equal(h.text("text"), "Déjeune à midi");
+  assert.deepEqual(linkedTexts(h), ["Aime le café noir", "Garde-meuble fermé le soir"]);
+});
+test("un texte lié reste du texte, et un souvenir lié oublié ensuite sort de « Lié à » après la relecture", async () => {
+  const h = await harness({ start: [fact("x1", "grokbot", "private", "<b>gras</b>", "automatic", "c1"), fact("x2", "grokbot", "private", "Deuxième", "automatic", "c1"), fact("x3", "grokbot", "private", "Troisième", "automatic", "c1")] });
+  h.item("x2").click();
+  assert.deepEqual(linkedTexts(h), ["<b>gras</b>", "Troisième"]);
+  h.net.drop("x3");
+  h.reload();
+  await h.settle();
+  assert.deepEqual(linkedTexts(h), ["<b>gras</b>"]);
+  h.net.drop("x1");
+  h.reload();
+  await h.settle();
+  assert.equal(h.panel().querySelector(".memory-detail-links"), null, "plus aucun souvenir lié");
+});
 test("styles : jetons seulement, aucun texte sous 11,5 px", () => {
   const css = fs.readFileSync(`${__dirname}/memory-detail.css`, "utf8");
   assert.doesNotMatch(css, /#[0-9a-fA-F]{3,8}\b|rgb\(|hsl\(/);

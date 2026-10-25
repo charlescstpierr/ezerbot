@@ -54,3 +54,21 @@ test("remplacer le graphe déconnecte l’observateur de redimensionnement préc
   for (let i = 0; i < 5; i += 1) window.GrokbotMemoryGraph.view(FACTS, {});
   assert.equal(live.size, 1, "un seul observateur reste actif");
 });
+// Les liens (#265) : deux souvenirs d'une même conversation sont reliés, un souvenir isolé ne l'est pas, plus de liens = un peu plus gros.
+const linked = (id, conversation, scope = "private") => ({ ...fact(id, scope), provenance: { source: "automatic", conversation_id: conversation } });
+const withLinks = () => { const w = {}, context = vm.createContext({ window: w, document, Math, Set, Map, Object, Array, String, Number }); for (const file of ["memory-links.js", "memory-graph.js"]) vm.runInContext(fs.readFileSync(`${__dirname}/${file}`, "utf8"), context); return w.GrokbotMemoryGraph; };
+const links = (facts) => JSON.parse(JSON.stringify(withLinks().buildGraph(facts))).links.map((edge) => [edge.from, edge.to]);
+test("deux souvenirs de la même conversation donnent un lien entre leurs points", () => {
+  assert.deepEqual(links([linked("a", "c1"), linked("b", "c1", "team")]), [["a", "b"]]);
+});
+test("un souvenir isolé n'a aucun lien, et le graphe garde ses seuls traits vous → groupe → souvenir", () => {
+  const facts = [linked("a", "c1"), linked("b", "c2"), linked("c", null)];
+  assert.deepEqual(links(facts), []);
+  assert.equal(JSON.parse(JSON.stringify(withLinks().buildGraph(facts))).edges.length, 1 + 3, "vous → Personnel, Personnel → 3 souvenirs");
+});
+test("un souvenir plus lié est un peu plus gros", () => {
+  const graph = JSON.parse(JSON.stringify(withLinks().buildGraph([linked("a", "c1"), linked("b", "c1"), linked("c", "c1"), linked("d", "c9"), linked("e", "c8"), linked("f", "c8")])));
+  const radius = Object.fromEntries(graph.nodes.map((node) => [node.id, node.r]));
+  assert.ok(radius.a > radius.e && radius.e > radius.d, "trois souvenirs d'une conversation > deux > isolé");
+  assert.equal(radius.a, radius.b);
+});

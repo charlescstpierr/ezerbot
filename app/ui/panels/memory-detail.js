@@ -23,7 +23,8 @@
     const root = node("aside", "memory-detail");
     root.hidden = true;
     root.setAttribute("aria-label", "Détail du souvenir");
-    const stamp = (fact) => JSON.stringify([fact, label.bot(fact), label.scope(fact)]); // un bot renommé change aussi ce que le panneau affiche
+    const related = (fact) => window.EzerbotMemoryLinks?.of(facts() || [], fact) ?? []; // « Lié à » : les souvenirs de la même conversation (memory-links.js)
+  const stamp = (fact) => JSON.stringify([fact, label.bot(fact), label.scope(fact), related(fact).map((item) => [item.fact_id, item.text])]); // un bot renommé ou un souvenir lié qui change modifient aussi ce que le panneau affiche
     const current = () => (facts() || []).find((item) => item.fact_id === id) || null;
     const find = (key) => root.parentElement?.querySelector(`[data-id="${key}"], [data-fact-id="${key}"]`);
     const mark = () => {
@@ -70,7 +71,8 @@
       const status = node("p", "memory-detail-note", note), alert = node("p", "memory-detail-error", problem);
       status.setAttribute("role", "status");
       alert.setAttribute("role", "alert");
-      root.replaceChildren(head, body, fields, node("p", confirming ? "memory-detail-warning" : "memory-detail-note", hint), status, alert, actions);
+      const linked = related(fact);
+      root.replaceChildren(head, body, fields, ...(linked.length ? [window.EzerbotMemoryLinks.section(linked, open)] : []), node("p", confirming ? "memory-detail-warning" : "memory-detail-note", hint), status, alert, actions);
       root.hidden = false;
       root.parentElement.dataset.detail = "open";
       mark();

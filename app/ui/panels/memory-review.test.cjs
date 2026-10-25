@@ -81,6 +81,7 @@ async function harness({ facts: seed = FACTS, down = false } = {}) {
     row: (id) => main.querySelector(`.memory-review-item[data-review-id="${id}"]`),
     buttons: (id) => h.row(id).querySelectorAll("button").map((b) => b.textContent),
     press: (id, label) => { const b = h.row(id).querySelectorAll("button").find((x) => x.textContent === label); b.focus(); b.click(); }, // un clic focalise le bouton
+    escape: () => keys.forEach((key) => key({ key: "Escape", preventDefault() {} })),
     detail: () => main.querySelector(".memory-detail"),
     detailButton: (label) => h.detail().querySelectorAll("button").find((b) => b.textContent === label),
     mutations: () => calls.api.filter(([path]) => path !== "/api/memory/all"),
@@ -233,4 +234,19 @@ test("styles : jetons --verify en clair et en sombre, lisibles (4,5:1), aucune c
     for (const [, size] of css.matchAll(/font-size:\s*(?:calc\()?(\d+(?:\.\d+)?)px/g)) assert.ok(Number(size) >= 11.5, `${file} ${size}px`);
   }
   assert.match(fs.readFileSync(`${__dirname}/memory-graph.css`, "utf8"), /memory-graph-halo[^{]*\{[^}]*var\(--verify\)/, "le halo prend la couleur du jeton");
+});
+
+test("fermer le panneau de détail ouvert depuis « À revoir » rend le focus au bouton d'où l'on vient (Fermer, Annuler puis Échap)", async () => {
+  const h = await harness();
+  h.tab("graph");
+  const button = (id, label) => h.row(id).querySelectorAll("button").find((b) => b.textContent === label);
+  h.press("f1", "Modifier");
+  h.detailButton("Fermer").click();
+  assert.equal(Element.active, button("f1", "Modifier"), "Modifier, puis Fermer");
+  h.press("f1", "Oublier…");
+  h.escape();
+  assert.equal(Element.active, button("f1", "Oublier…"), "Oublier, puis Échap");
+  h.point("f2").click();
+  h.escape();
+  assert.equal(Element.active, h.point("f2"), "ouvert depuis le graphe, le focus revient toujours au point");
 });

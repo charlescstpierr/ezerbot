@@ -18,7 +18,7 @@
 
   // `facts()` donne la liste lue par l'écran, `reload()` la relit (et rend la main une fois l'écran à jour), `label` : { bot, scope, date }.
   function create({ facts, reload, label }) {
-    let id = null, mode = "view", busy = false, draft = "", note = "", problem = "", shown = null, epoch = 0;
+    let id = null, mode = "view", busy = false, draft = "", note = "", problem = "", shown = null, epoch = 0, opener = null; // opener : le bouton d'où le panneau « À revoir » l'a ouvert
     const moved = new Map(); // ancien identifiant → identifiant du souvenir qui le remplace (réponse du moteur à une correction)
     const root = node("aside", "memory-detail");
     root.hidden = true;
@@ -128,8 +128,9 @@
       root.replaceChildren();
       mark();
       delete root.parentElement.dataset.detail;
-      const back = find(was) || root.parentElement.querySelector('.memory-space-tab[aria-pressed="true"]');
-      if (restore) (back?.querySelector("button") || back)?.focus(); // une ligne de la Liste se focalise par son bouton
+      const back = find(was) || root.parentElement.querySelector('.memory-space-tab[aria-pressed="true"]'), from = opener?.isConnected !== false ? opener : null;
+      opener = null;
+      if (restore) (from || back?.querySelector("button") || back)?.focus(); // une ligne de la Liste se focalise par son bouton ; le panneau « À revoir » reprend son propre bouton
     }
     // Appelé par l'écran quand la liste a changé : un souvenir disparu ferme le panneau ; la saisie en cours n'est jamais écrasée.
     function refresh() {
@@ -146,10 +147,11 @@
       event.preventDefault();
       close(true);
     });
-    // `start` : "edit" ou "confirm" ouvre directement Modifier ou la confirmation d'Oublier (le panneau « À revoir ») ; un souvenir de sujet ne se modifie pas.
-    function open(factId, start = "view") {
+    // `start` : "edit" ou "confirm" ouvre directement Modifier ou la confirmation d'Oublier, `from` : le bouton à refocaliser à la fermeture (le panneau « À revoir ») ; un souvenir de sujet ne se modifie pas.
+    function open(factId, start = "view", from = null) {
       if (busy) return;
       epoch += 1;
+      opener = from;
       const fact = (facts() || []).find((item) => item.fact_id === factId), first = (start === "edit" && fact?.scope !== "topic") || start === "confirm" ? start : "view";
       [id, mode, draft, note, problem] = [factId, first, first === "edit" ? String(fact?.text ?? "") : "", "", ""];
       render(first === "edit" ? "body" : first === "confirm" ? "back" : "title");

@@ -42,8 +42,12 @@ jobs:
           elif [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then range="$BEFORE..HEAD"
           else range="HEAD~1..HEAD"; fi
           "$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts="$range"
+      # Seule exclusion : voice_ui::french_audio_recognized_on_device_after_english, exempté par
+      # Charles (24-10 23h48). Il demande la permission Speech de l'utilisateur, que ce runner ne
+      # peut pas accorder (statut notDetermined). Il reste lancé sur le Mac (preuve-main-vert).
+      # --exact : seul ce nom complet est exclu ; les 2 autres tests de voice_ui tournent ici.
       - name: cargo test --workspace
-        run: cargo test --workspace --locked --no-fail-fast
+        run: cargo test --workspace --locked --no-fail-fast -- --skip french_audio_recognized_on_device_after_english --exact
       - name: npm ci (app/web)
         if: ${{ !cancelled() }}
         working-directory: app/web

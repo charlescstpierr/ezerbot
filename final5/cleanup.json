@@ -1,0 +1,23 @@
+{
+  "cleaned": true,
+  "killed": {
+    "auth": "arrete",
+    "wrapper": "arrete",
+    "fake": "arrete",
+    "chrome": "arrete",
+    "axi": {
+      "session": "pm-i295",
+      "result": "arrete",
+      "code": 0
+    }
+  },
+  "removed_home": true,
+  "home_still_present": false,
+  "processes_still_ours": {
+    "wrapper": false,
+    "fake": false
+  },
+  "evidence": "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i295/final5",
+  "build_sha": "caaf0734037a4bd3536e291d365b111f8c9ed219",
+  "url": "http://127.0.0.1:60919"
+}

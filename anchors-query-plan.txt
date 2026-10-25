@@ -1,0 +1,8 @@
+SQLite 3.43.2, Python EXPLAIN QUERY PLAN.
+The Rust pages integration test separately measures the real GET with StatementStatus::VmStep.
+The fixture has one requested Page anchor and 10,000 anchors for another Page.
+BEFORE SQL SELECT message_id, passage, state, source_version FROM wrapper_page_anchors WHERE page_id = ?1 ORDER BY created_at, message_id
+BEFORE PLAN SCAN wrapper_page_anchors
+BEFORE PLAN USE TEMP B-TREE FOR ORDER BY
+AFTER SQL SELECT conversation_id, message_id, passage, state, source_version FROM wrapper_page_anchors WHERE page_id = ?1 ORDER BY created_at, message_id
+AFTER PLAN SEARCH wrapper_page_anchors USING INDEX wrapper_page_anchors_page (page_id=?)

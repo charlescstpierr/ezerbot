@@ -1,0 +1,7 @@
+summary: "2 passed, 0 failed, 2 total"
+checks[2]{name,conclusion}:
+  compile,pass
+  compile,pass
+help[2]:
+  Run `gh-axi pr view 574 -R charlescstpierr/ezerbot` to see PR details
+  Run `gh-axi pr merge 574 -R charlescstpierr/ezerbot` to merge when ready

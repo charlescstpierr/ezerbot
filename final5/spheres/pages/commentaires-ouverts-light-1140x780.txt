@@ -1,0 +1,97 @@
+ezerbot.
+Nouvelle conversation
+⌘ N
+⌘ K
+Mémoire
+0
+BOTS
+Ezerbot
+SUJETS
+
+Regroupez plusieurs fils sous un sujet.
+
+Pages
+Trois forfaits
+CONVERSATIONS
+
+Aujourd’hui
+
+Vérification visuelle
+E
+Espace local
+Paramètres de l’application
+Ezerbot
+/
+Vérification visuelle
+Écran du Mac
+Notifications
+Créer un groupe
+Membres
+Appel vocal
+Fais-moi une page des forfaits
+Envoyé
+Ezerbot
+18 h 51
+Outil · write_pageAppel terminé
+
+Voici la Page.
+
+Bon résultat
+Mauvais résultat
+Page « Trois forfaits » — « Confort »
+Garde ce commentaire ouvert.
+Envoyé
+Ezerbot
+18 h 52
+
+Voici la Page.
+
+Bon résultat
+Mauvais résultat
+Page « Trois forfaits » — « Famille »
+Autre commentaire à traiter.
+Envoyé
+Ezerbot
+18 h 52
+
+Voici la Page.
+
+Bon résultat
+Mauvais résultat
+Renommer
+Ouvrir en pleine page
+Commentaires (2)
+
+1. Confort
+
+OuvertVoir dans le fil
+
+2. Famille
+
+OuvertVoir dans le fil
+Trois forfaits
+
+Tout < 30 € par mois
+
+Offre choisie : Confort
+
+Offre	Prix	
+Essentiel	9 €	Choisir
+Confort	19 €	Choisir
+Famille	29 €	Choisir
+1
+2
+
+
+
+
+● Enregistrer une réunion
+Ezerbot
+GPT Test
+medium
+Standard
+Mode voix
+Mémo vocal
+Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne
+Quota de votre abonnement ChatGPT ·
+Gérer l’utilisation

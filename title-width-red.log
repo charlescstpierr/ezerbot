@@ -1,0 +1,28 @@
+✖ le panneau réel conserve les sélections, annote les passages et isole les restaurations concurrentes (1699.685888ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1876.922492
+
+✖ failing tests:
+
+test at app/ui/panels/pages-browser.test.cjs:21:1
+✖ le panneau réel conserve les sélections, annote les passages et isole les restaurations concurrentes (1699.685888ms)
+  AssertionError [ERR_ASSERTION]: le titre reste lisible quand les commentaires ajoutent un bouton
+  
+  false !== true
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i295/app/ui/panels/pages-browser.test.cjs:97:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

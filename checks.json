@@ -1,0 +1,51 @@
+[
+  {
+    "name": "rust-pages-head",
+    "command": [
+      "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/cargo-gate",
+      "/Users/cstpierrecharles/.cargo/bin/cargo",
+      "test",
+      "--locked",
+      "-p",
+      "grokbot-wrapper",
+      "--test",
+      "pages",
+      "--",
+      "--nocapture"
+    ],
+    "code": 0,
+    "seconds": 40.895,
+    "head": "caaf0734037a4bd3536e291d365b111f8c9ed219",
+    "log": "rust-pages-head.log"
+  },
+  {
+    "name": "fmt-head",
+    "command": [
+      "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/cargo-gate",
+      "/Users/cstpierrecharles/.cargo/bin/cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "code": 0,
+    "seconds": 23.441,
+    "head": "caaf0734037a4bd3536e291d365b111f8c9ed219",
+    "log": "fmt-head.log"
+  },
+  {
+    "name": "ui-head",
+    "command": [
+      "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/test-gate",
+      "node",
+      "--test",
+      "app/ui/panels/pages.test.cjs",
+      "app/ui/panels/pages-browser.test.cjs",
+      "app/ui/draft-transfer.test.cjs"
+    ],
+    "code": 0,
+    "seconds": 5.033,
+    "head": "caaf0734037a4bd3536e291d365b111f8c9ed219",
+    "log": "ui-head.log"
+  }
+]

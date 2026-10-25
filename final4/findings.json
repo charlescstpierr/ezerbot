@@ -1,0 +1,8 @@
+[
+  {
+    "screenshot": "spheres/pages/commentaires-ouverts-dark-1140x780.png",
+    "defect": "Le champ Renommer se réduit à environ 50 px avec le bouton Commentaires. Le titre est difficile à lire et à modifier.",
+    "severity": "bloquant",
+    "fix": "Donner au champ une base de 140 px et laisser les boutons passer à la ligne. Ajouter une assertion de largeur au test navigateur."
+  }
+]

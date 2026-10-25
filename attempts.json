@@ -1,0 +1,59 @@
+[
+  {
+    "run": "final",
+    "head": "1d4e21eff32cc3aabefc9f5df6f22e0ed2da9110",
+    "completed": false,
+    "cause": "Le pilote contenait des guillemets JavaScript invalides dans le sélecteur Modèle.",
+    "cleanup": {
+      "cleaned": true,
+      "home_still_present": false,
+      "processes_still_ours": {
+        "wrapper": false,
+        "fake": false
+      },
+      "axi": {
+        "session": "pm-i295",
+        "result": "arrete",
+        "code": 0
+      }
+    }
+  },
+  {
+    "run": "final2",
+    "head": "1d4e21eff32cc3aabefc9f5df6f22e0ed2da9110",
+    "completed": false,
+    "cause": "La saisie automatisée ne replaçait pas de Range dans le compositeur après la sélection programmée.",
+    "cleanup": {
+      "cleaned": true,
+      "home_still_present": false,
+      "processes_still_ours": {
+        "wrapper": false,
+        "fake": false
+      },
+      "axi": {
+        "session": "pm-i295",
+        "result": "arrete",
+        "code": 0
+      }
+    }
+  },
+  {
+    "run": "final3",
+    "head": "1d4e21eff32cc3aabefc9f5df6f22e0ed2da9110",
+    "completed": false,
+    "cause": "Le compteur de pastilles était lu en petit format après défilement. Les passages hors du canevas visible ne portent pas de pastille flottante.",
+    "cleanup": {
+      "cleaned": true,
+      "home_still_present": false,
+      "processes_still_ours": {
+        "wrapper": false,
+        "fake": false
+      },
+      "axi": {
+        "session": "pm-i295",
+        "result": "arrete",
+        "code": 0
+      }
+    }
+  }
+]

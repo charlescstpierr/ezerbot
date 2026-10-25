@@ -1,0 +1,18 @@
+{
+  "action": "page-orpheline",
+  "metrics": {
+    "theme": "light",
+    "canvas": "#ffffff",
+    "width": 1140,
+    "height": 780,
+    "title": "Vérification visuelle · Ezerbot"
+  },
+  "observed": {
+    "text": "ezerbot.\nNouvelle conversation\n⌘ N\n⌘ K\nMémoire\n0\nBOTS\nEzerbot\nSUJETS\n\nRegroupez plusieurs fils sous un sujet.\n\nPages\nTrois forfaits\nCONVERSATIONS\n\nAujourd’hui\n\nVérification visuelle\nE\nEspace local\nParamètres de l’application\nEzerbot\n/\nVérification visuelle\nÉcran du Mac\nNotifications\nCréer un groupe\nMembres\nAppel vocal\nPage « Trois forfaits » — « Famille »\nReprends ce commentaire dans le nouveau fil.\nEnvoyé\nEzerbot\n18 h 54\n\nBonjour vous\n\nBon résultat\nMauvais résultat\nRenommer\nOuvrir en pleine page\nCommentaires (1)\n\n1. Famille\n\nOuvertVoir dans le fil\nTrois forfaits\n\nTout < 30 € par mois\n\nOffre choisie : Essentiel\n\nOffre\tPrix\t\nEssentiel\t9 €\tChoisir\nConfort\t19 €\tChoisir\nFamille\t29 €\tChoisir\n1\n\n\n\n\n● Enregistrer une réunion\nEzerbot\nGPT Test\nmedium\nStandard\nMode voix\nMémo vocal\nEntrée pour envoyer · ⇧ Entrée pour une nouvelle ligne\nQuota de votre abonnement ChatGPT ·\nGérer l’utilisation",
+    "comments": "1. Famille\n\nOuvertVoir dans le fil",
+    "badges": 1,
+    "lines": 1,
+    "canvas": "Trois forfaits\n\nTout < 30 € par mois\n\nOffre choisie : Essentiel\n\nOffre\tPrix\t\nEssentiel\t9 €\tChoisir\nConfort\t19 €\tChoisir\nFamille\t29 €\tChoisir",
+    "overflow": false
+  }
+}

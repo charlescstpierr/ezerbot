@@ -99,7 +99,8 @@ pub fn reads_on_this_thread() -> u64 {
 /// file over it (`Vault::write`), and a keychain write renames it before it touches the keychain
 /// (`keychain::set`, `keychain::remove`): any write of this process or of another wrapper
 /// process, even one the keychain took only in part, changes the stamp. So does a change of
-/// owner or permissions, after which reading the vault again fails closed.
+/// owner or permissions, after which reading the vault again fails closed. A writer changes it
+/// under the vault's locks: taken under them too (`stamp_locked`), it waits for that writer.
 #[derive(PartialEq)]
 pub(crate) struct Stamp([i64; 9]);
 // 0: explicit file-only library fixture; 1: host lacks a stable signer; 2: admitted.
@@ -173,7 +174,7 @@ impl Vault {
     }
     /// `open_app` and what its one read found, keychain migration included: redaction masks with
     /// it instead of reading the vault again (`redact::app_patterns`, #328).
-    pub(crate) fn open_app_known(path: &Path) -> Result<(Self, Vec<String>, Stamp)> {
+    pub(crate) fn open_app_known(path: &Path) -> Result<(Self, Vec<String>, Option<Stamp>)> {
         let vault = Self::create(path)?;
         #[cfg(target_os = "macos")]
         let mut vault = vault;
@@ -222,7 +223,12 @@ impl Vault {
         }
     }
     /// See `Stamp`. Reads no secret.
-    pub(crate) fn stamp(&self) -> Result<Stamp> {
+    pub(crate) fn stamp_locked(&self) -> Result<Stamp> {
+        let _guard = access();
+        let _file_guard = self.lock_file(false)?;
+        self.stamp()
+    }
+    fn stamp(&self) -> Result<Stamp> {
         let metadata = fs::symlink_metadata(&self.path)?;
         #[cfg(unix)]
         {
@@ -369,8 +375,9 @@ impl Vault {
     pub(crate) fn known_values(&self) -> Result<Vec<String>> {
         Ok(self.known_values_stamped()?.0)
     }
-    /// `known_values`, and the stamp of the content they were read from.
-    pub(crate) fn known_values_stamped(&self) -> Result<(Vec<String>, Stamp)> {
+    /// `known_values`, and the stamp of the content they were read from: none when the stamp
+    /// cannot tell whether that content is still current (`keychain::degraded`).
+    pub(crate) fn known_values_stamped(&self) -> Result<(Vec<String>, Option<Stamp>)> {
         let _guard = access();
         let _file_guard = self.lock_file(true)?;
         let mut values = Vec::new();
@@ -415,7 +422,12 @@ impl Vault {
             }
             values.push(secret.value);
         }
-        Ok((values, self.stamp()?))
+        let stamp = self.stamp()?;
+        #[cfg(target_os = "macos")]
+        if self.keychain.is_some() && keychain::degraded(&self.path) {
+            return Ok((values, None));
+        }
+        Ok((values, Some(stamp)))
     }
 
     // Call only while holding VAULT_ACCESS and the companion-file lock. Parse
@@ -1106,6 +1118,36 @@ mod tests {
             crate::redact::redact(&reopened, "test-value").unwrap(),
             "[...]"
         );
+    }
+
+    #[test]
+    fn a_hold_check_waits_for_a_writer_that_holds_the_vault() {
+        let test = TestVault::new();
+        test.vault.set("TOKEN", "", "private-value").unwrap();
+        let held = crate::redact::hold();
+        crate::redact::app_patterns(test.vault.path()).unwrap();
+        let other = TestVault::new();
+        other.vault.set("TOKEN", "", "private-value").unwrap();
+        other.vault.set("RENEWED", "", "renewed-value").unwrap();
+        let (locked, wait) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn({
+            let (path, renewed) = (test.vault.path().to_owned(), other.vault.path().to_owned());
+            move || {
+                let vault = Vault::open(&path).unwrap();
+                let _lock = vault.lock_file(true).unwrap();
+                locked.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let staged = path.with_extension("staged");
+                fs::copy(renewed, &staged).unwrap();
+                fs::rename(staged, path).unwrap();
+            }
+        });
+        wait.recv().unwrap();
+        assert!(
+            !held.settled().unwrap(),
+            "the check ran before the writer renamed the vault"
+        );
+        writer.join().unwrap();
     }
 
     #[test]

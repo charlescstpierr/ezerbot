@@ -70,7 +70,11 @@ impl Hold {
         }
         let kept = HELD.take().unwrap_or_default();
         for held in &kept {
-            if held.vault.stamp()? != held.stamp && read_patterns(&held.vault)?.0 != held.patterns {
+            let moved = match &held.stamp {
+                Some(stamp) => held.vault.stamp_locked()? != *stamp,
+                None => true,
+            };
+            if moved && read_patterns(&held.vault)?.0 != held.patterns {
                 return Ok(false);
             }
         }
@@ -89,7 +93,7 @@ impl Drop for Hold {
 struct Held {
     vault: Vault,
     patterns: Vec<String>,
-    stamp: Stamp,
+    stamp: Option<Stamp>,
     /// The `app_patterns` paths that opened this vault during the hold.
     opened_as: Vec<PathBuf>,
 }
@@ -205,7 +209,7 @@ fn known_patterns(vault: &Vault) -> Result<Vec<String>> {
     })
 }
 
-fn read_patterns(vault: &Vault) -> Result<(Vec<String>, Stamp)> {
+fn read_patterns(vault: &Vault) -> Result<(Vec<String>, Option<Stamp>)> {
     let (values, stamp) = vault.known_values_stamped()?;
     Ok((patterns_of(values)?, stamp))
 }

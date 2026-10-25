@@ -84,8 +84,13 @@ fn states() -> MutexGuard<'static, BTreeMap<PathBuf, State>> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
+/// The last snapshot could not reach the keychain and fell back to the file and this process's
+/// cache: the keychain may hold what neither shows, and no `Stamp` sees it become readable.
+pub(super) fn degraded(path: &Path) -> bool {
+    states().get(path).is_some_and(|s| s.failed)
+}
 pub(super) fn status(path: &Path) -> StorageStatus {
-    if states().get(path).is_some_and(|s| s.failed) {
+    if degraded(path) {
         StorageStatus { backend: "file_fallback", label: "Trousseau macOS indisponible", notice_kind: Some("warning"), notice: Some("Le trousseau macOS est indisponible ou son accès a été refusé. Les nouveaux secrets ne sont pas enregistrés. Les secrets déjà présents dans le trousseau restent en place. Déverrouillez-le ou vérifiez les autorisations d’Ezerbot dans Trousseaux d’accès, puis vérifiez le stockage.") }
     } else {
         StorageStatus {

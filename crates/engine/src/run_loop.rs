@@ -1493,6 +1493,7 @@ mod tests {
         cancel: Arc<AtomicBool>,
         cancel_in_tool: bool,
         interrupt: Arc<AtomicBool>,
+        interrupt_after: Option<String>,
         journaled_external: bool,
         external_calls: usize,
         cancel_in_context: bool,
@@ -1536,6 +1537,9 @@ mod tests {
             conn.execute("INSERT INTO effects VALUES (?1)", [&call.call_id])?;
             if self.cancel_in_tool {
                 self.cancel.store(true, Ordering::SeqCst);
+            }
+            if self.interrupt_after.as_ref() == Some(&call.call_id) {
+                self.interrupt.store(true, Ordering::SeqCst);
             }
             if self.error_in_tool {
                 return Err(invalid("effect failed"));
@@ -3400,6 +3404,54 @@ mod tests {
             );
             assert_eq!(store::budget_usage(&conn, "run", now_ms())?.tool_calls, 1);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn two_calls_in_one_response_run_in_order_and_both_reach_the_next_turn() -> Result<()> {
+        let conn = database(false, RunBudgets::default())?;
+        let gateway = Scripted::new(vec![
+            response(vec![
+                call("first", "work", json!({})),
+                call("second", "work", json!({})),
+            ]),
+            response(vec![]),
+        ]);
+        let mut services = Services {
+            specs: vec![spec("work", false)],
+            interrupt_after: Some("first".into()),
+            ..Services::default()
+        };
+        assert!(run(&conn, &gateway, &mut services, "run").is_err());
+        assert_eq!(services.calls, ["first"]);
+        assert_eq!(count(&conn, "effects"), 1);
+        let pending: Vec<_> = pending_calls(&store::events(&conn, "run", 0)?)?
+            .into_iter()
+            .map(|call| call.call_id)
+            .collect();
+        assert_eq!(pending, ["second"]);
+        services.interrupt_after = None;
+        services.interrupt.store(false, Ordering::SeqCst);
+        run(&conn, &gateway, &mut services, "run")?;
+        assert_eq!(services.calls, ["first", "second"]);
+        assert_eq!(count(&conn, "effects"), 2);
+        let results: Vec<_> = store::events(&conn, "run", 0)?
+            .into_iter()
+            .filter(|event| event.kind == RunEventKind::ToolResult)
+            .map(|event| event.payload["call_id"].clone())
+            .collect();
+        assert_eq!(results, [json!("first"), json!("second")]);
+        let requests = gateway.requests.lock().unwrap();
+        let outputs: Vec<_> = requests[1]
+            .input
+            .iter()
+            .flat_map(|item| &item.tool_items)
+            .filter_map(|item| match item {
+                ToolItem::Output { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs, ["first", "second"]);
         Ok(())
     }
 

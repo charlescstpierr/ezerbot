@@ -575,6 +575,15 @@ fn parallel_tool_calls_keep_call_ids() {
 }
 
 #[test]
+fn a_local_endpoint_asks_for_one_tool_call_at_a_time() {
+    let fixture = Fixture::new();
+    fixture.events(&[json!({"type": "response.completed"})]);
+    fixture.collect(&request());
+    let body = &fixture.server.seen.lock().unwrap().bodies[0];
+    assert_eq!(body["parallel_tool_calls"], false, "{body}");
+}
+
+#[test]
 fn image_input_is_serialized() {
     let fixture = Fixture::new();
     fixture.events(&[json!({"type": "response.completed"})]);
@@ -608,7 +617,14 @@ fn image_input_is_serialized() {
             {"type": "input_image", "image_url": "data:image/png;base64,AA=="},
         ])
     );
-    for field in ["tools", "reasoning", "service_tier", "previous_response_id"] {
+    for field in [
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "service_tier",
+        "previous_response_id",
+    ] {
         assert!(body.get(field).is_none());
     }
     assert!(!body.to_string().contains("attachment_id"));

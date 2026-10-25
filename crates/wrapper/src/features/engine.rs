@@ -438,7 +438,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             };
             let has_prior = app
                 .reader
-                .list_submissions()?
+                .list_conversation_submissions(&conversation)?
                 .iter()
                 .any(|r| r.conversation_id == conversation && r.message_id != message);
             if !has_prior {
@@ -3063,9 +3063,7 @@ pub fn context(ctx: &super::Context<'_>, request: &ContextRequest) -> Vec<Contex
 pub fn context_preview(app: &App, conversation_id: &str) -> Result<Vec<ContextBlock>, ApiError> {
     app.require_conversation(conversation_id)?;
     let conversation = app
-        .conversations()?
-        .into_iter()
-        .find(|c| c.id == conversation_id)
+        .conversation(conversation_id)?
         .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?;
     let current = conversation
         .messages
@@ -3349,9 +3347,7 @@ fn message_ids(body: &[u8]) -> Result<(String, String), ApiError> {
 
 fn require_visible_message(app: &App, conversation: &str, message: &str) -> Result<(), ApiError> {
     let visible = app
-        .conversations()?
-        .into_iter()
-        .find(|item| item.id == conversation)
+        .conversation(conversation)?
         .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?
         .messages
         .into_iter()
@@ -3369,9 +3365,9 @@ fn submission_body(
     message: &MessageId,
 ) -> Result<String, ApiError> {
     app.reader
-        .list_submissions()?
+        .list_conversation_submissions(conversation)?
         .into_iter()
-        .find(|item| &item.conversation_id == conversation && &item.message_id == message)
+        .find(|item| &item.message_id == message)
         .map(|item| item.body)
         .ok_or_else(|| ApiError::new(404, "Message introuvable."))
 }

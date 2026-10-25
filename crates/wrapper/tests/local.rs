@@ -776,9 +776,8 @@ fn timeout_output_cap_and_cancel_kill_background_process_group() {
     assert!(out["output"]["stdout"].as_str().unwrap().len() <= 1024);
     // A descendant that outlives the kill would write once the test says so,
     // after the timeout or the cancel: never before, whatever the load.
-    let mut args = f.shell(
-        "(until [ -e go-timeout ]; do sleep 0.05; done; touch timeout-leak) & wait",
-    );
+    let mut args =
+        f.shell("(until [ -e go-timeout ]; do sleep 0.05; done; touch timeout-leak) & wait");
     args["timeout_ms"] = json!(100);
     f.send("timeout", "run_shell", args);
     let r = f.request("timeout");

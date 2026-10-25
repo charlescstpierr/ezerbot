@@ -555,7 +555,7 @@ fn record_recalled(conn: &Connection, run_id: &str, found: &[Value]) -> Result<(
 /// Ids des souvenirs rappelés pendant ce tour, dans l'ordre du rappel, sans ceux oubliés depuis
 /// (fait de bot effacé, fait de sujet supprimé) : le filtre se fait à la lecture, l'historique reste intact.
 pub(super) fn recalled_ids(conn: &Connection, run_id: &str) -> Result<Vec<String>, ApiError> {
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT r.fact_id FROM memory_recalled r WHERE r.run_id = ?1
          AND (EXISTS (SELECT 1 FROM memory_facts f WHERE f.fact_id = r.fact_id AND f.status <> 'forgotten')
               OR EXISTS (SELECT 1 FROM wrapper_topic_facts t WHERE t.id = r.fact_id))

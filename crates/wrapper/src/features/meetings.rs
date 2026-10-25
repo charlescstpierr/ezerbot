@@ -80,11 +80,11 @@ pub fn state(ctx: &Context<'_>) -> Value {
     json!({"max_seconds":MAX_SECONDS,"audio_days":days,"interrupted":interrupted,"debug_fake":cfg!(debug_assertions)})
 }
 pub fn is_summary(conn: &Connection, conversation: &str, message: &str) -> Result<bool, ApiError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM wrapper_meetings WHERE conversation_id=?1 AND message_id=?2)",
-        params![conversation, message],
-        |r| r.get(0),
-    )?)
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM wrapper_meetings WHERE conversation_id=?1 AND message_id=?2)",
+        )?
+        .query_row(params![conversation, message], |r| r.get(0))?)
 }
 pub fn model_text(
     conn: &Connection,
@@ -108,7 +108,7 @@ pub fn attachment(
     conversation: &str,
     message: &str,
 ) -> Result<Vec<Value>, ApiError> {
-    let mut q = conn.prepare(&format!(
+    let mut q = conn.prepare_cached(&format!(
         "{SELECT} WHERE conversation_id=?1 AND message_id=?2"
     ))?;
     let rows = q

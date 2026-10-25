@@ -1,6 +1,10 @@
 //! Cost of the two reads that look at the `quiet` flag of old routine passes (#286, rule 23):
 //! the notification outbox projection, read on every `GET /api/notifications`, and the history of
 //! a routine. Ten times the old passes, silent and not, must not multiply the SQLite work.
+use grokbot_engine::{
+    contracts::{RunBudgets, RunKind, TaskStatus, Trigger, TurnEnd},
+    model::{Run, RunStatus},
+};
 use grokbot_wrapper::App;
 use rusqlite::{ffi, Connection, StatementStatus};
 use serde_json::{json, Value};
@@ -28,7 +32,7 @@ struct Fixture {
 }
 impl Fixture {
     /// A routine with `passes` old occurrences: every third failed, half of the others quiet.
-    /// Returns the fixture and how many of them must notify.
+    /// Returns the fixture and how many notifications they must make, sub-tasks included.
     fn new(passes: usize) -> (Self, i64) {
         let dir = grokbot_test_support::TestDir::new("routine-quiet-scale");
         let path = dir.to_path_buf().join("app.sqlite");
@@ -43,6 +47,10 @@ impl Fixture {
             )
             .unwrap();
         let routine = made["routine"]["routine_id"].as_str().unwrap().to_owned();
+        let conversation = made["routine"]["conversation_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let db = Connection::open(&path).unwrap();
         let mut notifying = 0;
         let tx = db.unchecked_transaction().unwrap();
@@ -51,7 +59,27 @@ impl Fixture {
                 (true, _) => ("failed", false),
                 (false, quiet) => ("done", quiet),
             };
-            notifying += i64::from(!quiet);
+            // Every pass delegated once; the sub-task of a quiet pass is as silent as the pass.
+            notifying += 2 * i64::from(!quiet);
+            let run = Run {
+                run_id: format!("run{i}"),
+                bot_id: "grokbot".into(),
+                conversation_id: conversation.clone(),
+                trigger: Trigger::Occurrence {
+                    occurrence_id: format!("o{i}"),
+                },
+                kind: RunKind::Task,
+                status: RunStatus::Finished,
+                task_status: Some(TaskStatus::Done {
+                    summary: "Fini".into(),
+                    captures: vec![],
+                }),
+                turn_end: Some(TurnEnd::Finished),
+                budgets: RunBudgets::default(),
+                started_at: 1,
+            };
+            tx.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) VALUES (?1,'grokbot',?2,'occurrence',?3,0,'finished',?4)", rusqlite::params![run.run_id, conversation, format!("o{i}"), serde_json::to_string(&run).unwrap()]).unwrap();
+            tx.execute("INSERT INTO delegation_graph VALUES (?1,?2,?2,'grokbot','other',1,NULL,NULL,'{}','{\"status\":\"done\"}')", rusqlite::params![format!("d{i}"), format!("run{i}")]).unwrap();
             tx.execute(
                 "INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,manual_nonce,status,run_id,reason,quiet)
                  VALUES (?1,?2,1,?3,?1,?4,?5,?6,?7)",

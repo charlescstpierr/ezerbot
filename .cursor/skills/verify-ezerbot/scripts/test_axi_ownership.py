@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import launch
 import verify_lib
-from verify_lib import proc_identity
+from process_test_support import recorded_child
 
 SCRIPTS = Path(__file__).resolve().parent
 
@@ -445,10 +445,9 @@ fcntl.flock = flock
 
     def test_cleanup_preserves_pid_identity_guards(self) -> None:
         self.open_browser()
-        owned = subprocess.Popen(["sleep", "30"], start_new_session=True)
-        foreign = subprocess.Popen(["sleep", "30"], start_new_session=True)
-        try:
-            self.record.update({"wrapper_pid": owned.pid, "wrapper_identity": proc_identity(owned.pid),
+        with recorded_child(["sleep", "30"], start_new_session=True) as (owned, identity), \
+                recorded_child(["sleep", "30"], start_new_session=True) as (foreign, _):
+            self.record.update({"wrapper_pid": owned.pid, "wrapper_identity": identity,
                                 "fake_pid": foreign.pid, "fake_identity": {"platform": "foreign"}})
             self.write_run()
             cleanup = self.cleanup()
@@ -456,36 +455,27 @@ fcntl.flock = flock
             self.assertIsNone(foreign.poll())
             self.assertEqual(cleanup["killed"]["wrapper"], "arrete")
             self.assertEqual(cleanup["killed"]["fake"], "identite-differente-non-tue")
-        finally:
-            for process in (owned, foreign):
-                if process.poll() is None:
-                    process.kill()
-                process.wait(timeout=5)
 
     def test_headless_cleanup_stops_only_recorded_chrome_without_axi(self) -> None:
-        chrome = subprocess.Popen(["sleep", "30"], start_new_session=True)
         identity_reader = verify_lib.proc_identity
         observations = []
         def startup_identity(pid):
             identity = identity_reader(pid)
             observations.append(identity)
             if len(observations) == 1:
-                return {"pid": pid, "platform": sys.platform, "command": "", "marker": ""}
+                return {**(identity or {}), "command": "", "marker": ""}
             return identity
-        try:
-            with patch.object(verify_lib, "proc_identity", side_effect=startup_identity):
+        with patch.object(verify_lib, "proc_identity", side_effect=startup_identity):
+            with recorded_child(["sleep", "30"], start_new_session=True) as (chrome, identity):
+                self.assertGreaterEqual(len(observations), 2)
                 (self.run_root / "browser.json").write_text(json.dumps({
                     "mode": "chrome-headless", "session": "pm-i545", "started_by": "verify-ezerbot",
-                    "chrome_pid": chrome.pid, "identity": verify_lib.proc_identity(chrome.pid), "pgid": chrome.pid,
+                    "chrome_pid": chrome.pid, "identity": identity, "pgid": chrome.pid,
                 }))
-            cleanup = self.cleanup()
-            chrome.wait(timeout=5)
-            self.assertEqual(cleanup["killed"]["chrome"], "arrete")
-            self.assert_no_stop()
-        finally:
-            if chrome.poll() is None:
-                chrome.kill()
-            chrome.wait(timeout=5)
+                cleanup = self.cleanup()
+                chrome.wait(timeout=5)
+                self.assertEqual(cleanup["killed"]["chrome"], "arrete")
+                self.assert_no_stop()
 
 
 if __name__ == "__main__":

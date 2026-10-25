@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod local_auth;
+pub use local_auth::LaunchSecret;
 pub mod deep_links;
 mod fluidity;
 mod mcp;
@@ -1205,11 +1207,38 @@ pub fn validate_headers(
     port: u16,
     method: &str,
     headers: &[(String, String)],
+    secret: &LaunchSecret,
 ) -> Result<(), ApiError> {
-    validate_headers_for_path(port, method, "", headers)
+    validate_headers_for_path(port, method, "", headers, secret)
 }
 
 pub fn validate_headers_for_path(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    secret: &LaunchSecret,
+) -> Result<(), ApiError> {
+    let mut supplied = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(local_auth::LAUNCH_HEADER));
+    let accepted = supplied
+        .next()
+        .is_some_and(|(_, value)| secret.matches(value));
+    if !accepted || supplied.next().is_some() {
+        return Err(ApiError::new(
+            403,
+            "Cette requête ne provient pas de l'application locale.",
+        ));
+    }
+    validate_request_headers(port, method, path, headers)
+}
+
+pub fn validate_static_headers(port: u16, headers: &[(String, String)]) -> Result<(), ApiError> {
+    validate_request_headers(port, "GET", "", headers)
+}
+
+fn validate_request_headers(
     port: u16,
     method: &str,
     path: &str,

@@ -2,6 +2,9 @@
 //! names an explicit throwaway root. This guard does not call plutil, so it
 //! runs on Linux as well as macOS. The rest of the launch-agent suite stays
 //! in routines_background.rs behind the macOS cfg.
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
+use launch_identity::LaunchIdentity;
 use serde_json::json;
 use std::{
     fs,
@@ -24,18 +27,19 @@ fn debug_build_cannot_install_without_explicit_throwaway_override() {
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("unsafe-override")).unwrap();
     let plist = root.join("Library/LaunchAgents/local.ezerbot.routines.plist");
+    let identity = LaunchIdentity::new();
     let mut child = Stopped(
-        Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
-            .args(["--port", "0", "--db"])
-            .arg(root.join("unsafe-override/workspace.sqlite"))
-            .current_dir(&root)
-            .env("HOME", &root)
-            .env("CFFIXED_USER_HOME", &root)
-            .env_remove("GROKBOT_LAUNCH_AGENT_TEST_ROOT")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
+        identity.spawn(
+            Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
+                .args(["--port", "0", "--db"])
+                .arg(root.join("unsafe-override/workspace.sqlite"))
+                .current_dir(&root)
+                .env("HOME", &root)
+                .env("CFFIXED_USER_HOME", &root)
+                .env_remove("GROKBOT_LAUNCH_AGENT_TEST_ROOT")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit()),
+        ),
     );
     let mut line = String::new();
     BufReader::new(child.0.stdout.take().unwrap())
@@ -47,6 +51,7 @@ fn debug_build_cannot_install_without_explicit_throwaway_override() {
         .to_owned();
     let response = ureq::post(&format!("{url}/api/routines/background"))
         .set("X-Grokbot-Request", "local")
+        .set("X-Ezerbot-Launch", &identity.value())
         .send_json(json!({"enabled": true}));
     assert!(response.is_err());
     assert!(!plist.exists());

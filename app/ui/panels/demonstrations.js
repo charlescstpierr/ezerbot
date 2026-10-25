@@ -134,7 +134,7 @@
       const { demonstration: d, images } = await host.api(`/api/demonstrations/summary?id=${encodeURIComponent(id)}`);
       const view = window.GrokbotChat.demonstrationSummaryView(d, { id: data.session?.status === "review" ? data.session.id : null, explanation, keepImages: keep });
       summaryDialog.replaceChildren(summaryHeader(), node("p", view.explanation), node("pre", view.summary, "demonstration-summary"), node("p", view.media));
-      for (const image of images || []) { const img = node("img"); img.src = image; img.alt = "Capture conservée de la démonstration"; img.width = 1280; img.height = 800; img.loading = "lazy"; summaryDialog.append(img); }
+      for (const image of images || []) { const img = node("img"); img.src = window.EzerbotLocal?.resourceURL(image) ?? image; img.alt = "Capture conservée de la démonstration"; img.width = 1280; img.height = 800; img.loading = "lazy"; summaryDialog.append(img); }
     } catch (e) { summaryDialog.replaceChildren(summaryHeader("Synthèse indisponible"), node("p", e.message)); }
   }
   // Escape, like Fermer, only closes the controls. Only the explicit destructive

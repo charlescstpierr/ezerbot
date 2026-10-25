@@ -25,7 +25,6 @@ conserve la base semée pour la réutiliser avec `--seed DIR/w.sqlite`.
 """
 
 import argparse
-import http.client
 import json
 import os
 import platform
@@ -38,33 +37,26 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from local_api import LaunchIdentity, LocalEndpoint
 
 BODY = "Peux-tu m'aider à préparer la réunion de demain ? " * 4
 START_LIMIT_S = 60
 
 
-def request(port, method, path, body=None, timeout=120):
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-    headers = {"Host": f"127.0.0.1:{port}"}
-    if method != "GET":
-        headers.update(
-            {
-                "X-Grokbot-Request": "local",
-                "Content-Type": "application/json",
-                "Origin": f"http://127.0.0.1:{port}",
-            }
-        )
-    payload = json.dumps(body) if body is not None else None
-    connection.request(method, path, body=payload, headers=headers)
-    response = connection.getresponse()
-    data = response.read()
-    connection.close()
-    return response.status, data
+def request(endpoint, method, path, body=None, timeout=120):
+    status, data, _ = endpoint.request(method, path,
+        body=json.dumps(body) if body is not None else None,
+        headers={"Content-Type": "application/json"}, timeout=timeout)
+    return status, data
 
 
 def start(binary, db):
     started = time.perf_counter()
-    process = subprocess.Popen(
+    identity = LaunchIdentity()
+    process = identity.spawn(
         [binary, "--port", "0", "--db", db],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -78,14 +70,14 @@ def start(binary, db):
         announced = time.perf_counter()
         if not line:
             raise RuntimeError(f"{binary} s'est arrêté sans annoncer d'URL")
-        port = int(json.loads(line)["url"].rsplit(":", 1)[1])
+        endpoint = LocalEndpoint(identity, json.loads(line)["url"])
         deadline = announced + START_LIMIT_S
         while True:
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
                 raise RuntimeError(f"/api/ping n'a pas répondu 200 en {START_LIMIT_S} s")
             try:
-                status, _ = request(port, "GET", "/api/ping", timeout=remaining)
+                status, _ = request(endpoint, "GET", "/api/ping", timeout=remaining)
                 if status == 200:
                     break
             except OSError:
@@ -94,7 +86,7 @@ def start(binary, db):
         stop(process)
         raise
     pinged = time.perf_counter()
-    return process, port, (announced - started) * 1000, (pinged - started) * 1000
+    return process, endpoint, (announced - started) * 1000, (pinged - started) * 1000
 
 
 def stop(process):
@@ -106,16 +98,16 @@ def stop(process):
         process.wait()
 
 
-def new_conversation(port):
-    status, data = request(port, "POST", "/api/conversations", {})
+def new_conversation(endpoint):
+    status, data = request(endpoint, "POST", "/api/conversations", {})
     if status != 200:
         raise RuntimeError(f"POST /api/conversations a répondu {status}")
     return json.loads(data)["conversation"]["id"]
 
 
-def send(port, conversation, message):
+def send(endpoint, conversation, message):
     status, _ = request(
-        port,
+        endpoint,
         "POST",
         "/api/send",
         {"conversation_id": conversation, "message_id": message, "body": BODY},
@@ -124,12 +116,12 @@ def send(port, conversation, message):
 
 
 def seed(binary, db, conversations, messages):
-    process, port, _, _ = start(binary, db)
+    process, endpoint, _, _ = start(binary, db)
     try:
         for c in range(conversations):
-            conversation = new_conversation(port)
+            conversation = new_conversation(endpoint)
             for m in range(messages):
-                status = send(port, conversation, f"c{c}m{m}")
+                status = send(endpoint, conversation, f"c{c}m{m}")
                 if status != 200:
                     raise RuntimeError(f"envoi de semis c{c}m{m} : {status}")
     finally:
@@ -160,10 +152,10 @@ def copy_db(source, directory):
 def restart(binary, source, scratch, errors):
     directory = tempfile.mkdtemp(dir=scratch)
     db = copy_db(source, directory) if source else os.path.join(directory, "w.sqlite")
-    process, port, url_ms, ping_ms = start(binary, db)
+    process, endpoint, url_ms, ping_ms = start(binary, db)
     try:
-        conversation = new_conversation(port)
-        status = send(port, conversation, "apres-demarrage")
+        conversation = new_conversation(endpoint)
+        status = send(endpoint, conversation, "apres-demarrage")
         if status != 200:
             errors.append(f"envoi après démarrage : {status}")
     finally:

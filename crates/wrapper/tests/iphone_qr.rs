@@ -1,7 +1,10 @@
 #![cfg(debug_assertions)]
 //! QR pairing over the real listeners: the scanned link carries the Tailscale
 //! address and a working code, the Mac still confirms, and no log keeps the code.
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
 use base64::Engine;
+use launch_identity::LaunchIdentity;
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
@@ -10,7 +13,27 @@ use std::{
 };
 struct Host {
     child: std::process::Child,
+    identity: LaunchIdentity,
     root: PathBuf,
+    url: String,
+}
+impl Host {
+    fn post(&self, path: &str, body: Value) -> ureq::Response {
+        response(
+            ureq::post(&format!("{}{path}", self.url))
+                .set("Origin", &self.url)
+                .set("X-Grokbot-Request", "local")
+                .set("X-Ezerbot-Launch", &self.identity.value())
+                .send_json(body),
+        )
+    }
+    fn get(&self, path: &str) -> ureq::Response {
+        response(
+            ureq::get(&format!("{}{path}", self.url))
+                .set("X-Ezerbot-Launch", &self.identity.value())
+                .call(),
+        )
+    }
 }
 impl Drop for Host {
     fn drop(&mut self) {
@@ -108,23 +131,26 @@ fn qr_link_prefills_a_single_use_code_that_still_needs_the_mac_and_never_reaches
         .port();
     // Every byte the wrapper prints lands in these files, scanned at the end.
     let stdout = root.join("stdout.log");
-    let child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
-        .env("GROKBOT_IPHONE_PORT", iphone_port.to_string())
-        .args(["--port", "0", "--db"])
-        .arg(root.join("workspace.sqlite"))
-        .env("HOME", &root)
-        .env("CFFIXED_USER_HOME", &root)
-        .env("GROKBOT_FAKE_TAILSCALE", fake)
-        .env_remove("GROKBOT_FAKE_OPENAI")
-        .stdout(Stdio::from(std::fs::File::create(&stdout).unwrap()))
-        .stderr(Stdio::from(
-            std::fs::File::create(root.join("stderr.log")).unwrap(),
-        ))
-        .spawn()
-        .unwrap();
+    let identity = LaunchIdentity::new();
+    let child = identity.spawn(
+        Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
+            .env("GROKBOT_IPHONE_PORT", iphone_port.to_string())
+            .args(["--port", "0", "--db"])
+            .arg(root.join("workspace.sqlite"))
+            .env("HOME", &root)
+            .env("CFFIXED_USER_HOME", &root)
+            .env("GROKBOT_FAKE_TAILSCALE", fake)
+            .env_remove("GROKBOT_FAKE_OPENAI")
+            .stdout(Stdio::from(std::fs::File::create(&stdout).unwrap()))
+            .stderr(Stdio::from(
+                std::fs::File::create(root.join("stderr.log")).unwrap(),
+            )),
+    );
     let mut host = Host {
         child,
+        identity,
         root: root.clone(),
+        url: String::new(),
     };
     let mut line = String::new();
     for _ in 0..300 {
@@ -134,12 +160,12 @@ fn qr_link_prefills_a_single_use_code_that_still_needs_the_mac_and_never_reaches
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let mac = serde_json::from_str::<Value>(line.lines().next().unwrap()).unwrap()["url"]
+    host.url = serde_json::from_str::<Value>(line.lines().next().unwrap()).unwrap()["url"]
         .as_str()
         .unwrap()
         .to_owned();
     let remote = format!("http://127.0.0.1:{iphone_port}");
-    post(&mac, "/api/iphone/enabled", json!({"enabled":true}));
+    host.post("/api/iphone/enabled", json!({"enabled":true}));
     for _ in 0..60 {
         if ureq::get(&format!("{remote}/")).call().is_ok() {
             break;
@@ -147,7 +173,8 @@ fn qr_link_prefills_a_single_use_code_that_still_needs_the_mac_and_never_reaches
         std::thread::sleep(Duration::from_millis(30));
     }
     let before = now();
-    let created: Value = post(&mac, "/api/iphone/code", json!({}))
+    let created: Value = host
+        .post("/api/iphone/code", json!({}))
         .into_json()
         .unwrap();
     let code = created["code"].as_str().unwrap().to_owned();
@@ -190,12 +217,9 @@ fn qr_link_prefills_a_single_use_code_that_still_needs_the_mac_and_never_reaches
         waiting.into_json::<Value>().unwrap(),
         json!({"pending":true})
     );
-    let status: Value = response(ureq::get(&format!("{mac}/api/iphone/status")).call())
-        .into_json()
-        .unwrap();
+    let status: Value = host.get("/api/iphone/status").into_json().unwrap();
     assert_eq!(status["devices"][0]["status"], "pending");
-    post(
-        &mac,
+    host.post(
         "/api/iphone/confirm",
         json!({"id":status["devices"][0]["id"],"allow":true}),
     );
@@ -204,7 +228,8 @@ fn qr_link_prefills_a_single_use_code_that_still_needs_the_mac_and_never_reaches
     assert_eq!(paired.into_json::<Value>().unwrap(), json!({"paired":true}));
 
     // Two minutes later the next QR no longer pairs.
-    let late: Value = post(&mac, "/api/iphone/code", json!({}))
+    let late: Value = host
+        .post("/api/iphone/code", json!({}))
         .into_json()
         .unwrap();
     let late = late["code"].as_str().unwrap().to_owned();

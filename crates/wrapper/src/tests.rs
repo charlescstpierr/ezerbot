@@ -846,6 +846,9 @@ fn boundaries_reject_invalid_input_before_creating_submission() {
 
 #[test]
 fn cross_origin_and_rebinding_requests_are_rejected() {
+    let mut bytes = [0; 32];
+    getrandom::getrandom(&mut bytes).unwrap();
+    let secret = super::LaunchSecret::read(bytes.as_slice()).unwrap();
     let good = vec![
         ("Host".into(), "127.0.0.1:7777".into()),
         ("Origin".into(), "http://127.0.0.1:7777".into()),
@@ -854,8 +857,9 @@ fn cross_origin_and_rebinding_requests_are_rejected() {
             "application/json; charset=utf-8".into(),
         ),
         ("X-Grokbot-Request".into(), "local".into()),
+        ("X-Ezerbot-Launch".into(), secret.header_value().into()),
     ];
-    assert!(validate_headers(7777, "POST", &good).is_ok());
+    assert!(validate_headers(7777, "POST", &good, &secret).is_ok());
     for (index, bad) in [
         (0, "evil.test:7777"),
         (1, "https://127.0.0.1:7777"),
@@ -865,20 +869,28 @@ fn cross_origin_and_rebinding_requests_are_rejected() {
         let mut headers = good.clone();
         headers[index].1 = bad.into();
         assert_eq!(
-            validate_headers(7777, "POST", &headers).unwrap_err().status,
+            validate_headers(7777, "POST", &headers, &secret)
+                .unwrap_err()
+                .status,
             403
         );
     }
     let mut duplicate = good.clone();
     duplicate.push(("Host".into(), "evil.test:7777".into()));
     assert_eq!(
-        validate_headers(7777, "POST", &duplicate)
+        validate_headers(7777, "POST", &duplicate, &secret)
             .unwrap_err()
             .status,
         403
     );
+    let missing_marker: Vec<_> = good
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != 3)
+        .map(|(_, value)| value.clone())
+        .collect();
     assert_eq!(
-        validate_headers(7777, "POST", &good[..3])
+        validate_headers(7777, "POST", &missing_marker, &secret)
             .unwrap_err()
             .status,
         403

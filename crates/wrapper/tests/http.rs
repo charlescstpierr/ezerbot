@@ -1,6 +1,9 @@
 //! HTTP host extension contracts, exercised against the actual wrapper process.
 //! Never launch a release host here: its OS vault deliberately ignores test overrides.
 #![cfg(debug_assertions)]
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
+use launch_identity::LaunchIdentity;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::process::{Child, Command, Stdio};
@@ -24,18 +27,19 @@ fn first_line_announces_loopback_and_http_enforces_origin_and_size() {
     let guard = grokbot_test_support::TestDir::new("grokbot-wrapper-http");
     let directory = guard.to_path_buf();
     let db = directory.join("app.sqlite");
-    let child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
-        .args(["--port", "0", "--db"])
-        .arg(&db)
-        .env("HOME", &directory)
-        .env("CFFIXED_USER_HOME", &directory)
-        .env_remove("GROKBOT_TEST_KEYCHAIN")
-        .env_remove("GROKBOT_TEST_SIGNATURE_REQUIREMENT")
-        .env_remove("GROKBOT_FAKE_OPENAI")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+    let identity = LaunchIdentity::new();
+    let child = identity.spawn(
+        Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
+            .args(["--port", "0", "--db"])
+            .arg(&db)
+            .env("HOME", &directory)
+            .env("CFFIXED_USER_HOME", &directory)
+            .env_remove("GROKBOT_TEST_KEYCHAIN")
+            .env_remove("GROKBOT_TEST_SIGNATURE_REQUIREMENT")
+            .env_remove("GROKBOT_FAKE_OPENAI")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit()),
+    );
     let mut running = Running(child);
     let mut first = String::new();
     BufReader::new(running.0.stdout.take().unwrap())
@@ -56,12 +60,14 @@ fn first_line_announces_loopback_and_http_enforces_origin_and_size() {
         socket
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
-        write!(socket, "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n{extra}\r\n", body.len()).unwrap();
+        write!(socket, "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nX-Ezerbot-Launch: {}\r\nContent-Length: {}\r\n{extra}\r\n", identity.value(), body.len()).unwrap();
         socket.write_all(body).unwrap();
         let mut result = String::new();
         socket.read_to_string(&mut result).unwrap();
         result
     };
+    let anonymous = status(ureq::get(&format!("http://{address}/api/state")).call());
+    assert_eq!(anonymous, 403, "anonymous local API must be denied");
     let state = request(address, "GET", "/api/state", "", b"");
     assert!(state.starts_with("HTTP/1.1 200"), "{state}");
     assert!(state.contains("Cache-Control: no-store"), "{state}");
@@ -95,6 +101,7 @@ fn first_line_announces_loopback_and_http_enforces_origin_and_size() {
 struct Host {
     child: Child,
     url: String,
+    identity: LaunchIdentity,
     _dir: grokbot_test_support::TestDir,
 }
 
@@ -102,20 +109,22 @@ impl Host {
     fn new() -> Self {
         let guard = grokbot_test_support::TestDir::new("grokbot-http");
         let directory = guard.to_path_buf();
-        let child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
-            .args(["--port", "0", "--db"])
-            .arg(directory.join("app.sqlite"))
-            .env("HOME", &directory)
-            .env("CFFIXED_USER_HOME", &directory)
-            .env_remove("GROKBOT_TEST_KEYCHAIN")
-            .env_remove("GROKBOT_TEST_SIGNATURE_REQUIREMENT")
-            .env_remove("GROKBOT_FAKE_OPENAI")
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let identity = LaunchIdentity::new();
+        let child = identity.spawn(
+            Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
+                .args(["--port", "0", "--db"])
+                .arg(directory.join("app.sqlite"))
+                .env("HOME", &directory)
+                .env("CFFIXED_USER_HOME", &directory)
+                .env_remove("GROKBOT_TEST_KEYCHAIN")
+                .env_remove("GROKBOT_TEST_SIGNATURE_REQUIREMENT")
+                .env_remove("GROKBOT_FAKE_OPENAI")
+                .stdout(Stdio::piped()),
+        );
         let mut host = Self {
             child,
             url: String::new(),
+            identity,
             _dir: guard,
         };
         let mut line = String::new();
@@ -130,6 +139,7 @@ impl Host {
     fn post(&self, path: &str, content_type: &str, body: &[u8]) -> u16 {
         status(
             ureq::post(&format!("{}{path}", self.url))
+                .set("X-Ezerbot-Launch", &self.identity.value())
                 .set("Origin", &self.url)
                 .set("X-Grokbot-Request", "local")
                 .set("Content-Type", content_type)
@@ -143,7 +153,7 @@ impl Host {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        write!(stream, "POST {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: {}\r\nX-Grokbot-Request: local\r\nContent-Type: {content_type}\r\nConnection: close\r\n{framing}\r\n\r\n", self.url).unwrap();
+        write!(stream, "POST {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: {}\r\nX-Ezerbot-Launch: {}\r\nX-Grokbot-Request: local\r\nContent-Type: {content_type}\r\nConnection: close\r\n{framing}\r\n\r\n", self.url, self.identity.value()).unwrap();
         stream.write_all(body).unwrap();
         stream.shutdown(Shutdown::Write).unwrap();
         let mut response = String::new();
@@ -180,7 +190,11 @@ fn proof_script_calls_pass_the_local_guard_and_a_bare_post_stays_forbidden() {
     let host = Host::new();
     let ui = |path: &str, body: &[u8]| host.post(path, "application/json", body);
     assert_eq!(
-        status(ureq::get(&format!("{}/api/state", host.url)).call()),
+        status(
+            ureq::get(&format!("{}/api/state", host.url))
+                .set("X-Ezerbot-Launch", &host.identity.value())
+                .call()
+        ),
         200
     );
     assert_eq!(
@@ -191,6 +205,7 @@ fn proof_script_calls_pass_the_local_guard_and_a_bare_post_stays_forbidden() {
         200
     );
     let created = ureq::post(&format!("{}/api/conversations", host.url))
+        .set("X-Ezerbot-Launch", &host.identity.value())
         .set("Origin", &host.url)
         .set("X-Grokbot-Request", "local")
         .set("Content-Type", "application/json")
@@ -208,16 +223,22 @@ fn proof_script_calls_pass_the_local_guard_and_a_bare_post_stays_forbidden() {
     assert_ne!(ui("/api/send", &send), 403);
     assert_eq!(ui("/api/provider/test", br#"{"refresh":true}"#), 200);
     assert_eq!(
-        status(ureq::get(&format!("{}/api/usage", host.url)).call()),
+        status(
+            ureq::get(&format!("{}/api/usage", host.url))
+                .set("X-Ezerbot-Launch", &host.identity.value())
+                .call()
+        ),
         200
     );
     assert_eq!(ui("/api/usage/refresh", b"{}"), 200);
     assert_eq!(ui("/api/provider/signout", b"{}"), 200);
     let bare = ureq::post(&format!("{}/api/preferences", host.url))
+        .set("X-Ezerbot-Launch", &host.identity.value())
         .set("Content-Type", "application/json")
         .send_bytes(br#"{"model":"gpt-6.1-sol","effort":"high"}"#);
     assert_eq!(status(bare), 403);
     let wrong_origin = ureq::post(&format!("{}/api/preferences", host.url))
+        .set("X-Ezerbot-Launch", &host.identity.value())
         .set("Origin", "https://example.invalid")
         .set("X-Grokbot-Request", "local")
         .set("Content-Type", "application/json")
@@ -228,7 +249,10 @@ fn proof_script_calls_pass_the_local_guard_and_a_bare_post_stays_forbidden() {
 #[test]
 fn floating_surface_is_separate_and_settings_keep_the_http_origin_gate() {
     let host = Host::new();
-    let page = ureq::get(&format!("{}/floating", host.url)).call().unwrap();
+    let page = ureq::get(&format!("{}/floating", host.url))
+        .set("X-Ezerbot-Launch", &host.identity.value())
+        .call()
+        .unwrap();
     assert!(page
         .header("Content-Security-Policy")
         .unwrap()
@@ -238,6 +262,7 @@ fn floating_surface_is_separate_and_settings_keep_the_http_origin_gate() {
     assert!(!html.contains("src=\"/app.js\""));
     let body = br#"{"shortcut":"disabled"}"#;
     let refusal = ureq::post(&format!("{}/api/floating/settings", host.url))
+        .set("X-Ezerbot-Launch", &host.identity.value())
         .set("Origin", "https://example.invalid")
         .set("X-Grokbot-Request", "local")
         .set("Content-Type", "application/json")
@@ -248,6 +273,7 @@ fn floating_surface_is_separate_and_settings_keep_the_http_origin_gate() {
         200
     );
     let settings: Value = ureq::get(&format!("{}/api/floating", host.url))
+        .set("X-Ezerbot-Launch", &host.identity.value())
         .call()
         .unwrap()
         .into_json()
@@ -261,6 +287,7 @@ fn voice_audio_supports_webkit_byte_ranges() {
     let host = Host::new();
     let post = |path: &str, body: Value| -> Value {
         ureq::post(&format!("{}{path}", host.url))
+            .set("X-Ezerbot-Launch", &host.identity.value())
             .set("X-Grokbot-Request", "local")
             .send_json(body)
             .unwrap()
@@ -278,7 +305,10 @@ fn voice_audio_supports_webkit_byte_ranges() {
         host.url,
         memo["id"].as_str().unwrap()
     );
-    let full = ureq::get(&url).call().unwrap();
+    let full = ureq::get(&url)
+        .set("X-Ezerbot-Launch", &host.identity.value())
+        .call()
+        .unwrap();
     assert_eq!(full.status(), 200);
     assert_eq!(full.header("Accept-Ranges"), Some("bytes"));
     assert!(full.header("Content-Range").is_none());
@@ -293,7 +323,11 @@ fn voice_audio_supports_webkit_byte_ranges() {
         ("bytes=32000-999999", 32000, wav.len() - 1),
         ("bytes=-999999", 0, wav.len() - 1),
     ] {
-        let response = ureq::get(&url).set("Range", range).call().unwrap();
+        let response = ureq::get(&url)
+            .set("X-Ezerbot-Launch", &host.identity.value())
+            .set("Range", range)
+            .call()
+            .unwrap();
         assert_eq!(response.status(), 206, "{range}");
         assert_eq!(response.header("Accept-Ranges"), Some("bytes"));
         assert_eq!(
@@ -321,7 +355,11 @@ fn voice_audio_supports_webkit_byte_ranges() {
         "bytes=-",
         "bytes=+1-2",
     ] {
-        let response = match ureq::get(&url).set("Range", range).call() {
+        let response = match ureq::get(&url)
+            .set("X-Ezerbot-Launch", &host.identity.value())
+            .set("Range", range)
+            .call()
+        {
             Err(ureq::Error::Status(416, response)) => response,
             other => panic!("{range}: {other:?}"),
         };
@@ -333,6 +371,7 @@ fn voice_audio_supports_webkit_byte_ranges() {
     // A Range header does not change JSON or error responses.
     assert_eq!(
         ureq::get(&format!("{}/api/state", host.url))
+            .set("X-Ezerbot-Launch", &host.identity.value())
             .set("Range", "bytes=0-1")
             .call()
             .unwrap()
@@ -342,6 +381,7 @@ fn voice_audio_supports_webkit_byte_ranges() {
     assert_eq!(
         status(
             ureq::get(&format!("{}/api/voice/audio/missing", host.url))
+                .set("X-Ezerbot-Launch", &host.identity.value())
                 .set("Range", "bytes=0-1")
                 .call()
         ),
@@ -382,20 +422,23 @@ fn binary_post_only_allowed_on_attachment_route() {
         200
     );
     let port: u16 = host.url.rsplit(':').next().unwrap().parse().unwrap();
+    let identity = LaunchIdentity::new();
+    let secret = identity.validator();
     let headers = vec![
+        ("X-Ezerbot-Launch".into(), identity.value()),
         ("Host".into(), format!("127.0.0.1:{port}")),
         ("X-Grokbot-Request".into(), "local".into()),
         ("Content-Type".into(), "image/png".into()),
         ("Origin".into(), "https://foreign.example".into()),
     ];
     assert_eq!(
-        validate_headers_for_path(port, "POST", "/api/attachments", &headers)
+        validate_headers_for_path(port, "POST", "/api/attachments", &headers, &secret)
             .unwrap_err()
             .status,
         403
     );
     assert_eq!(
-        validate_headers_for_path(port, "POST", "/api/attachments", &headers[..1])
+        validate_headers_for_path(port, "POST", "/api/attachments", &headers[..1], &secret)
             .unwrap_err()
             .status,
         403
@@ -484,6 +527,7 @@ fn non_read_methods_require_local_marker_and_origin() {
     for method in ["DELETE", "PUT", "PATCH", "OPTIONS"] {
         let request = || {
             ureq::request(method, &format!("{}/api/conversations", host.url))
+                .set("X-Ezerbot-Launch", &host.identity.value())
                 .set("Content-Type", "application/json")
         };
         assert_eq!(status(request().send_string("{}")), 403, "{method}");
@@ -552,7 +596,10 @@ fn bytes_response_keeps_content_type() {
         ("/panels.css", "text/css; charset=utf-8"),
         ("/api/state", "application/json; charset=utf-8"),
     ] {
-        let response = ureq::get(&format!("{}{path}", host.url)).call().unwrap();
+        let response = ureq::get(&format!("{}{path}", host.url))
+            .set("X-Ezerbot-Launch", &host.identity.value())
+            .call()
+            .unwrap();
         assert_eq!(response.header("Content-Type"), Some(mime));
         assert_eq!(response.header("X-Content-Type-Options"), Some("nosniff"));
         let mut body = Vec::new();

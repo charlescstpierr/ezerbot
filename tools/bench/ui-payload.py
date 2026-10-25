@@ -17,7 +17,6 @@ Le chiffre est déterministe : les passes servent à montrer qu'il ne varie pas.
 """
 import argparse
 import gzip
-import http.client
 import json
 import re
 import statistics
@@ -26,6 +25,10 @@ import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from local_api import LaunchIdentity, LocalEndpoint
 
 ACCEPT = "gzip, deflate, br"
 TARGET_TOTAL_KIB = 1350
@@ -33,30 +36,24 @@ TARGET_JS_KIB = 310
 
 
 def start(binary, db):
-    process = subprocess.Popen([binary, "--port", "0", "--db", db], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    port = int(json.loads(process.stdout.readline())["url"].rsplit(":", 1)[1])
+    identity = LaunchIdentity()
+    process = identity.spawn([binary, "--port", "0", "--db", db], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    endpoint = LocalEndpoint(identity, json.loads(process.stdout.readline())["url"])
     threading.Thread(target=process.stdout.read, daemon=True).start()
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:
-            if get(port, "/api/ping")[0] == 200:
-                return process, port
+            if get(endpoint, "/api/ping")[0] == 200:
+                return process, endpoint
         except OSError:
             time.sleep(0.05)
     process.kill()
     raise SystemExit("le serveur ne répond pas à /api/ping")
 
 
-def get(port, path, encoding=None):
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
-    headers = {"Host": f"127.0.0.1:{port}"}
-    if encoding:
-        headers["Accept-Encoding"] = encoding
-    connection.request("GET", path, headers=headers)
-    response = connection.getresponse()
-    body = response.read()
-    connection.close()
-    return response.status, body, {k.lower(): v for k, v in response.getheaders()}
+def get(endpoint, path, encoding=None):
+    headers = {"Accept-Encoding": encoding} if encoding else {}
+    return endpoint.request("GET", path, headers=headers, timeout=30)
 
 
 def decode(body, encoding):
@@ -70,9 +67,9 @@ def decode(body, encoding):
     raise ValueError(f"Content-Encoding non décodable ici : {encoding}")
 
 
-def fetch(port, path):
-    status, wire, headers = get(port, path, ACCEPT)
-    reference_status, reference, _ = get(port, path)
+def fetch(endpoint, path):
+    status, wire, headers = get(endpoint, path, ACCEPT)
+    reference_status, reference, _ = get(endpoint, path)
     encoding = headers.get("content-encoding", "")
     error = None
     try:
@@ -106,19 +103,19 @@ def local_references(text, pattern):
 
 def measure(binary):
     with tempfile.TemporaryDirectory(prefix="ui-payload-") as directory:
-        process, port = start(binary, f"{directory}/w.sqlite")
+        process, endpoint = start(binary, f"{directory}/w.sqlite")
         try:
-            worker = get(port, "/sw.js")[1].decode()
-            shell = [fetch(port, path) for path in listed(worker, "ASSETS")]
+            worker = get(endpoint, "/sw.js")[1].decode()
+            shell = [fetch(endpoint, path) for path in listed(worker, "ASSETS")]
             index = next(item for item in shell if item["path"] == "/")["body"].decode()
             # iphone.js registers /sw.js, so the browser fetches it at every opening too.
             loaded = set(local_references(index, r'(?:src|href)="([^"?#]+)"')) | {"/sw.js"}
-            extra = [fetch(port, path) for path in sorted(loaded - {item["path"] for item in shell})]
+            extra = [fetch(endpoint, path) for path in sorted(loaded - {item["path"] for item in shell})]
             later = set(listed(worker, "ON_DEMAND"))
             for item in shell:
                 if item["type"] == "text/css":
                     later.update(local_references(item["body"].decode(), r'url\(\s*["\']?([^"\')]+)'))
-            on_demand = [fetch(port, path) for path in sorted(later - {item["path"] for item in shell + extra})]
+            on_demand = [fetch(endpoint, path) for path in sorted(later - {item["path"] for item in shell + extra})]
         finally:
             process.terminate()
             process.wait(10)

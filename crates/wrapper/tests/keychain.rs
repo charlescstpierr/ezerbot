@@ -1,7 +1,10 @@
 //! Real Security.framework tests: every operation explicitly selects a disposable
 //! keychain created by `security` inside a throwaway HOME. No login search/list.
 #![cfg(all(target_os = "macos", debug_assertions))]
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
 use grokbot_forms::vault::{Vault, MCP_ENV_PURPOSE};
+use launch_identity::LaunchIdentity;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -93,7 +96,8 @@ impl Fixture {
         if let Some(requirement) = requirement {
             command.env("GROKBOT_TEST_SIGNATURE_REQUIREMENT", requirement);
         }
-        let mut child = command.spawn().unwrap();
+        let identity = LaunchIdentity::new();
+        let mut child = identity.spawn(&mut command);
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let text = fs::read_to_string(self.home.join("host.log")).unwrap();
@@ -102,7 +106,11 @@ impl Fixture {
                     .ok()
                     .and_then(|v| v["url"].as_str().map(str::to_owned))
             }) {
-                return Host { child, url };
+                return Host {
+                    child,
+                    identity,
+                    url,
+                };
             }
             assert!(
                 child.try_wait().unwrap().is_none(),
@@ -125,11 +133,13 @@ impl Drop for Fixture {
 }
 struct Host {
     child: Child,
+    identity: LaunchIdentity,
     url: String,
 }
 impl Host {
     fn state(&self) -> Value {
         ureq::get(&format!("{}/api/state", self.url))
+            .set("X-Ezerbot-Launch", &self.identity.value())
             .call()
             .unwrap()
             .into_json()
@@ -139,6 +149,7 @@ impl Host {
         ureq::post(&format!("{}{path}", self.url))
             .set("Origin", &self.url)
             .set("X-Grokbot-Request", "local")
+            .set("X-Ezerbot-Launch", &self.identity.value())
             .send_json(body)
             .unwrap()
             .into_json()
@@ -159,6 +170,7 @@ impl Host {
         ureq::post(&format!("{}/api/secrets/delete", self.url))
             .set("Origin", &self.url)
             .set("X-Grokbot-Request", "local")
+            .set("X-Ezerbot-Launch", &self.identity.value())
             .send_json(json!({"name":name}))
             .unwrap()
     }

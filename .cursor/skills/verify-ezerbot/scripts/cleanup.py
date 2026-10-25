@@ -119,7 +119,7 @@ def cleanup_run(evidence: Path) -> None:
     run["cleaning"] = True
     save_run(evidence, run)
     results = {}
-    for name in ("wrapper", "fake"):
+    for name in ("auth", "wrapper", "fake"):
         pid = int(run.get(f"{name}_pid") or 0)
         identity = run.get(f"{name}_identity")
         if name == "wrapper" and identity and run.get("wrapper_pgid"):

@@ -180,28 +180,19 @@ class TerminateTests(unittest.TestCase):
     def test_caller_group_is_not_killed(self) -> None:
         script = textwrap.dedent(
             f"""
-            import os, sys, time
+            import os, sys
             sys.path.insert(0, {str(SCRIPTS)!r})
-            from verify_lib import pid_alive, proc_identity, terminate_recorded
+            from verify_lib import pid_alive, terminate_recorded
+            from process_test_support import recorded_child
             os.setsid()
-            import subprocess
-            sibling = subprocess.Popen(["sleep", "30"])
-            victim = subprocess.Popen(["sleep", "30"], start_new_session=True)
-            time.sleep(0.2)
-            identity = proc_identity(victim.pid)
-            identity["pgid"] = os.getpgrp()
-            result = terminate_recorded(victim.pid, identity)
-            sibling_alive = pid_alive(sibling.pid)
-            victim_alive = pid_alive(victim.pid)
-            if sibling_alive:
-                sibling.kill()
-                sibling.wait(timeout=2)
-            if victim_alive:
-                victim.kill()
-            if result == "arrete" and not victim_alive and sibling_alive:
-                sys.exit(0)
-            print(result, victim_alive, sibling_alive)
-            sys.exit(1)
+            with recorded_child(["sleep", "30"]) as (sibling, _):
+                with recorded_child(["sleep", "30"], start_new_session=True) as (victim, identity):
+                    identity["pgid"] = os.getpgrp()
+                    result = terminate_recorded(victim.pid, identity)
+                    sibling_alive = pid_alive(sibling.pid)
+                    victim_alive = pid_alive(victim.pid)
+                    if result != "arrete" or victim_alive or not sibling_alive:
+                        raise AssertionError((result, victim_alive, sibling_alive))
             """
         )
         result = subprocess.run([sys.executable, "-c", script], text=True, capture_output=True)
@@ -210,29 +201,20 @@ class TerminateTests(unittest.TestCase):
     def test_same_group_kills_only_the_recorded_pid(self) -> None:
         script = textwrap.dedent(
             f"""
-            import os, sys, time
+            import os, sys
             sys.path.insert(0, {str(SCRIPTS)!r})
-            from verify_lib import pid_alive, proc_identity, terminate_recorded
-            import subprocess
+            from verify_lib import pid_alive, terminate_recorded
+            from process_test_support import recorded_child
             os.setsid()
-            sibling = subprocess.Popen(["sleep", "30"])
-            victim = subprocess.Popen(["sleep", "30"])
-            time.sleep(0.2)
-            identity = proc_identity(victim.pid)
-            identity["pgid"] = os.getpgid(victim.pid)
-            assert identity["pgid"] == os.getpgrp()
-            result = terminate_recorded(victim.pid, identity)
-            sibling_alive = pid_alive(sibling.pid)
-            victim_alive = pid_alive(victim.pid)
-            if sibling_alive:
-                sibling.kill()
-                sibling.wait(timeout=2)
-            if victim_alive:
-                victim.kill()
-            if result == "arrete" and not victim_alive and sibling_alive:
-                sys.exit(0)
-            print(result, victim_alive, sibling_alive)
-            sys.exit(1)
+            with recorded_child(["sleep", "30"]) as (sibling, _):
+                with recorded_child(["sleep", "30"]) as (victim, identity):
+                    identity["pgid"] = os.getpgid(victim.pid)
+                    assert identity["pgid"] == os.getpgrp()
+                    result = terminate_recorded(victim.pid, identity)
+                    sibling_alive = pid_alive(sibling.pid)
+                    victim_alive = pid_alive(victim.pid)
+                    if result != "arrete" or victim_alive or not sibling_alive:
+                        raise AssertionError((result, victim_alive, sibling_alive))
             """
         )
         result = subprocess.run([sys.executable, "-c", script], text=True, capture_output=True)
@@ -241,23 +223,17 @@ class TerminateTests(unittest.TestCase):
     def test_matching_foreign_group_is_killed(self) -> None:
         script = textwrap.dedent(
             f"""
-            import os, sys, time
+            import os, sys
             sys.path.insert(0, {str(SCRIPTS)!r})
-            from verify_lib import pid_alive, proc_identity, terminate_recorded
-            import subprocess
-            victim = subprocess.Popen(["sleep", "30"], start_new_session=True)
-            time.sleep(0.2)
-            identity = proc_identity(victim.pid)
-            identity["pgid"] = os.getpgid(victim.pid)
-            assert identity["pgid"] != os.getpgrp()
-            result = terminate_recorded(victim.pid, identity)
-            alive = pid_alive(victim.pid)
-            if alive:
-                victim.kill()
-            if result == "arrete" and not alive:
-                sys.exit(0)
-            print(result, alive)
-            sys.exit(1)
+            from verify_lib import pid_alive, terminate_recorded
+            from process_test_support import recorded_child
+            with recorded_child(["sleep", "30"], start_new_session=True) as (victim, identity):
+                identity["pgid"] = os.getpgid(victim.pid)
+                assert identity["pgid"] != os.getpgrp()
+                result = terminate_recorded(victim.pid, identity)
+                alive = pid_alive(victim.pid)
+                if result != "arrete" or alive:
+                    raise AssertionError((result, alive))
             """
         )
         result = subprocess.run([sys.executable, "-c", script], text=True, capture_output=True)

@@ -107,6 +107,7 @@ pub mod page_snapshot;
 pub mod pages;
 pub mod recall;
 pub mod routine_calendar;
+mod routine_cost;
 pub mod routine_github;
 pub mod routine_mail;
 pub mod routine_webhooks;
@@ -122,6 +123,7 @@ pub mod templates;
 pub mod threads;
 pub mod topic_memory;
 pub mod topics;
+pub mod turns;
 pub mod updates;
 pub mod usage;
 pub mod voice;
@@ -181,6 +183,7 @@ registry!(
     mcp,
     storage,
     usage,
+    turns,
     notifications,
     iphone,
     floating,
@@ -305,5 +308,42 @@ pub(crate) mod test_hooks {
         ids: &[String],
     ) -> Option<Result<(), ApiError>> {
         LINK.get().map(|hook| hook(ctx, conversation, message, ids))
+    }
+}
+
+#[cfg(test)]
+mod schema_coverage {
+    /// Ignored by the validator on purpose: the engine does not check these `anyOf`
+    /// branches. Only the tool's own deserialization of `field_type` does, and it does
+    /// not reject extra fields.
+    const TOLERATED: &[(&str, &str)] = &[
+        (
+            "request_form",
+            "/properties/fields/items/properties/field_type/anyOf",
+        ),
+        (
+            "request_site_form",
+            "/properties/fields/items/properties/field_type/anyOf",
+        ),
+    ];
+
+    #[test]
+    fn every_static_tool_schema_uses_only_keywords_the_engine_validates() {
+        let mut unexpected = Vec::new();
+        let mut tolerated = Vec::new();
+        for spec in super::tools() {
+            for keyword in grokbot_engine::schema::unsupported_keywords(&spec.schema) {
+                match TOLERATED.iter().find(|t| t == &&(&*spec.name, &*keyword)) {
+                    Some(known) => tolerated.push(*known),
+                    None => unexpected.push(format!("{}{keyword}", spec.name)),
+                }
+            }
+        }
+        assert!(
+            unexpected.is_empty(),
+            "keywords the argument validator ignores: {unexpected:?}"
+        );
+        tolerated.sort();
+        assert_eq!(tolerated, TOLERATED, "stale entry in TOLERATED");
     }
 }

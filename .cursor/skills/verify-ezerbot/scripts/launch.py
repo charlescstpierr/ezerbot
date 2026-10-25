@@ -40,6 +40,8 @@ from verify_lib import (
     repo_root,
     resolve_commit,
     save_run,
+    run_lock,
+    run_path,
     session_id,
     sha256_file,
     sign_run_directory,
@@ -109,7 +111,7 @@ def allocate_run_root(evidence: Path) -> tuple[Path, Path, dict[str, str]]:
         assert_outside_repo(run_root, "répertoire jetable")
         assert_not_under(evidence, home, "preuves")
         assert_not_under(evidence, run_root, "preuves")
-        signature = sign_run_directory(run_root)
+        signature = sign_run_directory(run_root, session_id())
     except BaseException:
         shutil.rmtree(run_root, ignore_errors=True)
         raise
@@ -124,6 +126,13 @@ def main() -> None:
     repo = repo_root()
     session = session_id()
     evidence = evidence_dir(session, str(args.evidence) if args.evidence else None)
+    with run_lock(evidence):
+        if run_path(evidence).exists():
+            raise SystemExit("refus: ce dossier de preuves contient déjà un run; choisir un dossier neuf")
+        launch_run(args, repo, session, evidence)
+
+
+def launch_run(args: argparse.Namespace, repo: Path, session: str, evidence: Path) -> None:
     if not compiled_sources_clean(repo):
         raise SystemExit(
             "refus: crates/, app/ui/, app/web/ ou Cargo.lock diffèrent du commit. "
@@ -205,7 +214,7 @@ def main() -> None:
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "GROKBOT_FAKE_OPENAI": base,
         }
-        if args.sphere not in ("images", "images-reference", "pages", "reponse-fil", "taches-de-fond", "approbation-tardive", "approbation-rappel", "mode-yolo", "sources-citees", "souvenirs-rappeles"):
+        if args.sphere not in ("images", "images-reference", "pages", "reponse-fil", "taches-de-fond", "approbation-tardive", "approbation-rappel", "mode-yolo", "sources-citees", "souvenirs-rappeles", "rien-a-signaler"):
             # Les builds de debug ouvrent la session factice eux-mêmes (le jeton écrit ci-dessus n'est plus lu).
             # Les sphères images, images-reference, pages, reponse-fil, taches-de-fond, approbation-tardive, approbation-rappel et sources-citees gardent le faux OpenAI du run : lui seul sait répondre à un dessin,
             # écrire une Page, citer le message parent d'un sous-fil, lancer une tâche de fond, demander une commande protégée puis en rendre le résultat, ou citer des sources numérotées.

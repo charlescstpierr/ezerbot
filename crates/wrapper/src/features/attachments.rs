@@ -1031,6 +1031,9 @@ pub fn link_attachments(
 
 /// UI-safe attachment DTOs, never raw bytes or drafts.
 pub fn for_message(ctx: &Context<'_>, conversation: &str, message: &str) -> Vec<Value> {
+    if crate::projection_hints::no_attachments(conversation, message) {
+        return Vec::new();
+    }
     message_attachments(ctx, conversation, message).unwrap_or_default()
 }
 

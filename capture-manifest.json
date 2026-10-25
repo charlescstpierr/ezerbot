@@ -1,0 +1,105 @@
+{
+  "head": "5fef3f585dc42ffe2b87b1d4d98946d9e2e042b4",
+  "binary_sha256": "3a88a15fffd26431000939042441453f4c9eb4c1bb86b14fef413c52623c6070",
+  "platform": "macOS",
+  "browser": "chrome-devtools-axi",
+  "session": "pm-i281",
+  "checks": [
+    "modèle disponible",
+    "envoi disponible",
+    "Page générée et cliquable",
+    "état initial choisi",
+    "cache DOM purgé à version identique",
+    "version source inchangée",
+    "Page API masquée",
+    "state et carte historique masqués",
+    "clic sûr 0",
+    "choix rendu 0",
+    "clic sûr 1",
+    "choix rendu 1",
+    "clic sûr 2",
+    "choix rendu 2",
+    "renommage enregistré",
+    "titre focalisé remplacé par le masque",
+    "retrait au coffre sans réapparition",
+    "thème confirmé light",
+    "capture sans valeur privée light",
+    "thème confirmé light",
+    "capture sans valeur privée light",
+    "thème confirmé dark",
+    "capture sans valeur privée dark",
+    "thème confirmé dark",
+    "capture sans valeur privée dark",
+    "fragments masqués dans le DOM réel",
+    "fragments masqués dans la réponse ouvrir",
+    "fragments masqués dans la réponse renommer",
+    "thème confirmé light",
+    "capture sans valeur privée light",
+    "thème confirmé light",
+    "capture sans valeur privée light",
+    "thème confirmé dark",
+    "capture sans valeur privée dark",
+    "thème confirmé dark",
+    "capture sans valeur privée dark",
+    "restauration masquée après retrait du coffre",
+    "restauration visible et cliquable"
+  ],
+  "captures": [
+    {
+      "file": "page-cache-dark-1140.png",
+      "sha256": "7e0f3b9703f7afc00bc8597cabf6ed1625a0f7e3e10a89b89cce54863202870a",
+      "width": 1140,
+      "height": 780,
+      "action": "Page générée puis masquée à version constante, retrait au coffre et clics"
+    },
+    {
+      "file": "page-cache-dark-820.png",
+      "sha256": "5ad619429e73a04da5f19e4bb49376b7d8b1d9c56f5c26d2ce0e0add8f9f4d91",
+      "width": 820,
+      "height": 560,
+      "action": "Page générée puis masquée à version constante, retrait au coffre et clics"
+    },
+    {
+      "file": "page-cache-light-1140.png",
+      "sha256": "7370681cd9a002a455b245679b933638908db526f85b64d6ad860c9209a99779",
+      "width": 1140,
+      "height": 780,
+      "action": "Page générée puis masquée à version constante, retrait au coffre et clics"
+    },
+    {
+      "file": "page-cache-light-820.png",
+      "sha256": "42276bd5bfbb9caea4b6bf456f4809ee3f5d91b55e2a61678f5324ef9289624f",
+      "width": 820,
+      "height": 560,
+      "action": "Page générée puis masquée à version constante, retrait au coffre et clics"
+    },
+    {
+      "file": "page-fragments-dark-1140.png",
+      "sha256": "3fc064757d515ca00f384878d9a5dba10fbe0aea67aa8e44cdb54902cf238007",
+      "width": 1140,
+      "height": 780,
+      "action": "Fixture synthétique de fragments adjacents, servie et rendue par la vraie Page"
+    },
+    {
+      "file": "page-fragments-dark-820.png",
+      "sha256": "7f9da57b3a0d2621d862c42addcdd57ae5b878b0319c5eb0ec26806350df48c6",
+      "width": 820,
+      "height": 560,
+      "action": "Fixture synthétique de fragments adjacents, servie et rendue par la vraie Page"
+    },
+    {
+      "file": "page-fragments-light-1140.png",
+      "sha256": "01b9f0af708bf9589f294716e43e365a75d41a8ac235f4257a92f35ca7d7cd27",
+      "width": 1140,
+      "height": 780,
+      "action": "Fixture synthétique de fragments adjacents, servie et rendue par la vraie Page"
+    },
+    {
+      "file": "page-fragments-light-820.png",
+      "sha256": "7e11cc0b6aa1225567cd9200713a720035f755e2ca184a91a0a7e6315584f817",
+      "width": 820,
+      "height": 560,
+      "action": "Fixture synthétique de fragments adjacents, servie et rendue par la vraie Page"
+    }
+  ]
+}

@@ -210,8 +210,9 @@ pub fn routes(
                 "entry_id": r.get::<_, Option<String>>(9)?,
             }))
         })?;
-        Ok(ApiResponse::Json(
-            json!({"livrables": rows.collect::<rusqlite::Result<Vec<Value>>>()?}),
-        ))
+        let livrables = json!({"livrables": rows.collect::<rusqlite::Result<Vec<Value>>>()?});
+        // Titles come from the bot: a secret registered since is masked, as in the thread.
+        let secrets = super::engine::redaction_patterns(&app.connection)?;
+        Ok(ApiResponse::Json(secrets.value(&livrables)?))
     })())
 }

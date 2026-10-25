@@ -556,3 +556,26 @@ fn the_read_grows_linearly_with_the_livrables() {
     );
     eprintln!("VmStep LIST : 200 livrables {small}, 400 livrables {large}");
 }
+
+#[test]
+fn a_secret_registered_after_the_creation_is_masked_in_the_titles() {
+    const SECRET: &str = "livrables-secret-4f7a91c3-test";
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.page(&chat, "p1", "bilan.page.tsx", &format!("Bilan {SECRET}"));
+    f.document(&chat, "d1", &format!("Rapport-{SECRET}"), "md");
+    f.image(&chat, "i1", &format!("un phare {SECRET}"));
+    assert!(f
+        .app
+        .api("GET", "/api/livrables", b"")
+        .unwrap()
+        .to_string()
+        .contains(SECRET));
+    grokbot_forms::vault::Vault::open(&f.path.with_extension("secrets.json"))
+        .unwrap()
+        .set("LIVRABLES_TEST", "Secret de test", SECRET)
+        .unwrap();
+    let body = f.app.api("GET", "/api/livrables", b"").unwrap().to_string();
+    assert!(!body.contains(SECRET), "{body}");
+    assert_eq!(f.list("").len(), 3);
+}

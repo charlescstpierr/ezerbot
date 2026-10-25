@@ -21,12 +21,14 @@
     // mode : "view" (lecture), "edit" (édition ; intacte tant que le brouillon égale le texte du souvenir, modifiée sinon),
     // "forget" (confirmation d'oubli) ou "discard" (confirmation d'abandon d'une édition modifiée).
     let id = null, mode = "view", busy = false, draft = "", note = "", problem = "", shown = null, epoch = 0;
+    let opener = null; // le bouton d'où le panneau « À revoir » a ouvert le souvenir : la fermeture lui rend le focus
     let after = null; const saved = new Map(); // after : ce que la sortie demandée fera si l'on abandonne ; saved : souvenir → brouillon, pour un écran quitté en pleine modification
     const moved = new Map(); // ancien identifiant → identifiant du souvenir qui le remplace (réponse du moteur à une correction)
     const root = node("aside", "memory-detail");
     root.hidden = true;
     root.setAttribute("aria-label", "Détail du souvenir");
-    const stamp = (fact) => JSON.stringify([fact, label.bot(fact), label.scope(fact)]); // un bot renommé change aussi ce que le panneau affiche
+    const related = (fact) => window.EzerbotMemoryLinks?.of(facts() || [], fact) ?? []; // « Lié à » : les souvenirs de la même conversation (memory-links.js)
+    const stamp = (fact) => JSON.stringify([fact, label.bot(fact), label.scope(fact), related(fact).map((item) => [item.fact_id, item.text])]); // un bot renommé ou un souvenir lié qui change modifient aussi ce que le panneau affiche
     const current = () => (facts() || []).find((item) => item.fact_id === id) || null;
     const find = (key) => root.parentElement?.querySelector(`[data-id="${key}"], [data-fact-id="${key}"]`);
     const mark = () => {
@@ -51,7 +53,10 @@
       const fact = current();
       if (!fact) return;
       shown = stamp(fact);
-      const controls = () => [...root.querySelectorAll("h2, button, textarea")], held = controls().indexOf(document.activeElement); // le focus reste sur le même contrôle quand la liste change autour du panneau
+      // Le focus reste sur le même contrôle quand la liste change autour du panneau : on le retrouve par ce qu'il est (balise, classe, libellé ou identifiant du souvenir lié), pas par son rang,
+      // car la section « Lié à » change le nombre de contrôles et un rang décalé tomberait sur un autre bouton, par exemple « Oublier ce souvenir » à la place d'« Annuler ».
+      const controls = () => [...root.querySelectorAll("h2, button, textarea")], identity = (el) => [el.tagName, el.className, el.dataset?.factId ?? el.textContent].join("|");
+      const held = root.contains(document.activeElement) ? identity(document.activeElement) : null;
       const discarding = mode === "discard", editing = mode === "edit" || discarding, confirming = mode === "forget", conversation = fact.provenance?.conversation_id;
       const origin = conversation ? button("Ouvrir la conversation", "memory-detail-link", () => { if (!panels.openConversation?.(conversation)) { problem = "Cette conversation n’existe plus, ou une autre action est en cours."; render("origin"); } }, false) : "Hors conversation";
       const rows = [["Bot", label.bot(fact)], ["Origine", origin], ["Appris le", label.date(fact.learned_at)], ["Provenance", SOURCES[fact.provenance?.source] || "Inconnue"], ["Portée", label.scope(fact)]];
@@ -85,12 +90,13 @@
       const status = node("p", "memory-detail-note", note), alert = node("p", "memory-detail-error", problem);
       status.setAttribute("role", "status");
       alert.setAttribute("role", "alert");
-      root.replaceChildren(head, body, fields, node("p", confirming || discarding ? "memory-detail-warning" : "memory-detail-note", hint), status, alert, actions);
+      const linked = related(fact);
+      root.replaceChildren(head, body, fields, ...(linked.length ? [window.EzerbotMemoryLinks.section(linked, open)] : []), node("p", confirming || discarding ? "memory-detail-warning" : "memory-detail-note", hint), status, alert, actions);
       root.hidden = false;
       root.parentElement.dataset.detail = "open";
       mark();
       ({ title, body, back, edit, ask, origin, keep })[want]?.focus();
-      if (!want) controls()[held]?.focus();
+      if (!want && held !== null) (controls().find((el) => identity(el) === held) || title).focus(); // un contrôle disparu (souvenir lié oublié ou corrigé) : le focus va au titre, il ne se perd pas
     }
     // Après une action, la liste ET l'état partagé de l'application sont relus : un fil en cache afficherait sinon un reçu de mémoire périmé (un texte oublié, des commandes actives).
     // L'échec de cette relecture ne devient pas celui de l'action : le panneau ne l'affiche pas comme une erreur.
@@ -145,8 +151,9 @@
       root.replaceChildren();
       mark();
       delete root.parentElement.dataset.detail;
-      const back = find(was) || root.parentElement.querySelector('.memory-space-tab[aria-pressed="true"]');
-      if (restore) (back?.querySelector("button") || back)?.focus(); // une ligne de la Liste se focalise par son bouton
+      const back = find(was) || root.parentElement.querySelector('.memory-space-tab[aria-pressed="true"]'), from = opener?.isConnected !== false ? opener : null;
+      opener = null;
+      if (restore) (from || back?.querySelector("button") || back)?.focus(); // une ligne de la Liste se focalise par son bouton ; le panneau « À revoir » reprend son propre bouton
     }
     // Appelé par l'écran quand la liste a changé : un souvenir disparu ferme le panneau ; la saisie en cours n'est jamais écrasée.
     function refresh() {
@@ -164,15 +171,18 @@
       if (mode === "discard") { resume(); return; } // Échap répond « Continuer »
       leave(mode === "edit" ? () => render("edit") : () => close(true)); // en édition, Échap ne quitte que l'édition
     });
-    function open(factId) {
+    // `start` : "edit" ou "forget" ouvre directement Modifier ou la confirmation d'Oublier (le panneau « À revoir »), `from` : le bouton à refocaliser à la fermeture ; un souvenir de sujet ne se modifie pas.
+    function open(factId, start = "view", from = null) {
       if (busy || (factId === id && (mode === "edit" || mode === "discard"))) return; // re-cliquer le souvenir en cours de modification ne l'efface pas
       leave(() => {
         if (id !== factId && !(facts() || []).some((item) => item.fact_id === factId)) { render("title"); return; } // le souvenir visé a disparu pendant la confirmation : le panneau reste où il est
-        const kept = saved.get(factId) ?? null;
+        const kept = saved.get(factId) ?? null, fact = (facts() || []).find((item) => item.fact_id === factId);
+        const first = kept !== null || (start === "edit" && fact?.scope !== "topic") ? "edit" : start === "forget" ? "forget" : "view";
         epoch += 1;
         saved.delete(factId);
-        [id, mode, draft, note, problem] = [factId, kept === null ? "view" : "edit", kept ?? "", kept === null ? "" : "Brouillon retrouvé : Enregistrer ou Annuler.", ""];
-        render(kept === null ? "title" : "body");
+        opener = from;
+        [id, mode, draft, note, problem] = [factId, first, kept ?? (first === "edit" ? String(fact?.text ?? "") : ""), kept === null ? "" : "Brouillon retrouvé : Enregistrer ou Annuler.", ""];
+        render(first === "edit" ? "body" : first === "forget" ? "back" : "title");
       });
     }
     // Un clic n'importe où sur la carte ouvre le souvenir ; au clavier, le bouton du texte s'en charge.

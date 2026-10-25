@@ -16,7 +16,7 @@
   let latest = null; // { state } du dernier onState
   let facts = null; // null tant que la liste n’est pas arrivée
   let failed = false, open = false, view = "list", generation = 0;
-  let mark = null, painted = null, entry = null, screen = null, detail = null, found = null; // found : ids trouvés (Set), null sans filtre
+  let mark = null, painted = null, entry = null, screen = null, detail = null, review = null, found = null; // found : ids trouvés (Set), null sans filtre
   // Ouvert depuis « N souvenirs utilisés » sous une réponse : `recalled` attend la liste relue, `used` garde la demande
   // ({ origin, ask, all }) ; ce qui existe encore s'en déduit à chaque affichage (`scopeOf`), car un souvenir peut être oublié écran ouvert.
   let recalled = null, used = null, usedBar = null;
@@ -120,11 +120,13 @@
     const add = window.EzerbotMemoryAdd?.create(load);
     // Le panneau de détail (memory-detail.js) s'ouvre à droite de la vue ; il fait relire la liste après chaque action.
     detail = window.EzerbotMemoryDetail?.create({ facts: () => facts, reload: load, label: { bot: botLabel, scope: scopeLabel, date: factDate } });
+    // Le panneau « À revoir » (memory-review.js) : les souvenirs que le moteur marque à revoir, avec « Encore vrai ? ».
+    review = window.EzerbotMemoryReview?.create({ reload: load, detail, label: { bot: botLabel, scope: scopeLabel, date: factDate } });
     usedBar = node("div", "memory-space-used");
     usedBar.hidden = true;
     const head = node("div", "memory-space-head");
     head.append(switcher, ...(add ? [add.button] : []));
-    screen.append(head, ...(add ? [add.form] : []), node("p", "memory-space-help", "Tout ce que vos bots ont retenu : souvenirs privés, d’équipe et de sujet."), usedBar, ...(filter ? [filter.element] : []), node("div", "memory-space-body"), ...(detail ? [detail.element] : []));
+    screen.append(head, ...(add ? [add.form] : []), node("p", "memory-space-help", "Tout ce que vos bots ont retenu : souvenirs privés, d’équipe et de sujet."), usedBar, ...(filter ? [filter.element] : []), ...(review ? [review.element] : []), node("div", "memory-space-body"), ...(detail ? [detail.element] : []));
     dock.parentElement.insertBefore(screen, dock);
     return true;
   }
@@ -221,6 +223,7 @@
     painted = signature;
     screen.querySelector(".memory-space-body").replaceChildren(...body(shown));
     detail?.refresh();
+    review?.sync((facts || []).filter((fact) => !found || found.has(String(fact.fact_id))));
   }
   const registered = panels.register({
     id: "memory-space",

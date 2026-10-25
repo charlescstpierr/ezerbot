@@ -163,11 +163,8 @@ pub(crate) fn trigger_key(trigger: &Trigger) -> (&str, &str, u32) {
 
 pub fn get(conn: &Connection, run_id: &str) -> Result<Option<Run>> {
     let record: Option<String> = conn
-        .query_row(
-            "SELECT record FROM engine_runs WHERE run_id = ?1",
-            [run_id],
-            |row| row.get(0),
-        )
+        .prepare_cached("SELECT record FROM engine_runs WHERE run_id = ?1")?
+        .query_row([run_id], |row| row.get(0))
         .optional()?;
     record
         .map(|record| Ok(serde_json::from_str(&record)?))

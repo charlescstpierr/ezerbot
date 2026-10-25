@@ -4,7 +4,6 @@
 @import "katex/dist/katex.min.css";
 @source "../node_modules/streamdown/dist/*.js";
 @source "../node_modules/@streamdown/mermaid/dist/*.js";
-@source "../node_modules/@streamdown/math/dist/*.js";
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 .gb-voice-memo { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); text-align: left; max-width: 100%; }

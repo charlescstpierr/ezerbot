@@ -1005,3 +1005,256 @@ test('a pass the bot noted with nothing to report reads « Rien à signaler », 
   assert.equal(label('result'), 'Terminée');
   assert.equal(label('failed'), 'Échec / tâche inachevée');
 });
+
+const measuredCost = (extra = {}) => ({ state: 'measured', average_tokens: 2000, average_sample: 10, tokens_7d: 4000, forecast: { state: 'estimated', reason: null, runs_next_7d: 336, tokens_per_day: 96000, tokens_next_7d: 672000 }, quota_share: { state: 'unknown', reason: 'quota_not_attributed' }, ...extra });
+const timedRoutine = (extra = {}) => ({ ...routine, enabled: true, body: { kind: 'inline_prompt', prompt: 'Préparer le bilan.' }, trigger: { kind: 'every', interval_ms: 1800000, phase_ms: null }, cost: measuredCost(), ...extra });
+const wakeSelect = h => inputOf(labelled(h, 'Réveil')[0]);
+const cronInput = h => inputOf(labelled(h, 'Cron (5 champs)')[0]);
+const costText = h => h.t.content.querySelectorAll('.routines-cost').map(el => el.textContent).join('\n');
+async function wakeEditor(existing = timedRoutine()) {
+  let stored = existing;
+  const sent = [], h = harness(async (url, body) => {
+    if (url.startsWith('/api/routines?')) return { routines: [stored] };
+    sent.push({ url, body: JSON.parse(JSON.stringify(body)) });
+    stored = { ...timedRoutine(), ...stored, ...body };
+    return { routine: stored };
+  });
+  h.panels.state.routines.items = existing ? [{ routine: existing }] : [];
+  h.panels.refresh = async () => { h.panels.state.routines.items = stored ? [{ routine: stored }] : []; };
+  await h.t.edit(existing);
+  return { h, sent, stored: () => stored };
+}
+
+test('the wake choices save 30 minutes as an every trigger and reopen on the same choice', async () => {
+  const { h, sent, stored } = await wakeEditor(null);
+  assert.deepEqual(wakeSelect(h).children.map(option => option.textContent), ['Toutes les 15 min', 'Toutes les 30 min', 'Toutes les 1 h', 'Toutes les 2 h', 'Toutes les 4 h', '1 fois par jour', 'Personnalisé']);
+  assert.equal(wakeSelect(h).value, 'daily');
+  assert.equal(cronInput(h).value, '0 9 * * *');
+  choose(h, wakeSelect(h), '30m');
+  assert.equal(cronInput(h).value, '@every 30m');
+  assert.equal(cronInput(h).parentElement.hidden, true);
+  type(inputOf(labelled(h, 'Nom')[0]), 'Bilan régulier');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Préparer le bilan.');
+  await submit(h);
+  assert.deepEqual(sent[0].body.trigger, { kind: 'every', interval_ms: 1800000, phase_ms: null });
+  await h.t.edit(stored());
+  assert.equal(wakeSelect(h).value, '30m');
+  choose(h, wakeSelect(h), 'custom');
+  assert.equal(cronInput(h).parentElement.hidden, false);
+  assert.equal(cronInput(h).value, '@every 1800000ms');
+});
+
+test('a new daily routine keeps the existing nine o’clock default', async () => {
+  const { h, sent } = await wakeEditor(null);
+  type(inputOf(labelled(h, 'Nom')[0]), 'Bilan du matin');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Préparer le bilan.');
+  await submit(h);
+  assert.deepEqual(sent[0].body.trigger, { kind: 'cron', expression: '0 9 * * *', time_zone: null });
+});
+
+test('editing a saved rhythm updates the existing routine and reopens on the new choice', async () => {
+  const { h, sent, stored } = await wakeEditor();
+  choose(h, wakeSelect(h), '1h');
+  await submit(h);
+  assert.equal(sent[0].url, '/api/routines/update');
+  assert.equal(sent[0].body.routine_id, routine.routine_id);
+  assert.deepEqual(sent[0].body.trigger, { kind: 'every', interval_ms: 3600000, phase_ms: null });
+  await h.t.edit(stored());
+  assert.equal(wakeSelect(h).value, '1h');
+});
+
+test('existing intervals find their choice and explicit phases remain custom without a rename changing the trigger', async () => {
+  for (const [interval, phase, key] of [[900000, null, '15m'], [1800000, null, '30m'], [3600000, null, '1h'], [7200000, null, '2h'], [14400000, null, '4h'], [86400000, null, 'daily'], [2700000, null, 'custom'], [1800000, 0, 'custom'], [1800000, 60000, 'custom']]) {
+    const existing = timedRoutine({ trigger: { kind: 'every', interval_ms: interval, phase_ms: phase } });
+    const { h, sent } = await wakeEditor(existing);
+    assert.equal(wakeSelect(h).value, key, JSON.stringify(existing.trigger));
+    assert.equal(cronInput(h).parentElement.hidden, key !== 'custom');
+    if (phase !== null) assert.equal(cronInput(h).value, `@every ${interval}ms/${phase}ms`);
+    type(inputOf(labelled(h, 'Nom')[0]), 'Nouveau nom');
+    await submit(h);
+    assert.equal(sent[0].body.trigger, undefined);
+    assert.equal(sent[0].body.time_zone, undefined);
+  }
+});
+
+test('regular cron aliases, steps and shifted hours find their choice while a rename preserves the exact schedule', async () => {
+  for (const [expression, key] of [['@hourly', '1h'], ['@daily', 'daily'], ['@midnight', 'daily'], ['5 9 * * *', 'daily'], ['*/15 * * * *', '15m'], ['7,37 * * * *', '30m'], ['15 */2 * * *', '2h'], ['5 1-21/4 * * *', '4h'], ['CRON_TZ=America/Toronto 0 9 * * *', 'daily'], ['0 9 * * 1-5', 'custom'], ['0 9 1 * *', 'custom'], ['0,30 */2 * * *', 'custom']]) {
+    const { h, sent, stored } = await wakeEditor(timedRoutine({ trigger: { kind: 'cron', expression, time_zone: 'UTC' } }));
+    assert.equal(wakeSelect(h).value, key, expression);
+    assert.equal(cronInput(h).value, expression);
+    choose(h, wakeSelect(h), 'custom');
+    assert.equal(cronInput(h).parentElement.hidden, false);
+    assert.equal(cronInput(h).value, expression);
+    type(inputOf(labelled(h, 'Nom')[0]), 'Bilan renommé');
+    await submit(h);
+    assert.equal(sent[0].body.trigger, undefined, expression);
+    assert.equal(stored().trigger.expression, expression);
+    assert.equal(stored().trigger.time_zone, 'UTC');
+  }
+});
+
+test('the list and editor show the measured average and 96000 tokens per day with no invented quota or money', async () => {
+  const { h } = await wakeEditor();
+  for (const show of [() => {}, () => h.t.back()]) {
+    show();
+    assert.match(costText(h), /2 000 tokens par réveil en moyenne/);
+    assert.match(costText(h), /≈ 96 000 tokens par jour/);
+    assert.match(costText(h), /4 000 tokens mesurés sur les 7 derniers jours/);
+    assert.doesNotMatch(costText(h), /%|quota|\$|dollar|USD/i);
+  }
+});
+
+test('changing the wake choice and a custom interval recalculates the cost before saving', async () => {
+  const { h, sent } = await wakeEditor();
+  choose(h, wakeSelect(h), '15m');
+  assert.match(costText(h), /≈ 192 000 tokens par jour/);
+  choose(h, wakeSelect(h), '2h');
+  assert.match(costText(h), /≈ 24 000 tokens par jour/);
+  choose(h, wakeSelect(h), 'custom');
+  type(cronInput(h), '@every 45m'); editorChanged(h);
+  assert.match(costText(h), /≈ 64 000 tokens par jour/);
+  type(cronInput(h), '*/0 * * * *'); editorChanged(h);
+  assert.match(costText(h), /2 000 tokens par réveil/);
+  assert.match(costText(h), /Prévision impossible/);
+  assert.doesNotMatch(costText(h), /tokens par jour/);
+  assert.equal(sent.length, 0);
+});
+
+test('missing measurements keep the exact first-wake message in the editor and list', async () => {
+  for (const cost of [undefined, null, { state: 'no_measure_yet', average_tokens: null, average_sample: 0, tokens_7d: null, forecast: { state: 'no_measure_yet', tokens_per_day: null, tokens_next_7d: null }, quota_share: { state: 'unknown' } }]) {
+    const { h } = await wakeEditor(timedRoutine({ cost }));
+    assert.equal(costText(h), "Le coût s'affichera après le premier réveil.");
+    choose(h, wakeSelect(h), '15m');
+    assert.equal(costText(h), "Le coût s'affichera après le premier réveil.");
+    h.t.back();
+    assert.equal(costText(h), "Le coût s'affichera après le premier réveil.");
+  }
+});
+
+test('null and invalid averages or forecasts never turn into a measured zero', async () => {
+  for (const average_tokens of [null, undefined, -1, NaN, Infinity, '2000']) {
+    const { h } = await wakeEditor(timedRoutine({ cost: measuredCost({ average_tokens }) }));
+    assert.match(costText(h), /moyenne mesurée/);
+    assert.doesNotMatch(costText(h), /\d|tokens par jour|%/);
+  }
+  for (const tokens_per_day of [null, undefined, -1, NaN, Infinity, '96000']) {
+    const { h } = await wakeEditor(timedRoutine({ cost: measuredCost({ forecast: { state: 'estimated', tokens_per_day } }) }));
+    assert.match(costText(h), /2 000 tokens par réveil/);
+    assert.match(costText(h), /Prévision impossible/);
+    assert.doesNotMatch(costText(h), /tokens par jour/);
+  }
+});
+
+test('a measured zero is valid and remains zero after a rhythm change', async () => {
+  const { h } = await wakeEditor(timedRoutine({ cost: measuredCost({ average_tokens: 0, tokens_7d: 0, forecast: { state: 'estimated', runs_next_7d: 336, tokens_per_day: 0, tokens_next_7d: 0 } }) }));
+  assert.match(costText(h), /^0 tokens par réveil/);
+  assert.match(costText(h), /≈ 0 tokens par jour/);
+  choose(h, wakeSelect(h), '15m');
+  assert.match(costText(h), /≈ 0 tokens par jour/);
+  assert.doesNotMatch(costText(h), /premier réveil/);
+});
+
+test('event and unusable schedules preserve the measured average and explain the missing projection', async () => {
+  for (const [trigger, reason, explanation, enabled = true] of [[{ kind: 'webhook' }, 'event_trigger', /événements reçus/], [{ kind: 'group', members: [{ id: 'a', trigger: everyMinute }, { id: 'b', trigger: { kind: 'webhook' } }] }, 'event_trigger', /événements reçus/, false], [{ kind: 'cron', expression: '0 9 * * 1-5' }, 'schedule_unusable', /ce rythme/]]) {
+    const { h } = await wakeEditor(timedRoutine({ trigger, enabled, cost: measuredCost({ forecast: { state: 'impossible', reason, tokens_per_day: null, tokens_next_7d: null } }) }));
+    assert.match(costText(h), /2 000 tokens par réveil/);
+    assert.match(costText(h), explanation);
+    assert.doesNotMatch(costText(h), /tokens par jour|%/);
+    h.t.back();
+    assert.match(costText(h), explanation);
+  }
+});
+
+test('paused schedules project zero while the resume review projects the active rhythm before activation', async () => {
+  const paused = timedRoutine({ enabled: false, cost: measuredCost({ forecast: { state: 'estimated', runs_next_7d: 0, tokens_per_day: 0, tokens_next_7d: 0 } }) });
+  const { h, sent } = await wakeEditor(paused);
+  assert.match(costText(h), /≈ 0 tokens par jour/);
+  choose(h, wakeSelect(h), '15m');
+  assert.match(costText(h), /≈ 0 tokens par jour/);
+  await h.t.edit(paused, true);
+  assert.match(costText(h), /≈ 96 000 tokens par jour/);
+  assert.equal(sent.length, 0);
+  const unmeasured = { ...paused, cost: { state: 'no_measure_yet', average_tokens: null } };
+  const { h: first } = await wakeEditor(unmeasured);
+  await first.t.edit(unmeasured, true);
+  assert.equal(costText(first), "Le coût s'affichera après le premier réveil.");
+});
+
+test('a changed paused cron still costs zero and a custom interval never invents a fractional seven-day count', async () => {
+  const { h: paused } = await wakeEditor(timedRoutine({ enabled: false, trigger: { kind: 'cron', expression: '0 9 * * 1-5' }, cost: measuredCost({ forecast: { state: 'estimated', tokens_per_day: 0, tokens_next_7d: 0, runs_next_7d: 0 } }) }));
+  type(inputOf(labelled(paused, 'Fuseau IANA')[0]), 'America/Toronto'); editorChanged(paused);
+  assert.match(costText(paused), /≈ 0 tokens par jour/);
+  const { h } = await wakeEditor();
+  choose(h, wakeSelect(h), 'custom');
+  type(cronInput(h), '@every 5h'); editorChanged(h);
+  assert.match(costText(h), /Prévision impossible/);
+  assert.doesNotMatch(costText(h), /tokens par jour|tokens sur les 7 prochains jours/);
+});
+
+test('unchanged once, grouped and complex schedules use the server forecast and an edit never reuses it', async () => {
+  for (const trigger of [{ kind: 'once', at: 100000 }, { kind: 'group', members: [{ id: 'a', trigger: everyMinute }, { id: 'b', trigger: { kind: 'every', interval_ms: 3600000, phase_ms: null } }] }, { kind: 'cron', expression: '0 9 * * 1-5' }]) {
+    const { h } = await wakeEditor(timedRoutine({ trigger, cost: measuredCost({ forecast: { state: 'estimated', tokens_per_day: 286, tokens_next_7d: 2000, runs_next_7d: 1 } }) }));
+    assert.match(costText(h), /≈ 286 tokens par jour/);
+    type(inputOf(labelled(h, 'Fuseau IANA')[0]), 'America/Toronto'); editorChanged(h);
+    assert.match(costText(h), /Prévision impossible/);
+    assert.doesNotMatch(costText(h), /286 tokens par jour/);
+  }
+});
+
+test('quota is shown only when estimated and the orange warning starts strictly above twenty percent', async () => {
+  for (const [percent, warning] of [[20, false], [20.1, true], [10, false]]) {
+    const { h } = await wakeEditor(timedRoutine({ cost: measuredCost({ quota_share: { state: 'estimated', percent } }) }));
+    for (const show of [() => {}, () => h.t.back()]) {
+      show();
+      assert.match(costText(h), new RegExp(`≈ ${String(percent).replace('.', ',')} % du quota hebdo Codex`));
+      assert.equal(h.t.content.querySelectorAll('.routines-cost')[0].querySelectorAll('.routines-warning').length, Number(warning));
+      assert.equal(costText(h).includes('Ce rythme peut consommer une grande part de votre quota.'), warning);
+      assert.doesNotMatch(costText(h), /\$|dollar|USD/i);
+    }
+  }
+  for (const quota_share of [{ state: 'unknown', percent: 90 }, ...[null, undefined, -1, NaN, Infinity, '20'].map(percent => ({ state: 'estimated', percent }))]) {
+    const { h } = await wakeEditor(timedRoutine({ cost: measuredCost({ quota_share }) }));
+    assert.doesNotMatch(costText(h), /%|grande part/);
+  }
+});
+
+test('a changed rhythm rescales an attributable quota or explains why the previous percentage is unavailable', async () => {
+  const { h } = await wakeEditor(timedRoutine({ cost: measuredCost({ quota_share: { state: 'estimated', percent: 10 } }) }));
+  choose(h, wakeSelect(h), '15m');
+  assert.match(costText(h), /≈ 20 % du quota hebdo Codex/);
+  assert.doesNotMatch(costText(h), /grande part/);
+  choose(h, wakeSelect(h), '2h');
+  assert.match(costText(h), /≈ 2,5 % du quota hebdo Codex/);
+  for (const tokens_next_7d of [0, null, undefined, -1, Infinity]) {
+    const { h: unknown } = await wakeEditor(timedRoutine({ cost: measuredCost({ quota_share: { state: 'estimated', percent: 20.1 }, forecast: { state: 'estimated', tokens_per_day: 96000, tokens_next_7d } }) }));
+    choose(unknown, wakeSelect(unknown), '15m');
+    assert.match(costText(unknown), /≈ 192 000 tokens par jour/);
+    assert.match(costText(unknown), /part du quota ne peut pas être recalculée/);
+    assert.doesNotMatch(costText(unknown), /%|grande part/);
+  }
+});
+
+test('state polling preserves the edited wake choice, typed name and focused control', async () => {
+  const { h } = await wakeEditor();
+  const name = inputOf(labelled(h, 'Nom')[0]);
+  choose(h, wakeSelect(h), '15m');
+  type(name, 'Nom en cours'); name.focus();
+  h.panels.state.routines.items = [{ routine: timedRoutine({ name: 'Nom serveur', cost: measuredCost({ average_tokens: 3000 }) }) }];
+  h.panels.panel.onState(h.panels.state, { connected: true });
+  assert.equal(inputOf(labelled(h, 'Nom')[0]), name);
+  assert.equal(name.value, 'Nom en cours');
+  assert.equal(h.document.activeElement, name);
+  assert.equal(wakeSelect(h).value, '15m');
+  assert.match(costText(h), /≈ 192 000 tokens par jour/);
+});
+
+test('list polling replaces the first-wake message with the newly measured cost', async () => {
+  const { h } = await wakeEditor(timedRoutine({ cost: { state: 'no_measure_yet' } }));
+  h.t.back();
+  assert.equal(costText(h), "Le coût s'affichera après le premier réveil.");
+  h.panels.state.routines.items = [{ routine: timedRoutine() }];
+  h.panels.panel.onState(h.panels.state, { connected: true });
+  assert.match(costText(h), /2 000 tokens par réveil en moyenne/);
+  assert.match(costText(h), /≈ 96 000 tokens par jour/);
+  assert.doesNotMatch(costText(h), /premier réveil/);
+});

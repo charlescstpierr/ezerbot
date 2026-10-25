@@ -9,12 +9,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { execFileSync, spawn } = require("node:child_process");
 const { createServer } = require("node:http");
-const { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } = require("node:fs");
+const { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
-const { beforeDeadline, checkGroupPid, cleanUpFixture, pageTarget, spawnGroup, startGuard, untilTrue } = require("./wrapper-chrome-fixture.cjs");
+const { createFixtureOwner } = require("./fixture-lifetime.cjs");
+const { beforeDeadline, pageTarget, untilTrue } = require("./wrapper-chrome-fixture.cjs");
 
-const FIXTURE = join(__dirname, "wrapper-chrome-fixture.cjs");
+const LIFETIME = join(__dirname, "fixture-lifetime.cjs");
 
 const WRITER = `
 const { mkdirSync, writeFileSync } = require("node:fs");
@@ -75,25 +76,72 @@ async function until(read, message, ms = 10000) {
 
 function firstLine(child) {
   return new Promise((resolve, reject) => {
-    child.stdout.once("data", (chunk) => resolve(String(chunk).trim()));
-    child.once("error", reject);
-    child.once("exit", () => reject(new Error("the process ended before printing its line")));
+    let output = "";
+    function finish(error, line) {
+      child.stdout.removeListener("data", data);
+      child.removeListener("error", failed);
+      child.removeListener("exit", exited);
+      if (error) reject(error);
+      else resolve(line);
+    }
+    function data(chunk) {
+      output += chunk;
+      const end = output.indexOf("\n");
+      if (end !== -1) finish(null, output.slice(0, end).trim());
+    }
+    function failed(error) { finish(error); }
+    function exited() { finish(new Error("the process ended before printing its line")); }
+    child.stdout.on("data", data);
+    child.once("error", failed);
+    child.once("exit", exited);
   });
 }
 
-// The leader and its writers, running. The teardown goes through the same bounded wait as the
-// fixture, so it cannot bring the race back, and so does the removal of the directory.
-async function startLeader(t, root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"))) {
-  const leader = spawnGroup(process.execPath, ["-e", LEADER, root], { stdio: ["ignore", "pipe", "ignore"] });
-  t.after(() => cleanUpFixture({ root, groups: [{ name: "leader", pid: leader.pid }] }));
-  const { helper, crashpad } = JSON.parse(await firstLine(leader));
+function lineWithin(child, ms = 15000) {
+  return beforeDeadline(firstLine(child), Date.now() + ms, `no line from process ${child.pid} within ${ms} ms`);
+}
+
+function exited(child, ms = 3000) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return beforeDeadline(new Promise((resolve, reject) => {
+    child.once("exit", resolve);
+    child.once("error", reject);
+  }), Date.now() + ms, `process ${child.pid} did not exit within ${ms} ms`);
+}
+
+function fixtureRoot() {
+  return mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
+}
+
+async function ownedRoot(t, { root = fixtureRoot(), start } = {}) {
+  const owner = await createFixtureOwner({ root, start });
+  t.after(() => owner.close());
+  return owner;
+}
+
+// A failed close is terminal. The harness removes the retained root only after the independent
+// owner or inspection worker that caused the refusal has finished.
+function retainedRoot(t, owner, release) {
+  let closing;
+  t.after(async () => {
+    await (closing ??= owner.close()).catch(() => {});
+    await release();
+    rmSync(owner.root, { recursive: true, force: true });
+  });
+  return (options) => (closing ??= owner.close(options));
+}
+
+async function startLeader(t, root = fixtureRoot()) {
+  const owner = await ownedRoot(t, { root });
+  const leader = await owner.spawn(process.execPath, ["-e", LEADER, root]);
+  const { helper, crashpad } = JSON.parse(await lineWithin(leader));
   await until(() => existsSync(join(root, "chrome", "profile", "file-100")), "the helpers never started writing");
-  return { root, leader, helper, crashpad };
+  return { root, owner, leader, helper, crashpad };
 }
 
 test("the fixture directory is removed only after the helpers of a killed leader have exited, Crashpad's session included", async (t) => {
-  const { root, leader, helper, crashpad } = await startLeader(t);
-  await cleanUpFixture({ root, groups: [{ name: "chrome", pid: leader.pid }] });
+  const { root, owner, helper, crashpad } = await startLeader(t);
+  assert.deepEqual(await owner.close(), { removed: true });
   assert.ok(gone(helper), "the helper of the group must be gone when the cleanup returns");
   assert.ok(gone(crashpad), "the helper of its own session must be gone when the cleanup returns");
   assert.ok(!existsSync(root), "the directory must be removed");
@@ -102,159 +150,164 @@ test("the fixture directory is removed only after the helpers of a killed leader
 });
 
 test("the cleanup also stops the helpers when their leader already exited", async (t) => {
-  const { root, leader, helper, crashpad } = await startLeader(t);
+  const { root, owner, leader, helper, crashpad } = await startLeader(t);
   leader.kill("SIGKILL");
-  await new Promise((resolve) => leader.once("exit", resolve));
+  await exited(leader);
   assert.ok(!gone(helper), "the helper outlives its leader");
-  await cleanUpFixture({ root, groups: [{ name: "chrome", pid: leader.pid }] });
+  await owner.close();
   assert.ok(gone(helper) && gone(crashpad));
   assert.ok(!existsSync(root));
 });
 
-test("groups killed but not yet reaped, and groups already gone, are not an error", async () => {
-  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
-  const first = spawnGroup(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-  const second = spawnGroup(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-  const done = spawnGroup(process.execPath, ["-e", ""], { stdio: "ignore" });
-  await new Promise((resolve) => done.once("exit", resolve));
-  await cleanUpFixture({ root, groups: [first, done, second].map((child, index) => ({ name: `group-${index}`, pid: child.pid })) });
+test("processes killed but not yet reaped, and processes already gone, are not an error", async (t) => {
+  const owner = await ownedRoot(t);
+  const first = await owner.spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
+  const second = await owner.spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
+  const done = await owner.spawn(process.execPath, ["-e", ""]);
+  await exited(done);
+  first.kill("SIGKILL");
+  await owner.close();
   assert.ok(gone(first.pid) && gone(second.pid));
-  assert.ok(!existsSync(root));
+  assert.ok(!existsSync(owner.root));
 });
 
 test("something that names the directory and does not exit makes the cleanup fail clearly after the bound, and the directory stays", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
-  const stuck = spawnGroup(process.execPath, ["-e", "setInterval(() => {}, 1000)", join(root, "chrome", "profile")], { stdio: "ignore" });
-  t.after(() => cleanUpFixture({ root, groups: [{ name: "stuck", pid: stuck.pid }] }));
+  const root = fixtureRoot();
+  const owner = await createFixtureOwner({ root });
+  const foreign = await ownedRoot(t);
+  const close = retainedRoot(t, owner, () => foreign.close());
+  const stuck = await foreign.spawn(process.execPath, ["-e", "console.log('up'); setInterval(() => {}, 1000)", join(root, "chrome", "profile")]);
+  assert.equal(await lineWithin(stuck), "up");
   const started = Date.now();
-  await assert.rejects(
-    cleanUpFixture({ root, groups: [], stopMs: 2000 }),
-    new RegExp(`fixture directory ${root} kept: still running 2000 ms after SIGKILL: process ${stuck.pid} `),
-  );
+  await assert.rejects(close({ stopMs: 2000 }), (error) => {
+    assert.match(error.message, /directory .* kept|deletion is indeterminate/);
+    assert.match(error.message, new RegExp(`process ${stuck.pid} `));
+    return true;
+  });
   assert.ok(Date.now() - started < 3000, "the wait is bounded");
   assert.ok(existsSync(root));
+  assert.ok(!gone(stuck.pid), "an observed foreign process must not be signalled");
 });
 
-// The runner of the tests can die without running t.after (crash, SIGKILL, deadline); the guard
-// the fixture starts cleans up for it.
 const RUNNER = `
 const { mkdtempSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
-const { spawn } = require("node:child_process");
-const { spawnGroup, startGuard } = require(${JSON.stringify(join(__dirname, "wrapper-chrome-fixture.cjs"))});
-const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
-const guard = startGuard(root);
-const leader = spawnGroup(process.execPath, ["-e", ${JSON.stringify(LEADER)}, root], { stdio: ["ignore", "pipe", "ignore"] }, (pid) => guard.register("chrome", pid));
-leader.stdout.once("data", (chunk) => {
-  console.log(JSON.stringify({ root, leader: leader.pid, ...JSON.parse(String(chunk)) }));
-});
+const { createFixtureOwner } = require(${JSON.stringify(LIFETIME)});
+(async () => {
+  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
+  const owner = await createFixtureOwner({ root });
+  const leader = await owner.spawn(process.execPath, ["-e", ${JSON.stringify(LEADER)}, root]);
+  leader.stdout.once("data", (chunk) => {
+    console.log(JSON.stringify({ root, leader: leader.pid, ...JSON.parse(String(chunk)) }));
+  });
+})();
 setInterval(() => {}, 1000);
 `;
 
-test("when the test runner is killed, the guard stops every helper and removes the directory", async (t) => {
+test("when the test runner is killed, its owner stops every helper and removes the directory", async (t) => {
   const runner = spawn(process.execPath, ["-e", RUNNER], { stdio: ["ignore", "pipe", "ignore"] });
-  t.after(() => { try { runner.kill("SIGKILL"); } catch { /* already gone */ } });
-  const { root, leader, helper, crashpad } = JSON.parse(await firstLine(runner));
-  t.after(() => cleanUpFixture({ root, groups: [{ name: "leader", pid: leader }] }));
+  let launched;
+  t.after(async () => {
+    if (runner.exitCode === null && runner.signalCode === null) runner.kill("SIGKILL");
+    await exited(runner);
+    if (launched) await until(() => gone(launched.leader) && gone(launched.helper) && gone(launched.crashpad) && !existsSync(launched.root), "the owner did not finish cleanup after runner death");
+  });
+  launched = JSON.parse(await lineWithin(runner));
+  const { root, leader, helper, crashpad } = launched;
   await until(() => existsSync(join(root, "chrome", "profile", "file-100")), "the helpers never started writing");
   assert.ok(!gone(leader) && !gone(helper) && !gone(crashpad));
   runner.kill("SIGKILL");
-  await new Promise((resolve) => runner.once("exit", resolve));
-  await until(() => gone(leader) && gone(helper) && gone(crashpad) && !existsSync(root), "the guard did not clean up after the runner died");
+  await exited(runner);
+  await until(() => gone(leader) && gone(helper) && gone(crashpad) && !existsSync(root), "the owner did not clean up after the runner died");
   await pause(150);
-  assert.ok(!existsSync(root), "nothing writes into the directory after the guard's cleanup");
+  assert.ok(!existsSync(root), "nothing writes into the directory after the owner's cleanup");
 });
 
-test("after \"done\" the guard leaves what it was given alone", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
-  const group = spawnGroup(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-  t.after(() => cleanUpFixture({ root, groups: [{ name: "group", pid: group.pid }] }));
-  const guard = startGuard(root);
-  guard.register("group", group.pid);
-  guard.release();
+test("an idempotent close removes its own root and leaves an independent owner and process alone", async (t) => {
+  const owner = await ownedRoot(t);
+  const independent = await ownedRoot(t);
+  const group = await owner.spawn(process.execPath, ["-e", "console.log('up'); setInterval(() => {}, 1000)"]);
+  const witness = await independent.spawn(process.execPath, ["-e", "console.log('up'); setInterval(() => {}, 1000)"]);
+  assert.equal(await lineWithin(group), "up");
+  assert.equal(await lineWithin(witness), "up");
+  const first = owner.close();
+  assert.equal(owner.close(), first, "concurrent close calls share one cleanup promise");
+  assert.deepEqual(await first, { removed: true });
+  assert.equal(owner.close(), first, "a terminal close reuses its original result");
   await pause(300);
-  assert.ok(!gone(group.pid), "a released guard must not kill the group");
-  assert.ok(existsSync(root));
+  assert.ok(gone(group.pid) && !existsSync(owner.root));
+  assert.ok(!gone(witness.pid), "closing another owner must not kill the independent process");
+  assert.ok(existsSync(independent.root), "the independent root remains owned and present");
 });
-
-// The first line `child` prints, or a failure after `ms`, so a regression cannot hang the test.
-function lineWithin(child, ms = 15000) {
-  return beforeDeadline(firstLine(child), Date.now() + ms, `no line from process ${child.pid} within ${ms} ms`);
-}
-
-// Runs cleanUpFixture({ root, groups, stopMs }) in a process of its own group, with `env`, and
-// resolves with { ok, message, ms }. A cleanup that signalled its own group kills only that process.
-const SANDBOX = `
-const { cleanUpFixture } = require(${JSON.stringify(FIXTURE)});
-const [root, groups, stopMs] = [process.argv[1], JSON.parse(process.argv[2]), Number(process.argv[3])];
-const started = Date.now();
-cleanUpFixture({ root, groups, stopMs }).then(() => ({ ok: true }), (error) => ({ ok: false, message: error.message }))
-  .then((result) => { console.log(JSON.stringify({ ...result, ms: Date.now() - started })); process.exit(0); });
-`;
-
-async function cleanUpInSandbox(t, { root, groups, stopMs, env = process.env }) {
-  const sandbox = spawnGroup(process.execPath, ["-e", SANDBOX, root, JSON.stringify(groups), String(stopMs)], { stdio: ["ignore", "pipe", "ignore"], env });
-  t.after(() => cleanUpFixture({ root, groups: [{ name: "sandbox", pid: sandbox.pid }] }));
-  return { sandbox, ...JSON.parse(await lineWithin(sandbox, 20000)) };
-}
-
-function groupGone(pid) {
-  try {
-    process.kill(-pid, 0);
-    return false;
-  } catch (error) {
-    return error.code === "ESRCH";
-  }
-}
 
 test("a ps slower than the bound makes the cleanup fail at the bound, is killed, and the directory stays", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
+  const root = fixtureRoot();
   const bin = join(root, "bin");
+  const marker = join(root, "ps.pid");
   mkdirSync(bin);
-  // Answers like a ps that finds nothing, but only after 5 s.
-  writeFileSync(join(bin, "ps"), "#!/bin/sh\nexec /bin/sleep 5\n");
+  const quotedMarker = `'${marker.replace(/'/g, "'\\''")}'`;
+  writeFileSync(join(bin, "ps"), `#!/bin/sh\nprintf '%s\\n' "$$" > ${quotedMarker}\nexec /bin/sleep 5\n`);
   chmodSync(join(bin, "ps"), 0o755);
-  const result = await cleanUpInSandbox(t, { root, groups: [], stopMs: 1000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
-  assert.equal(result.ok, false, "a cleanup whose check outlasted the bound must not succeed");
-  assert.match(result.message, new RegExp(`^fixture directory ${root} kept: could not check within 1000 ms that the processes exited: ps did not answer within \\d+ ms$`));
-  assert.ok(result.ms < 4000, `the bound holds while ps is slow (${result.ms} ms)`);
+  const owner = await createFixtureOwner({ root, start: (command, args, options) => spawn(command, args, {
+    ...options, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+  }) });
+  let inspector;
+  const close = retainedRoot(t, owner, async () => {
+    if (existsSync(marker)) inspector = Number(readFileSync(marker, "utf8"));
+    if (inspector) await until(() => gone(inspector), "the slow ps must be killed at the bound", 2000);
+  });
+  const started = Date.now();
+  await assert.rejects(close({ stopMs: 1000 }), (error) => {
+    assert.match(error.message, /directory .* kept|deletion is indeterminate/);
+    assert.match(error.message, /ps|check|deadline|bound|timed out/);
+    return true;
+  });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 4000, `the bound holds while ps is slow (${elapsed} ms)`);
   assert.ok(existsSync(root));
-  // The slow ps is in the group of the sandbox, which exits right after printing its result.
-  await until(() => groupGone(result.sandbox.pid), "the slow ps must be killed at the bound", 2000);
+  assert.ok(existsSync(marker), "the cleanup launched its slow process-table inspection");
+  inspector = Number(readFileSync(marker, "utf8"));
+  assert.ok(Number.isSafeInteger(inspector) && inspector > 1);
+  await until(() => gone(inspector), "the slow ps must be killed at the bound", 2000);
 });
 
 test("a process that names a neighbouring directory is not waited for", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
+  const root = fixtureRoot();
+  const owner = await ownedRoot(t, { root });
   const neighbour = `${root}-other`;
   mkdirSync(neighbour);
-  const other = spawnGroup(process.execPath, ["-e", "console.log('up'); setInterval(() => {}, 1000)", join(neighbour, "chrome", "profile"), `/elsewhere${root}/chrome`], { stdio: ["ignore", "pipe", "ignore"] });
-  t.after(() => cleanUpFixture({ root: neighbour, groups: [{ name: "neighbour", pid: other.pid }] }));
+  const otherOwner = await ownedRoot(t, { root: neighbour });
+  const other = await otherOwner.spawn(process.execPath, ["-e", "console.log('up'); setInterval(() => {}, 1000)", join(neighbour, "chrome", "profile"), `/elsewhere${root}/chrome`]);
   assert.equal(await lineWithin(other), "up");
   const started = Date.now();
-  await cleanUpFixture({ root, groups: [], stopMs: 3000 });
+  await owner.close({ stopMs: 3000 });
   assert.ok(Date.now() - started < 2000, "the neighbour must not hold the cleanup until the bound");
   assert.ok(!existsSync(root));
   assert.ok(!gone(other.pid) && existsSync(neighbour), "the neighbour and its directory are left alone");
 });
 
 test("a process that names the directory through its real path is waited for", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
-  const stuck = spawnGroup(process.execPath, ["-e", "console.log('up'); setInterval(() => {}, 1000)", `profile=${realpathSync(root)}/chrome/profile`], { stdio: ["ignore", "pipe", "ignore"] });
-  t.after(() => cleanUpFixture({ root, groups: [{ name: "stuck", pid: stuck.pid }] }));
+  const root = fixtureRoot();
+  const owner = await createFixtureOwner({ root });
+  const foreign = await ownedRoot(t);
+  const close = retainedRoot(t, owner, () => foreign.close());
+  const stuck = await foreign.spawn(process.execPath, ["-e", "console.log('up'); setInterval(() => {}, 1000)", `profile=${realpathSync(root)}/chrome/profile`]);
   assert.equal(await lineWithin(stuck), "up");
-  await assert.rejects(cleanUpFixture({ root, groups: [], stopMs: 2000 }), new RegExp(`still running 2000 ms after SIGKILL: process ${stuck.pid} `));
+  await assert.rejects(close({ stopMs: 2000 }), (error) => {
+    assert.match(error.message, /directory .* kept|deletion is indeterminate/);
+    assert.match(error.message, new RegExp(`process ${stuck.pid} `));
+    return true;
+  });
   assert.ok(existsSync(root));
+  assert.ok(!gone(stuck.pid), "canonical-path observation never grants signal authority");
 });
 
-// A parent that never reaps (like PID 1 in some containers) keeps an exited child as a zombie:
-// kill(-group, 0) still finds the group (EPERM on macOS), though nothing in it can write any more.
 const NEVER_REAPS = '$| = 1; my $pid = fork(); if ($pid == 0) { setpgrp(0, 0); exit 0 } print "$pid\\n"; sleep 60';
 
-test("a group that only holds a zombie counts as gone", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
-  const parent = spawnGroup("perl", ["-e", NEVER_REAPS], { stdio: ["ignore", "pipe", "ignore"] });
-  t.after(() => cleanUpFixture({ root, groups: [{ name: "parent", pid: parent.pid }] }));
+test("a zombie cannot keep the fixture root after its writers have stopped", async (t) => {
+  const owner = await ownedRoot(t);
+  const parent = await owner.spawn("perl", ["-e", NEVER_REAPS]);
   const zombie = Number(await lineWithin(parent));
   const row = () => execFileSync("ps", ["-o", "pgid=,stat=", "-p", String(zombie)], { encoding: "utf8", timeout: 5000 }).trim().split(/\s+/);
   await until(() => row()[1]?.startsWith("Z"), "the child never became a zombie");
@@ -264,66 +317,108 @@ test("a group that only holds a zombie counts as gone", async (t) => {
   } catch (error) {
     assert.equal(error.code, "EPERM", "only permission denial also establishes that the group exists");
   }
-  await cleanUpFixture({ root, groups: [{ name: "zombie", pid: zombie }], stopMs: 3000 });
-  assert.ok(!existsSync(root));
+  await owner.close({ stopMs: 3000 });
+  assert.ok(gone(parent.pid), "the live parent is stopped before removing the root");
+  assert.ok(!existsSync(owner.root));
 });
 
-test("only a group the fixture could have started is ever signalled", () => {
-  for (const pid of [0, 1, -1, -42, 1.5, NaN, Infinity, undefined, null, "123", process.pid]) {
-    assert.throws(() => checkGroupPid(pid), /refusing to signal process group/, String(pid));
+test("invalid launch inputs and changed diagnostic PIDs never authorize a foreign signal", async (t) => {
+  const owner = await ownedRoot(t);
+  const independent = await ownedRoot(t);
+  const witness = await independent.spawn(process.execPath, ["-e", "console.log('up'); setInterval(() => {}, 1000)"]);
+  assert.equal(await lineWithin(witness), "up");
+  for (const command of [0, 1, -1, -42, 1.5, NaN, Infinity, undefined, null, process.pid]) {
+    await assert.rejects(owner.spawn(command, []), /command|executable/, String(command));
   }
-  const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
-  assert.equal(checkGroupPid(child.pid), child.pid);
+  const marker = join(owner.root, "invalid-launch-ran");
+  await assert.rejects(owner.spawn(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", marker, undefined]), /args|argument/);
+  assert.ok(!existsSync(marker), "invalid launch arguments prevent useful execution");
+  const stale = await owner.spawn(process.execPath, ["-e", ""]);
+  await exited(stale);
+  stale.pid = witness.pid;
+  stale.kill("SIGKILL");
+  const live = await owner.spawn(process.execPath, ["-e", "console.log('up'); setInterval(() => {}, 1000)"]);
+  assert.equal(await lineWithin(live), "up");
+  const ownedPid = live.pid;
+  live.pid = witness.pid;
+  live.kill("SIGKILL");
+  await exited(live);
+  assert.ok(gone(ownedPid), "the live handle still targets only its own launch");
+  await pause(150);
+  assert.ok(!gone(witness.pid), "a stale or changed diagnostic PID must not target the foreign witness");
+  assert.ok(existsSync(independent.root));
 });
 
-test("a group that is refused does not stop the cleanup of the next ones, and the cleanup fails clearly", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
-  const next = spawnGroup(process.execPath, ["-e", "console.log('up'); setInterval(() => {}, 1000)"], { stdio: ["ignore", "pipe", "ignore"] });
-  t.after(() => cleanUpFixture({ root, groups: [{ name: "next", pid: next.pid }] }));
+test("an exec failure still stops admitted siblings, reports the failure, and keeps the root", async (t) => {
+  const owner = await createFixtureOwner({ root: fixtureRoot() });
+  let next;
+  const close = retainedRoot(t, owner, async () => {
+    if (next) await until(() => gone(next.pid), "the sibling must be gone before the harness removes the retained root");
+  });
+  next = await owner.spawn(process.execPath, ["-e", "console.log('up'); setInterval(() => {}, 1000)"]);
   assert.equal(await lineWithin(next), "up");
-  const result = await cleanUpInSandbox(t, { root, groups: [{ name: "bad", pid: 0 }, { name: "next", pid: next.pid }], stopMs: 5000 });
-  assert.equal(result.ok, false);
-  assert.match(result.message, /kept: not signalled: bad: refusing to signal process group 0/);
-  await until(() => gone(next.pid), "the group after the refused one must be stopped");
-  assert.ok(existsSync(root));
+  let child;
+  let failure;
+  try {
+    child = await owner.spawn(join(owner.root, "missing-executable"), []);
+  } catch (error) {
+    failure = error;
+  }
+  if (child) failure = await beforeDeadline(new Promise((resolve) => child.once("error", resolve)), Date.now() + 3000, "no launch error was reported");
+  assert.match(failure.message, /exec|ENOENT|launch/);
+  await assert.rejects(close({ stopMs: 5000 }), /exec|ENOENT|launch/);
+  await until(() => gone(next.pid), "the sibling of the failed launch must be stopped");
+  assert.ok(existsSync(owner.root));
 });
 
 test("a directory that is not a fixture directory inside the temporary directory is never removed", async (t) => {
-  const parent = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
-  t.after(() => cleanUpFixture({ root: parent, groups: [] }));
-  const nested = join(parent, "nested");
+  const owner = await ownedRoot(t);
+  const nested = join(owner.root, "nested");
   mkdirSync(nested);
-  await assert.rejects(cleanUpFixture({ root: nested, groups: [] }), /refusing .*nested: not a fixture directory inside/);
+  await assert.rejects(createFixtureOwner({ root: nested }), /invalid fixture root/);
   assert.ok(existsSync(nested));
 });
 
-// The runner dies after starting a child and before the guard knows it.
 const EARLY_DEATH = `
 const { writeSync } = require("node:fs");
-const { spawnGroup, startGuard } = require(${JSON.stringify(FIXTURE)});
+const { spawn } = require("node:child_process");
+const { createFixtureOwner } = require(${JSON.stringify(LIFETIME)});
 const [root, marker] = process.argv.slice(1);
-startGuard(root);
-spawnGroup(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", marker], { stdio: "ignore" }, (pid) => {
-  writeSync(1, pid + "\\n");
-  process.kill(process.pid, "SIGKILL");
-});
+(async () => {
+  const owner = await createFixtureOwner({ root, start(command, args, options) {
+    const child = spawn(command, args, options);
+    const send = child.send.bind(child);
+    child.send = (message, ...rest) => {
+      if (message.type === "spawn") {
+        writeSync(1, "held\\n");
+        child.disconnect();
+        process.kill(process.pid, "SIGKILL");
+        return false;
+      }
+      return send(message, ...rest);
+    };
+    return child;
+  } });
+  await owner.spawn(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", marker]);
+})();
 setInterval(() => {}, 1000);
 `;
 
-test("a runner that dies between starting a child and registering it leaves nothing running", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
-  const elsewhere = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
-  const marker = join(elsewhere, "ran");
+test("a runner that dies before launch admission leaves no useful command running", async (t) => {
+  const root = fixtureRoot();
+  const elsewhere = await ownedRoot(t);
+  const marker = join(elsewhere.root, "ran");
   const runner = spawn(process.execPath, ["-e", EARLY_DEATH, root, marker], { stdio: ["ignore", "pipe", "ignore"] });
-  t.after(() => { runner.kill("SIGKILL"); });
-  const child = Number(await lineWithin(runner));
-  t.after(() => cleanUpFixture({ root: elsewhere, groups: [{ name: "held", pid: child }] }));
-  t.after(() => cleanUpFixture({ root, groups: [] }));
-  await until(() => runner.exitCode !== null || runner.signalCode !== null, "the runner did not die");
-  await until(() => gone(child), "the unregistered child must not survive its runner");
+  t.after(async () => {
+    if (runner.exitCode === null && runner.signalCode === null) runner.kill("SIGKILL");
+    await exited(runner);
+    await until(() => !existsSync(root), "the owner still removes the directory");
+  });
+  assert.equal(await lineWithin(runner), "held");
+  await exited(runner);
   await pause(150);
-  assert.ok(!existsSync(marker), "the command of an unregistered child never runs");
-  await until(() => !existsSync(root), "the guard still removes the directory");
+  assert.ok(!existsSync(marker), "a command denied admission never executes after runner death");
+  await until(() => !existsSync(root), "the owner still removes the directory");
 });
 
 test("a bounded wait holds its bound when a single read never settles", async () => {
@@ -341,32 +436,41 @@ test("the wait for a page target holds its bound when the debugging port never a
   assert.ok(Date.now() - started < 3000);
 });
 
-
-test("a rejected guard registration never releases a useful child", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
-  const child = spawnGroup(process.execPath, ["-e", "console.log('unexpected launch')"], {
-    stdio: ["ignore", "pipe", "ignore"],
-  }, () => Promise.reject(Object.assign(new Error("registration failed"), { code: "EPIPE" })));
-  let output = "";
-  child.stdout.on("data", (chunk) => { output += chunk; });
-  const closed = new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code) => resolve(code));
-  });
-  t.after(async () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    await beforeDeadline(closed, Date.now() + 3000, "owned launcher did not exit during teardown");
-    await cleanUpFixture({ root, groups: [] });
-  });
-  assert.equal(await beforeDeadline(closed, Date.now() + 3000, "unregistered launcher did not exit"), 1);
-  assert.equal(output, "", "the held command never executes after rejected registration");
+test("a rejected launch request never releases its useful command", async (t) => {
+  let rejectLaunch;
+  const owner = await createFixtureOwner({ root: fixtureRoot(), start(command, args, options) {
+    const child = spawn(command, args, options);
+    const send = child.send.bind(child);
+    rejectLaunch = () => {
+      child.send = (message, ...rest) => {
+        if (message.type !== "spawn") return send(message, ...rest);
+        const callback = rest.find((value) => typeof value === "function");
+        child.disconnect();
+        if (callback) queueMicrotask(() => callback(Object.assign(new Error("launch admission failed"), { code: "EPIPE" })));
+        return false;
+      };
+    };
+    return child;
+  } });
+  const elsewhere = await ownedRoot(t);
+  const marker = join(elsewhere.root, "ran");
+  t.after(() => until(() => !existsSync(owner.root), "the disconnected owner did not finish cleanup", 3000));
+  rejectLaunch();
+  const started = Date.now();
+  await assert.rejects(owner.spawn(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", marker]), /admission|EPIPE|closed|disconnect|channel failed/);
+  assert.ok(Date.now() - started < 3000, "a rejected launch request is bounded");
+  await pause(150);
+  assert.ok(!existsSync(marker), "the held command never executes after rejected admission");
+  await until(() => !existsSync(owner.root), "the disconnected owner did not finish cleanup", 3000);
 });
 
-
-test("registering on a closed guard rejects its failed write", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "fixture-cleanup-test-"));
-  t.after(() => cleanUpFixture({ root, groups: [] }));
-  const guard = startGuard(root);
-  guard.release();
-  await assert.rejects(guard.register("closed", process.pid), { code: "ERR_STREAM_WRITE_AFTER_END" });
+test("a closed owner rejects a new launch without executing its command", async (t) => {
+  const owner = await ownedRoot(t);
+  const elsewhere = await ownedRoot(t);
+  const marker = join(elsewhere.root, "ran");
+  await owner.close();
+  await assert.rejects(owner.spawn(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", marker]), /closed|closing|terminal/);
+  await pause(150);
+  assert.ok(!existsSync(marker));
+  assert.ok(!existsSync(owner.root));
 });

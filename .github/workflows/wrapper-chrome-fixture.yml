@@ -7,6 +7,9 @@ on:
     paths:
       - app/ui/wrapper-chrome-*.cjs
       - app/ui/chrome-binary*.cjs
+      - app/ui/fixture-lifetime.cjs
+      - app/ui/fixture-process-owner*
+      - app/ui/fixture-process-ownership.md
       - app/ui/local-api-client.cjs
       - app/web/src/generated-dialogs.test.js
       - tools/*chrome-headless-shell*
@@ -46,6 +49,7 @@ jobs:
         run: |
           mkdir -p "$PROBE_EVIDENCE"
           git rev-parse HEAD > "$PROBE_EVIDENCE/head.txt"
+          node -e 'const fs=require("node:fs"), cp=require("node:child_process"); fs.writeFileSync(process.env.PROBE_EVIDENCE+"/run.json", JSON.stringify({source:cp.execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim(),event:process.env.GITHUB_EVENT_NAME,sha:process.env.GITHUB_SHA,workflowSha:process.env.GITHUB_WORKFLOW_SHA,run:process.env.GITHUB_RUN_ID,attempt:process.env.GITHUB_RUN_ATTEMPT,platform:process.platform,arch:process.arch,node:process.version},null,2));'
           node app/ui/wrapper-chrome-feasibility.cjs | tee "$PROBE_EVIDENCE/feasibility.log"
       - name: Compiler le wrapper et le web
         run: |
@@ -53,8 +57,10 @@ jobs:
           npm ci --prefix app/web
           npm run build --prefix app/web
           cargo build --locked -p grokbot-wrapper
-      - name: Vérifier les utilisateurs de la fixture
-        run: node --test app/ui/chrome-binary.test.cjs app/ui/wrapper-chrome-fixture.test.cjs app/web/src/generated-dialogs.test.js
+      - name: Vérifier les suites web et UI complètes
+        run: |
+          export CHROME_BIN="$(node -e 'process.stdout.write(require("./app/ui/chrome-binary.cjs").pinnedFixtureShell())')"
+          node --test --test-concurrency=1 app/web/src/*.test.js app/ui/*.test.cjs app/ui/panels/*.test.cjs | tee "$PROBE_EVIDENCE/web-ui.log"
       - name: Conserver seulement les reçus sans données applicatives
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -62,7 +68,9 @@ jobs:
           name: wrapper-chrome-fixture-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/wrapper-chrome-proof/head.txt
+            ${{ runner.temp }}/wrapper-chrome-proof/run.json
             ${{ runner.temp }}/wrapper-chrome-proof/feasibility.log
+            ${{ runner.temp }}/wrapper-chrome-proof/web-ui.log
             ${{ runner.temp }}/wrapper-chrome-proof/*.result.json
           if-no-files-found: error
           retention-days: 14

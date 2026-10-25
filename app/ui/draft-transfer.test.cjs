@@ -310,7 +310,8 @@ function boot() {
     return timer;
   }
   function json(data, status = 200) {
-    return { ok: status >= 200 && status < 300, status, async json() { return data; } };
+    const snapshot = structuredClone(data);
+    return { ok: status >= 200 && status < 300, status, async json() { return structuredClone(snapshot); } };
   }
   async function fetch(path, options = {}) {
     const url = String(path);
@@ -336,8 +337,6 @@ function boot() {
       sendWaiting?.();
       if (holdSend) await holdSend;
       if (sendStatus || body.page_anchor?.passage === "REFUSÉ") {
-        // Un vrai moteur ne garde pas le message refusé ; ce faux partage l'état avec le client.
-        for (const thread of state.conversations) thread.messages = thread.messages.filter((message) => message.state !== "queued");
         return json({ error: "Ce passage n’apparaît pas dans le texte affiché de la Page." }, sendStatus || 400);
       }
       const conversation = state.conversations.find((item) => item.id === body.conversation_id);
@@ -634,8 +633,6 @@ async function quotedPage(orphan = false) {
   await app.document.getElementById("composer-form").requestSubmit();
   const conversation = app.state.conversations[0];
   if (orphan) { app.state.conversations.length = 0; await ready(app); }
-  // Ce faux serveur partage son état avec le client : on retire l'envoi optimiste resté « queued ».
-  conversation.messages = conversation.messages.filter((message) => message.state !== "queued");
   const detail = {
     id: "page_forfaits", bot_id: "grokbot", title: "Trois forfaits", status: "ready", diagnostic: null, source_version: "c".repeat(64), preview: "ConfortREFUSÉ",
     document: { states: [], view: { type: "element", tag: "table", children: [
@@ -811,4 +808,30 @@ test("r11 un passage disparu ne revient pas et son avertissement reste visible a
   gate.release(); await pending;
   assert.equal(chip.hidden, true);
   assert.match(doc.getElementById("toast").textContent, /citation.*passage n’apparaît plus/);
+});
+
+for (const passage of [null, "Confort", "Con"]) test(`r12 citation ${passage ?? "retirée"} pendant création puis refus 400`, async () => {
+  const { app, doc, comment, chip, select } = await quotedPage(true);
+  select("Confort"); comment.click();
+  const creation = app.gateCreation();
+  app.refuseSend(400);
+  app.type("Corrige ce prix");
+  const pending = doc.getElementById("composer-form").requestSubmit();
+  await creation.waiting;
+  chip.querySelector(".gb-quote-remove").click();
+  if (passage) { select(passage); comment.click(); }
+  creation.release();
+  await pending;
+  assert.equal(app.sent.at(-1).conversation_id, "conv-2");
+  assert.equal(app.sent.at(-1).page_anchor.passage, "Confort", "le premier envoi garde sa citation capturée");
+  assert.equal(app.composer().api.value, "Corrige ce prix");
+  assert.equal(chip.hidden, !passage, "le refus respecte la citation choisie pendant la création");
+  if (passage) assert.ok(chip.textContent.includes(`« ${passage} »`));
+  app.refuseSend(null);
+  await doc.getElementById("composer-form").requestSubmit();
+  assert.equal(app.sent.at(-1).body, "Corrige ce prix");
+  assert.deepEqual(structuredClone(app.sent.at(-1).page_anchor), passage ? {
+    page_id: "page_forfaits", source_version: "c".repeat(64), passage,
+  } : undefined, "le réessai utilise la nouvelle citation, jamais l’ancienne");
+  assert.equal(chip.hidden, true);
 });

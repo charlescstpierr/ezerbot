@@ -365,6 +365,13 @@ pub fn capture(
     Ok(())
 }
 pub fn mentions(conn: &Connection, conversation: &str, message: &str) -> Value {
+    match crate::projection_hints::mentions(conversation, message) {
+        crate::projection_hints::Known::Row(stored) => {
+            return serde_json::from_str(&stored).unwrap_or(json!([]));
+        }
+        crate::projection_hints::Known::Absent => return json!([]),
+        crate::projection_hints::Known::Unknown => {}
+    }
     conn.prepare_cached("SELECT mentions FROM wrapper_group_inputs WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3").and_then(|mut s|s.query_row(params![ACCOUNT,conversation,message],|r|r.get::<_,String>(0))).ok().and_then(|s|serde_json::from_str(&s).ok()).unwrap_or(json!([]))
 }
 pub fn enqueue(conn: &Connection, conversation: &str, message: &str) -> Result<bool, ApiError> {

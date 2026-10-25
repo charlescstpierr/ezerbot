@@ -714,6 +714,11 @@ pub fn settled(ctx: &Context<'_>, request: &str) -> Result<(), ApiError> {
     Ok(())
 }
 pub fn message_source(ctx: &Context<'_>, message: &str) -> Option<String> {
+    if ctx.conversation_id.is_some_and(|conversation| {
+        crate::projection_hints::no_demonstration(conversation, message)
+    }) {
+        return None;
+    }
     ctx.connection.prepare_cached("SELECT id FROM wrapper_demonstrations WHERE conversation_id=?1 AND bot_id=?2 AND message_id=?3").and_then(|mut s|s.query_row(params![ctx.conversation_id,ctx.bot_id,message], |r|r.get(0)).optional()).ok().flatten()
 }
 pub fn hydrate(ctx: &Context<'_>, input: &mut [HistoryItem]) {

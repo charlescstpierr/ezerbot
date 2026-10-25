@@ -2282,3 +2282,105 @@ fn a_secret_stored_while_routine_and_group_replies_are_masked_never_leaves_in_cl
     let state = app.api("GET", "/api/state", b"").unwrap().to_string();
     assert!(!state.contains(secret));
 }
+
+/// `/api/state` looks up the side tables of the whole history at once (#515); one conversation
+/// read looks them up message by message. Both must project the same history, whichever side
+/// tables hold rows for it.
+#[test]
+fn a_state_read_projects_the_history_like_a_conversation_read_message_by_message() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let chat = conversation(&mut app);
+    let other = conversation(&mut app);
+    seed_attachments(&app);
+    for (conversation, message) in [
+        (&chat, "m1"),
+        (&chat, "m2"),
+        (&chat, "m3"),
+        (&chat, "m4"),
+        (&other, "m5"),
+    ] {
+        post(
+            &mut app,
+            "/api/send",
+            json!({"conversation_id": conversation, "message_id": message, "body": format!("Question {message}")}),
+        )
+        .unwrap();
+    }
+    let run_of = |app: &mut App, message: &str| -> String {
+        let state = app.api("GET", "/api/state", b"").unwrap();
+        state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c["messages"].as_array().unwrap())
+            .find(|m| m["id"] == format!("reply-{message}"))
+            .unwrap()["payload"]["run_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (run1, run2) = (run_of(&mut app, "m1"), run_of(&mut app, "m2"));
+    {
+        let tx = super::features::write_transaction(&app.connection).unwrap();
+        grokbot_attachments::staging::link_attachments(&tx, &chat, "m1", &["image-a".into()])
+            .unwrap();
+        tx.execute("INSERT OR REPLACE INTO wrapper_group_inputs(account_id,conversation_id,message_id,mentions,targets,group_mode) VALUES (?1,?2,'m2','[\"grokbot\"]','[]',0)", rusqlite::params![super::ACCOUNT, chat]).unwrap();
+        tx.execute("INSERT INTO wrapper_voice_memos(id,conversation_id,message_id,transcript,language,duration_ms,audio,created_at) VALUES ('memo-1',?1,'m2','Bonjour','fr',1200,x'0102',1)", [&chat]).unwrap();
+        tx.execute("INSERT INTO wrapper_demonstrations(id,bot_id,conversation_id,identity,status,started_at,message_id) VALUES ('demo-1','grokbot',?1,'moi','done',1,'m2')", [&chat]).unwrap();
+        tx.execute("INSERT INTO wrapper_run_sources(run_id,n,key,kind,title) VALUES (?1,1,'k1','web','Une source')", [&run1]).unwrap();
+        tx.execute("INSERT INTO engine_response_usage(run_id,response,input_tokens,output_tokens,cached_input_tokens) VALUES (?1,1,10,5,2),(?1,2,7,3,0)", [&run2]).unwrap();
+        tx.execute(
+            "UPDATE wrapper_engine_runs SET notice='À noter' WHERE run_id=?1",
+            [&run2],
+        )
+        .unwrap();
+        // A meeting summary is not shown as a message of its own.
+        tx.execute("INSERT INTO wrapper_meetings(id,conversation_id,title,status,created_at,message_id) VALUES ('meeting-1',?1,'Réunion','ready',1,'m4')", [&chat]).unwrap();
+        tx.commit().unwrap();
+    }
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    for id in [&chat, &other] {
+        let alone = serde_json::to_value(app.conversation(id).unwrap().unwrap()).unwrap();
+        let listed = state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == *id)
+            .unwrap();
+        assert_eq!(listed, &alone);
+    }
+    // The rows above do show: the comparison is not between two empty projections.
+    let messages = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == chat)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap();
+    let find = |id: &str| messages.iter().find(|m| m["id"] == id);
+    assert_eq!(find("m1").unwrap()["attachments"][0]["id"], "image-a");
+    assert_eq!(
+        find("m2").unwrap()["payload"]["mentions"],
+        json!(["grokbot"])
+    );
+    assert_eq!(find("m2").unwrap()["payload"]["demonstration_id"], "demo-1");
+    assert_eq!(find("m2").unwrap()["attachments"][0]["id"], "memo-1");
+    assert_eq!(
+        find("reply-m1").unwrap()["payload"]["sources"][0]["titre"],
+        "Une source"
+    );
+    assert_eq!(
+        find("reply-m2").unwrap()["payload"]["usage"],
+        json!({"input_tokens": 17, "output_tokens": 8, "cached_input_tokens": 2})
+    );
+    assert_eq!(find("reply-m2").unwrap()["notice"], "À noter");
+    assert!(find("m4").is_none() && find("reply-m4").is_none());
+    assert!(find("m3").unwrap()["attachments"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(find("m3").unwrap()["payload"]["mentions"], json!([]));
+    assert!(find("reply-m3").unwrap()["payload"]["usage"].is_null());
+}

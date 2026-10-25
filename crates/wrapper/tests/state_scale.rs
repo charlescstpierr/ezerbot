@@ -21,6 +21,25 @@ const PER_MESSAGE: [&str; 6] = [
         FROM engine_response_usage WHERE run_id=?1 HAVING COUNT(*)>0",
 ];
 
+/// What a state read runs once for the whole history (#515): each reads its table whole, once,
+/// whatever the number of messages. Mirrors `projection_hints.rs`.
+const ONCE: [&str; 11] = [
+    "SELECT conversation_id, message_id, mentions FROM wrapper_group_inputs WHERE account_id = ?1",
+    "SELECT conversation_id, message_id, ordinal, created_at FROM wrapper_messages WHERE account_id = ?1 AND kind = 'submission'",
+    "SELECT conversation_id, message_id FROM attachments_message_links",
+    "SELECT conversation_id, message_id FROM wrapper_meetings WHERE message_id IS NOT NULL",
+    "SELECT DISTINCT run_id FROM wrapper_run_sources",
+    "SELECT DISTINCT run_id FROM memory_recalled",
+    "SELECT trigger_ref, record FROM engine_runs WHERE trigger_kind = 'user_message' ORDER BY trigger_ref, attempt",
+    "SELECT e.run_id, e.seq, e.kind, e.payload FROM engine_run_events e
+         JOIN engine_runs r ON r.run_id = e.run_id
+         WHERE r.trigger_kind = 'user_message' ORDER BY e.run_id, e.seq",
+    "SELECT run_id, error, error_kind, notice FROM wrapper_engine_runs",
+    "SELECT run_id, SUM(input_tokens), SUM(output_tokens), SUM(cached_input_tokens)
+             FROM engine_response_usage GROUP BY run_id",
+    "SELECT conversation_id, message_id FROM wrapper_demonstrations WHERE message_id IS NOT NULL",
+];
+
 std::thread_local! {
     /// Calls of `add_steps` on this thread, whatever counter they reach: what shows the callback
     /// is gone once its guard is.
@@ -162,6 +181,24 @@ fn a_state_read_costs_no_more_than_ten_times_for_ten_times_the_history() {
             "{sql}: {details:?}"
         );
     }
+    for sql in ONCE {
+        let mut plan = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let count = plan.parameter_count();
+        let details: Vec<String> = plan
+            .query_map(rusqlite::params_from_iter(vec![""; count]), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        eprintln!(
+            "PLAN UNE FOIS {} => {}",
+            sql.split_whitespace().collect::<Vec<_>>().join(" "),
+            details.join(" | ")
+        );
+    }
     eprintln!(
         "VmStep /api/state : {shown_small} messages {small}, {shown_large} messages {large} ({:.2}x)",
         large as f64 / small as f64
@@ -171,6 +208,42 @@ fn a_state_read_costs_no_more_than_ten_times_for_ten_times_the_history() {
     assert!(
         large <= 10 * small,
         "20 messages sent: {small} VM instructions, 200: {large}"
+    );
+    drop((small_app, large_app));
+    let _ = std::fs::remove_dir_all(small_dir);
+    let _ = std::fs::remove_dir_all(large_dir);
+}
+
+/// Statements run on the app connection by one `/api/state`. `CALLS` counts the end of each.
+fn state_statements(app: &mut App) -> usize {
+    let steps = Steps::on(app);
+    // The first read also fills the cache of prepared statements.
+    app.api("GET", "/api/state", b"").unwrap();
+    let before = CALLS.get();
+    app.api("GET", "/api/state", b"").unwrap();
+    let ran = CALLS.get() - before;
+    drop(steps);
+    ran
+}
+
+#[test]
+fn a_state_read_runs_the_same_statements_whatever_the_length_of_the_history() {
+    // Before #515 every message of the history cost sixteen lookups on each poll: the
+    // projection read the side tables (mentions, attachments, meeting, sources, events, usage...)
+    // message by message, and a reply that streams is polled every 100 ms. The tables are now
+    // read once for the whole history: a message adds rows to read, not statements to run.
+    let (mut small_app, small_dir) = history(20);
+    let small = state_statements(&mut small_app);
+    let (mut large_app, large_dir) = history(200);
+    let large = state_statements(&mut large_app);
+    eprintln!(
+        "STATEMENTS /api/state : 20 messages sent {small}, 200 messages sent {large} ({:+} for 180 more)",
+        large as i64 - small as i64
+    );
+    // One lookup per message more would be 180 statements more.
+    assert!(
+        large <= small + 20,
+        "20 messages sent: {small} statements, 200: {large}"
     );
     drop((small_app, large_app));
     let _ = std::fs::remove_dir_all(small_dir);

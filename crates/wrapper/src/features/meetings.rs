@@ -80,6 +80,9 @@ pub fn state(ctx: &Context<'_>) -> Value {
     json!({"max_seconds":MAX_SECONDS,"audio_days":days,"interrupted":interrupted,"debug_fake":cfg!(debug_assertions)})
 }
 pub fn is_summary(conn: &Connection, conversation: &str, message: &str) -> Result<bool, ApiError> {
+    if crate::projection_hints::no_meeting(conversation, message) {
+        return Ok(false);
+    }
     Ok(conn
         .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM wrapper_meetings WHERE conversation_id=?1 AND message_id=?2)",

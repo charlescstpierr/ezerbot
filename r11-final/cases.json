@@ -1,0 +1,155 @@
+[
+  {
+    "case": "Page réelle du faux fournisseur",
+    "result": {
+      "title": "Renommer\nOuvrir en pleine page\nTrois forfaits\n\nTout < 30 € par mois\n\nOffre choisie : Essentiel\n\nOffre\tPrix\t\nEssentiel\t9 €\tChoisir\nConfort\t19 €\tChoisir\nFamille\t29 €\tChoisir",
+      "model": "GPT Test"
+    }
+  },
+  {
+    "case": "Non-régression sélection multi-cellules",
+    "result": {
+      "mentions": [],
+      "attachments": [],
+      "page_anchor": {
+        "page_id": "page_184eba7b2fb772132716ad016e4a4741d690c46f3ff6ba56ca23807413244f3e",
+        "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+        "passage": "Confort\t19 €\tChoisir\nFamille"
+      },
+      "conversation_id": "9c4154b71db1547fb1fe58326f7c2e1e",
+      "message_id": "6ceed649-021e-4cfc-82ee-825eaf7d6150",
+      "body": "Commentaire sur plusieurs cellules",
+      "simulate_loss": false
+    }
+  },
+  {
+    "case": "Non-régression espaces jamais supprimés",
+    "result": {
+      "status": 400,
+      "body": {
+        "error": "Ce passage n’apparaît pas dans le texte affiché de la Page."
+      }
+    }
+  },
+  {
+    "case": "T01/T02 refus 400",
+    "result": {
+      "requests": [
+        {
+          "route": "/api/send",
+          "body": {
+            "mentions": [],
+            "attachments": [],
+            "page_anchor": {
+              "page_id": "page_184eba7b2fb772132716ad016e4a4741d690c46f3ff6ba56ca23807413244f3e",
+              "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+              "passage": "Confort"
+            },
+            "conversation_id": "19cc9e9fc30b7023f245d5f17fa49bad",
+            "message_id": "fb73d9bb-b0a3-4b8c-9795-402c19d87813",
+            "body": "Retouche refusée 400",
+            "simulate_loss": false
+          }
+        }
+      ],
+      "chip": true,
+      "text": "Retouche refusée 400",
+      "selected": "19cc9e9fc30b7023f245d5f17fa49bad"
+    }
+  },
+  {
+    "case": "capture 400 dark 1140",
+    "result": {
+      "theme": "dark",
+      "canvas": "#0e0f12",
+      "above": true,
+      "width": 1140,
+      "height": 780
+    }
+  },
+  {
+    "case": "capture 400 dark 820",
+    "result": {
+      "theme": "dark",
+      "canvas": "#0e0f12",
+      "above": true,
+      "width": 820,
+      "height": 560
+    }
+  },
+  {
+    "case": "capture 400 light 1140",
+    "result": {
+      "theme": "light",
+      "canvas": "#ffffff",
+      "above": true,
+      "width": 1140,
+      "height": 780
+    }
+  },
+  {
+    "case": "capture 400 light 820",
+    "result": {
+      "theme": "light",
+      "canvas": "#ffffff",
+      "above": true,
+      "width": 820,
+      "height": 560
+    }
+  },
+  {
+    "case": "nouvel essai 400",
+    "result": [
+      {
+        "route": "/api/send",
+        "body": {
+          "mentions": [],
+          "attachments": [],
+          "page_anchor": {
+            "page_id": "page_184eba7b2fb772132716ad016e4a4741d690c46f3ff6ba56ca23807413244f3e",
+            "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+            "passage": "Confort"
+          },
+          "conversation_id": "19cc9e9fc30b7023f245d5f17fa49bad",
+          "message_id": "fb73d9bb-b0a3-4b8c-9795-402c19d87813",
+          "body": "Retouche refusée 400",
+          "simulate_loss": false
+        }
+      },
+      {
+        "route": "/api/send",
+        "body": {
+          "mentions": [],
+          "attachments": [],
+          "page_anchor": {
+            "page_id": "page_184eba7b2fb772132716ad016e4a4741d690c46f3ff6ba56ca23807413244f3e",
+            "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+            "passage": "Confort"
+          },
+          "conversation_id": "19cc9e9fc30b7023f245d5f17fa49bad",
+          "message_id": "5db1b109-badc-46f7-9d89-1f920232d572",
+          "body": "Retouche refusée 400",
+          "simulate_loss": false
+        }
+      }
+    ]
+  },
+  {
+    "case": "T12 nouvelle citation après ancien accusé",
+    "result": {
+      "chip": "Page « Trois forfaits » — « Confort »",
+      "draft": "Nouvelle citation du même passage"
+    }
+  },
+  {
+    "case": "T10 renommage",
+    "result": "Page « Forfaits vérifiés » — « Confort »"
+  },
+  {
+    "case": "preuve terminée",
+    "result": {
+      "head": "638abad5340b6737c16a6bc24f95f28e990cd717",
+      "captures": 6
+    }
+  }
+]

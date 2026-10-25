@@ -1,0 +1,7 @@
+#!/bin/bash
+set -eu
+if [ "${CHROME_DEVTOOLS_AXI_SESSION:-}" != "pm-i294" ] || [ "$#" -ne 1 ] || [ "$1" != "stop" ]; then
+  echo "refus: Cleanup exige uniquement pm-i294 stop" >&2
+  exit 91
+fi
+exec /Users/cstpierrecharles/.local/bin/chrome-devtools-axi stop

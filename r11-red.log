@@ -1,0 +1,97 @@
+✔ a draft typed during creation stays on its thread and does not return on Nouvelle conversation (184.657306ms)
+✔ an orphan welcome document left by an older transfer is purged instead of restored (47.971325ms)
+✔ a refused creation keeps both the submitted text and the text typed while waiting (260.463351ms)
+✔ a maximal bot name and its edit action stay inside an ellipsis rule (124.30084ms)
+✔ the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape (124.466505ms)
+✔ a disabled composer bot focuses the conversation title when the editor is not editable (23.208043ms)
+✔ a disabled composer bot returns menu focus to the editor (105.333676ms)
+✔ short composer names stay whole and a maximal name ellipsizes only when the bar is full (134.743326ms)
+✔ l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce (269.652609ms)
+✔ l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre (190.417513ms)
+✔ « Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file (63.151115ms)
+✔ le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée (107.57597ms)
+✖ r11 une citation orpheline revient après création puis refus 400 et repart avec son ancre (158.938731ms)
+✔ r11 refus ancien après remove de citation (154.293911ms)
+✔ r11 refus ancien après same de citation (84.518956ms)
+✔ r11 refus ancien après other de citation (172.805758ms)
+✖ r11 un passage disparu ne revient pas et son avertissement reste visible après le refus (153.621799ms)
+✔ la Page s’affiche à côté du fil, se renomme, s’ouvre en pleine page, et ne propose pas de partage (35.118713ms)
+✔ une Page de 64 niveaux s’affiche encore (3.156825ms)
+✔ une Page de 65 niveaux est refusée avant de peindre le DOM (1.842099ms)
+✔ une Page déjà enregistrée plus profonde que 64 niveaux est refusée sans construire le DOM (21.68337ms)
+✔ un useState se réinitialise quand la source change et garde le clic si la version est la même (9.507722ms)
+✔ une compilation cassée montre la ligne et le caractère, pas une Page vide réussie (8.912209ms)
+✔ les maps imbriquées respectent le budget cumulé (14, 1) (67.865348ms)
+✔ les maps imbriquées respectent le budget cumulé (14, 0) (53.168113ms)
+✔ les maps imbriquées respectent le budget cumulé (8, 3000) (77.783017ms)
+✔ les maps imbriquées respectent le budget cumulé (40, 1) (52.344877ms)
+✔ 1 000 000 octets de texte répartis en 100 paragraphes se peignent, un de plus non (même borne que compile.rs) (125.008061ms)
+✔ un rafraîchissement identique ne reconstruit pas la Page et garde le focus (59.26675ms)
+✔ une Page écrite par un autre participant d’un groupe s’affiche avec le fil du groupe (3.042162ms)
+✔ une Page dont la conversation a disparu reste ouvrable, sans l’afficher à côté d’un autre fil (67.454061ms)
+✔ une navigation refusée pendant une réponse prévient au lieu d’afficher la Page à côté d’un autre fil (2.127489ms)
+✔ sélectionner « Forfait B » affiche « Commenter » près de la sélection ; le clic pose la puce au-dessus de la boîte de message (4.236192ms)
+✔ l’envoi transmet la Page, la version lue par le panneau et le passage rogné ; la puce part avec le message (3.380464ms)
+✔ l’accusé d’un envoi ne retire que sa citation : la même citation posée à nouveau entre-temps reste (6.836369ms)
+✔ la croix retire la puce : le message part sans ancre (2.319553ms)
+✔ une sélection de plus de 500 caractères ne donne ni bouton ni ancre ; 500 passent (3.404049ms)
+✔ une sélection vide, hors de la Page ou qui déborde du canevas ne donne pas de bouton (2.460768ms)
+✔ au clavier, « Commenter » est un bouton après le canevas et garde la sélection quand il prend le focus (2.355757ms)
+✔ changer de fil retire la puce, et « Commenter » depuis la pleine page revient au fil pour écrire (2.198262ms)
+✔ un clic sur la puce du fil montre la Page ; une Page disparue prévient (1.734382ms)
+✔ ouvrir une autre Page du même fil retire la citation de la première avant tout envoi (2.414275ms)
+✔ dans une sous-tâche déléguée, « Commenter » n’est pas proposé : son envoi n’emporte pas d’ancre (1.793209ms)
+✔ 500 caractères en comptant les emoji comme le moteur : 500 passent, 501 non (1.894642ms)
+✔ le rognage suit `str::trim` de Rust : U+0085 est retiré, U+FEFF est gardé (1.863981ms)
+✔ une sélection sur plusieurs cellules et paragraphes donne le bouton et part telle quelle (1.653032ms)
+✔ les blancs sont réduits à un espace, jamais supprimés : un blanc dans un mot, ou absent entre deux cellules, ne donne pas de bouton (3.218211ms)
+✔ un texte changé par l’état interactif de la Page, absent de l’aperçu que contrôle le moteur, ne donne pas de bouton (1.621789ms)
+✔ dans un groupe, la Page d’un autre participant que le bot du fil ne donne pas de bouton (le moteur répondrait 409) (1.67746ms)
+✔ une navigation refusée vers une autre Page (liste ou puce du fil) garde la citation posée (75.87944ms)
+✔ renommer la Page met le nouveau titre dans la puce de la citation posée (13.492561ms)
+✔ après un renommage, la liste garde le nouveau titre quand l’hôte repeint avec son état (2.740561ms)
+✔ « Commenter » gardé au clavier ne cite pas un passage que la Page modifiée entre-temps n’affiche plus (3.668558ms)
+ℹ tests 53
+ℹ suites 0
+ℹ pass 51
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2554.214151
+
+✖ failing tests:
+
+test at app/ui/draft-transfer.test.cjs:771:1
+✖ r11 une citation orpheline revient après création puis refus 400 et repart avec son ancre (158.938731ms)
+  AssertionError [ERR_ASSERTION]: la citation accompagne le brouillon récupéré
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:778:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/draft-transfer.test.cjs:803:1
+✖ r11 un passage disparu ne revient pas et son avertissement reste visible après le refus (153.621799ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  false !== true
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i294/app/ui/draft-transfer.test.cjs:812:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

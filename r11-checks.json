@@ -1,0 +1,92 @@
+{
+  "head": "638abad5340b6737c16a6bc24f95f28e990cd717",
+  "cwd": "/Users/cstpierrecharles/.treehouse/pm/ez-i294",
+  "revert": "f88d55c3",
+  "citation_diff": {
+    "files": 3,
+    "insertions": 103,
+    "deletions": 16
+  },
+  "pr_diff": {
+    "files": 25,
+    "insertions": 1483,
+    "deletions": 90
+  },
+  "checks": [
+    {
+      "log": "r11-red.log",
+      "exit": 1,
+      "tests": 53,
+      "pass": 51,
+      "fail": 2,
+      "note": "Sans correctif; les trois protections retrait/citation récente sont déjà vertes."
+    },
+    {
+      "log": "r11-green.log",
+      "exit": 0,
+      "tests": 53,
+      "pass": 53,
+      "fail": 0
+    },
+    {
+      "log": "r11-node.log",
+      "exit": 0,
+      "tests": 1105,
+      "pass": 1105,
+      "fail": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "todo": 0
+    },
+    {
+      "log": "r11-rust.log",
+      "exit": 0,
+      "tests": 449,
+      "pass": 449,
+      "fail": 0,
+      "ignored": 0,
+      "filtered": 0,
+      "suites": {
+        "lib": 302,
+        "delegation": 80,
+        "delegation_success": 6,
+        "pages": 34,
+        "state_scale": 2,
+        "storage": 25
+      }
+    },
+    {
+      "log": "r11-web-build.log",
+      "exit": 0,
+      "bundles_changed": false
+    },
+    {
+      "log": "r11-gitleaks.log",
+      "exit": 0,
+      "leaks": 0,
+      "command": "gitleaks git --redact --log-opts=origin/main..HEAD"
+    },
+    {
+      "log": "r11-final/drive.log",
+      "exit": 0,
+      "captures": 6
+    },
+    {
+      "log": "r11-final/doctor-before.log",
+      "exit": 0
+    },
+    {
+      "log": "r11-final/doctor-after.log",
+      "exit": 0
+    },
+    {
+      "log": "r11-final/report.md",
+      "status": "PASS owner"
+    },
+    {
+      "log": "r11-final/cleanup.json",
+      "exit": 0,
+      "session": "pm-i294"
+    }
+  ]
+}

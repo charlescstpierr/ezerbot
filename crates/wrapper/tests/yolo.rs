@@ -146,7 +146,7 @@ impl Fixture {
             .clone()
     }
     fn shell(&self, command: &str) -> Value {
-        json!({"command":command,"cwd":self.root(),"timeout_ms":2000,"output_limit":1024})
+        json!({"description":"Vérifier la commande locale","command":command,"cwd":self.root(),"timeout_ms":2000,"output_limit":1024})
     }
     fn card(&mut self, chat: &str, call_id: &str) -> Value {
         self.state()["conversations"]

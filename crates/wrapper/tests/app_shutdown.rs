@@ -212,6 +212,7 @@ fn a_shell_task_started_by_the_turn_during_the_destruction_is_stopped_and_joined
         json!({"bot_id": "grokbot", "shell": true, "files": false}),
     );
     let arguments = json!({
+        "description": "Attendre la fin de la tâche",
         "command": "sleep 300",
         "cwd": f.root,
         "timeout_ms": 2000,

@@ -1,9 +1,9 @@
 //! Privacy profile for persisted deliverable presentations. Only fingerprints survive
 //! vault rotation; raw credentials are never copied into this ledger.
 use crate::ApiError;
-use grokbot_forms::vault::Vault;
+use grokbot_forms::vault::{privacy_fingerprints, Vault};
 use ring::digest::{digest, SHA256};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -43,6 +43,49 @@ pub(super) fn refused() -> ApiError {
 
 pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_disclosure_patterns (length INTEGER NOT NULL, digest BLOB NOT NULL, filter BLOB NOT NULL, PRIMARY KEY(length,digest)) WITHOUT ROWID")?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_disclosure_trust (kind TEXT NOT NULL, key TEXT NOT NULL, epoch TEXT NOT NULL, PRIMARY KEY(kind,key)) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS wrapper_disclosure_epoch (singleton INTEGER PRIMARY KEY CHECK(singleton=1), epoch TEXT NOT NULL);")?;
+    Ok(())
+}
+
+pub(super) fn initialize(conn: &Connection) -> Result<(), ApiError> {
+    if conn.path().is_none_or(str::is_empty) {
+        return Ok(());
+    }
+    let snapshot = current_vault(conn)?
+        .privacy_snapshot()
+        .map_err(|_| refused())?;
+    conn.execute("INSERT INTO wrapper_disclosure_epoch VALUES (1,?1) ON CONFLICT(singleton) DO UPDATE SET epoch=excluded.epoch", [&snapshot.epoch])?;
+    for (table, kind) in [
+        ("wrapper_bots", "bot"),
+        ("wrapper_conversations", "conversation"),
+    ] {
+        conn.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS disclosure_{kind}_INSERT AFTER INSERT ON {table} BEGIN
+            INSERT INTO wrapper_disclosure_trust(kind,key,epoch) SELECT '{kind}',NEW.account_id||':'||NEW.id,epoch FROM wrapper_disclosure_epoch WHERE singleton=1
+            ON CONFLICT(kind,key) DO UPDATE SET epoch=excluded.epoch; END;"))?;
+    }
+    Ok(())
+}
+fn current_vault(conn: &Connection) -> Result<Vault, ApiError> {
+    let path = conn.path().filter(|p| !p.is_empty()).ok_or_else(refused)?;
+    Vault::open_app(&Path::new(path).with_extension("secrets.json")).map_err(|_| refused())
+}
+pub(super) fn stamp(conn: &Connection, kind: &str, key: &str) -> Result<(), ApiError> {
+    let snapshot = current_vault(conn)?
+        .privacy_snapshot()
+        .map_err(|_| refused())?;
+    let epoch: String = conn.query_row(
+        "SELECT epoch FROM wrapper_disclosure_epoch WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    if epoch != snapshot.epoch {
+        return Err(refused());
+    }
+    conn.execute(
+        "INSERT INTO wrapper_disclosure_trust VALUES (?1,?2,?3) ON CONFLICT DO NOTHING",
+        rusqlite::params![kind, key, epoch],
+    )?;
     Ok(())
 }
 
@@ -52,32 +95,28 @@ pub(super) struct Patterns {
     known: Fingerprints,
     active: BTreeSet<String>,
     retired: Fingerprints,
+    epoch: String,
+    revision: u64,
 }
 impl Patterns {
     fn current(conn: &Connection) -> Result<Self, ApiError> {
-        let path = conn.path().ok_or_else(refused)?;
-        let vault = Vault::open_app(&Path::new(path).with_extension("secrets.json"))
+        let snapshot = current_vault(conn)?
+            .privacy_snapshot()
             .map_err(|_| refused())?;
-        let mut result = Self::default();
-        for value in vault.values_for_redaction().map_err(|_| refused())? {
-            let encoded = serde_json::to_string(&value).map_err(|_| refused())?;
-            for variant in [&value, value.trim(), &encoded[1..encoded.len() - 1]] {
-                let normalized: String = variant.nfd().collect();
-                if normalized.encode_utf16().count() >= 6 && normalized.len() > MASK.len() {
-                    result.active.insert(normalized.clone());
-                    result
-                        .known
-                        .entry(normalized.len())
-                        .or_default()
-                        .entry(
-                            window_fingerprint(rolling(normalized.as_bytes()))
-                                .as_ref()
-                                .to_vec(),
-                        )
-                        .or_default()
-                        .insert(fingerprint(normalized.as_bytes()));
-                }
-            }
+        let mut result = Self {
+            epoch: snapshot.epoch,
+            revision: snapshot.revision,
+            active: snapshot.active.into_iter().collect(),
+            ..Self::default()
+        };
+        for pattern in snapshot.fingerprints {
+            result
+                .known
+                .entry(pattern.length)
+                .or_default()
+                .entry(pattern.filter)
+                .or_default()
+                .insert(pattern.digest);
         }
         Ok(result)
     }
@@ -92,6 +131,9 @@ impl Patterns {
             ))
         })? {
             let (length, digest, filter) = pair?;
+            if length <= 5 || digest.len() != 32 || filter.len() != 32 {
+                return Err(refused());
+            }
             all.known
                 .entry(length)
                 .or_default()
@@ -129,19 +171,33 @@ impl Patterns {
             tx.commit()?;
         }
         all.active = self.active.clone();
+        all.epoch = self.epoch.clone();
+        all.revision = self.revision;
         all.retired = all.known.clone();
-        for (length, filters) in &self.known {
-            if let Some(retired) = all.retired.get_mut(length) {
-                for (filter, digests) in filters {
-                    if let Some(known) = retired.get_mut(filter) {
-                        known.retain(|digest| !digests.contains(digest));
-                    }
+        let (active, _) = privacy_fingerprints(&self.active.iter().cloned().collect::<Vec<_>>());
+        for pattern in active {
+            if let Some(filters) = all.retired.get_mut(&pattern.length) {
+                if let Some(digests) = filters.get_mut(&pattern.filter) {
+                    digests.remove(&pattern.digest);
                 }
-                retired.retain(|_, digests| !digests.is_empty());
+                filters.retain(|_, digests| !digests.is_empty());
             }
         }
         all.retired.retain(|_, filters| !filters.is_empty());
         Ok(all)
+    }
+    pub(super) fn covers(&self, epoch: Option<&str>) -> bool {
+        epoch.is_some_and(|epoch| epoch == self.epoch)
+    }
+    pub(super) fn covers_file(&self, conn: &Connection, id: &str) -> Result<bool, ApiError> {
+        let epoch: Option<String> = conn
+            .query_row(
+                "SELECT epoch FROM wrapper_disclosure_trust WHERE kind='document' AND key=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(self.covers(epoch.as_deref()))
     }
     fn is_empty(&self) -> bool {
         self.known.is_empty()
@@ -271,10 +327,12 @@ pub(super) fn read<T>(
 ) -> Result<T, ApiError> {
     for _ in 0..3 {
         let current = Patterns::current(conn)?;
-        let all = current.remember(conn)?;
+        let all = current.remember(conn).map_err(|_| refused())?;
         let output =
             render(&all).map_err(|error| ApiError::new(error.status, all.text(&error.message)));
-        let remembered: usize = conn.query_row(COUNT_PATTERNS, [], |r| r.get(0))?;
+        let remembered: usize = conn
+            .query_row(COUNT_PATTERNS, [], |r| r.get(0))
+            .map_err(|_| refused())?;
         let captured: usize = all
             .known
             .values()
@@ -403,6 +461,45 @@ mod tests {
         assert_eq!(calls, 3);
         assert!(output.is_err());
     }
+    #[test]
+    fn a_round_trip_with_already_known_values_retries_the_output() {
+        let (_dir, conn, vault) = fixture();
+        vault
+            .set("ABA_PROOF", "Fixture", "phrase du tour complet")
+            .unwrap();
+        vault.remove("ABA_PROOF").unwrap();
+        let mut calls = 0;
+        let output = read(&conn, |patterns| {
+            calls += 1;
+            if calls == 1 {
+                vault
+                    .set("ABA_PROOF", "Fixture", "phrase du tour complet")
+                    .unwrap();
+                vault.remove("ABA_PROOF").unwrap();
+            }
+            Ok(patterns.text("phrase du tour complet"))
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(output, MASK);
+    }
+    #[test]
+    fn malformed_registry_rows_refuse_before_rendering() {
+        let (_dir, conn, _vault) = fixture();
+        conn.execute(
+            "INSERT INTO wrapper_disclosure_patterns VALUES (0,x'00',x'00')",
+            [],
+        )
+        .unwrap();
+        let mut rendered = false;
+        assert!(read(&conn, |_| {
+            rendered = true;
+            Ok(())
+        })
+        .is_err());
+        assert!(!rendered);
+    }
+
     #[test]
     fn long_private_values_do_not_hash_every_full_candidate_window() {
         let (_dir, conn, vault) = fixture();

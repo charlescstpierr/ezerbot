@@ -220,6 +220,8 @@ impl Backend for Native {
 fn migrate(vault: &Vault, backend: &impl Backend, state: &mut State) -> Result<Secrets> {
     let mut file = vault.read_file()?;
     let mut merged = backend.read_all()?;
+    vault.capture_backend_privacy(&merged)?;
+    vault.capture_privacy(&file, !file.is_empty())?;
     merged.extend(file.clone());
     state.cached = merged.clone();
     for (name, secret) in &merged {
@@ -231,6 +233,15 @@ fn migrate(vault: &Vault, backend: &impl Backend, state: &mut State) -> Result<S
         vault.write(&file)?; // atomic rename + file and directory fsync
     }
     Ok(merged)
+}
+pub(super) fn strict_snapshot(vault: &Vault, target: &Target) -> Result<Secrets> {
+    let mut states = states();
+    let state = states.entry(vault.path.clone()).or_default();
+    let result = target
+        .connect(&vault.path)
+        .and_then(|backend| migrate(vault, &backend, state));
+    state.failed = result.is_err();
+    result
 }
 pub(super) fn snapshot(vault: &Vault, target: &Target) -> Result<Secrets> {
     let mut states = states();
@@ -336,5 +347,49 @@ mod tests {
         let all = migrate(&test.vault, &fake, &mut State::default()).unwrap();
         assert_eq!(all.len(), 2);
         assert!(test.vault.read_file().unwrap().is_empty());
+    }
+    #[test]
+    fn migration_records_overwritten_backend_values_before_failed_verification() {
+        let test = test_support::TestVault::new();
+        test.vault
+            .set("FIRST", "", "phrase synthetique du fichier")
+            .unwrap();
+        let mut old = test.vault.read_file().unwrap();
+        old.get_mut("FIRST").unwrap().value = "phrase synthetique du backend".into();
+        let fake = Fake {
+            secrets: RefCell::new(old),
+            writes: Cell::new(0),
+            fail_at: 1,
+        };
+        {
+            let _guard = access(test.vault.path());
+            let _lock = test.vault.lock_file(true).unwrap();
+            assert!(migrate(&test.vault, &fake, &mut State::default()).is_err());
+        }
+        let snapshot = test.vault.privacy_snapshot().unwrap();
+        for value in [
+            "phrase synthetique du fichier",
+            "phrase synthetique du backend",
+        ] {
+            let (patterns, _) = privacy_fingerprints(&[value.into()]);
+            assert!(patterns
+                .iter()
+                .all(|entry| snapshot.fingerprints.contains(entry)));
+        }
+        assert!(!snapshot.complete);
+        {
+            let _guard = access(test.vault.path());
+            let _lock = test.vault.lock_file(true).unwrap();
+            migrate(&test.vault, &fake, &mut State::default()).unwrap();
+        }
+        let reopened = Vault::open(test.vault.path())
+            .unwrap()
+            .privacy_snapshot()
+            .unwrap();
+        assert_eq!(snapshot.epoch, reopened.epoch);
+        assert!(snapshot
+            .fingerprints
+            .iter()
+            .all(|entry| reopened.fingerprints.contains(entry)));
     }
 }

@@ -211,6 +211,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     for feature in FEATURES {
         (feature.migrate)(&tx)?;
     }
+    disclosure::initialize(&tx)?;
     tx.execute("INSERT INTO component_versions (component, version) VALUES ('wrapper', 1) ON CONFLICT(component) DO UPDATE SET version = MAX(version, excluded.version)", [])?;
     tx.commit()?;
     Ok(())

@@ -130,6 +130,7 @@ fn roots(conn: &Connection) -> Result<HashSet<String>, ApiError> {
             "attachments_staged"
                 | "attachments_documents"
                 | "attachments_generated"
+                | "wrapper_disclosure_trust"
                 | "attachments_caption_cache"
                 | "attachments_caption_uses"
                 | "wrapper_attachment_retry"

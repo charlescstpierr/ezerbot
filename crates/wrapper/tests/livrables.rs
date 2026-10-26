@@ -348,9 +348,10 @@ fn documents_and_images_from_before_the_migration_are_found_without_error() {
     }
     let unknown = after.iter().find(|i| i["bot_id"].is_null()).unwrap();
     assert_eq!(unknown["type"], "document");
-    assert_eq!(unknown["title"], "Orphelin.pdf");
+    assert_eq!(unknown["title"], "Document");
+    assert!(unknown["open_url"].is_null() && unknown["id"].is_null());
     assert!(unknown["conversation_id"].is_null() && unknown["entry_id"].is_null());
-    for item in &after {
+    for item in known {
         f.opens(item);
     }
     f.db()
@@ -372,7 +373,8 @@ fn an_old_document_without_history_survives_the_startup_cleanup_and_opens() {
     let items = f.list("");
     assert_eq!(items.len(), 1, "le nettoyage du démarrage l’a emporté");
     assert!(items[0]["bot_id"].is_null());
-    f.opens(&items[0]);
+    assert_eq!(items[0]["title"], "Document");
+    assert!(items[0]["open_url"].is_null() && items[0]["id"].is_null());
     f.reopen();
     assert_eq!(f.list("").len(), 1);
 }
@@ -1431,4 +1433,311 @@ fn the_complete_persistent_preview_read_is_independent_of_old_history() {
         "VmStep complete persistent preview: 1000 events {}; 10000 events {}",
         costs[0], costs[1]
     );
+}
+
+#[test]
+fn first_catalogue_read_after_unobserved_vault_removal() {
+    first_read_after_unobserved_mutation(false, false);
+}
+
+#[test]
+fn first_catalogue_read_after_unobserved_vault_rotation() {
+    first_read_after_unobserved_mutation(true, false);
+}
+
+#[test]
+fn first_catalogue_read_after_unobserved_removal_and_reopen() {
+    first_read_after_unobserved_mutation(false, true);
+}
+
+#[test]
+fn first_catalogue_read_after_unobserved_rotation_and_reopen() {
+    first_read_after_unobserved_mutation(true, true);
+}
+
+fn first_read_after_unobserved_mutation(rotate: bool, reopen: bool) {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    let marker = "phrase synthetique du bilan";
+    f.call(
+        &chat,
+        "r11-document",
+        "create_document",
+        json!({"name":format!("Public {marker}"),"format":"md","content":format!("Public {marker}")}),
+    );
+    f.image(&chat, "r11-image", &format!("Public {marker}"));
+    let id: String = f
+        .db()
+        .query_row("SELECT id FROM attachments_generated", [], |r| r.get(0))
+        .unwrap();
+    f.post("/api/secrets/put", json!({"bot_id":"alpha","name":"MUTATION_PROOF","description":"Fixture locale","value":marker}));
+    if rotate {
+        f.post("/api/secrets/put", json!({"bot_id":"alpha","name":"MUTATION_PROOF","description":"Fixture locale","value":"phrase de remplacement du bilan"}));
+    } else {
+        f.post(
+            "/api/secrets/delete",
+            json!({"bot_id":"alpha","name":"MUTATION_PROOF"}),
+        );
+    }
+    if reopen {
+        f.reopen();
+    }
+    let catalogue = body(&mut f, "GET", "/api/livrables", json!(null));
+    let save = body(
+        &mut f,
+        "GET",
+        &format!("/api/generated/{id}/save-path"),
+        json!(null),
+    );
+    let preview = body(
+        &mut f,
+        "GET",
+        &format!("/api/generated/{id}/preview"),
+        json!(null),
+    );
+    let exposed = [
+        catalogue.contains(marker),
+        save.contains(marker),
+        preview.contains(marker),
+    ];
+    assert!(
+        catalogue.contains("Public") && preview.contains("Public"),
+        "public content must remain available"
+    );
+    assert!(
+        exposed.iter().all(|exposed| !exposed),
+        "private text emitted, catalogue/save/preview exposure flags {exposed:?}"
+    );
+}
+
+#[test]
+fn legacy_presentations_are_neutral_after_import_and_two_reopens() {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    let marker = "phrase ancienne non classifiable";
+    f.call(
+        &chat,
+        "legacy-document",
+        "create_document",
+        json!({"name":marker,"format":"md","content":marker}),
+    );
+    f.image(&chat, "legacy-image", marker);
+    let id: String = f
+        .db()
+        .query_row("SELECT id FROM attachments_generated", [], |r| r.get(0))
+        .unwrap();
+    f.db()
+        .execute("UPDATE wrapper_bots SET name=?1 WHERE id='alpha'", [marker])
+        .unwrap();
+    f.db()
+        .execute("UPDATE wrapper_conversations SET title=?1", [marker])
+        .unwrap();
+    let path = f.path.with_extension("secrets.json");
+    let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("_privacy");
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    for _ in 0..2 {
+        f.reopen();
+        let catalogue = f.list("");
+        assert_eq!(catalogue.len(), 2);
+        assert!(
+            !serde_json::to_string(&catalogue).unwrap().contains(marker),
+            "legacy metadata leaked"
+        );
+        for item in catalogue {
+            assert!(matches!(item["title"].as_str(), Some("Document" | "Image")));
+            for key in [
+                "id",
+                "bot_id",
+                "bot_name",
+                "conversation_id",
+                "conversation_title",
+                "entry_id",
+                "open_url",
+            ] {
+                assert!(
+                    item[key].is_null(),
+                    "uncertain identity or metadata emitted at {key}"
+                );
+            }
+            assert_eq!(item["date"], 0);
+        }
+        let preview = body(
+            &mut f,
+            "GET",
+            &format!("/api/generated/{id}/preview"),
+            json!(null),
+        );
+        assert!(preview.contains("Aperçu indisponible") && !preview.contains(marker));
+        let save = f
+            .app
+            .api("GET", &format!("/api/generated/{id}/save-path"), b"")
+            .unwrap();
+        assert!(save["path"].is_null());
+    }
+    f.post(
+        "/api/bots",
+        json!({"id":"new-public","name":"Nouvel atelier","color":"cyan"}),
+    );
+    let new_chat = f.chat("new-public");
+    f.document(&new_chat, "new-public-document", "Nouveau public", "md");
+    let fresh = f.list("bot=new-public");
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(fresh[0]["bot_name"], "Nouvel atelier");
+    assert_eq!(fresh[0]["conversation_id"], new_chat);
+    assert_eq!(fresh[0]["title"], "Nouveau public.md");
+    f.opens(&fresh[0]);
+    f.reopen();
+    assert_eq!(f.list("bot=new-public")[0], fresh[0]);
+}
+
+#[test]
+fn central_envelope_writers_retain_values_before_any_protected_read() {
+    for site in [false, true] {
+        let mut f = Fixture::new();
+        let chat = f.chat("alpha");
+        let marker = "phrase du connecteur synthétique";
+        f.call(&chat, "envelope-document", "create_document", json!({"name":format!("Public {marker}"),"format":"md","content":format!("Public {marker}")}));
+        let id: String = f
+            .db()
+            .query_row("SELECT id FROM attachments_generated", [], |r| r.get(0))
+            .unwrap();
+        let path = f.path.with_extension("secrets.json");
+        let vault = grokbot_forms::vault::Vault::open(&path).unwrap();
+        let (name, purpose, envelope) = if site {
+            (
+                "SITE_PROOF",
+                "Formulaire de site privé",
+                json!({"values":{"field":marker}}),
+            )
+        } else {
+            (
+                "MCP_PROOF_ENV",
+                grokbot_forms::vault::MCP_ENV_PURPOSE,
+                json!({"variables":{"field":marker}}),
+            )
+        };
+        vault.set(name, purpose, &envelope.to_string()).unwrap();
+        let other = grokbot_forms::vault::Vault::open(&path).unwrap();
+        other.remove(name).unwrap();
+        assert!(!other.privacy_snapshot().unwrap().fingerprints.is_empty());
+        assert_eq!(
+            f.db()
+                .query_row(
+                    "SELECT count(*) FROM wrapper_disclosure_patterns",
+                    [],
+                    |r| r.get::<_, usize>(0)
+                )
+                .unwrap(),
+            0
+        );
+        f.reopen();
+        for route in [
+            "/api/livrables".into(),
+            format!("/api/generated/{id}/save-path"),
+            format!("/api/generated/{id}/preview"),
+        ] {
+            let output = body(&mut f, "GET", &route, json!(null));
+            assert!(!output.contains(marker), "retired envelope field emitted");
+            assert!(output.contains("Public"), "public text lost");
+        }
+    }
+}
+
+#[test]
+fn first_read_after_retirement_checks_every_catalogue_copy() {
+    for field in [
+        "title",
+        "bot_name",
+        "conversation_title",
+        "id",
+        "bot_id",
+        "conversation_id",
+        "entry_id",
+        "open_url",
+        "date",
+    ] {
+        let mut f = Fixture::new();
+        let chat = f.chat("alpha");
+        f.document(&chat, "copy-document", "Public", "md");
+        let marker = if field == "date" {
+            "9876543210"
+        } else {
+            "phrase-copie-synthetique"
+        };
+        match field {
+            "bot_name" => {
+                f.db()
+                    .execute("UPDATE wrapper_bots SET name=?1 WHERE id='alpha'", [marker])
+                    .unwrap();
+            }
+            "conversation_title" => {
+                f.db()
+                    .execute("UPDATE wrapper_conversations SET title=?1", [marker])
+                    .unwrap();
+            }
+            "bot_id" => {
+                f.db()
+                    .execute("UPDATE wrapper_bots SET id=?1 WHERE id='alpha'", [marker])
+                    .unwrap();
+                f.db()
+                    .execute("UPDATE wrapper_livrables SET bot_id=?1", [marker])
+                    .unwrap();
+            }
+            "conversation_id" => {
+                f.db()
+                    .execute(
+                        "UPDATE wrapper_conversations SET id=?1 WHERE id=?2",
+                        [marker, &chat],
+                    )
+                    .unwrap();
+                f.db()
+                    .execute("UPDATE wrapper_livrables SET conversation_id=?1", [marker])
+                    .unwrap();
+            }
+            _ => {
+                let column = if field == "id" {
+                    "ref"
+                } else if field == "date" {
+                    "created_at"
+                } else {
+                    field
+                };
+                f.db()
+                    .execute(
+                        &format!("UPDATE wrapper_livrables SET {column}=?1"),
+                        [marker],
+                    )
+                    .unwrap();
+            }
+        }
+        let vault =
+            grokbot_forms::vault::Vault::open(&f.path.with_extension("secrets.json")).unwrap();
+        vault.set("COPY_PROOF", "Fixture", marker).unwrap();
+        vault.remove("COPY_PROOF").unwrap();
+        let output = match f.app.api("GET", "/api/livrables", b"") {
+            Ok(value) => value.to_string(),
+            Err(error) => {
+                assert_eq!(error.status, 409);
+                error.message
+            }
+        };
+        assert!(
+            !output.contains(marker),
+            "retired catalogue copy emitted at {field}"
+        );
+    }
+}
+
+#[test]
+fn a_new_default_bot_keeps_public_provenance() {
+    let mut f = Fixture::new();
+    let chat = f.chat("grokbot");
+    f.document(&chat, "default-document", "Public", "md");
+    let items = f.list("");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["bot_id"], "grokbot");
+    assert_eq!(items[0]["conversation_id"], chat);
+    assert!(items[0]["entry_id"].is_string());
+    f.opens(&items[0]);
 }

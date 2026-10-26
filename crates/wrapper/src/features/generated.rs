@@ -110,7 +110,7 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
         ctx.connection
             .execute_batch("SAVEPOINT wrapper_generated_tool")?;
         let stored = (|| -> Result<Value, ApiError> {
-            ctx.connection.execute(
+            let inserted = ctx.connection.execute(
                 "INSERT INTO attachments_generated VALUES (?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
                 params![
                     file.id,
@@ -123,6 +123,9 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
                     ctx.now_ms
                 ],
             )?;
+            if inserted > 0 {
+                super::disclosure::stamp(ctx.connection, "document", &file.id)?;
+            }
             super::livrables::record(
                 ctx.connection,
                 ctx,
@@ -455,6 +458,9 @@ const HIDDEN: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32
 /// learned since no longer matches there. The text is masked first, then drawn again.
 fn preview(conn: &Connection, file: &File) -> Result<String, ApiError> {
     super::disclosure::read(conn, |patterns| {
+        if !patterns.covers_file(conn, &file.id)? {
+            return Ok(HIDDEN.into());
+        }
         let Some(request) = source(conn, file)? else {
             return Ok(HIDDEN.into());
         };
@@ -525,6 +531,9 @@ pub fn routes(
                 // The name comes from the bot: a secret learned since is masked in it, never in
                 // the folder, which may hold the account name.
                 super::disclosure::read(&app.connection, |patterns| {
+                    if !patterns.covers_file(&app.connection, &file.id)? {
+                        return Ok(ApiResponse::Json(json!({"path":null})));
+                    }
                     let mut name = patterns.text(&file.name);
                     if !name.ends_with(&format!(".{}", file.format)) {
                         name = format!("{name}.{}", file.format);

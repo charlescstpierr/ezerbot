@@ -132,15 +132,19 @@ pub fn record(
             ctx.now_ms
         ],
     )?;
+    super::disclosure::stamp(conn, "creation", &card)?;
     Ok(())
 }
 
 /// Creation history is never scanned here. Deleted origins hide their creations.
 pub const LIST: &str = "
-SELECT x.kind, x.ref, x.title, x.bot_id, b.name, x.conversation_id, c.title, x.created_at, x.open_url, x.entry_id
+SELECT x.kind, x.ref, x.title, x.bot_id, b.name, x.conversation_id, c.title, x.created_at, x.open_url, x.entry_id, t.epoch, bt.epoch, ct.epoch
 FROM wrapper_livrables x
 LEFT JOIN wrapper_bots b ON b.account_id=?1 AND b.id=x.bot_id
 LEFT JOIN wrapper_conversations c ON c.account_id=?1 AND c.id=x.conversation_id
+LEFT JOIN wrapper_disclosure_trust t ON t.kind='creation' AND t.key=x.key
+LEFT JOIN wrapper_disclosure_trust bt ON bt.kind='bot' AND bt.key=?1||':'||x.bot_id
+LEFT JOIN wrapper_disclosure_trust ct ON ct.kind='conversation' AND ct.key=?1||':'||x.conversation_id
 WHERE x.key NOT GLOB 'nonattribue:*' AND x.kind IN ('document', 'image')
   AND (x.bot_id IS NULL OR b.deleted=0) AND (x.conversation_id IS NULL OR c.deleted=0)
   AND (?2 IS NULL OR x.kind=?2) AND (?3 IS NULL OR x.bot_id=?3)
@@ -190,7 +194,7 @@ pub fn routes(
         let (kind, bot) = filters(query)?;
         let mut statement = app.connection.prepare_cached(LIST)?;
         let rows = statement.query_map(params![ACCOUNT, kind, bot], |r| {
-            Ok(json!({
+            let mut item = json!({
                 "type": r.get::<_, String>(0)?, "id": r.get::<_, String>(1)?,
                 "title": r.get::<_, String>(2)?,
                 "bot_id": r.get::<_, Option<String>>(3)?, "bot_name": r.get::<_, Option<String>>(4)?,
@@ -198,7 +202,22 @@ pub fn routes(
                 "conversation_title": r.get::<_, Option<String>>(6)?,
                 "date": r.get::<_, i64>(7)?, "open_url": r.get::<_, String>(8)?,
                 "entry_id": r.get::<_, Option<String>>(9)?,
-            }))
+            });
+            if !patterns.covers(r.get::<_, Option<String>>(10)?.as_deref()) {
+                let kind = item["type"].clone();
+                item = json!({"type":kind,"id":null,"title":if kind=="image" {"Image"} else {"Document"},"bot_id":null,"bot_name":null,"conversation_id":null,"conversation_title":null,"date":0,"open_url":null,"entry_id":null});
+            } else {
+                if !patterns.covers(r.get::<_, Option<String>>(11)?.as_deref()) {
+                    item["bot_id"] = Value::Null;
+                    item["bot_name"] = Value::Null;
+                }
+                if !patterns.covers(r.get::<_, Option<String>>(12)?.as_deref()) {
+                    item["conversation_id"] = Value::Null;
+                    item["conversation_title"] = Value::Null;
+                    item["entry_id"] = Value::Null;
+                }
+            }
+            Ok(item)
         })?;
         let livrables = json!({"livrables": rows.collect::<rusqlite::Result<Vec<Value>>>()?});
         for item in livrables["livrables"]

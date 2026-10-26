@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import socket
 import stat
 import subprocess
 import sys
@@ -15,6 +16,8 @@ import threading
 import time
 import urllib.request
 from urllib.parse import urlsplit
+
+from browser_run_scope import BrowserRunScope, ScopeError
 
 
 class LocalApiError(RuntimeError):
@@ -168,8 +171,15 @@ def launch_isolated_chrome(profile, log):
 
 class BrowserAuthentication:
 
-    def __init__(self, identity, origin, ws_url):
-        self.__identity = identity
+    def __init__(self, identity, origin, ws_url, *, browser_context=None):
+        self.__scope = None
+        self.__lease = None
+        if browser_context is not None:
+            if "/devtools/browser/" not in ws_url:
+                raise LocalApiError("Run context authentication requires a browser connection")
+            self.__scope = BrowserRunScope()
+            self.__lease = self.__scope.begin_run(self.__scope.epoch, browser_context, origin, identity)
+        self.__identity = None if self.__scope else identity
         self.__origin = local_origin(origin)
         self.__cdp = _browser_module().Cdp(ws_url)
         self.__lock = threading.Lock()
@@ -179,6 +189,7 @@ class BrowserAuthentication:
         self.__sessions_ready.set()
         self.__next_id = 1
         self.__closed = False
+        self.__close_error = None
         self.__failed = False
         self.__authenticated = set()
         self.__thread = threading.Thread(target=self.__read, daemon=True)
@@ -205,6 +216,8 @@ class BrowserAuthentication:
 
     def __send(self, method, params=None, session=None, waiter=None):
         with self.__lock:
+            if self.__closed:
+                raise LocalApiError("Browser authentication connection closed")
             identifier = self.__next_id
             self.__next_id += 1
             message = {"id": identifier, "method": method, "params": params or {}}
@@ -223,6 +236,9 @@ class BrowserAuthentication:
             raise LocalApiError("Browser authentication command failed")
 
     def __paused(self, params, session):
+        if self.__scope is not None:
+            self.__scope.dispatch_paused(session, params, self.__send)
+            return
         request_id = params["requestId"]
         key = (session, request_id)
         redirected = (session, params.get("redirectedRequestId"))
@@ -278,6 +294,12 @@ class BrowserAuthentication:
                         raise LocalApiError("Browser authentication command failed")
                 elif message.get("method") == "Target.attachedToTarget":
                     session = message["params"]["sessionId"]
+                    if self.__scope is not None:
+                        try:
+                            self.__scope.bind_session(self.__lease, session, message["params"].get("targetInfo", {}))
+                        except ScopeError:
+                            self.__send("Target.detachFromTarget", {"sessionId": session})
+                            continue
                     with self.__lock:
                         self.__sessions_pending.add(session)
                         self.__sessions_ready.clear()
@@ -289,9 +311,18 @@ class BrowserAuthentication:
                                 waiter={"session_ready": session})
                 elif message.get("method") == "Fetch.requestPaused":
                     self.__paused(message["params"], message.get("sessionId"))
+                elif message.get("method") == "Target.detachedFromTarget" and self.__scope is not None:
+                    session = message.get("params", {}).get("sessionId")
+                    self.__scope.session_detached(session)
+                    with self.__lock:
+                        self.__sessions_pending.discard(session)
+                        if not self.__sessions_pending:
+                            self.__sessions_ready.set()
         except BaseException:
             if not self.__closed:
                 self.__failed = True
+            if self.__scope is not None:
+                self.__scope.poison()
             with self.__lock:
                 for waiter in self.__pending.values():
                     if "event" in waiter:
@@ -305,8 +336,26 @@ class BrowserAuthentication:
             raise LocalApiError("Browser authentication connection closed")
 
     def close(self):
+        if self.__close_error is not None:
+            raise LocalApiError(self.__close_error)
         self.__closed = True
+        try:
+            self.__cdp.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         self.__cdp.close()
+        if self.__scope is not None:
+            self.__scope.poison()
+        if threading.current_thread() is self.__thread:
+            self.__close_error = "Browser authentication reader cannot join itself"
+            raise LocalApiError(self.__close_error)
+        else:
+            self.__thread.join(timeout=5)
+            if self.__thread.is_alive():
+                self.__close_error = "Browser authentication reader did not stop"
+                raise LocalApiError(self.__close_error)
+        if self.__scope is not None:
+            self.__scope.close(self.__scope.epoch)
 
 
 def main():
@@ -314,12 +363,13 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--browser-auth", nargs=2, metavar=("WS_URL", "ORIGIN"), required=True)
+    parser.add_argument("--browser-context", help="Explicit context attributed to the private run")
     args = parser.parse_args()
     authentication = None
     try:
         identity = LaunchIdentity.from_pipe()
         ws_url, origin = args.browser_auth
-        authentication = BrowserAuthentication(identity, origin, ws_url)
+        authentication = BrowserAuthentication(identity, origin, ws_url, browser_context=args.browser_context)
         print("ready", flush=True)
         while True:
             authentication.check()

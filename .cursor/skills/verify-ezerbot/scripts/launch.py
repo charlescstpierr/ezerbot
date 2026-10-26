@@ -266,9 +266,13 @@ def launch_run(args: argparse.Namespace, repo: Path, session: str, evidence: Pat
         save_run(evidence, record)
         from browser import ensure_headless, http_json
         state = ensure_headless(record, headed=sys.platform == "darwin" and os.environ.get("EZERBOT_VERIFY_BROWSER") != "chrome-headless")
+        context = state.get("browser_context_id")
+        if not isinstance(context, str) or not context:
+            raise SystemExit("le contexte privé du navigateur n'est pas attribué")
         version = http_json(f"http://127.0.0.1:{state['debug_port']}/json/version")
         auth = identity.spawn(
-            [sys.executable, str(repo / "tools/local_api.py"), "--browser-auth", version["webSocketDebuggerUrl"], url],
+            [sys.executable, str(repo / "tools/local_api.py"), "--browser-auth", version["webSocketDebuggerUrl"], url,
+             "--browser-context", context],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             cwd=repo, start_new_session=True,
         )

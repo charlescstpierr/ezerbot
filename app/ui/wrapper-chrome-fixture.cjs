@@ -211,13 +211,18 @@ async function launchFixture(t, { documents, viewport, binary = join(__dirname, 
   let cdp;
   // Registered before anything can fail, and run by node:test when the test ends for any reason,
   // including the test timeout, where the awaited body never reaches a `finally`.
-  t.after(() => {
+  t.after(async () => {
     watches.forEach((watch) => watch.settle());
     cdp?.close();
-    if (alive(processes.wrapper)) processes.wrapper.kill("SIGKILL");
-    if (alive(processes.chrome)) processes.chrome.kill("SIGKILL");
+    await Promise.all(Object.values(processes).map(child => {
+      if (!alive(child)) return;
+      return new Promise(resolve => {
+        child.once("close", resolve);
+        child.kill("SIGKILL");
+      });
+    }));
     fake.server?.closeAllConnections();
-    fake.server?.close();
+    if (fake.server) await new Promise(resolve => fake.server.close(resolve));
     rmSync(root, { recursive: true, force: true });
   });
   const whileRunning = (work) => Promise.race([work, ...watches.map((watch) => watch.failed)]);

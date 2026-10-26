@@ -96,8 +96,8 @@ input:focus, textarea:focus { outline: none; }
 .icon-button:disabled { opacity: .35; }
 kbd { font-family: inherit; font-size: 11.5px; color: var(--subtle); border-radius: 4px; white-space: nowrap; }
 
-.sidebar { min-width: 0; min-height: 0; display: grid; grid-template-columns: 48px minmax(0, 1fr); background: var(--sidebar); color: var(--sidebar-text); margin: 8px 0 8px 8px; border: 1px solid var(--line); border-radius: 10px; z-index: 30; overflow: hidden; }
-.sidebar-rail { display: flex; flex-direction: column; align-items: center; gap: 6px; min-height: 0; padding: 18px 5px 12px; border-right: 1px solid var(--line); background: var(--canvas); }
+.sidebar { min-width: 0; min-height: 0; display: grid; grid-template-columns: 48px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; background: var(--sidebar); color: var(--sidebar-text); margin: 8px 0 8px 8px; border: 1px solid var(--line); border-radius: 10px; z-index: 30; overflow: hidden; }
+.sidebar-rail { grid-row: 1 / 3; display: flex; flex-direction: column; align-items: center; gap: 6px; min-height: 0; padding: 18px 5px 12px; border-right: 1px solid var(--line); background: var(--canvas); }
 .sidebar-rail .brand { margin-bottom: 14px; border-radius: 9px; }
 .sidebar-rail .brand-mascot { width: 34px; height: 30px; }
 .rail-button { display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 auto; padding: 0; color: var(--sidebar-muted); border-radius: 10px; }
@@ -105,6 +105,7 @@ kbd { font-family: inherit; font-size: 11.5px; color: var(--subtle); border-radi
 .rail-button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); }
 .rail-bottom { margin-top: auto; display: flex; flex-direction: column; gap: 6px; padding-top: 18px; }
 .sidebar-content { min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 22px 10px 16px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; scroll-padding-block: 16px; }
+.sidebar-updates { grid-column: 2; min-width: 0; max-height: 35vh; overflow-y: auto; padding: 0 10px; }
 .sidebar-heading { display: flex; align-items: center; justify-content: space-between; margin: 0 3px 16px; }
 .sidebar-heading h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .brand { color: var(--text); text-decoration: none; display: inline-flex; align-items: center; gap: 7px; font-size: 24px; letter-spacing: -1.1px; font-weight: 650; }

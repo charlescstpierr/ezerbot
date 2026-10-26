@@ -21,7 +21,7 @@ function installUpdatesService() {
     const response = await originalFetch(input, options);
     if (path !== "/api/state" || !response.ok) return response;
     const state = await response.json();
-    return new Response(JSON.stringify({ ...state, updates: service.state }), { status: response.status, headers: response.headers });
+    return new Response(JSON.stringify({ ...state, updates: service.state, forms: service.storage ? { ...state.forms, storage: service.storage } : state.forms }), { status: response.status, headers: response.headers });
   };
   return GrokbotPanels.refresh();
 }
@@ -40,6 +40,7 @@ function updateGeometry() {
     corner: rect(corner), content: rect(content),
     contained: controls.every(el => inside(rect(el), rect(sidebar))) && (corner.hidden || inside(rect(corner), rect(sidebar))),
     hitTargets: controls.every(el => el.contains(document.elementFromPoint(rect(el).x + rect(el).width / 2, rect(el).y + rect(el).height / 2))),
+    railChildrenContained: [...document.querySelectorAll(".rail-bottom .icon, .rail-bottom .storage-warning-marker")].filter(el => el.getClientRects().length).every(el => inside(rect(el), rect(el.closest("button")))),
     legible: text.every(el => {
       const range = document.createRange(); range.selectNodeContents(el);
       return parseFloat(getComputedStyle(el).fontSize) >= 11.5 && [...range.getClientRects()].every(r => inside(r, rect(sidebar)));

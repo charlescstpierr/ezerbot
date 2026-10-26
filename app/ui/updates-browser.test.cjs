@@ -27,10 +27,14 @@ for (const theme of ["light", "dark"]) for (const [width, height] of [[1440, 900
       const geometry = await evaluate(`(${updateGeometry})()`);
       assert.deepEqual(geometry.buttons, baseline.buttons, `${phase}: Notifications et Réglages se déplacent ${JSON.stringify(geometry)}`);
       assert.deepEqual(geometry.rail, baseline.rail, `${phase}: largeur du rail`);
-      assert.ok(geometry.contained && geometry.hitTargets && geometry.legible && geometry.separate, `${phase}: débordement ou action inaccessible ${JSON.stringify(geometry)}`);
+      assert.ok(geometry.contained && geometry.hitTargets && geometry.legible && geometry.separate && geometry.railChildrenContained, `${phase}: débordement ou action inaccessible ${JSON.stringify(geometry)}`);
     }
     await evaluate('updatesFixture.set("disponible")');
     await check("disponible");
+    await evaluate('updatesFixture.storage={backend:"file_fallback"}; GrokbotPanels.refresh()');
+    assert.equal(await evaluate('document.querySelector(".storage-warning-marker").hidden'), false);
+    await check("avertissement de stockage");
+    await evaluate('updatesFixture.storage={backend:"file"}; GrokbotPanels.refresh()');
     await evaluate('document.querySelector(".update-corner-action").click()');
     await wait('document.querySelector(".update-corner-label").textContent === "Téléchargement…"');
     for (const phase of ["telechargement", "compilation", "installation", "redemarrage", "attente"]) {
@@ -53,6 +57,16 @@ for (const theme of ["light", "dark"]) for (const [width, height] of [[1440, 900
     await evaluate('updatesFixture.failApply=false; document.querySelector(".update-corner-dismiss").click(); document.querySelector(".update-corner-action").click()');
     await wait('document.querySelector(".update-corner-label").textContent === "Téléchargement…"');
     await check("nouvelle tentative");
+    await evaluate('updatesFixture.set("erreur", {message:"Diagnostic ".repeat(160)})');
+    assert.equal(await evaluate(`(() => {
+      const host=document.getElementById('sidebar-updates');
+      const text=document.querySelector('.update-corner-error-text');
+      host.scrollTop=host.scrollHeight;
+      const range=document.createRange(); range.selectNodeContents(text);
+      return host.scrollHeight>host.clientHeight && [...range.getClientRects()].at(-1).bottom<=host.getBoundingClientRect().bottom;
+    })()`), true);
+    assert.deepEqual(await evaluate(`(${updateGeometry})().buttons`), baseline.buttons);
+    await evaluate('document.getElementById("sidebar-updates").scrollTop=0; document.querySelector(".update-corner-dismiss").click()');
     await evaluate('updatesFixture.set("a_jour")');
     assert.equal(await evaluate('document.querySelector(".update-corner").hidden'), true);
     await check("repos");

@@ -168,7 +168,7 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               const heading = welcome?.querySelector("h2")?.innerText || "";
               const title = document.getElementById("conversation-title")?.textContent || "";
               const editor = document.querySelector(".gb-editor[aria-label='Votre message']");
-              const brand = document.getElementById("home-link")?.innerText || "";
+              const brand = document.getElementById("home-link")?.getAttribute("aria-label") || "";
               const ok = !!(welcome && !welcome.hidden && heading.includes("Une idée en tête") && title === "Nouvelle conversation" && editor && /ezerbot/i.test(brand));
               return ok ? {ok, heading, title} : null;
             }""",

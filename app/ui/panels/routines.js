@@ -933,6 +933,7 @@
   }
   panels.register({
     id: "routines",
+    openSidebar(context) { open(context.bot?.id); },
     async openLink({ id, agent }) {
       if (busy) return false;
       const routine = (panels.state.routines?.items || []).find((item) => item.routine.routine_id === id && item.routine.bot_id === agent)?.routine;

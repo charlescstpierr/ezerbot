@@ -123,6 +123,9 @@ impl Registry {
     pub(crate) fn activity_kind(&self, id: &str, step: Option<&str>, internal: Option<bool>) {
         let time = self.now();
         let mut state = self.lock();
+        if !state.watches.contains_key(id) {
+            return;
+        }
         if let Some(active) = internal {
             if let Some(watch) = state.watches.get_mut(id) {
                 watch.internal_active = active;
@@ -466,11 +469,14 @@ pub(super) fn entry(ctx: &super::super::Context<'_>, id: &str) -> Option<Message
         }
         _ => None,
     };
+    let can_regenerate = message_id.is_some()
+        && !late
+        && !super::super::multibot::is_group(ctx.connection, &run.conversation_id);
     Some(card(
         id,
         "stalled",
         format!("Arrêté : rien ne bougeait depuis 8 min (dernière étape : {step})."),
-        json!({"run_id":run_id,"conversation_id":run.conversation_id,"message_id":message_id,"can_regenerate":message_id.is_some() && !late}),
+        json!({"run_id":run_id,"conversation_id":run.conversation_id,"message_id":message_id,"can_regenerate":can_regenerate}),
         time,
     ))
 }

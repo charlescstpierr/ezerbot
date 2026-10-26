@@ -1108,3 +1108,32 @@ fn a_child_pulse_removes_its_waiting_parents_signal_immediately() {
     f.provider().pulse_run("child");
     assert_eq!(f.state()["silence"], json!({}));
 }
+
+#[test]
+fn stalled_group_turns_do_not_offer_a_regeneration_the_route_refuses() {
+    let mut f = Fixture::new();
+    f.conn
+        .execute(
+            "UPDATE wrapper_conversations SET kind='group' WHERE id=?1",
+            [&f.conversation],
+        )
+        .unwrap();
+    f.run("group-source", RunStatus::Running);
+    f.tick(0);
+    f.tick(540_000);
+    let stalled = f.messages("stalled");
+    assert_eq!(stalled.len(), 1);
+    assert_eq!(stalled[0]["payload"]["message_id"], "group-source");
+    assert_eq!(stalled[0]["payload"]["can_regenerate"], false);
+    let error = f
+        .app
+        .api(
+            "POST",
+            "/api/regenerate",
+            json!({"conversation_id":f.conversation,"message_id":"group-source"})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap_err();
+    assert_eq!(error.status, 409);
+}

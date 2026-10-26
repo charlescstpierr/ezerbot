@@ -7,7 +7,7 @@ import base64
 import copy
 import io
 import unittest
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -76,8 +76,23 @@ class FakeChrome:
         is_browser = "/devtools/browser/" in endpoint
 
         class Connection:
+            loader = "old-loader"
+            handler = None
+
             def close(self):
                 chrome.closed.append(endpoint)
+
+            @contextmanager
+            def observe(self, handler):
+                self.handler = handler
+                try:
+                    yield
+                finally:
+                    self.handler = None
+
+            def wait_until(self, condition, timeout):
+                if not condition():
+                    raise TimeoutError("no matching navigation")
 
             def call(self, method, params=None, timeout=30):
                 params = params or {}
@@ -103,8 +118,10 @@ class FakeChrome:
                         return {"success": chrome.close_success}
                     raise AssertionError(f"unexpected browser CDP method {method}")
                 chrome.effects.append((page_id, method, copy.deepcopy(params)))
-                if method in ("Page.enable", "Runtime.enable", "Emulation.setDeviceMetricsOverride"):
+                if method in ("Page.enable", "Runtime.enable", "Emulation.setDeviceMetricsOverride", "Page.setLifecycleEventsEnabled"):
                     return {}
+                if method == "Page.getFrameTree":
+                    return {"frameTree": {"frame": {"id": "frame", "loaderId": self.loader}}}
                 if method == "Page.navigate":
                     if chrome.on_navigate:
                         chrome.on_navigate(page_id)
@@ -113,7 +130,12 @@ class FakeChrome:
                     for item in chrome.targets:
                         if item["targetId"] == page_id:
                             item["url"] = params["url"]
-                    return {"frameId": "frame"}
+                    self.loader = "new-loader"
+                    self.handler({"method": "Page.frameNavigated", "params": {
+                        "frame": {"id": "frame", "loaderId": self.loader}}})
+                    self.handler({"method": "Page.lifecycleEvent", "params": {
+                        "frameId": "frame", "loaderId": self.loader, "name": "load"}})
+                    return {"frameId": "frame", "loaderId": self.loader}
                 if method == "Runtime.evaluate":
                     if chrome.eval_exception:
                         return {"exceptionDetails": {"text": "injected JavaScript failure"}}

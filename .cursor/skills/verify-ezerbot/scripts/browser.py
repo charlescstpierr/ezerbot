@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -145,6 +146,7 @@ class Cdp:
         if f"Sec-WebSocket-Accept: {accept}" not in header:
             raise ConnectionError("poignée de main websocket refusée")
         self.next_id = 1
+        self._event_handler = None
 
     def close(self) -> None:
         try:
@@ -199,18 +201,46 @@ class Cdp:
                     return json.loads(b"".join(chunks))
 
     def call(self, method: str, params: dict | None = None, timeout: float = 30) -> dict:
+        if timeout <= 0:
+            raise TimeoutError(method)
+        deadline = time.monotonic() + timeout
+        self.sock.settimeout(timeout)
         message_id = self.next_id
         self.next_id += 1
         self._send(0x1, json.dumps({"id": message_id, "method": method, "params": params or {}}).encode())
-        deadline = time.time() + timeout
-        self.sock.settimeout(timeout)
-        while time.time() < deadline:
-            message = self._message()
+        while time.monotonic() < deadline:
+            message = self._receive(deadline)
             if message.get("id") == message_id:
                 if "error" in message:
                     raise RuntimeError(json.dumps(message["error"]))
                 return message.get("result") or {}
         raise TimeoutError(method)
+
+    def _receive(self, deadline: float) -> dict:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("CDP deadline")
+        self.sock.settimeout(remaining)
+        message = self._message()
+        if "id" not in message and self._event_handler is not None:
+            self._event_handler(message)
+        return message
+
+    @contextmanager
+    def observe(self, handler):
+        """Observe events consumed by this connection's sole synchronous reader."""
+        if self._event_handler is not None:
+            raise RuntimeError("CDP event observation already active")
+        self._event_handler = handler
+        try:
+            yield
+        finally:
+            self._event_handler = None
+
+    def wait_until(self, condition, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while not condition():
+            self._receive(deadline)
 
 
 def http_json(url: str):
@@ -512,10 +542,59 @@ def require_wrapper_url(url: str, wrapper_url: str) -> None:
         raise SystemExit("refus: navigation hors de l'origine exacte du wrapper")
 
 
-def command_open(cdp: Cdp, url: str, wrapper_url: str) -> None:
+def remaining_time(deadline: float, maximum: float = 25) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("navigation deadline")
+    return min(maximum, remaining)
+
+
+def command_open(cdp: Cdp, url: str, wrapper_url: str) -> dict:
     require_wrapper_url(url, wrapper_url)
-    if cdp.call("Page.navigate", {"url": url}).get("errorText"):
-        raise SystemExit("la navigation Chrome a échoué")
+    deadline = time.monotonic() + 25
+    cdp.call("Page.setLifecycleEventsEnabled", {"enabled": True}, timeout=remaining_time(deadline, 5))
+    previous = cdp.call("Page.getFrameTree", timeout=remaining_time(deadline, 5))["frameTree"]["frame"]
+    frame_id = previous["id"]
+    committed = None
+    loads = set()
+    expected = None
+
+    def observe(message):
+        nonlocal committed
+        if message.get("sessionId"):
+            return
+        method, params = message.get("method"), message.get("params", {})
+        if method == "Inspector.detached" or (
+            method == "Page.frameDetached" and params.get("frameId") == frame_id
+        ):
+            raise SystemExit("la page a été détachée pendant la navigation")
+        if method == "Page.frameNavigated":
+            frame = params.get("frame", {})
+            if frame.get("id") == frame_id and not frame.get("parentId"):
+                committed = frame.get("loaderId")
+                if expected is not None and committed != expected:
+                    raise SystemExit("le document a changé pendant la navigation")
+        elif method == "Page.lifecycleEvent" and params.get("frameId") == frame_id:
+            if params.get("name") == "load":
+                loads.add(params.get("loaderId"))
+
+    with cdp.observe(observe):
+        navigation = cdp.call("Page.navigate", {"url": url}, timeout=remaining_time(deadline))
+        expected = navigation.get("loaderId")
+        if (navigation.get("errorText") or navigation.get("isDownload")
+                or navigation.get("frameId") != frame_id or not expected
+                or expected == previous.get("loaderId")):
+            raise SystemExit("navigation refusée: aucun nouveau document attesté")
+        if committed is not None and committed != expected:
+            raise SystemExit("la navigation ne correspond pas au document principal")
+        cdp.wait_until(lambda: committed == expected and expected in loads,
+                       timeout=remaining_time(deadline))
+        receipt = {"frame_id": frame_id, "loader_id": expected}
+        wait_for_application(cdp, url, receipt, deadline)
+        return receipt
+
+
+def wait_for_application(cdp: Cdp, url: str, receipt: dict, deadline: float) -> None:
     expression = """() => ({
       state: document.readyState,
       href: location.href,
@@ -524,17 +603,22 @@ def command_open(cdp: Cdp, url: str, wrapper_url: str) -> None:
       model: !!document.querySelector('#composer-tools [data-picker="model"]'),
       pending: performance.getEntriesByType("resource").filter((entry) => entry.responseEnd === 0).map((entry) => entry.name).slice(0, 8)
     })"""
-    deadline = time.time() + 25
     last = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         result = cdp.call(
             "Runtime.evaluate",
             {"expression": eval_expression(expression), "returnByValue": True},
-            timeout=5,
+            timeout=remaining_time(deadline, 5),
         )
         last = result.get("result", {}).get("value")
         href = str(last.get("href", "")) if isinstance(last, dict) else ""
-        if href.startswith(url) and isinstance(last, dict) and last.get("editor") and last.get("model"):
+        destination = urlparse(url)
+        actual = urlparse(href)
+        same_url = actual._replace(path=actual.path or "/") == destination._replace(path=destination.path or "/")
+        if same_url and isinstance(last, dict) and last.get("editor") and last.get("model"):
+            frame = cdp.call("Page.getFrameTree", timeout=remaining_time(deadline, 5))["frameTree"]["frame"]
+            if frame.get("id") != receipt["frame_id"] or frame.get("loaderId") != receipt["loader_id"]:
+                raise SystemExit("le document prêt n'est plus celui de la navigation")
             return
         time.sleep(0.15)
     raise SystemExit(f"la page n'a pas fini de charger: {last}")
@@ -642,8 +726,13 @@ def run_headless(run: dict, arguments: list[str]) -> None:
                 if name != "resize":
                     apply_metrics(cdp, state)
                 if name in ("open", "newpage"):
-                    command_open(cdp, url, run["url"])
+                    navigation = command_open(cdp, url, run["url"])
                     state.update({"page_id": created or state["page_id"], "page_url": url})
+                    state["document_navigation"] = {
+                        **navigation, "target_id": state["page_id"],
+                        "browser_ws_url": state.get("browser_ws_url"),
+                        "browser_context_id": state.get("browser_context_id"),
+                    }
                 elif name == "resize":
                     command_resize(cdp, state, width, height)
                 elif name == "screenshot":

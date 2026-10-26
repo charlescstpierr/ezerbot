@@ -454,19 +454,21 @@ const HIDDEN: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32
 /// The stored preview is the bot's text once escaped, wrapped and cut: a secret the vault
 /// learned since no longer matches there. The text is masked first, then drawn again.
 fn preview(conn: &Connection, file: &File) -> Result<String, ApiError> {
-    let Some(request) = source(conn, file)? else {
-        return Ok(HIDDEN.into());
-    };
-    let content = super::engine::redaction_patterns(conn)?.text(&request.content)?;
-    if content == request.content {
-        return Ok(conn.query_row(
-            "SELECT preview FROM attachments_generated WHERE id=?1",
-            [&file.id],
-            |r| r.get(0),
-        )?);
-    }
-    Ok(generation::generate(&Request { content, ..request })
-        .map_or_else(|_| HIDDEN.into(), |masked| masked.preview))
+    super::disclosure::read(conn, |patterns| {
+        let Some(request) = source(conn, file)? else {
+            return Ok(HIDDEN.into());
+        };
+        let content = patterns.text(&request.content);
+        if content == request.content {
+            return Ok(conn.query_row(
+                "SELECT preview FROM attachments_generated WHERE id=?1",
+                [&file.id],
+                |r| r.get(0),
+            )?);
+        }
+        Ok(generation::generate(&Request { content, ..request })
+            .map_or_else(|_| HIDDEN.into(), |masked| masked.preview))
+    })
 }
 /// What the bot wrote: the arguments of the call that created the file, or the bytes of a
 /// Markdown file, which are that text.

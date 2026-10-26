@@ -1337,3 +1337,98 @@ fn shared_files_survive_cleanup_until_the_last_conversation_is_deleted() {
     f.reopen();
     assert!(f.list("").is_empty());
 }
+
+#[test]
+fn the_complete_persistent_preview_read_is_independent_of_old_history() {
+    use std::{collections::BTreeSet, ffi::c_void};
+    #[derive(Default)]
+    struct Work {
+        steps: i64,
+        queries: BTreeSet<String>,
+    }
+    unsafe extern "C" fn measure(
+        _: u32,
+        context: *mut c_void,
+        statement: *mut c_void,
+        _: *mut c_void,
+    ) -> i32 {
+        let work = &mut *context.cast::<Work>();
+        work.steps += i64::from(rusqlite::ffi::sqlite3_stmt_status(
+            statement.cast(),
+            rusqlite::StatementStatus::VmStep as i32,
+            1,
+        ));
+        work.queries.insert(
+            std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_sql(statement.cast()))
+                .to_string_lossy()
+                .into_owned(),
+        );
+        0
+    }
+    struct Trace(*mut rusqlite::ffi::sqlite3, Box<Work>);
+    impl Drop for Trace {
+        fn drop(&mut self) {
+            unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(self.0, 0, None, std::ptr::null_mut());
+            }
+        }
+    }
+    let (mut f, _) = private_document();
+    let url = link(&mut f, "document");
+    body(&mut f, "GET", &url, json!(null));
+    grokbot_forms::vault::Vault::open(&f.path.with_extension("secrets.json"))
+        .unwrap()
+        .remove("LIENS_TEST")
+        .unwrap();
+    f.db().execute_batch("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) VALUES ('preview-noise','alpha','old','test','old',1,'finished','{}')").unwrap();
+    let mut costs = Vec::new();
+    for (start, end) in [(1, 1000), (1001, 10000)] {
+        f.db().execute("WITH RECURSIVE n(i) AS (VALUES(?1) UNION ALL SELECT i+1 FROM n WHERE i<?2) INSERT INTO engine_run_events SELECT 'preview-noise',i,'text_delta','{}' FROM n", [start,end]).unwrap();
+        let mut trace = Trace(
+            unsafe { f.app.feature_context().connection.handle() },
+            Box::default(),
+        );
+        assert_eq!(
+            unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(
+                    trace.0,
+                    rusqlite::ffi::SQLITE_TRACE_PROFILE as u32,
+                    Some(measure),
+                    (&mut *trace.1 as *mut Work).cast(),
+                )
+            },
+            rusqlite::ffi::SQLITE_OK
+        );
+        body(&mut f, "GET", &url, json!(null));
+        trace.1.steps = 0;
+        trace.1.queries.clear();
+        let shown = body(&mut f, "GET", &url, json!(null));
+        assert!(shown.contains("[...]"));
+        assert!(!shown.contains(LEAK), "the measured preview must be masked");
+        costs.push(trace.1.steps);
+        let queries = trace.1.queries.clone();
+        drop(trace);
+        if end == 10000 {
+            let db = f.db();
+            for sql in queries {
+                let mut statement = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+                let params = vec![""; statement.parameter_count()];
+                let plan: Vec<String> = statement
+                    .query_map(rusqlite::params_from_iter(params), |r| r.get(3))
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect();
+                eprintln!("PLAN persistent preview: {sql} => {}", plan.join(" | "));
+            }
+        }
+    }
+    assert!(costs[0] > 0);
+    assert!(
+        costs[1] <= costs[0] + costs[0] / 10,
+        "the complete preview read must stay within 1.1x for 10x history"
+    );
+    eprintln!(
+        "VmStep complete persistent preview: 1000 events {}; 10000 events {}",
+        costs[0], costs[1]
+    );
+}

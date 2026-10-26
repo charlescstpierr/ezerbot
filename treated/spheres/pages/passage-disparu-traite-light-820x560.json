@@ -1,0 +1,18 @@
+{
+  "action": "passage-disparu-traite",
+  "metrics": {
+    "theme": "light",
+    "canvas": "#ffffff",
+    "width": 820,
+    "height": 560,
+    "title": "Vérification visuelle · Ezerbot"
+  },
+  "observed": {
+    "text": "ezerbot.\nNouvelle conversation\n⌘ K\nMémoire\n0\nBOTS\nEzerbot\nSUJETS\n\nRegroupez plusieurs fils sous un sujet.\n\nPages\nTrois forfaits\nCONVERSATIONS\n\nAujourd’hui\n\nVérification visuelle\nE\nEspace local\nParamètres de l’application\nEzerbot\n/\nVérification visuelle\nCréer un groupe\nMembres\nFais-moi une page des forfaits\nEnvoyé\nEzerbot\n20 h 03\nOutil · write_pageAppel terminé\n\nVoici la Page.\n\nBon résultat\nMauvais résultat\nPage « Trois forfaits » — « Confort »\nChange le prix de Confort\nEnvoyé\nEzerbot\n20 h 03\nOutil · edit_pageAppel terminé\n\nLa Page est modifiée.\n\nBon résultat\nMauvais résultat\nPage « Trois forfaits » — « 21 € »\nGarde ce prix en commentaire.\nEnvoyé\nEzerbot\n20 h 04\n\nLa Page est modifiée.\n\nBon résultat\nMauvais résultat\nRenommer\nOuvrir en pleine page\nCommentaires (2)\n\n1. Confort\n\nTraitéVoir dans le fil\n\n2. 21 €\n\nTraitéVoir dans le fil\nTrois forfaits\n\nTout < 30 € par mois\n\nOffre choisie : Essentiel\n\nOffre\tPrix\t\nEssentiel\t9 €\tChoisir\nConfort\t19 €\tChoisir\nFamille\t29 €\tChoisir\n\n\n\n\n● Enregistrer une réunion\nEzerbot\nGPT Test\nmedium\nStandard\nMode voix\nMémo vocal\nEntrée pour envoyer · ⇧ Entrée pour une nouvelle ligne\nQuota de votre abonnement ChatGPT ·\nGérer l’utilisation",
+    "comments": "1. Confort\n\nTraitéVoir dans le fil\n\n2. 21 €\n\nTraitéVoir dans le fil",
+    "badges": 0,
+    "lines": 0,
+    "canvas": "Trois forfaits\n\nTout < 30 € par mois\n\nOffre choisie : Essentiel\n\nOffre\tPrix\t\nEssentiel\t9 €\tChoisir\nConfort\t19 €\tChoisir\nFamille\t29 €\tChoisir",
+    "overflow": false
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "headRefName": "pm/ez-i295",
+  "headRefOid": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+  "mergeStateStatus": "CLEAN",
+  "mergeable": "MERGEABLE",
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-10-25T23:46:38Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/charlescstpierr/ezerbot/actions/runs/40246259231/job/121328349693",
+      "name": "compile",
+      "startedAt": "2026-10-25T23:46:28Z",
+      "status": "COMPLETED",
+      "workflowName": "Coque macOS"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-10-25T23:46:33Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/charlescstpierr/ezerbot/actions/runs/40246255875/job/121328339824",
+      "name": "compile",
+      "startedAt": "2026-10-25T23:46:25Z",
+      "status": "COMPLETED",
+      "workflowName": "Coque macOS"
+    }
+  ],
+  "url": "https://github.com/charlescstpierr/ezerbot/pull/574"
+}

@@ -1,0 +1,16 @@
+ .cursor/skills/verify-ezerbot/features/pages.md |   3 +
+ app/ui/panels/pages-app-browser.test.cjs        | 303 ++++++++++++++++++++++++
+ app/ui/panels/pages-browser.test.cjs            | 182 ++++++++++++++
+ app/ui/panels/pages.css                         |  13 +-
+ app/ui/panels/pages.js                          | 193 ++++++++++++++-
+ crates/wrapper/src/features/pages/anchors.rs    |  15 +-
+ crates/wrapper/tests/pages.rs                   | 147 +++++++++++-
+ 7 files changed, 838 insertions(+), 18 deletions(-)
+
+3	0	.cursor/skills/verify-ezerbot/features/pages.md
+303	0	app/ui/panels/pages-app-browser.test.cjs
+182	0	app/ui/panels/pages-browser.test.cjs
+11	2	app/ui/panels/pages.css
+187	6	app/ui/panels/pages.js
+9	6	crates/wrapper/src/features/pages/anchors.rs
+143	4	crates/wrapper/tests/pages.rs

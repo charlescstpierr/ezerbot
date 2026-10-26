@@ -1,0 +1,401 @@
+[
+  {
+    "name": "faux-openai-boucle-locale",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "pid": 64322,
+      "endpoints": [
+        "127.0.0.1:55382"
+      ]
+    }
+  },
+  {
+    "name": "sans-commentaire",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "id": "page_184eba7b2fb772132716ad016e4a4741d690c46f3ff6ba56ca23807413244f3e",
+      "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+      "anchors": [],
+      "has_previous": false
+    }
+  },
+  {
+    "name": "sans-commentaire",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "captures": 4
+    }
+  },
+  {
+    "name": "citation-confort",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "passage": "Confort",
+      "chip": "Page « Trois forfaits » — « Confort »"
+    }
+  },
+  {
+    "name": "citation-famille",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "passage": "Famille",
+      "chip": "Page « Trois forfaits » — « Famille »"
+    }
+  },
+  {
+    "name": "deux-ancres-ouvertes",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "anchors": [
+        {
+          "conversation_id": "0b37db6931be25d40b097e146f7bb5d2",
+          "message_id": "d7682567-a350-4d63-8262-c6333b694bac",
+          "passage": "Confort",
+          "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+          "state": "open"
+        },
+        {
+          "conversation_id": "0b37db6931be25d40b097e146f7bb5d2",
+          "message_id": "8cf3d7d8-be82-4a01-b211-e26d0904f576",
+          "passage": "Famille",
+          "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+          "state": "open"
+        }
+      ],
+      "has_previous": false,
+      "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928"
+    }
+  },
+  {
+    "name": "reperes-fermes",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "captures": 4
+    }
+  },
+  {
+    "name": "commentaires-ouverts",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "captures": 4
+    }
+  },
+  {
+    "name": "voir-vrai-message",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "expected": {
+        "conversation_id": "0b37db6931be25d40b097e146f7bb5d2",
+        "message_id": "d7682567-a350-4d63-8262-c6333b694bac",
+        "passage": "Confort",
+        "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+        "state": "open"
+      },
+      "observed": {
+        "message_id": "d7682567-a350-4d63-8262-c6333b694bac",
+        "text": "Page « Trois forfaits » — « Confort »\nGarde ce commentaire ouvert.\nEnvoyé"
+      }
+    }
+  },
+  {
+    "name": "edit-page-traite",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "source_version": "a058fe44064a6971bd484deac7a3f5e7d3ec96b95fc19e4dcd7132fda7b16c69",
+      "has_previous": true,
+      "anchors": [
+        {
+          "conversation_id": "0b37db6931be25d40b097e146f7bb5d2",
+          "message_id": "d7682567-a350-4d63-8262-c6333b694bac",
+          "passage": "Confort",
+          "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+          "state": "open"
+        },
+        {
+          "conversation_id": "0b37db6931be25d40b097e146f7bb5d2",
+          "message_id": "8cf3d7d8-be82-4a01-b211-e26d0904f576",
+          "passage": "Famille",
+          "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+          "state": "open"
+        },
+        {
+          "conversation_id": "0b37db6931be25d40b097e146f7bb5d2",
+          "message_id": "8f9e4109-b7aa-47c3-a4f5-7bab6d5c3634",
+          "passage": "Confort",
+          "source_version": "a058fe44064a6971bd484deac7a3f5e7d3ec96b95fc19e4dcd7132fda7b16c69",
+          "state": "done"
+        }
+      ]
+    }
+  },
+  {
+    "name": "apres-modification",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "captures": 4
+    }
+  },
+  {
+    "name": "retour-pendant-restauration",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "hidden_when_left": true,
+      "visible_on_return": true,
+      "pending": true
+    }
+  },
+  {
+    "name": "retour-pendant-restauration",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "captures": 4
+    }
+  },
+  {
+    "name": "revenir-passage-disparu",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "page": {
+        "anchors": [
+          {
+            "conversation_id": "0b37db6931be25d40b097e146f7bb5d2",
+            "message_id": "d7682567-a350-4d63-8262-c6333b694bac",
+            "passage": "Confort",
+            "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+            "state": "open"
+          },
+          {
+            "conversation_id": "0b37db6931be25d40b097e146f7bb5d2",
+            "message_id": "8cf3d7d8-be82-4a01-b211-e26d0904f576",
+            "passage": "Famille",
+            "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+            "state": "open"
+          },
+          {
+            "conversation_id": "0b37db6931be25d40b097e146f7bb5d2",
+            "message_id": "8f9e4109-b7aa-47c3-a4f5-7bab6d5c3634",
+            "passage": "Confort",
+            "source_version": "a058fe44064a6971bd484deac7a3f5e7d3ec96b95fc19e4dcd7132fda7b16c69",
+            "state": "done"
+          },
+          {
+            "conversation_id": "0b37db6931be25d40b097e146f7bb5d2",
+            "message_id": "782508f5-700b-442c-ab55-9daf63da801e",
+            "passage": "21 €",
+            "source_version": "a058fe44064a6971bd484deac7a3f5e7d3ec96b95fc19e4dcd7132fda7b16c69",
+            "state": "open"
+          }
+        ],
+        "bot_id": "grokbot",
+        "conversation_id": "0b37db6931be25d40b097e146f7bb5d2",
+        "diagnostic": null,
+        "document": {
+          "states": [
+            {
+              "initial": "Essentiel",
+              "name": "offre"
+            }
+          ],
+          "view": {
+            "children": [
+              {
+                "children": [
+                  {
+                    "text": "Trois forfaits",
+                    "type": "text"
+                  }
+                ],
+                "tag": "h1",
+                "type": "element"
+              },
+              {
+                "children": [
+                  {
+                    "text": "Tout < 30 € par mois",
+                    "type": "text"
+                  }
+                ],
+                "tag": "p",
+                "type": "element"
+              },
+              {
+                "children": [
+                  {
+                    "text": "Offre choisie : ",
+                    "type": "text"
+                  },
+                  {
+                    "name": "offre",
+                    "type": "state"
+                  }
+                ],
+                "tag": "p",
+                "type": "element"
+              },
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "children": [
+                              {
+                                "text": "Offre",
+                                "type": "text"
+                              }
+                            ],
+                            "tag": "th",
+                            "type": "element"
+                          },
+                          {
+                            "children": [
+                              {
+                                "text": "Prix",
+                                "type": "text"
+                              }
+                            ],
+                            "tag": "th",
+                            "type": "element"
+                          },
+                          {
+                            "children": [],
+                            "tag": "th",
+                            "type": "element"
+                          }
+                        ],
+                        "tag": "tr",
+                        "type": "element"
+                      }
+                    ],
+                    "tag": "thead",
+                    "type": "element"
+                  },
+                  {
+                    "children": [
+                      {
+                        "items": [
+                          [
+                            "Essentiel",
+                            "9 €"
+                          ],
+                          [
+                            "Confort",
+                            "19 €"
+                          ],
+                          [
+                            "Famille",
+                            "29 €"
+                          ]
+                        ],
+                        "node": {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "index": 0,
+                                  "type": "field"
+                                }
+                              ],
+                              "tag": "td",
+                              "type": "element"
+                            },
+                            {
+                              "children": [
+                                {
+                                  "index": 1,
+                                  "type": "field"
+                                }
+                              ],
+                              "tag": "td",
+                              "type": "element"
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "text": "Choisir",
+                                      "type": "text"
+                                    }
+                                  ],
+                                  "click": {
+                                    "index": 0,
+                                    "state": "offre"
+                                  },
+                                  "tag": "button",
+                                  "type": "element"
+                                }
+                              ],
+                              "tag": "td",
+                              "type": "element"
+                            }
+                          ],
+                          "tag": "tr",
+                          "type": "element"
+                        },
+                        "type": "map"
+                      }
+                    ],
+                    "tag": "tbody",
+                    "type": "element"
+                  }
+                ],
+                "tag": "table",
+                "type": "element"
+              }
+            ],
+            "tag": "article",
+            "type": "element"
+          }
+        },
+        "filename": "forfaits.page.tsx",
+        "has_previous": false,
+        "id": "page_184eba7b2fb772132716ad016e4a4741d690c46f3ff6ba56ca23807413244f3e",
+        "preview": "  Trois forfaits  Tout < 30 € par mois  Offre choisie : Essentiel     Offre  Prix        Essentiel  9 €  Choisir    Confort  19 €  Choisir    Famille  29 €  Choisir     ",
+        "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+        "status": "ready",
+        "title": "Trois forfaits"
+      },
+      "rows": [
+        "1. ConfortOuvertVoir dans le fil",
+        "2. FamilleOuvertVoir dans le fil",
+        "3. ConfortTraitéVoir dans le fil",
+        "4. 21 €TraitéVoir dans le fil"
+      ],
+      "canvas": "Trois forfaits\n\nTout < 30 € par mois\n\nOffre choisie : Essentiel\n\nOffre\tPrix\t\nEssentiel\t9 €\tChoisir\nConfort\t19 €\tChoisir\nFamille\t29 €\tChoisir",
+      "badges": 0
+    }
+  },
+  {
+    "name": "apres-restauration",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "captures": 4
+    }
+  },
+  {
+    "name": "page-orpheline-vrai-fil",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "origin": "0b37db6931be25d40b097e146f7bb5d2",
+      "anchor": {
+        "conversation_id": "02075b4dca0330207f8f3b66190e395e",
+        "message_id": "818417bb-98c3-443b-b564-41cb71432c1f",
+        "passage": "Famille",
+        "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+        "state": "open"
+      },
+      "observed": {
+        "message_id": "818417bb-98c3-443b-b564-41cb71432c1f"
+      }
+    }
+  },
+  {
+    "name": "page-orpheline",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "captures": 4
+    }
+  }
+]

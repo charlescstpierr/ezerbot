@@ -1,0 +1,19 @@
+{
+  "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+  "signed_root_valid": true,
+  "signed_home_valid": true,
+  "identities": {
+    "wrapper": {
+      "pid": 72581,
+      "matches": true
+    },
+    "fake": {
+      "pid": 72578,
+      "matches": true
+    },
+    "auth": {
+      "pid": 72618,
+      "matches": true
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+  "session": "pm-i295",
+  "signed_root_valid": true,
+  "signed_home_valid": true,
+  "home_still_present": false,
+  "root_still_present": false,
+  "processes": {
+    "wrapper": {
+      "pid": 59715,
+      "still_matches": false
+    },
+    "fake": {
+      "pid": 59712,
+      "still_matches": false
+    },
+    "auth": {
+      "pid": 59747,
+      "still_matches": false
+    },
+    "chrome": {
+      "pid": 59725,
+      "still_matches": false
+    }
+  }
+}

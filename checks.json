@@ -1,0 +1,53 @@
+[
+  {
+    "name": "rust-pages-head",
+    "command": [
+      "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/cargo-gate",
+      "/Users/cstpierrecharles/.cargo/bin/cargo",
+      "test",
+      "--locked",
+      "-p",
+      "grokbot-wrapper",
+      "--test",
+      "pages",
+      "--",
+      "--nocapture"
+    ],
+    "code": 0,
+    "seconds": 68.516,
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "log": "rust-pages-head.log"
+  },
+  {
+    "name": "fmt-head",
+    "command": [
+      "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/cargo-gate",
+      "/Users/cstpierrecharles/.cargo/bin/cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "code": 0,
+    "seconds": 8.192,
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "log": "fmt-head.log"
+  },
+  {
+    "name": "ui-head",
+    "command": [
+      "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/test-gate",
+      "node",
+      "--test",
+      "--test-concurrency=1",
+      "app/ui/panels/pages-app-browser.test.cjs",
+      "app/ui/panels/pages.test.cjs",
+      "app/ui/panels/pages-browser.test.cjs",
+      "app/ui/draft-transfer.test.cjs"
+    ],
+    "code": 0,
+    "seconds": 427.042,
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "log": "ui-head.log"
+  }
+]

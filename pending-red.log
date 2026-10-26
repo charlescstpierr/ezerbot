@@ -1,0 +1,114 @@
+test-gate: 1 places prises, attente (0 s)...
+✖ navigation-perdue, retour depuis un fil sans Page pendant une restauration réussie (1737.836866ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✖ navigation-perdue, retour depuis un fil sans Page pendant une restauration refusée (1608.74179ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, lecture réussie partie avant une restauration réussie (1679.390844ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, lecture refusée partie avant une restauration réussie (1697.767217ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, lecture réussie partie pendant une restauration réussie (1564.350017ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, lecture refusée partie pendant une restauration réussie (1487.55065ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, lecture réussie partie avant une restauration refusée (1489.455598ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, lecture refusée partie avant une restauration refusée (1545.536924ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, un choix récent remove prime sur la lecture retenue (1522.556385ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, un choix récent same prime sur la lecture retenue (1487.35232ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, un choix récent valid prime sur la lecture retenue (1584.733651ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, un polling identique conserve la citation valide et la sélection récente (1503.909269ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ navigation-perdue, lecture tardive réussie d’une Page quittée (1464.019153ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/b","reader":"panel"}]
+✔ navigation-perdue, lecture tardive refusée d’une Page quittée (1540.801273ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/b","reader":"panel"},{"url":"/api/pages/b","reader":"panel"}]
+✔ navigation-perdue, une restauration tardive réussie ne touche pas la Page courante (1547.031115ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/b","reader":"panel"}]
+✔ navigation-perdue, une restauration tardive refusée ne touche pas la Page courante (1449.187506ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/b","reader":"panel"}]
+✔ reponse-perimee, réponse réussie reçue pendant la mutation (1524.152571ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, réponse refusée reçue pendant la mutation (1520.020659ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✖ reponse-perimee, le renommage confirmé prime sur une ancienne relecture de citation (829.758227ms)
+ℹ []
+✔ reponse-perimee, le contexte deleted retire la citation pendant la lecture (1485.172543ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/state","reader":"panel"}]
+✔ reponse-perimee, le contexte task retire la citation pendant la lecture (1502.502107ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, le contexte bot retire la citation pendant la lecture (1469.729248ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+ℹ tests 22
+ℹ suites 0
+ℹ pass 19
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 33393.572484
+
+✖ failing tests:
+
+test at app/ui/panels/pages-app-browser.test.cjs:159:38
+✖ navigation-perdue, retour depuis un fil sans Page pendant une restauration réussie (1737.836866ms)
+  AssertionError [ERR_ASSERTION]: la restauration en cours reste visible et ne peut pas être relancée
+  + actual - expected
+  
+    {
+      disabled: true,
+  +   hidden: true
+  -   hidden: false
+    }
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i295/app/ui/panels/pages-app-browser.test.cjs:171:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: { hidden: true, disabled: true },
+    expected: { hidden: false, disabled: true },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/panels/pages-app-browser.test.cjs:159:38
+✖ navigation-perdue, retour depuis un fil sans Page pendant une restauration refusée (1608.74179ms)
+  AssertionError [ERR_ASSERTION]: la restauration en cours reste visible et ne peut pas être relancée
+  + actual - expected
+  
+    {
+      disabled: true,
+  +   hidden: true
+  -   hidden: false
+    }
+  
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i295/app/ui/panels/pages-app-browser.test.cjs:171:10)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: { hidden: true, disabled: true },
+    expected: { hidden: false, disabled: true },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/panels/pages-app-browser.test.cjs:264:1
+✖ reponse-perimee, le renommage confirmé prime sur une ancienne relecture de citation (829.758227ms)
+  AssertionError [ERR_ASSERTION]: Chrome ouvre son propre port CDP
+      at fixture (/Users/cstpierrecharles/.treehouse/pm/ez-i295/app/ui/panels/pages-app-browser.test.cjs:109:10)
+      at async TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i295/app/ui/panels/pages-app-browser.test.cjs:265:15)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 0,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }

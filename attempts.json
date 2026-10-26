@@ -1,0 +1,41 @@
+[
+  {
+    "run": "final",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "completed": false,
+    "cause": "Option --sphere pages absente. EZERBOT_FAKE_SIGNIN répond OK sans appeler write_page.",
+    "evidence": "final2/failure-state.json et launch.py:230",
+    "cleaned": true,
+    "home_still_present": false,
+    "remaining_owned_processes": []
+  },
+  {
+    "run": "final2",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "completed": false,
+    "cause": "Option --sphere pages absente. EZERBOT_FAKE_SIGNIN répond OK sans appeler write_page.",
+    "evidence": "final2/failure-state.json et launch.py:230",
+    "cleaned": true,
+    "home_still_present": false,
+    "remaining_owned_processes": []
+  },
+  {
+    "run": "final3",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "completed": true,
+    "launch_sphere": "pages",
+    "owner_verdict": "PASS 904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "captures": 28,
+    "cleaned": true,
+    "cleanup_audit": "final3/cleanup-audit.json"
+  },
+  {
+    "run": "treated",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "completed": true,
+    "owner_verdict": "PASS 904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "captures": 4,
+    "cleaned": true,
+    "cleanup_audit": "treated/cleanup-audit.json"
+  }
+]

@@ -1,0 +1,38 @@
+[
+  {
+    "name": "passage-disparu-traite",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "rows": [
+        "1. Confort\n\nTraitéVoir dans le fil",
+        "2. 21 €\n\nTraitéVoir dans le fil"
+      ],
+      "canvas": "Trois forfaits\n\nTout < 30 € par mois\n\nOffre choisie : Essentiel\n\nOffre\tPrix\t\nEssentiel\t9 €\tChoisir\nConfort\t19 €\tChoisir\nFamille\t29 €\tChoisir",
+      "source_version": "23297a59f39512e9b96e2ad90d79512a13b87848a37a13050e01541306324928",
+      "has_previous": false,
+      "anchors": [
+        {
+          "conversation_id": "7beda5bc0e018d457728453a6c005b2c",
+          "message_id": "622e89cd-97ff-46db-a16a-04d5c32f7f9d",
+          "passage": "Confort",
+          "source_version": "a058fe44064a6971bd484deac7a3f5e7d3ec96b95fc19e4dcd7132fda7b16c69",
+          "state": "done"
+        },
+        {
+          "conversation_id": "7beda5bc0e018d457728453a6c005b2c",
+          "message_id": "e647c4fe-061b-4c8d-9de9-5baf271f9130",
+          "passage": "21 €",
+          "source_version": "a058fe44064a6971bd484deac7a3f5e7d3ec96b95fc19e4dcd7132fda7b16c69",
+          "state": "open"
+        }
+      ]
+    }
+  },
+  {
+    "name": "passage-disparu-traite",
+    "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+    "result": {
+      "captures": 4
+    }
+  }
+]

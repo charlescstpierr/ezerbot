@@ -1,0 +1,30 @@
+{
+  "text": "ezerbot.\nNouvelle conversation\n⌘ N\n⌘ K\nMémoire\n0\nBOTS\nEzerbot\nSUJETS\n\nRegroupez plusieurs fils sous un sujet.\n\nPages\n\nAucune Page pour l’instant.\n\nCONVERSATIONS\n\nAujourd’hui\n\nOK\nE\nEspace local\nParamètres de l’application\nEzerbot\n/\nOK\nÉcran du Mac\nNotifications\nCréer un groupe\nMembres\nAppel vocal\nFais-moi une page des forfaits\nEnvoyé\nEzerbot\n19 h 51\n\nOK\n\nBon résultat\nMauvais résultat\n\n\n\n\n● Enregistrer une réunion\nEzerbot\nModèle\nGPT Test\nEffort\nmedium\nMode voix\nMémo vocal\nEntrée pour envoyer · ⇧ Entrée pour une nouvelle ligne\nQuota de votre abonnement ChatGPT ·\nGérer l’utilisation",
+  "draft": "\n",
+  "sends": [
+    "Fais-moi une page des forfaits"
+  ],
+  "provider": {
+    "connected": true,
+    "models_ready": true
+  },
+  "pages": {},
+  "conversations": [
+    {
+      "id": "e939d08fa506c47c04658f65ba69b76e",
+      "bot_id": "grokbot",
+      "messages": [
+        {
+          "role": "user",
+          "body": "Fais-moi une page des forfaits",
+          "state": "echoed"
+        },
+        {
+          "role": "assistant",
+          "body": "OK",
+          "state": "echoed"
+        }
+      ]
+    }
+  ]
+}

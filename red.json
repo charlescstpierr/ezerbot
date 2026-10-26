@@ -1,0 +1,17 @@
+{
+  "head": "caaf0734037a4bd3536e291d365b111f8c9ed219",
+  "command": [
+    "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/test-gate",
+    "node",
+    "--test",
+    "app/ui/panels/pages-app-browser.test.cjs"
+  ],
+  "code": 1,
+  "product": "app/ui/panels/pages.js sans modification",
+  "reader_attribution": "En-t\u00eate ajout\u00e9 par fetch selon la pile, sans toucher aux r\u00e9ponses. Chaque barri\u00e8re cible le lecteur exact.",
+  "product_blob": "91e90c3970fdc0c9d31c5385302c323f6e830d1a",
+  "tests_commit": "5d237b47",
+  "test_source": "red-tests.cjs",
+  "test_sha256": "8d9df3fd2d492c209722aef677f790fd174784e07af7c7fd0f6fc923e7d143c9",
+  "log": "red.log"
+}

@@ -1,0 +1,18 @@
+{
+  "action": "reperes-fermes",
+  "metrics": {
+    "theme": "dark",
+    "canvas": "#0e0f12",
+    "width": 1140,
+    "height": 780,
+    "title": "Vérification visuelle · Ezerbot"
+  },
+  "observed": {
+    "text": "ezerbot.\nNouvelle conversation\n⌘ N\n⌘ K\nMémoire\n0\nBOTS\nEzerbot\nSUJETS\n\nRegroupez plusieurs fils sous un sujet.\n\nPages\nTrois forfaits\nCONVERSATIONS\n\nAujourd’hui\n\nVérification visuelle\nE\nEspace local\nParamètres de l’application\nEzerbot\n/\nVérification visuelle\nÉcran du Mac\nNotifications\nCréer un groupe\nMembres\nAppel vocal\nFais-moi une page des forfaits\nEnvoyé\nEzerbot\n19 h 53\nOutil · write_pageAppel terminé\n\nVoici la Page.\n\nBon résultat\nMauvais résultat\nPage « Trois forfaits » — « Confort »\nGarde ce commentaire ouvert.\nEnvoyé\nEzerbot\n19 h 54\n\nVoici la Page.\n\nBon résultat\nMauvais résultat\nPage « Trois forfaits » — « Famille »\nAutre commentaire à traiter.\nEnvoyé\nEzerbot\n19 h 54\n\nVoici la Page.\n\nBon résultat\nMauvais résultat\nRenommer\nOuvrir en pleine page\nCommentaires (2)\nTrois forfaits\n\nTout < 30 € par mois\n\nOffre choisie : Confort\n\nOffre\tPrix\t\nEssentiel\t9 €\tChoisir\nConfort\t19 €\tChoisir\nFamille\t29 €\tChoisir\n1\n2\n\n\n\n\n● Enregistrer une réunion\nEzerbot\nGPT Test\nmedium\nStandard\nMode voix\nMémo vocal\nEntrée pour envoyer · ⇧ Entrée pour une nouvelle ligne\nQuota de votre abonnement ChatGPT ·\nGérer l’utilisation",
+    "comments": "1. ConfortOuvertVoir dans le fil2. FamilleOuvertVoir dans le fil",
+    "badges": 2,
+    "lines": 2,
+    "canvas": "Trois forfaits\n\nTout < 30 € par mois\n\nOffre choisie : Confort\n\nOffre\tPrix\t\nEssentiel\t9 €\tChoisir\nConfort\t19 €\tChoisir\nFamille\t29 €\tChoisir",
+    "overflow": false
+  }
+}

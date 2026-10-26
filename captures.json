@@ -1,0 +1,261 @@
+{
+  "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+  "images": [
+    {
+      "path": "final3/spheres/pages/apres-modification-dark-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 1140,
+      "height": 780,
+      "sha256": "a93dde02856c03470cb578be6b35e7a14797fbab18630f202552d6b6e99ea7c0"
+    },
+    {
+      "path": "final3/spheres/pages/apres-modification-dark-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 820,
+      "height": 560,
+      "sha256": "398d65151dba232bd12bfd933eb858de5135c88190d66d71da0d29e8dc0e2fd8"
+    },
+    {
+      "path": "final3/spheres/pages/apres-modification-light-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 1140,
+      "height": 780,
+      "sha256": "14eb2f02e2a48df7051196f832c718e87d2e1c1486418fb46035492d179a1b32"
+    },
+    {
+      "path": "final3/spheres/pages/apres-modification-light-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 820,
+      "height": 560,
+      "sha256": "d8ac5511713d2adc13e44bed8cbab6ef376c5aca66e7c7ef1aa53e2bd237a5ea"
+    },
+    {
+      "path": "final3/spheres/pages/apres-restauration-dark-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 1140,
+      "height": 780,
+      "sha256": "13270ec70e1194fb3e280a3b2bab84c99854b10958228d70cca9495885b474fc"
+    },
+    {
+      "path": "final3/spheres/pages/apres-restauration-dark-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 820,
+      "height": 560,
+      "sha256": "d983f5ab034aa57dd48df53590a38b199def576c36f7a3d13b5885ca36a747f9"
+    },
+    {
+      "path": "final3/spheres/pages/apres-restauration-light-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 1140,
+      "height": 780,
+      "sha256": "ff2121262533e4c4ca856f7ea4c19bcceb1dd2e8812dd2ece3bcc7aa9345a4b0"
+    },
+    {
+      "path": "final3/spheres/pages/apres-restauration-light-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 820,
+      "height": 560,
+      "sha256": "06a6ec73c530a1135f2cc20812aaa9a68d3545a735a1b1c56eef5673e639bd25"
+    },
+    {
+      "path": "final3/spheres/pages/commentaires-ouverts-dark-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 1140,
+      "height": 780,
+      "sha256": "01c96699545f85cdbb84534e4457be607d2253f1500631fe7ed5bf21e5ffb631"
+    },
+    {
+      "path": "final3/spheres/pages/commentaires-ouverts-dark-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 820,
+      "height": 560,
+      "sha256": "3dc7390e050b9dfcef09565d6126983653cf3551fbc9dafd89312399bd7ed64f"
+    },
+    {
+      "path": "final3/spheres/pages/commentaires-ouverts-light-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 1140,
+      "height": 780,
+      "sha256": "996bf57ffeaa264c4374200ee42f2471ffc0293e492b16f982f5f46e43c58c99"
+    },
+    {
+      "path": "final3/spheres/pages/commentaires-ouverts-light-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 820,
+      "height": 560,
+      "sha256": "80379fddc2699a28b011d0a67527269564fd8e74d246a632c52b6d1e867df750"
+    },
+    {
+      "path": "final3/spheres/pages/page-orpheline-dark-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 1140,
+      "height": 780,
+      "sha256": "01739b6fad98b249904c46564abcd9203b17353e5cc77fc0f9838807935b4456"
+    },
+    {
+      "path": "final3/spheres/pages/page-orpheline-dark-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 820,
+      "height": 560,
+      "sha256": "3e43d20bc739e90e68f61482aac471b74bf812e1f194f39eac6dc5eb9d04b2c9"
+    },
+    {
+      "path": "final3/spheres/pages/page-orpheline-light-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 1140,
+      "height": 780,
+      "sha256": "f5a094d56c28e3840487f3d3067295cfa8578526515402a7caf5a7187ce81bba"
+    },
+    {
+      "path": "final3/spheres/pages/page-orpheline-light-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 820,
+      "height": 560,
+      "sha256": "141e740f143cb256041c328e5c540c9f93c67e275e3aa7b98bd39abc9d90fc3a"
+    },
+    {
+      "path": "final3/spheres/pages/reperes-fermes-dark-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 1140,
+      "height": 780,
+      "sha256": "1a2ad1613a160cd65d5fa118fb0ab5295b15792a61abc230b5980aa741158121"
+    },
+    {
+      "path": "final3/spheres/pages/reperes-fermes-dark-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 820,
+      "height": 560,
+      "sha256": "9cbb9eced1bd373671415b907c2dab9c43581ea81410b4dd9991d91e9d4c60f9"
+    },
+    {
+      "path": "final3/spheres/pages/reperes-fermes-light-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 1140,
+      "height": 780,
+      "sha256": "49812fb2aea733b1c63b09ebba3339e4940afe35e25e6ec3a0d25b77ed2cf1c3"
+    },
+    {
+      "path": "final3/spheres/pages/reperes-fermes-light-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 820,
+      "height": 560,
+      "sha256": "66c047b5de025cb37549425f717e97c7cf7efdfe42f1a3770dedd98ce8f5365c"
+    },
+    {
+      "path": "final3/spheres/pages/retour-pendant-restauration-dark-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 1140,
+      "height": 780,
+      "sha256": "696645401a07e2107f3c97ba6758f3937862fa79f1edf7036c32b80eff2491a3"
+    },
+    {
+      "path": "final3/spheres/pages/retour-pendant-restauration-dark-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 820,
+      "height": 560,
+      "sha256": "24eb10fa535f9b482cd39688ccf88860d92201adbbae090a55847badd5ea14a2"
+    },
+    {
+      "path": "final3/spheres/pages/retour-pendant-restauration-light-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 1140,
+      "height": 780,
+      "sha256": "de2f077a894a46dd71cafdd8bcab23cdf4076e0d13ffa019753f6d5ec0405def"
+    },
+    {
+      "path": "final3/spheres/pages/retour-pendant-restauration-light-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 820,
+      "height": 560,
+      "sha256": "1206b74021439323854551e149466e3da3ad62c69555a3b7fc56060cc4644d3c"
+    },
+    {
+      "path": "final3/spheres/pages/sans-commentaire-dark-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 1140,
+      "height": 780,
+      "sha256": "d84ea8eb3c61c20732085c473cb5bfce81007cd0023636236bc63d6cf67bae3b"
+    },
+    {
+      "path": "final3/spheres/pages/sans-commentaire-dark-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 820,
+      "height": 560,
+      "sha256": "b5aa2c27d3836b25a6f6f7395ea88c2a830ee9ae9a9fc97ae7a4ac1444250fc2"
+    },
+    {
+      "path": "final3/spheres/pages/sans-commentaire-light-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 1140,
+      "height": 780,
+      "sha256": "4753bdae1b582c8b869cf577141645195423a2cc032784be2c0515157dc2aa9b"
+    },
+    {
+      "path": "final3/spheres/pages/sans-commentaire-light-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 820,
+      "height": 560,
+      "sha256": "b901730f1e06167450cb51ef1720c64d9167d351923fadfed653bcf83e14fe47"
+    },
+    {
+      "path": "treated/spheres/pages/passage-disparu-traite-dark-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 1140,
+      "height": 780,
+      "sha256": "9688cb35518f6a62ded66707fa05ac3e09549c35efc4dd94aa7482369da7054f"
+    },
+    {
+      "path": "treated/spheres/pages/passage-disparu-traite-dark-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "dark",
+      "width": 820,
+      "height": 560,
+      "sha256": "9e83d0942063e696f743e07281a7c5713087efb39eeed0d8bfd3a153b08721fd"
+    },
+    {
+      "path": "treated/spheres/pages/passage-disparu-traite-light-1140x780.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 1140,
+      "height": 780,
+      "sha256": "59ca9b90d15ef42e418c7dbf0de492b64ff1bdb123e1215648316fdd87f94ec9"
+    },
+    {
+      "path": "treated/spheres/pages/passage-disparu-traite-light-820x560.png",
+      "head": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8",
+      "theme": "light",
+      "width": 820,
+      "height": 560,
+      "sha256": "7de81b18b326378ae812cf7a064c218417efe0f27ea958d198129fd771d78021"
+    }
+  ]
+}

@@ -1,0 +1,120 @@
+test-gate: 1 places prises, attente (0 s)...
+test-gate: 1 places prises, attente (61 s)...
+test-gate: 1 places prises, attente (122 s)...
+test-gate: 1 places prises, attente (182 s)...
+test-gate: 1 places prises, attente (243 s)...
+test-gate: 1 places prises, attente (304 s)...
+test-gate: 1 places prises, attente (365 s)...
+✔ a draft typed during creation stays on its thread and does not return on Nouvelle conversation (146.206648ms)
+✔ an orphan welcome document left by an older transfer is purged instead of restored (133.232664ms)
+✔ a refused creation keeps both the submitted text and the text typed while waiting (55.313362ms)
+✔ a maximal bot name and its edit action stay inside an ellipsis rule (59.270467ms)
+✔ the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape (67.739681ms)
+✔ a disabled composer bot focuses the conversation title when the editor is not editable (32.978427ms)
+✔ a disabled composer bot returns menu focus to the editor (18.146998ms)
+✔ short composer names stay whole and a maximal name ellipsizes only when the bar is full (32.191181ms)
+✔ l’envoi d’un passage cité transmet page_anchor ; après la croix, le message part sans ancre ; un refus garde la puce (157.146192ms)
+✔ l’accusé d’un envoi lent garde la nouvelle citation du même passage, qui part avec sa propre ancre (92.95976ms)
+✔ « Reprendre l’envoi » après un rechargement renvoie l’ancre enregistrée du message en file (48.391326ms)
+✔ le renvoi de repli (/api/messages/resend introuvable) rend lui aussi l’ancre enregistrée (56.069428ms)
+✔ r11 une citation orpheline revient après création puis refus 400 et repart avec son ancre (81.856972ms)
+✔ r11 refus ancien après remove de citation (73.043947ms)
+✔ r11 refus ancien après same de citation (67.722466ms)
+✔ r11 refus ancien après other de citation (69.815515ms)
+✔ r11 un passage disparu ne revient pas et son avertissement reste visible après le refus (218.952267ms)
+✔ r12 citation retirée pendant création puis refus 400 (121.422167ms)
+✔ r12 citation Confort pendant création puis refus 400 (70.471579ms)
+✔ r12 citation Con pendant création puis refus 400 (81.305823ms)
+✔ navigation-perdue, retour depuis le fil vide pendant une restauration réussie (1952.790132ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ navigation-perdue, retour depuis le fil vide pendant une restauration refusée (2038.474374ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ navigation-perdue, retour depuis le fil b pendant une restauration réussie (1866.999585ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/b","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ navigation-perdue, retour depuis le fil b pendant une restauration refusée (1593.391056ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/b","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, lecture réussie partie avant une restauration réussie (1505.206225ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, lecture refusée partie avant une restauration réussie (1407.446855ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, lecture réussie partie pendant une restauration réussie (1439.21734ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, lecture refusée partie pendant une restauration réussie (1384.079456ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, lecture réussie partie avant une restauration refusée (1405.756602ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, lecture refusée partie avant une restauration refusée (1617.708965ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, un choix récent remove prime sur la lecture retenue (1796.504518ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, un choix récent same prime sur la lecture retenue (2161.571292ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, un choix récent valid prime sur la lecture retenue (2327.321986ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, un polling identique conserve la citation valide et la sélection récente (2326.148563ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ navigation-perdue, lecture tardive réussie d’une Page quittée (2157.551407ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/b","reader":"panel"}]
+✔ navigation-perdue, lecture tardive refusée d’une Page quittée (2260.70284ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/b","reader":"panel"}]
+✔ navigation-perdue, une restauration tardive réussie ne touche pas la Page courante (1680.185147ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/b","reader":"panel"}]
+✔ navigation-perdue, une restauration tardive refusée ne touche pas la Page courante (1633.76045ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/b","reader":"panel"}]
+✔ reponse-perimee, réponse réussie reçue pendant la mutation (1661.279897ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, réponse refusée reçue pendant la mutation (1699.394169ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/revert","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, le renommage confirmé prime sur une ancienne relecture de citation (1718.461082ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/pages/rename","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, le contexte deleted retire la citation pendant la lecture (1843.562983ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/state","reader":"panel"}]
+✔ reponse-perimee, le contexte task retire la citation pendant la lecture (1870.795725ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ reponse-perimee, le contexte bot retire la citation pendant la lecture (1824.242948ms)
+ℹ [{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/send","reader":"panel"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"composer"},{"url":"/api/state","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"},{"url":"/api/pages/a","reader":"panel"}]
+✔ le panneau réel conserve les sélections, annote les passages et isole les restaurations concurrentes (1690.042279ms)
+✔ la Page s’affiche à côté du fil, se renomme, s’ouvre en pleine page, et ne propose pas de partage (17.772627ms)
+✔ une Page de 64 niveaux s’affiche encore (2.641177ms)
+✔ une Page de 65 niveaux est refusée avant de peindre le DOM (1.817894ms)
+✔ une Page déjà enregistrée plus profonde que 64 niveaux est refusée sans construire le DOM (4.093718ms)
+✔ un useState se réinitialise quand la source change et garde le clic si la version est la même (2.476628ms)
+✔ une compilation cassée montre la ligne et le caractère, pas une Page vide réussie (1.83443ms)
+✔ les maps imbriquées respectent le budget cumulé (14, 1) (21.45261ms)
+✔ les maps imbriquées respectent le budget cumulé (14, 0) (14.253882ms)
+✔ les maps imbriquées respectent le budget cumulé (8, 3000) (12.948479ms)
+✔ les maps imbriquées respectent le budget cumulé (40, 1) (15.478838ms)
+✔ 1 000 000 octets de texte répartis en 100 paragraphes se peignent, un de plus non (même borne que compile.rs) (42.746345ms)
+✔ un rafraîchissement identique ne reconstruit pas la Page et garde le focus (2.166735ms)
+✔ une Page écrite par un autre participant d’un groupe s’affiche avec le fil du groupe (1.935676ms)
+✔ une Page dont la conversation a disparu reste ouvrable, sans l’afficher à côté d’un autre fil (7.109926ms)
+✔ une navigation refusée pendant une réponse prévient au lieu d’afficher la Page à côté d’un autre fil (7.774125ms)
+✔ sélectionner « Forfait B » affiche « Commenter » près de la sélection ; le clic pose la puce au-dessus de la boîte de message (4.209168ms)
+✔ l’envoi transmet la Page, la version lue par le panneau et le passage rogné ; la puce part avec le message (1.916663ms)
+✔ l’accusé d’un envoi ne retire que sa citation : la même citation posée à nouveau entre-temps reste (2.02394ms)
+✔ la croix retire la puce : le message part sans ancre (1.676477ms)
+✔ une sélection de plus de 500 caractères ne donne ni bouton ni ancre ; 500 passent (1.820479ms)
+✔ une sélection vide, hors de la Page ou qui déborde du canevas ne donne pas de bouton (1.769296ms)
+✔ au clavier, « Commenter » est un bouton après le canevas et garde la sélection quand il prend le focus (1.676453ms)
+✔ changer de fil retire la puce, et « Commenter » depuis la pleine page revient au fil pour écrire (1.898397ms)
+✔ un clic sur la puce du fil montre la Page ; une Page disparue prévient (1.941234ms)
+✔ ouvrir une autre Page du même fil retire la citation de la première avant tout envoi (2.016807ms)
+✔ dans une sous-tâche déléguée, « Commenter » n’est pas proposé : son envoi n’emporte pas d’ancre (1.592411ms)
+✔ 500 caractères en comptant les emoji comme le moteur : 500 passent, 501 non (1.873997ms)
+✔ le rognage suit `str::trim` de Rust : U+0085 est retiré, U+FEFF est gardé (1.946802ms)
+✔ une sélection sur plusieurs cellules et paragraphes donne le bouton et part telle quelle (1.561605ms)
+✔ les blancs sont réduits à un espace, jamais supprimés : un blanc dans un mot, ou absent entre deux cellules, ne donne pas de bouton (2.881791ms)
+✔ un texte changé par l’état interactif de la Page, absent de l’aperçu que contrôle le moteur, ne donne pas de bouton (1.702973ms)
+✔ dans un groupe, la Page d’un autre participant que le bot du fil ne donne pas de bouton (le moteur répondrait 409) (1.719788ms)
+✔ une navigation refusée vers une autre Page (liste ou puce du fil) garde la citation posée (1.875709ms)
+✔ renommer la Page met le nouveau titre dans la puce de la citation posée (8.903914ms)
+✔ après un renommage, la liste garde le nouveau titre quand l’hôte repeint avec son état (2.606149ms)
+✔ « Commenter » gardé au clavier ne cite pas un passage que la Page modifiée entre-temps n’affiche plus (2.600841ms)
+ℹ tests 81
+ℹ suites 0
+ℹ pass 81
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 47353.714459

@@ -1,0 +1,22 @@
+[
+  {
+    "name": "launch",
+    "command": [
+      "bash",
+      "/Users/cstpierrecharles/.treehouse/pm/ez-i295/.cursor/skills/verify-ezerbot/scripts/launch.sh",
+      "--sphere",
+      "pages",
+      "--evidence",
+      "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i295/r2/final3"
+    ],
+    "code": 0
+  },
+  {
+    "name": "drive",
+    "command": [
+      "python3",
+      "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i295/r2/drive-final3.py"
+    ],
+    "code": 0
+  }
+]

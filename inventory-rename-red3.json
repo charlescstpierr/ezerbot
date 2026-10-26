@@ -1,0 +1,10 @@
+{
+  "command": [
+    "/Users/cstpierrecharles/.treehouse/pm/_orch/bin/test-gate",
+    "node",
+    "--test",
+    "app/ui/panels/pages-app-browser.test.cjs"
+  ],
+  "code": 1,
+  "head": "5d237b47b592ff5ba9c93d379f981ea341243fce"
+}

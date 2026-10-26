@@ -1,0 +1,5 @@
+build: /Users/cstpierrecharles/.cargo/bin/cargo build --locked -p grokbot-wrapper
+cargo-gate: 4 places prises, attente (0 s)...
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.38s
+run: /Users/cstpierrecharles/.treehouse/pm/ez-i295/target/debug/grokbot-wrapper --port 0 --db /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i295/r2/tmp/verify-ezerbot.5m7giaii/home/workspace.sqlite
+{"url": "http://127.0.0.1:63588", "evidence": "/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i295/r2/treated", "sha": "904f03fb3a9c6369a351fcfe8ace575d6b9acdf8", "port": 63588}

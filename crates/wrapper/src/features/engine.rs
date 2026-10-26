@@ -2880,7 +2880,9 @@ fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiErr
 }
 /// The secrets to hide in a rendering, read once for all its fragments: those of `event_vault`,
 /// which a state read opens once for all its replies (#377).
-fn redaction_patterns(conn: &Connection) -> grokbot_engine::contracts::Result<redact::Patterns> {
+pub(super) fn redaction_patterns(
+    conn: &Connection,
+) -> grokbot_engine::contracts::Result<redact::Patterns> {
     let path = conn
         .path()
         .ok_or_else(|| Error::InvalidInput("file database required".into()))?;

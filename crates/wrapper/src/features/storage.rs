@@ -146,7 +146,9 @@ fn roots(conn: &Connection) -> Result<HashSet<String>, ApiError> {
         let sql = match table.as_str() {
             "wrapper_conversations" => format!("SELECT * FROM {quoted} t WHERE t.deleted=0"),
             "wrapper_messages" | "submissions" | "wrapper_remote" | "engine_runs"
-            | "engine_summaries" => format!("SELECT * FROM {quoted} t WHERE NOT {deleted}"),
+            | "engine_summaries" | "wrapper_livrables" => {
+                format!("SELECT * FROM {quoted} t WHERE NOT {deleted}")
+            }
             "engine_run_events" | "wrapper_engine_runs" | "engine_external_tools" => {
                 format!("SELECT * FROM {quoted} t WHERE NOT {deleted_run}")
             }

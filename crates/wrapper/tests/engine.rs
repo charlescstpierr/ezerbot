@@ -499,6 +499,11 @@ fn retitle_after_first_and_third_turn() {
 #[test]
 fn tool_loop_runs_until_complete_task() {
     let mut f = Fixture::new(true);
+    let private = "Garde les réponses claires et respecte les refus de Charles.";
+    f.post(
+        "/api/bots/update",
+        json!({"id":"grokbot","instructions":private}),
+    );
     let c = f.conversation();
     f.events(vec![
         call("a", "begin_task", json!({"objective":"Learn"})),
@@ -537,6 +542,34 @@ fn tool_loop_runs_until_complete_task() {
         .iter()
         .any(|m| m["kind"] == "tool"));
     let seen = f.server.seen.lock().unwrap();
+    let bodies: Vec<_> = seen
+        .bodies
+        .iter()
+        .filter(|body| {
+            body["instructions"]
+                .as_str()
+                .is_some_and(|text| text.contains("\nUse begin_task"))
+        })
+        .collect();
+    assert_eq!(bodies.len(), 3);
+    for (index, body) in bodies.iter().enumerate() {
+        let instructions = body["instructions"].as_str().unwrap();
+        assert!(instructions.contains(private));
+        assert!(
+            instructions.find("\nUse begin_task").unwrap() < instructions.find(private).unwrap()
+        );
+        assert_eq!(
+            instructions.contains("answer without calling any tool"),
+            index == 0
+        );
+        assert_eq!(instructions.contains("You are executing a Task"), index > 0);
+        assert!(instructions.contains("only complete_task(summary) marks it done"));
+        assert!(body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "remember"));
+    }
     let input = seen.bodies[2]["input"].as_array().unwrap();
     assert_eq!(
         input
@@ -621,6 +654,11 @@ fn reset_keeps_memory_but_hides_history() {
 #[test]
 fn long_conversation_compacts_and_keeps_transcript() {
     let mut f = Fixture::new(false);
+    let private = "Réponds avec des phrases simples même après un résumé du fil.";
+    f.post(
+        "/api/bots/update",
+        json!({"id":"grokbot","instructions":private}),
+    );
     let c = f.conversation();
     f.post("/api/engine/config", json!({"estimated_tokens":12000}));
     for n in 0..8 {
@@ -667,6 +705,22 @@ fn long_conversation_compacts_and_keeps_transcript() {
         .as_str()
         .unwrap()
         .contains(&summary.text));
+    let instructions = body["instructions"].as_str().unwrap();
+    assert!(instructions.contains("answer without calling any tool"));
+    assert!(instructions.contains("Use a tool only when you need to read external state or act"));
+    assert!(instructions.contains("do not check or verify by reflex"));
+    assert!(instructions.contains(private));
+    assert!(
+        instructions
+            .find("answer without calling any tool")
+            .unwrap()
+            < instructions.find(private).unwrap()
+    );
+    assert!(body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "read_file"));
     assert!(!body.to_string().contains(&format!("0{}", "x".repeat(100))));
 }
 #[test]

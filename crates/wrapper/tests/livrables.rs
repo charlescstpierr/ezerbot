@@ -1036,6 +1036,250 @@ fn a_preview_with_no_recoverable_source_is_hidden() {
 }
 
 #[test]
+fn preview_retirement_survives_removal_and_reconnection() {
+    persistent_previews(false);
+}
+
+#[test]
+fn preview_retirement_survives_rotation_and_reconnection() {
+    persistent_previews(true);
+}
+
+fn persistent_previews(rotate: bool) {
+    for (format, private, content, fallback) in [
+        (
+            "md",
+            "apercu-persistant-retrait",
+            "Public apercu-persistant-retrait",
+            false,
+        ),
+        (
+            "md",
+            "apercu-persistant-privé",
+            "Public apercu-persistant-prive\u{301}",
+            false,
+        ),
+        (
+            "pdf",
+            "apercu&persistant<privé",
+            "Public apercu&persistant<privé",
+            false,
+        ),
+        (
+            "md",
+            "apercu-persistant-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "Public apercu-persistant-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            false,
+        ),
+        (
+            "csv",
+            "apercu-persistant-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            r#"[["Public","apercu-persistant-aaaaaaaaaaaaaaaaaaaaaaaaaaaa"]]"#,
+            false,
+        ),
+        (
+            "md",
+            "apercu-persistant-fallback",
+            "Public apercu-persistant-fallback",
+            true,
+        ),
+    ] {
+        let mut f = Fixture::new();
+        let chat = f.chat("alpha");
+        f.call(
+            &chat,
+            "d1",
+            "create_document",
+            json!({"name":"Rapport","format":format,"content":content}),
+        );
+        let url = link(&mut f, "document");
+        if fallback {
+            f.db().execute("UPDATE engine_run_events SET payload=json_remove(payload,'$.arguments') WHERE kind='tool_call'", []).unwrap();
+        }
+        let before = body(&mut f, "GET", &url, json!(null));
+        assert!(
+            before.contains("apercu"),
+            "fixture must contain unmasked text"
+        );
+        vault(&f, "PERSISTENT_PREVIEW", "Valeur synthétique", private);
+        for phase in 0..3 {
+            if phase == 1 {
+                let v = grokbot_forms::vault::Vault::open(&f.path.with_extension("secrets.json"))
+                    .unwrap();
+                if rotate {
+                    v.set(
+                        "PERSISTENT_PREVIEW",
+                        "Valeur synthétique",
+                        "apercu-remplacement-public",
+                    )
+                    .unwrap();
+                } else {
+                    v.remove("PERSISTENT_PREVIEW").unwrap();
+                }
+            } else if phase == 2 {
+                f.reopen();
+            }
+            let shown = body(&mut f, "GET", &url, json!(null));
+            assert!(
+                shown.contains("Public"),
+                "public document text must remain visible"
+            );
+            assert!(
+                shown.contains("[...]"),
+                "preview must remain masked in phase {phase}"
+            );
+            assert!(
+                !shown.contains("apercu") && !shown.contains("aaaaaaaa"),
+                "private preview text was emitted in phase {phase}"
+            );
+        }
+    }
+}
+
+#[test]
+fn preview_refuses_an_unavailable_vault_or_ledger() {
+    for failure in ["vault", "read", "write"] {
+        let (mut f, _) = private_document();
+        let url: String = f
+            .db()
+            .query_row(
+                "SELECT json_extract(record,'$.preview_url') FROM attachments_generated",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        match failure {
+            "vault" => {
+                std::fs::write(f.path.with_extension("secrets.json"), b"invalid fixture").unwrap()
+            }
+            "read" => {
+                f.db()
+                    .execute_batch("DROP TABLE wrapper_disclosure_patterns")
+                    .unwrap();
+            }
+            "write" => {
+                f.db().execute_batch("CREATE TRIGGER refuse_preview_pattern BEFORE INSERT ON wrapper_disclosure_patterns BEGIN SELECT RAISE(ABORT,'registry unavailable'); END").unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let result = f.app.api_response("GET", &url, b"");
+        assert!(result.is_err(), "preview must refuse {failure} failure");
+        assert!(!result.err().unwrap().message.contains(LEAK));
+    }
+}
+
+#[test]
+fn preview_rechecks_vault_changes_during_source_read() {
+    use std::{ffi::c_void, os::raw::c_uint};
+    struct Change {
+        action: Option<Box<dyn FnOnce()>>,
+        succeeded: bool,
+    }
+    unsafe extern "C" fn change(
+        _: c_uint,
+        context: *mut c_void,
+        statement: *mut c_void,
+        _: *mut c_void,
+    ) -> i32 {
+        let sql = std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_sql(statement.cast()));
+        if sql.to_bytes() == grokbot_wrapper::features::generated::SOURCE_CALL.as_bytes() {
+            let change = &mut *context.cast::<Change>();
+            if let Some(action) = change.action.take() {
+                change.succeeded =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_ok();
+            }
+        }
+        0
+    }
+    struct Trace(*mut rusqlite::ffi::sqlite3, Box<Change>);
+    impl Drop for Trace {
+        fn drop(&mut self) {
+            unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(self.0, 0, None, std::ptr::null_mut());
+            }
+        }
+    }
+    for mutation in ["add", "remove", "rotate", "corrupt"] {
+        let mut f = Fixture::new();
+        let chat = f.chat("alpha");
+        let private = "apercu-course-synthetique";
+        f.call(
+            &chat,
+            "d1",
+            "create_document",
+            json!({"name":"Rapport","format":"md","content":format!("Public {private}")}),
+        );
+        let url = link(&mut f, "document");
+        if mutation != "add" {
+            vault(&f, "PREVIEW_RACE", "Valeur synthétique", private);
+        }
+        let path = f.path.with_extension("secrets.json");
+        let mut trace = Trace(
+            unsafe { f.app.feature_context().connection.handle() },
+            Box::new(Change {
+                action: Some(Box::new(move || {
+                    let vault = grokbot_forms::vault::Vault::open(&path).unwrap();
+                    match mutation {
+                        "add" => {
+                            vault
+                                .set("PREVIEW_RACE", "Valeur synthétique", private)
+                                .unwrap();
+                        }
+                        "remove" => {
+                            vault.remove("PREVIEW_RACE").unwrap();
+                        }
+                        "rotate" => {
+                            vault
+                                .set("PREVIEW_RACE", "Valeur synthétique", "apercu-autre-valeur")
+                                .unwrap();
+                        }
+                        "corrupt" => std::fs::write(&path, b"invalid fixture").unwrap(),
+                        _ => unreachable!(),
+                    }
+                })),
+                succeeded: false,
+            }),
+        );
+        assert_eq!(
+            unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(
+                    trace.0,
+                    rusqlite::ffi::SQLITE_TRACE_STMT as u32,
+                    Some(change),
+                    (&mut *trace.1 as *mut Change).cast(),
+                )
+            },
+            rusqlite::ffi::SQLITE_OK
+        );
+        let result = f.app.api_response("GET", &url, b"");
+        assert!(
+            trace.1.succeeded,
+            "the vault mutation must run during the source read"
+        );
+        drop(trace);
+        if mutation == "corrupt" {
+            assert!(
+                result.is_err(),
+                "a vault failure during rendering must refuse the preview"
+            );
+        } else {
+            let ApiResponse::Bytes { body, .. } = result.unwrap() else {
+                panic!("expected SVG");
+            };
+            let shown = String::from_utf8(body).unwrap();
+            assert!(
+                shown.contains("Public") && shown.contains("[...]"),
+                "the preview must retain public text and mask private text"
+            );
+            assert!(
+                !shown.contains(private),
+                "a concurrent vault change exposed private text"
+            );
+        }
+    }
+}
+
+#[test]
 fn shared_files_survive_cleanup_until_the_last_conversation_is_deleted() {
     let mut f = Fixture::new();
     let a = f.chat("alpha");

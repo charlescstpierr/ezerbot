@@ -811,11 +811,11 @@ fn repeated_call(
     conn: &Connection,
     run: &Run,
     fingerprint: Option<&str>,
-) -> Result<Option<(String, loop_guard::Rule)>> {
+) -> Result<Option<String>> {
     let Some(fingerprint) = fingerprint else {
         return Ok(None);
     };
-    Ok(loop_guard::rule(conn, &run.run_id, fingerprint)?.map(|rule| (fingerprint.into(), rule)))
+    Ok(loop_guard::blocks(conn, &run.run_id, fingerprint)?.then(|| fingerprint.into()))
 }
 
 fn block_call(
@@ -823,7 +823,6 @@ fn block_call(
     run: &Run,
     call: &ToolCall,
     fingerprint: &str,
-    rule: loop_guard::Rule,
 ) -> Result<Option<RunProgress>> {
     let run_id = &run.run_id;
     if store::tool_result_exists(conn, run_id, &call.call_id)? {
@@ -836,7 +835,7 @@ fn block_call(
         conn,
         run_id,
         RunEventKind::LoopGuard,
-        &json!({"name":loop_guard::safe_tool_name(&call.name),"fingerprint":&fingerprint[..12],"rule":rule}),
+        &json!({"name":loop_guard::safe_tool_name(&call.name),"fingerprint":&fingerprint[..12]}),
     )?;
     store::append_event(
         conn,
@@ -991,7 +990,7 @@ fn execute_external(
         let fingerprint = guard_fingerprint(services, call)?;
         let repeated = repeated_call(conn, &run, fingerprint.as_deref())?;
         finish_approval(conn, by.is_some(), repeated.is_some())?;
-        if let Some((fingerprint, rule)) = repeated {
+        if let Some(fingerprint) = repeated {
             return Ok(Start::Complete(block_call(
                 conn,
                 &run,
@@ -1149,7 +1148,7 @@ fn execute_journaled_external(
         }
         let repeated = repeated_call(conn, &run, fingerprint.as_deref())?;
         finish_approval(conn, by.is_some(), repeated.is_some())?;
-        if let Some((fingerprint, rule)) = repeated {
+        if let Some(fingerprint) = repeated {
             return Ok(Admission::Complete(block_call(
                 conn,
                 &run,
@@ -1350,8 +1349,8 @@ fn execute(
         };
         let repeated = repeated_call(conn, &run, fingerprint.as_deref())?;
         finish_approval(conn, authorized_by.is_some(), repeated.is_some())?;
-        if let Some((fingerprint, rule)) = repeated {
-            return block_call(conn, &run, call, &fingerprint, rule);
+        if let Some(fingerprint) = repeated {
+            return block_call(conn, &run, call, &fingerprint);
         }
         let mut usage = store::budget_usage(conn, run_id, now_ms())?;
         usage.tool_calls += 1;

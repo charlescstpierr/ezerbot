@@ -404,12 +404,11 @@ fn loop_guard_blocks_third_identical_call() -> Result<()> {
         assert!(!payload.contains("fixture-result-private"));
         assert!(payload.len() < 512, "guard metadata must stay bounded");
         let metadata = guards(&events)[0].payload.as_object().unwrap();
-        assert_eq!(metadata.len(), 3);
+        assert_eq!(metadata.len(), 2);
         let fingerprint = metadata["fingerprint"].as_str().unwrap();
         assert_eq!(fingerprint.len(), 12);
         assert!(fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(metadata["name"], "read_file");
-        assert!(metadata["rule"].is_string());
         assert_settled(&events);
         assert_eq!(gateway.request_count(), 4);
         assert_eq!(

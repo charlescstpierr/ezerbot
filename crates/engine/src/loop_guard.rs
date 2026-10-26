@@ -21,13 +21,6 @@ pub(crate) struct EffectiveAttempt {
     outcome: EffectiveOutcome,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Rule {
-    ThirdIdenticalCall,
-    SecondAfterFailure,
-}
-
 fn canonical(value: &Value) -> Value {
     match value {
         Value::Object(fields) => {
@@ -66,7 +59,7 @@ pub(crate) fn attempt(
     })
 }
 
-pub(crate) fn rule(conn: &Connection, run_id: &str, fingerprint: &str) -> Result<Option<Rule>> {
+pub(crate) fn blocks(conn: &Connection, run_id: &str, fingerprint: &str) -> Result<bool> {
     let mut statement = conn.prepare_cached(RECENT_ATTEMPTS)?;
     let rows = statement.query_map([run_id], |row| row.get::<_, String>(0))?;
     let recent: Vec<EffectiveAttempt> = rows
@@ -76,15 +69,12 @@ pub(crate) fn rule(conn: &Connection, run_id: &str, fingerprint: &str) -> Result
         .first()
         .filter(|last| last.fingerprint == fingerprint)
     else {
-        return Ok(None);
+        return Ok(false);
     };
-    if last.outcome == EffectiveOutcome::Failed {
-        return Ok(Some(Rule::SecondAfterFailure));
-    }
-    Ok(recent
-        .get(1)
-        .filter(|prior| prior.fingerprint == fingerprint)
-        .map(|_| Rule::ThirdIdenticalCall))
+    Ok(last.outcome == EffectiveOutcome::Failed
+        || recent
+            .get(1)
+            .is_some_and(|prior| prior.fingerprint == fingerprint))
 }
 
 pub(crate) fn safe_tool_name(name: &str) -> &str {
@@ -147,7 +137,7 @@ mod tests {
                 }
                 Ok(())
             })?;
-            assert!(rule(&conn, "scale", &"a".repeat(64))?.is_some());
+            assert!(blocks(&conn, "scale", &"a".repeat(64))?);
             assert_eq!(store::loop_guard_count(&conn, "scale")?, 3);
             assert!(store::tool_result_exists(&conn, "scale", "actual-2")?);
             let mut steps = Vec::new();

@@ -425,17 +425,53 @@ fn multibot_live_remove_stop_and_new_human_ignore_late_remote_events() {
 }
 
 #[test]
-fn simulated_mode_still_replies() {
+fn simulated_mode_follows_compiled_profile_and_send_stays_idempotent() {
     let mut f = Fixture::new(false);
+    assert_eq!(f.provider.status()["simulation"], cfg!(debug_assertions));
+    assert_eq!(f.provider.status()["signed_in"], false);
+    assert!(!f.provider.connected());
     let c = f.conversation();
-    let reply = f.send(&c, "sim", "bonjour");
-    assert!(reply["conversation"]["messages"][1]["body"]
-        .as_str()
-        .unwrap()
-        .starts_with("Bien reçu"));
-    assert_eq!(f.run("sim").status, RunStatus::Finished);
+    f.send(&c, "sim", "bonjour");
+    let reply = f.done(&c, "sim");
+    let run = f.run("sim");
+    if cfg!(debug_assertions) {
+        assert_eq!(reply["state"], "echoed");
+        assert!(reply["body"].as_str().unwrap().starts_with("Bien reçu"));
+        assert_eq!(run.status, RunStatus::Finished);
+    } else {
+        assert_eq!(reply["state"], "failed");
+        assert_eq!(reply["body"], "");
+        assert_eq!(reply["error_kind"], "signin");
+        assert_eq!(reply["error"], "Connectez votre compte ChatGPT pour recevoir une réponse. Votre question est conservée ; vous pourrez réessayer après la connexion.");
+        assert_eq!(run.status, RunStatus::Failed);
+        assert!(store::events(&f.db(), &run.run_id, 0)
+            .unwrap()
+            .iter()
+            .all(|event| event.kind != RunEventKind::TextDelta));
+        let error = f
+            .app
+            .api(
+                "POST",
+                "/api/regenerate",
+                json!({"conversation_id":c,"message_id":"sim"})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        assert_eq!(
+            error.message,
+            "Connectez-vous à ChatGPT pour relancer cette réponse."
+        );
+        assert_eq!(f.reply(&c, "sim"), reply);
+        assert!(f.server.seen.lock().unwrap().bodies.is_empty());
+    }
     f.send(&c, "sim", "bonjour");
     assert_eq!(store::runs_for_conversation(&f.db(), &c).unwrap().len(), 1);
+    assert_eq!(f.run("sim").run_id, run.run_id);
+    assert_eq!(f.reply(&c, "sim"), reply);
+    assert_eq!(f.provider.status()["signed_in"], false);
+    assert!(!f.provider.connected());
 }
 #[test]
 fn user_message_reply_still_streams_as_reply_id() {
@@ -653,15 +689,13 @@ fn reset_keeps_memory_but_hides_history() {
 }
 #[test]
 fn long_conversation_compacts_and_keeps_transcript() {
-    let mut f = Fixture::new(false);
+    let mut f = Fixture::new(true);
     let c = f.conversation();
     f.post("/api/engine/config", json!({"estimated_tokens":12000}));
     for n in 0..8 {
-        f.send(
-            &c,
-            &format!("long-{n}"),
-            &format!("{}{}", n, "x".repeat(12000)),
-        );
+        let message = format!("long-{n}");
+        f.send(&c, &message, &format!("{}{}", n, "x".repeat(12000)));
+        assert_eq!(f.done(&c, &message)["body"], "Bonjour **vous**");
     }
     let db = f.db();
     let count: i64 = db
@@ -689,13 +723,30 @@ fn long_conversation_compacts_and_keeps_transcript() {
         .unwrap(),
         12001
     );
-    f.authorize();
     f.send(&c, "long-final", "Use the summarized conversation");
-    f.done(&c, "long-final");
+    assert_eq!(f.done(&c, "long-final")["body"], "Bonjour **vous**");
+    assert_eq!(f.run("long-final").status, RunStatus::Finished);
     let summary = grokbot_engine::compaction::latest(&db, &c)
         .unwrap()
         .unwrap();
-    let body = f.server.seen.lock().unwrap().bodies.last().unwrap().clone();
+    let seen = f.server.seen.lock().unwrap();
+    let bodies: Vec<_> = seen
+        .bodies
+        .iter()
+        .filter(|body| {
+            body["instructions"]
+                .as_str()
+                .is_some_and(|text| text.contains("\nUse begin_task"))
+                && body["input"].as_array().is_some_and(|input| {
+                    input.iter().any(|item| {
+                        item["role"] == "user"
+                            && item["content"] == "Use the summarized conversation"
+                    })
+                })
+        })
+        .collect();
+    assert_eq!(bodies.len(), 1);
+    let body = bodies[0];
     assert!(body["instructions"]
         .as_str()
         .unwrap()
@@ -794,11 +845,24 @@ fn legacy_replies_migrate_once() {
 }
 #[test]
 fn restart_mid_run_resumes_without_rerunning_committed_tool() {
-    let mut f = Fixture::new(false);
+    let mut f = Fixture::new(true);
     let c = f.conversation();
     f.send(&c, "recover", "Question");
+    assert_eq!(f.done(&c, "recover")["body"], "Bonjour **vous**");
+    wait("initial recovery exchange finished", || {
+        f.provider.status()["titling"] == false
+    });
     let db = f.db();
     let old = f.run("recover");
+    assert_eq!(old.status, RunStatus::Finished);
+    let effect = f
+        .app
+        .invoke_tool("grokbot", "remember", json!({"text":"Only once"}))
+        .unwrap();
+    let ToolOutcome::Done { ref output } = effect else {
+        panic!("remember did not commit")
+    };
+    let fact_id = output["fact"]["fact_id"].as_str().unwrap().to_owned();
     let mut run = Run {
         run_id: "recover-run".into(),
         trigger: Trigger::UserMessage {
@@ -807,12 +871,20 @@ fn restart_mid_run_resumes_without_rerunning_committed_tool() {
         },
         status: RunStatus::Queued,
         turn_end: None,
-        ..old
+        ..old.clone()
     };
     let tx = db.unchecked_transaction().unwrap();
     run = model::start(&tx, &run).unwrap();
-    model::set_running_at(&tx, &run.run_id, 1).unwrap();
-    tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES (?1,?2,0,'simulated')",params![run.run_id,serde_json::to_string(&HistoryItem{entry_id:"recover".into(),role:Role::User,text:"Question".into(),images:vec![],tool_items:vec![]}).unwrap()]).unwrap();
+    model::set_running_at(
+        &tx,
+        &run.run_id,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64,
+    )
+    .unwrap();
+    assert_eq!(tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) SELECT ?1,input_json,1,model FROM wrapper_engine_runs WHERE run_id=?2",params![run.run_id,old.run_id]).unwrap(), 1);
     store::append_event(
         &tx,
         &run.run_id,
@@ -824,7 +896,7 @@ fn restart_mid_run_resumes_without_rerunning_committed_tool() {
         &tx,
         &run.run_id,
         RunEventKind::ToolResult,
-        &json!({"call_id":"kept","outcome":{"status":"done","output":"Committed"}}),
+        &json!({"call_id":"kept","outcome":effect}),
     )
     .unwrap();
     store::append_event(
@@ -834,11 +906,26 @@ fn restart_mid_run_resumes_without_rerunning_committed_tool() {
         &json!({"response":2,"text":"Abandoned partial"}),
     )
     .unwrap();
+    store::save_budget_usage(
+        &tx,
+        &run.run_id,
+        &grokbot_engine::model::BudgetUsage {
+            model_calls: 2,
+            tool_calls: 1,
+            elapsed_ms: 0,
+        },
+    )
+    .unwrap();
     tx.commit().unwrap();
     f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
     assert_eq!(f.run("recover").status, RunStatus::Interrupted);
     f.app.tick(1000);
+    wait("committed tool recovery", || {
+        f.run("recover").status == RunStatus::Finished
+    });
     assert_eq!(f.run("recover").status, RunStatus::Finished);
+    assert_eq!(f.run("recover").run_id, run.run_id);
+    assert_eq!(f.reply(&c, "recover")["body"], "Bonjour **vous**");
     assert!(!f.reply(&c, "recover")["body"]
         .as_str()
         .unwrap()
@@ -851,14 +938,71 @@ fn restart_mid_run_resumes_without_rerunning_committed_tool() {
             .count(),
         1
     );
+    assert_eq!(
+        store::events(&db, &run.run_id, 0)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == RunEventKind::ToolCall)
+            .count(),
+        1
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM memory_facts WHERE bot_id='grokbot' AND text='Only once' AND status='active'",
+            [],
+            |r| r.get::<_, usize>(0),
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT fact_id FROM memory_facts WHERE bot_id='grokbot' AND text='Only once' AND status='active'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap(),
+        fact_id
+    );
+    let seen = f.server.seen.lock().unwrap();
+    let bodies: Vec<_> = seen
+        .bodies
+        .iter()
+        .filter(|body| {
+            body["instructions"]
+                .as_str()
+                .is_some_and(|text| text.contains("\nUse begin_task"))
+                && body["input"].as_array().is_some_and(|input| {
+                    input.iter().any(|item| {
+                        item["type"] == "function_call_output" && item["call_id"] == "kept"
+                    })
+                })
+        })
+        .collect();
+    assert_eq!(bodies.len(), 1);
+    let body = bodies[0];
+    let outputs: Vec<_> = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "function_call_output" && item["call_id"] == "kept")
+        .collect();
+    assert_eq!(outputs.len(), 1);
+    assert!(outputs[0]["output"].as_str().unwrap().contains(&fact_id));
+    assert!(!body.to_string().contains("Abandoned partial"));
 }
 #[test]
 fn stop_keeps_partial_text_and_regenerate_increments_attempt() {
-    let mut f = Fixture::new(false);
+    let mut f = Fixture::new(true);
     let c = f.conversation();
     f.send(&c, "stop", "Question");
+    assert_eq!(f.done(&c, "stop")["body"], "Bonjour **vous**");
+    wait("initial stop exchange finished", || {
+        f.provider.status()["titling"] == false
+    });
     let db = f.db();
     let old = f.run("stop");
+    assert_eq!(old.status, RunStatus::Finished);
     let run = Run {
         run_id: "stop-run".into(),
         trigger: Trigger::UserMessage {
@@ -867,12 +1011,20 @@ fn stop_keeps_partial_text_and_regenerate_increments_attempt() {
         },
         status: RunStatus::Queued,
         turn_end: None,
-        ..old
+        ..old.clone()
     };
     let tx = db.unchecked_transaction().unwrap();
     model::start(&tx, &run).unwrap();
-    model::set_running_at(&tx, &run.run_id, 1).unwrap();
-    tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) SELECT ?1,input_json,live,model FROM wrapper_engine_runs WHERE run_id<>?1 LIMIT 1",[&run.run_id]).unwrap();
+    model::set_running_at(
+        &tx,
+        &run.run_id,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64,
+    )
+    .unwrap();
+    assert_eq!(tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) SELECT ?1,input_json,1,model FROM wrapper_engine_runs WHERE run_id=?2",params![run.run_id,old.run_id]).unwrap(), 1);
     store::append_event(
         &tx,
         &run.run_id,
@@ -888,6 +1040,10 @@ fn stop_keeps_partial_text_and_regenerate_increments_attempt() {
     let reply = f.reply(&c, "stop");
     assert_eq!(reply["state"], "stopped");
     assert_eq!(reply["body"], "Visible partial");
+    let stopped = store::required(&db, &run.run_id).unwrap();
+    assert_eq!(stopped.status, RunStatus::Cancelled);
+    assert_eq!(stopped.turn_end, Some(TurnEnd::Stopped));
+    let stopped_events = store::events(&db, &run.run_id, 0).unwrap();
     f.post(
         "/api/regenerate",
         json!({"conversation_id":c,"message_id":"stop"}),
@@ -899,6 +1055,16 @@ fn stop_keeps_partial_text_and_regenerate_increments_attempt() {
             attempt: 2
         }
     );
+    assert_eq!(f.done(&c, "stop")["body"], "Bonjour **vous**");
+    assert_eq!(f.run("stop").status, RunStatus::Finished);
+    assert_ne!(f.run("stop").run_id, run.run_id);
+    assert_eq!(
+        store::required(&db, &run.run_id).unwrap().status,
+        RunStatus::Cancelled
+    );
+    assert!(store::events(&db, &run.run_id, 0)
+        .unwrap()
+        .starts_with(&stopped_events));
 }
 
 #[test]
@@ -906,11 +1072,16 @@ fn pending_wake_is_delivered_by_tick_only_after_committed_resume() {
     use grokbot_forms::requests::{
         self, Field, FieldType, HumanInputRequest, InputKind, RequestStatus,
     };
-    let mut f = Fixture::new(false);
+    let mut f = Fixture::new(true);
     let c = f.conversation();
     f.send(&c, "wake", "Question");
+    assert_eq!(f.done(&c, "wake")["body"], "Bonjour **vous**");
+    wait("initial wake exchange finished", || {
+        f.provider.status()["titling"] == false
+    });
     let db = f.db();
     let old = f.run("wake");
+    assert_eq!(old.status, RunStatus::Finished);
     let run = Run {
         run_id: "wake-run".into(),
         trigger: Trigger::UserMessage {
@@ -919,12 +1090,20 @@ fn pending_wake_is_delivered_by_tick_only_after_committed_resume() {
         },
         status: RunStatus::Queued,
         turn_end: None,
-        ..old
+        ..old.clone()
     };
     let tx = db.unchecked_transaction().unwrap();
     model::start(&tx, &run).unwrap();
-    model::set_running_at(&tx, &run.run_id, 1).unwrap();
-    tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) SELECT ?1,input_json,0,'simulated' FROM wrapper_engine_runs WHERE run_id<>?1 LIMIT 1",[&run.run_id]).unwrap();
+    model::set_running_at(
+        &tx,
+        &run.run_id,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64,
+    )
+    .unwrap();
+    assert_eq!(tx.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) SELECT ?1,input_json,1,model FROM wrapper_engine_runs WHERE run_id=?2",params![run.run_id,old.run_id]).unwrap(), 1);
     requests::create(
         &tx,
         &HumanInputRequest {
@@ -974,6 +1153,8 @@ fn pending_wake_is_delivered_by_tick_only_after_committed_resume() {
     let wake =
         store::enqueue_wake(&tx, &run.run_id, WakeCause::Form, &receipt.resolution_id).unwrap();
     requests::attach_wake(&tx, &receipt.resolution_id, &wake).unwrap();
+    assert_eq!(f.run("wake").status, RunStatus::AwaitingHumanInput);
+    assert!(store::pending_wakes(&f.db()).unwrap().is_empty());
     tx.commit().unwrap();
     assert_eq!(
         store::wake_status(&db, &wake.wake_id).unwrap(),
@@ -994,7 +1175,22 @@ fn pending_wake_is_delivered_by_tick_only_after_committed_resume() {
         .unwrap()
         .remove(0);
     assert_eq!(resumed.kind, RunEventKind::Resumed);
+    wait("committed wake response", || {
+        f.run("wake").status == RunStatus::Finished
+    });
     assert_eq!(f.run("wake").status, RunStatus::Finished);
+    assert_eq!(f.run("wake").run_id, run.run_id);
+    assert_eq!(f.reply(&c, "wake")["body"], "Bonjour **vous**");
+    assert_eq!(
+        requests::get(&db, "form-request").unwrap().unwrap().status,
+        RequestStatus::Resolved {
+            resolution_id: receipt.resolution_id.clone()
+        }
+    );
+    assert_eq!(
+        requests::resolved_values(&db, &receipt.resolution_id).unwrap(),
+        json!({"answer":"A validated answer"})
+    );
     f.app.tick(1002);
     assert_eq!(
         store::events(&db, &run.run_id, 0)
@@ -1003,6 +1199,13 @@ fn pending_wake_is_delivered_by_tick_only_after_committed_resume() {
             .filter(|e| e.kind == RunEventKind::Resumed)
             .count(),
         1
+    );
+    assert_eq!(
+        store::wake_status(&db, &wake.wake_id).unwrap(),
+        WakeStatus::Delivered {
+            run_id: run.run_id,
+            first_event_seq
+        }
     );
 }
 
@@ -1191,23 +1394,47 @@ fn linked_upload_uses_typed_image_and_reset_hides_its_caption() {
 
 #[test]
 fn same_message_id_in_two_conversations_replies_in_both() {
-    let mut f = Fixture::new(false);
+    let mut f = Fixture::new(true);
     let a = f.conversation();
     let b = f.conversation();
     f.send(&a, "same", "Question A");
+    assert_eq!(f.done(&a, "same")["body"], "Bonjour **vous**");
     f.send(&b, "same", "Question B");
+    let reply_b = f.done(&b, "same");
+    assert_eq!(reply_b["body"], "Bonjour **vous**");
     assert_eq!(f.reply(&a, "same")["state"], "echoed");
     assert_eq!(f.reply(&b, "same")["state"], "echoed");
     let runs_a = store::runs_for_conversation(&f.db(), &a).unwrap();
     let runs_b = store::runs_for_conversation(&f.db(), &b).unwrap();
     assert_ne!(runs_a[0].run_id, runs_b[0].run_id);
     assert_ne!(runs_a[0].trigger, runs_b[0].trigger);
+    assert_eq!(runs_a[0].status, RunStatus::Finished);
+    assert_eq!(runs_b[0].status, RunStatus::Finished);
     f.post(
         "/api/regenerate",
         json!({"conversation_id":a,"message_id":"same"}),
     );
+    assert_eq!(f.done(&a, "same")["body"], "Bonjour **vous**");
     assert_eq!(store::runs_for_conversation(&f.db(), &a).unwrap().len(), 2);
     assert_eq!(store::runs_for_conversation(&f.db(), &b).unwrap().len(), 1);
+    let regenerated = store::runs_for_conversation(&f.db(), &a)
+        .unwrap()
+        .into_iter()
+        .find(|run| run.run_id != runs_a[0].run_id)
+        .unwrap();
+    assert_eq!(regenerated.status, RunStatus::Finished);
+    assert_eq!(
+        regenerated.trigger,
+        Trigger::UserMessage {
+            message_id: format!("{a}/same"),
+            attempt: 1
+        }
+    );
+    assert_eq!(
+        store::required(&f.db(), &runs_b[0].run_id).unwrap(),
+        runs_b[0]
+    );
+    assert_eq!(f.reply(&b, "same"), reply_b);
 }
 
 #[test]

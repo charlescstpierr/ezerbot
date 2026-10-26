@@ -1,0 +1,66 @@
+[
+  {
+    "file": "pages/dark-1440x900.png",
+    "sha": "7118a6e4a518a7bd1330d02df8a251dcaa70d91c",
+    "theme": "dark",
+    "ihdr": [
+      1440,
+      900
+    ],
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "dpr": 1,
+      "theme": "dark"
+    },
+    "sha256": "665135203bf0ba13219b75a11dfbaad4960d82f238a2e7c2f35b94b0d8822c66"
+  },
+  {
+    "file": "pages/dark-820x560.png",
+    "sha": "7118a6e4a518a7bd1330d02df8a251dcaa70d91c",
+    "theme": "dark",
+    "ihdr": [
+      820,
+      560
+    ],
+    "viewport": {
+      "width": 820,
+      "height": 560,
+      "dpr": 1,
+      "theme": "dark"
+    },
+    "sha256": "131421e4a7e7ea68d4ab90494ab37dc20ac1edeb1732a21b253f33717a74bc46"
+  },
+  {
+    "file": "pages/light-1440x900.png",
+    "sha": "7118a6e4a518a7bd1330d02df8a251dcaa70d91c",
+    "theme": "light",
+    "ihdr": [
+      1440,
+      900
+    ],
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "dpr": 1,
+      "theme": "light"
+    },
+    "sha256": "ef7a6de901aea287021e5e4e43a0eb48a2b07208f3ec6ccb567dcd41b64bd740"
+  },
+  {
+    "file": "pages/light-820x560.png",
+    "sha": "7118a6e4a518a7bd1330d02df8a251dcaa70d91c",
+    "theme": "light",
+    "ihdr": [
+      820,
+      560
+    ],
+    "viewport": {
+      "width": 820,
+      "height": 560,
+      "dpr": 1,
+      "theme": "light"
+    },
+    "sha256": "fb3836e55eee58ee3f6645c43238c831924e8adfb6b5f2978dac048d9de3dfd0"
+  }
+]

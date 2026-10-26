@@ -1,0 +1,210 @@
+✖ les mises à jour préservent le rail en light à 1440×900 (1440.168639ms)
+✖ les mises à jour préservent le rail en light à 820×560 (1413.840956ms)
+✖ les mises à jour préservent le rail en dark à 1440×900 (1409.127385ms)
+✖ les mises à jour préservent le rail en dark à 820×560 (1454.507508ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 0
+ℹ fail 4
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5843.256964
+
+✖ failing tests:
+
+test at app/ui/updates-browser.test.cjs:9:3
+✖ les mises à jour préservent le rail en light à 1440×900 (1440.168639ms)
+  AssertionError [ERR_ASSERTION]: disponible: Notifications et Réglages se déplacent {"rail":{"x":9,"y":9,"width":48,"height":882,"top":9,"right":57,"bottom":891,"left":9},"buttons":[{"x":0.03125,"y":746.8125,"width":38,"height":38,"top":746.8125,"right":38.03125,"bottom":784.8125,"left":0.03125},{"x":0.03125,"y":841,"width":38,"height":38,"top":841,"right":38.03125,"bottom":879,"left":0.03125}],"corner":{"x":2.03125,"y":790.8125,"width":60.9375,"height":36.1875,"top":790.8125,"right":62.96875,"bottom":827,"left":2.03125},"content":{"x":57,"y":9,"width":212,"height":882,"top":9,"right":269,"bottom":891,"left":57},"contained":false,"hitTargets":true,"legible":true,"separate":false,"label":"Mettre à jour","hidden":false}
+  + actual - expected
+  
+    [
+      {
+  +     bottom: 784.8125,
+  -     bottom: 835,
+        height: 38,
+  +     left: 0.03125,
+  +     right: 38.03125,
+  +     top: 746.8125,
+  -     left: 13.5,
+  -     right: 51.5,
+  -     top: 797,
+        width: 38,
+  +     x: 0.03125,
+  +     y: 746.8125
+  -     x: 13.5,
+  -     y: 797
+      },
+      {
+        bottom: 879,
+        height: 38,
+  +     left: 0.03125,
+  +     right: 38.03125,
+  -     left: 13.5,
+  -     right: 51.5,
+        top: 841,
+        width: 38,
+  +     x: 0.03125,
+  -     x: 13.5,
+        y: 841
+      }
+    ]
+  
+      at check (/Users/cstpierrecharles/.treehouse/pm/ez-i561/app/ui/updates-browser.test.cjs:28:14)
+      at async TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i561/app/ui/updates-browser.test.cjs:33:5)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: [ { x: 0.03125, y: 746.8125, width: 38, height: 38, top: 746.8125, right: 38.03125, bottom: 784.8125, left: 0.03125 }, { x: 0.03125, y: 841, width: 38, height: 38, top: 841, right: 38.03125, bottom: 879, left: 0.03125 } ],
+    expected: [ { x: 13.5, y: 797, width: 38, height: 38, top: 797, right: 51.5, bottom: 835, left: 13.5 }, { x: 13.5, y: 841, width: 38, height: 38, top: 841, right: 51.5, bottom: 879, left: 13.5 } ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/updates-browser.test.cjs:9:3
+✖ les mises à jour préservent le rail en light à 820×560 (1413.840956ms)
+  AssertionError [ERR_ASSERTION]: disponible: Notifications et Réglages se déplacent {"rail":{"x":9,"y":9,"width":48,"height":542,"top":9,"right":57,"bottom":551,"left":9},"buttons":[{"x":0.03125,"y":406.8125,"width":38,"height":38,"top":406.8125,"right":38.03125,"bottom":444.8125,"left":0.03125},{"x":0.03125,"y":501,"width":38,"height":38,"top":501,"right":38.03125,"bottom":539,"left":0.03125}],"corner":{"x":2.03125,"y":450.8125,"width":60.9375,"height":36.1875,"top":450.8125,"right":62.96875,"bottom":487,"left":2.03125},"content":{"x":57,"y":9,"width":186,"height":542,"top":9,"right":243,"bottom":551,"left":57},"contained":false,"hitTargets":true,"legible":true,"separate":false,"label":"Mettre à jour","hidden":false}
+  + actual - expected
+  
+    [
+      {
+  +     bottom: 444.8125,
+  -     bottom: 495,
+        height: 38,
+  +     left: 0.03125,
+  +     right: 38.03125,
+  +     top: 406.8125,
+  -     left: 13.5,
+  -     right: 51.5,
+  -     top: 457,
+        width: 38,
+  +     x: 0.03125,
+  +     y: 406.8125
+  -     x: 13.5,
+  -     y: 457
+      },
+      {
+        bottom: 539,
+        height: 38,
+  +     left: 0.03125,
+  +     right: 38.03125,
+  -     left: 13.5,
+  -     right: 51.5,
+        top: 501,
+        width: 38,
+  +     x: 0.03125,
+  -     x: 13.5,
+        y: 501
+      }
+    ]
+  
+      at check (/Users/cstpierrecharles/.treehouse/pm/ez-i561/app/ui/updates-browser.test.cjs:28:14)
+      at async TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i561/app/ui/updates-browser.test.cjs:33:5)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: [ { x: 0.03125, y: 406.8125, width: 38, height: 38, top: 406.8125, right: 38.03125, bottom: 444.8125, left: 0.03125 }, { x: 0.03125, y: 501, width: 38, height: 38, top: 501, right: 38.03125, bottom: 539, left: 0.03125 } ],
+    expected: [ { x: 13.5, y: 457, width: 38, height: 38, top: 457, right: 51.5, bottom: 495, left: 13.5 }, { x: 13.5, y: 501, width: 38, height: 38, top: 501, right: 51.5, bottom: 539, left: 13.5 } ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/updates-browser.test.cjs:9:3
+✖ les mises à jour préservent le rail en dark à 1440×900 (1409.127385ms)
+  AssertionError [ERR_ASSERTION]: disponible: Notifications et Réglages se déplacent {"rail":{"x":9,"y":9,"width":48,"height":882,"top":9,"right":57,"bottom":891,"left":9},"buttons":[{"x":0.03125,"y":746.8125,"width":38,"height":38,"top":746.8125,"right":38.03125,"bottom":784.8125,"left":0.03125},{"x":0.03125,"y":841,"width":38,"height":38,"top":841,"right":38.03125,"bottom":879,"left":0.03125}],"corner":{"x":2.03125,"y":790.8125,"width":60.9375,"height":36.1875,"top":790.8125,"right":62.96875,"bottom":827,"left":2.03125},"content":{"x":57,"y":9,"width":212,"height":882,"top":9,"right":269,"bottom":891,"left":57},"contained":false,"hitTargets":true,"legible":true,"separate":false,"label":"Mettre à jour","hidden":false}
+  + actual - expected
+  
+    [
+      {
+  +     bottom: 784.8125,
+  -     bottom: 835,
+        height: 38,
+  +     left: 0.03125,
+  +     right: 38.03125,
+  +     top: 746.8125,
+  -     left: 13.5,
+  -     right: 51.5,
+  -     top: 797,
+        width: 38,
+  +     x: 0.03125,
+  +     y: 746.8125
+  -     x: 13.5,
+  -     y: 797
+      },
+      {
+        bottom: 879,
+        height: 38,
+  +     left: 0.03125,
+  +     right: 38.03125,
+  -     left: 13.5,
+  -     right: 51.5,
+        top: 841,
+        width: 38,
+  +     x: 0.03125,
+  -     x: 13.5,
+        y: 841
+      }
+    ]
+  
+      at check (/Users/cstpierrecharles/.treehouse/pm/ez-i561/app/ui/updates-browser.test.cjs:28:14)
+      at async TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i561/app/ui/updates-browser.test.cjs:33:5)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: [ { x: 0.03125, y: 746.8125, width: 38, height: 38, top: 746.8125, right: 38.03125, bottom: 784.8125, left: 0.03125 }, { x: 0.03125, y: 841, width: 38, height: 38, top: 841, right: 38.03125, bottom: 879, left: 0.03125 } ],
+    expected: [ { x: 13.5, y: 797, width: 38, height: 38, top: 797, right: 51.5, bottom: 835, left: 13.5 }, { x: 13.5, y: 841, width: 38, height: 38, top: 841, right: 51.5, bottom: 879, left: 13.5 } ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at app/ui/updates-browser.test.cjs:9:3
+✖ les mises à jour préservent le rail en dark à 820×560 (1454.507508ms)
+  AssertionError [ERR_ASSERTION]: disponible: Notifications et Réglages se déplacent {"rail":{"x":9,"y":9,"width":48,"height":542,"top":9,"right":57,"bottom":551,"left":9},"buttons":[{"x":0.03125,"y":406.8125,"width":38,"height":38,"top":406.8125,"right":38.03125,"bottom":444.8125,"left":0.03125},{"x":0.03125,"y":501,"width":38,"height":38,"top":501,"right":38.03125,"bottom":539,"left":0.03125}],"corner":{"x":2.03125,"y":450.8125,"width":60.9375,"height":36.1875,"top":450.8125,"right":62.96875,"bottom":487,"left":2.03125},"content":{"x":57,"y":9,"width":186,"height":542,"top":9,"right":243,"bottom":551,"left":57},"contained":false,"hitTargets":true,"legible":true,"separate":false,"label":"Mettre à jour","hidden":false}
+  + actual - expected
+  
+    [
+      {
+  +     bottom: 444.8125,
+  -     bottom: 495,
+        height: 38,
+  +     left: 0.03125,
+  +     right: 38.03125,
+  +     top: 406.8125,
+  -     left: 13.5,
+  -     right: 51.5,
+  -     top: 457,
+        width: 38,
+  +     x: 0.03125,
+  +     y: 406.8125
+  -     x: 13.5,
+  -     y: 457
+      },
+      {
+        bottom: 539,
+        height: 38,
+  +     left: 0.03125,
+  +     right: 38.03125,
+  -     left: 13.5,
+  -     right: 51.5,
+        top: 501,
+        width: 38,
+  +     x: 0.03125,
+  -     x: 13.5,
+        y: 501
+      }
+    ]
+  
+      at check (/Users/cstpierrecharles/.treehouse/pm/ez-i561/app/ui/updates-browser.test.cjs:28:14)
+      at async TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i561/app/ui/updates-browser.test.cjs:33:5)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: [ { x: 0.03125, y: 406.8125, width: 38, height: 38, top: 406.8125, right: 38.03125, bottom: 444.8125, left: 0.03125 }, { x: 0.03125, y: 501, width: 38, height: 38, top: 501, right: 38.03125, bottom: 539, left: 0.03125 } ],
+    expected: [ { x: 13.5, y: 457, width: 38, height: 38, top: 457, right: 51.5, bottom: 495, left: 13.5 }, { x: 13.5, y: 501, width: 38, height: 38, top: 501, right: 51.5, bottom: 539, left: 13.5 } ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }

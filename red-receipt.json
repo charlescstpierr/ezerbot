@@ -1,0 +1,23 @@
+{
+  "binary": "r1-wrapper",
+  "sha": "be2cedd617db0161bab4d3192170dc9369497056",
+  "sha256": "d49180b6a88ad6e7c4d9e4041759e804813afb0236d06e2bfc5afc146f51fb2b",
+  "embedded_sha_found": true,
+  "R1_assets_unchanged_at_red": {
+    "index.html": true,
+    "styles.css": true,
+    "panels/updates.js": true,
+    "panels/updates.css": true
+  },
+  "http_source_identity_asserted": [
+    "/",
+    "/styles.css"
+  ],
+  "command": "EZERBOT_UPDATES_TEST_BINARY=r2/r1-wrapper test-gate node --test --test-concurrency=1 app/ui/updates-browser.test.cjs",
+  "log": "red-buttons.log",
+  "result": {
+    "tests": 4,
+    "fail": 4,
+    "cause": "Notifications et Réglages se déplacent. Coin update hors de la barre latérale."
+  }
+}

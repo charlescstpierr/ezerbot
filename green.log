@@ -1,0 +1,21 @@
+test-gate: 1 places prises, attente (0 s)...
+test-gate: 1 places prises, attente (60 s)...
+test-gate: 1 places prises, attente (121 s)...
+test-gate: 1 places prises, attente (182 s)...
+test-gate: 1 places prises, attente (243 s)...
+✔ une compilation ratée s’affiche en rouge dans le coin et reste dans les Réglages (6.03471ms)
+✔ le redémarrage attend discrètement une réunion ou un enregistrement (2.101213ms)
+✔ le premier état de capture est toujours envoyé, même sans capture (1.004291ms)
+✔ un hôte tardif reçoit une seule action sans déplacer Réglages (1.0646ms)
+✔ les mises à jour préservent le rail en light à 1440×900 (1853.995173ms)
+✔ les mises à jour préservent le rail en light à 820×560 (1896.975035ms)
+✔ les mises à jour préservent le rail en dark à 1440×900 (1755.700818ms)
+✔ les mises à jour préservent le rail en dark à 820×560 (1749.703914ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7468.174678

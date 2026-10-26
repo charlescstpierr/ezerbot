@@ -1,0 +1,63 @@
+Conversations
+Nouvelle conversation
+⌘ N
+⌘ K
+Mémoire
+0
+BOTS
+Ezerbot
+Atelier
+Lecture
+Projets
+Cuisine
+SUJETS
+
+Regroupez plusieurs fils sous un sujet.
+
+CONVERSATIONS
+
+Aujourd’hui
+
+Notes du projet 32
+Notes du projet 31
+Notes du projet 30
+Notes du projet 29
+Notes du projet 28
+Notes du projet 27
+Notes du projet 26
+Notes du projet 25
+Notes du projet 24
+Notes du projet 23
+Notes du projet 22
+Notes du projet 21
+Notes du projet 20
+Notes du projet 19
+Notes du projet 18
+Notes du projet 17
+Notes du projet 16
+Notes du projet 15
+Notes du projet 14
+Notes du projet 13
+Notes du projet 12
+Notes du projet 11
+Notes du projet 10
+Notes du projet 9
+Notes du projet 8
+Notes du projet 7
+Notes du projet 6
+Notes du projet 5
+Explorer le code Rust
+Idées de nom
+Relire l’annonce
+Plan en trois étapes
+Espace personnel
+/
+Mémoire · 0 souvenir
+Créer un groupe
+Graphe
+Liste
+Ajouter un souvenir
+
+Tout ce que vos bots ont retenu : souvenirs privés, d’équipe et de sujet.
+
+Aucun souvenir pour l’instant. Vos bots retiendront ici ce qui compte pour vous.

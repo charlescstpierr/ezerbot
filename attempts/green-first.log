@@ -1,0 +1,37 @@
+✔ une compilation ratée s’affiche en rouge dans le coin et reste dans les Réglages (4.629216ms)
+✔ le redémarrage attend discrètement une réunion ou un enregistrement (1.646779ms)
+✔ le premier état de capture est toujours envoyé, même sans capture (0.835887ms)
+✔ un hôte tardif reçoit une seule action sans déplacer Réglages (0.877173ms)
+✔ les mises à jour préservent le rail en light à 1440×900 (2367.708144ms)
+✖ les mises à jour préservent le rail en light à 820×560 (1710.019456ms)
+✔ les mises à jour préservent le rail en dark à 1440×900 (1639.39302ms)
+✔ les mises à jour préservent le rail en dark à 820×560 (1667.017156ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 7
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7587.512515
+
+✖ failing tests:
+
+test at app/ui/updates-browser.test.cjs:9:3
+✖ les mises à jour préservent le rail en light à 820×560 (1710.019456ms)
+  Error: ENOTEMPTY, Directory not empty: /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i561/r2/tmp/grokbot-fixture-FpKfIf '/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i561/r2/tmp/grokbot-fixture-FpKfIf'
+      at rmSync (node:fs:1222:18)
+      at TestContext.<anonymous> (/Users/cstpierrecharles/.treehouse/pm/ez-i561/app/ui/wrapper-chrome-fixture.cjs:221:5)
+      at TestHook.runInAsyncScope (node:async_hooks:227:14)
+      at TestHook.run (node:internal/test_runner/test:1325:25)
+      at TestHook.run (node:internal/test_runner/test:1669:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.runHook (node:internal/test_runner/test:1212:20)
+      at after (node:internal/test_runner/test:1265:20)
+      at Test.run (node:internal/test_runner/test:1351:13)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {
+    errno: 66,
+    code: 'ENOTEMPTY',
+    path: '/Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i561/r2/tmp/grokbot-fixture-FpKfIf',
+    syscall: 'rm'
+  }

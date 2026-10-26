@@ -1,0 +1,64 @@
+{
+  "runs": [
+    {
+      "run": "final",
+      "build_sha": "7118a6e4a518a7bd1330d02df8a251dcaa70d91c",
+      "wrapper_pid": 6182,
+      "wrapper_pid_alive": false,
+      "cleanup": {
+        "auth": "arrete",
+        "wrapper": "arrete",
+        "fake": "arrete",
+        "chrome": "arrete",
+        "axi": {
+          "session": "pm-i561",
+          "result": "arrete",
+          "code": 0
+        }
+      },
+      "home_removed": true
+    },
+    {
+      "run": "final-v2",
+      "build_sha": "7118a6e4a518a7bd1330d02df8a251dcaa70d91c",
+      "wrapper_pid": 14980,
+      "wrapper_pid_alive": false,
+      "cleanup": {
+        "auth": "arrete",
+        "wrapper": "arrete",
+        "fake": "arrete",
+        "chrome": "arrete",
+        "axi": {
+          "session": "pm-i561",
+          "result": "arrete",
+          "code": 0
+        }
+      },
+      "home_removed": true
+    },
+    {
+      "run": "final-pages",
+      "build_sha": "7118a6e4a518a7bd1330d02df8a251dcaa70d91c",
+      "wrapper_pid": 20810,
+      "wrapper_pid_alive": false,
+      "cleanup": {
+        "auth": "arrete",
+        "wrapper": "arrete",
+        "fake": "arrete",
+        "chrome": "arrete",
+        "axi": {
+          "session": "pm-i561",
+          "result": "arrete",
+          "code": 0
+        }
+      },
+      "home_removed": true
+    }
+  ],
+  "processes_in_tmpdir": [],
+  "signed_run_roots_remaining": 0,
+  "fixture_roots_remaining": 0,
+  "first_attempt_fixture_removed_after_process_check": true,
+  "control_home_removed": true,
+  "scope": "R2 seulement, session pm-i561 et PID lancés par ces preuves."
+}

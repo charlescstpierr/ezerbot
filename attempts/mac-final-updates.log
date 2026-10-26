@@ -1,0 +1,4 @@
+résultat navigateur illisible: result: undefined
+help[1]:
+  Run `chrome-devtools-axi snapshot` to see current page state
+

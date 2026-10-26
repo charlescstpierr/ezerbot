@@ -1,0 +1,3367 @@
+{
+  "checks": [
+    {
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "disponible",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "telechargement",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Téléchargement…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "compilation",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Compilation…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "installation",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Installation…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "redemarrage",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Redémarrage…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "attente",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Après l’enregistrement",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "erreur",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 820.9375,
+          "width": 188,
+          "height": 62.0625,
+          "top": 820.9375,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 811.9375,
+          "top": 9,
+          "right": 269,
+          "bottom": 820.9375,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "La compilation a échoué. L’application actuelle est restée en place. Réessayez depuis la barre latérale.\n×",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "erreur fermée",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "échec HTTP",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 851.96875,
+          "width": 188,
+          "height": 31.03125,
+          "top": 851.96875,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 842.96875,
+          "top": 9,
+          "right": 269,
+          "bottom": 851.96875,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Service de mise à jour indisponible.\n×",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "nouvelle tentative",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Téléchargement…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "liste défilée avec action disponible",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "repos",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "top": 0,
+          "right": 0,
+          "bottom": 0,
+          "left": 0
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 882,
+          "top": 9,
+          "right": 269,
+          "bottom": 891,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour×",
+        "hidden": true
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "disponible",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "telechargement",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Téléchargement…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "compilation",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Compilation…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "installation",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Installation…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "redemarrage",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Redémarrage…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "attente",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Après l’enregistrement",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "erreur",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 465.421875,
+          "width": 162,
+          "height": 77.578125,
+          "top": 465.421875,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 456.421875,
+          "top": 9,
+          "right": 243,
+          "bottom": 465.421875,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "La compilation a échoué. L’application actuelle est restée en place. Réessayez depuis la barre latérale.\n×",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "erreur fermée",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "échec HTTP",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 511.96875,
+          "width": 162,
+          "height": 31.03125,
+          "top": 511.96875,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 502.96875,
+          "top": 9,
+          "right": 243,
+          "bottom": 511.96875,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Service de mise à jour indisponible.\n×",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "nouvelle tentative",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Téléchargement…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "liste défilée avec action disponible",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "dark",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "repos",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "top": 0,
+          "right": 0,
+          "bottom": 0,
+          "left": 0
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 542,
+          "top": 9,
+          "right": 243,
+          "bottom": 551,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour×",
+        "hidden": true
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "disponible",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "telechargement",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Téléchargement…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "compilation",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Compilation…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "installation",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Installation…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "redemarrage",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Redémarrage…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "attente",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Après l’enregistrement",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "erreur",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 820.9375,
+          "width": 188,
+          "height": 62.0625,
+          "top": 820.9375,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 811.9375,
+          "top": 9,
+          "right": 269,
+          "bottom": 820.9375,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "La compilation a échoué. L’application actuelle est restée en place. Réessayez depuis la barre latérale.\n×",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "erreur fermée",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "échec HTTP",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 851.96875,
+          "width": 188,
+          "height": 31.03125,
+          "top": 851.96875,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 842.96875,
+          "top": 9,
+          "right": 269,
+          "bottom": 851.96875,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Service de mise à jour indisponible.\n×",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "nouvelle tentative",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Téléchargement…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "liste défilée avec action disponible",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 861.953125,
+          "width": 188,
+          "height": 21.046875,
+          "top": 861.953125,
+          "right": 257,
+          "bottom": 883,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 852.953125,
+          "top": 9,
+          "right": 269,
+          "bottom": 861.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        1440,
+        900
+      ],
+      "phase": "repos",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 882,
+          "top": 9,
+          "right": 57,
+          "bottom": 891,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 797,
+            "width": 38,
+            "height": 38,
+            "top": 797,
+            "right": 51.5,
+            "bottom": 835,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 841,
+            "width": 38,
+            "height": 38,
+            "top": 841,
+            "right": 51.5,
+            "bottom": 879,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "top": 0,
+          "right": 0,
+          "bottom": 0,
+          "left": 0
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 212,
+          "height": 882,
+          "top": 9,
+          "right": 269,
+          "bottom": 891,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour×",
+        "hidden": true
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "disponible",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "telechargement",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Téléchargement…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "compilation",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Compilation…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "installation",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Installation…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "redemarrage",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Redémarrage…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "attente",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Après l’enregistrement",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "erreur",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 465.421875,
+          "width": 162,
+          "height": 77.578125,
+          "top": 465.421875,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 456.421875,
+          "top": 9,
+          "right": 243,
+          "bottom": 465.421875,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "La compilation a échoué. L’application actuelle est restée en place. Réessayez depuis la barre latérale.\n×",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "erreur fermée",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "échec HTTP",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 511.96875,
+          "width": 162,
+          "height": 31.03125,
+          "top": 511.96875,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 502.96875,
+          "top": 9,
+          "right": 243,
+          "bottom": 511.96875,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Service de mise à jour indisponible.\n×",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "nouvelle tentative",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Téléchargement…",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "liste défilée avec action disponible",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 69,
+          "y": 521.953125,
+          "width": 162,
+          "height": 21.046875,
+          "top": 521.953125,
+          "right": 231,
+          "bottom": 543,
+          "left": 69
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 512.953125,
+          "top": 9,
+          "right": 243,
+          "bottom": 521.953125,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour",
+        "hidden": false
+      }
+    },
+    {
+      "theme": "light",
+      "size": [
+        820,
+        560
+      ],
+      "phase": "repos",
+      "geometry": {
+        "rail": {
+          "x": 9,
+          "y": 9,
+          "width": 48,
+          "height": 542,
+          "top": 9,
+          "right": 57,
+          "bottom": 551,
+          "left": 9
+        },
+        "buttons": [
+          {
+            "x": 13.5,
+            "y": 457,
+            "width": 38,
+            "height": 38,
+            "top": 457,
+            "right": 51.5,
+            "bottom": 495,
+            "left": 13.5
+          },
+          {
+            "x": 13.5,
+            "y": 501,
+            "width": 38,
+            "height": 38,
+            "top": 501,
+            "right": 51.5,
+            "bottom": 539,
+            "left": 13.5
+          }
+        ],
+        "corner": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "top": 0,
+          "right": 0,
+          "bottom": 0,
+          "left": 0
+        },
+        "content": {
+          "x": 57,
+          "y": 9,
+          "width": 186,
+          "height": 542,
+          "top": 9,
+          "right": 243,
+          "bottom": 551,
+          "left": 57
+        },
+        "contained": true,
+        "hitTargets": true,
+        "railChildrenContained": true,
+        "legible": true,
+        "separate": true,
+        "label": "Mettre à jour×",
+        "hidden": true
+      }
+    }
+  ],
+  "calls": [
+    {
+      "path": "/api/updates/apply",
+      "body": {}
+    },
+    {
+      "path": "/api/updates/apply",
+      "body": {}
+    },
+    {
+      "path": "/api/updates/apply",
+      "body": {}
+    },
+    {
+      "path": "/api/updates/apply",
+      "body": {}
+    },
+    {
+      "path": "/api/updates/apply",
+      "body": {}
+    },
+    {
+      "path": "/api/updates/apply",
+      "body": {}
+    },
+    {
+      "path": "/api/updates/apply",
+      "body": {}
+    },
+    {
+      "path": "/api/updates/apply",
+      "body": {}
+    },
+    {
+      "path": "/api/updates/apply",
+      "body": {}
+    },
+    {
+      "path": "/api/updates/apply",
+      "body": {}
+    },
+    {
+      "path": "/api/updates/apply",
+      "body": {}
+    },
+    {
+      "path": "/api/updates/apply",
+      "body": {}
+    }
+  ],
+  "boundary": "fetch /api/state et /api/updates/* simulés avant toute action. Aucun apply transmis au wrapper."
+}

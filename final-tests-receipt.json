@@ -1,0 +1,17 @@
+{
+  "sha": "7118a6e4a518a7bd1330d02df8a251dcaa70d91c",
+  "command_file": "final-tests-command.sh",
+  "working_directory": "/Users/cstpierrecharles/.treehouse/pm/ez-i561",
+  "log": "final-tests.log",
+  "log_sha256": "904768954a36441c5ee15e193408ad90adbfd93903d36f973f407920c440c1c7",
+  "result": {
+    "tests": 425,
+    "pass": 425,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "completed_at": "2026-10-26T03:27:47.415555+00:00",
+  "environment": "Dépendances app/web installées par npm ci --ignore-scripts. Le premier essai sans React est conservé dans attempt-missing-deps-final-tests.log. Même SHA, aucun code changé."
+}

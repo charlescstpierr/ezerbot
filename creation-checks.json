@@ -1,0 +1,19 @@
+{
+  "created": {
+    "id": "346d0299-1336-468a-88f1-e1012e6a5c73",
+    "name": "Assistant preuve"
+  },
+  "sent": {
+    "conversation": "edd53e7ccc639464df402697239c589e",
+    "bot": "346d0299-1336-468a-88f1-e1012e6a5c73",
+    "states": [
+      "echoed"
+    ]
+  },
+  "keyboard": [
+    "Enter on plus",
+    "Meta+n",
+    "type message",
+    "Enter to send"
+  ]
+}

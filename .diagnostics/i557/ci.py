@@ -22,6 +22,7 @@ def gate(seconds, label, command):
     return [sys.executable, str(TOOLS / 'gate.py'), str(OUT / 'cargo.lock'), seconds, str(OUT / (label + '-gate.json')), *command]
 
 def checkpoint(state):
+    state['product_failed'] = any(c['return_code'] != 0 for c in state['configurations'])
     schema.receipt(state)
     (OUT / 'state.json').write_bytes(schema.encoded(state))
 
@@ -231,7 +232,6 @@ def main():
             if sensor.exists():
                 sensor.unlink()
         state['source_restored'] = not bool(git('status', '--porcelain'))
-        state['product_failed'] = any(c['return_code'] != 0 for c in state['configurations'])
         checkpoint(state)
     if not state['source_restored']:
         raise SystemExit('I557 restoration_failed')

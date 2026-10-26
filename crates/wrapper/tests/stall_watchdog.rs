@@ -104,6 +104,9 @@ impl Fixture {
                     started_at: self.start as i64,
                 },
             )?;
+            if status == RunStatus::Queued {
+                return Ok(());
+            }
             let mut run = model::set_running_at(conn, id, self.start as i64)?;
             store::append_event(
                 conn,
@@ -154,6 +157,50 @@ impl Fixture {
     fn tick(&mut self, elapsed: u64) {
         self.clock(elapsed);
         self.app.tick(self.start + elapsed);
+    }
+
+    fn tick_routines(&mut self, elapsed: u64) {
+        self.clock(elapsed);
+        let mut ctx = self.app.feature_context();
+        ctx.now_ms = self.start + elapsed;
+        features::engine::tick_routines(&ctx);
+    }
+
+    fn routine_run(&mut self, id: &str, status: RunStatus) -> String {
+        use grokbot_scheduler::occurrences;
+        let routine = self.post(
+            "/api/routines",
+            json!({
+                "bot_id":"grokbot","name":"Silent routine","prompt":"Wait",
+                "schedule":"@every 1h","time_zone":"UTC","enabled":false
+            }),
+        )["routine"]
+            .clone();
+        let occurrence = occurrences::run_now(
+            &self.conn,
+            routine["routine_id"].as_str().unwrap(),
+            id,
+            self.start as i64,
+        )
+        .unwrap();
+        self.insert_run(
+            id,
+            routine["conversation_id"].as_str().unwrap(),
+            Trigger::Occurrence {
+                occurrence_id: occurrence.occurrence_id.clone(),
+            },
+            status,
+        );
+        occurrences::attach_run(&self.conn, &occurrence.occurrence_id, id).unwrap();
+        occurrence.occurrence_id
+    }
+
+    fn routine_child(&mut self, parent: &str, id: &str, status: RunStatus) {
+        self.child(parent, id, status);
+        self.conn.execute(
+            "UPDATE wrapper_conversations SET parent_id=(SELECT conversation_id FROM engine_runs WHERE run_id=?1) WHERE id=(SELECT conversation_id FROM engine_runs WHERE run_id=?2)",
+            params![parent, id],
+        ).unwrap();
     }
 
     fn state(&mut self) -> Value {
@@ -1284,5 +1331,278 @@ fn stalled_child_notice_obeys_delegation_independently_of_reply_and_preserves_fa
                 delegation_enabled,
             );
         }
+    }
+}
+
+#[test]
+fn routine_only_tick_stops_a_silent_worker_once_without_admitting_user_chats() {
+    let mut f = Fixture::new();
+    stalled_notice_settings(&mut f, "routine", true, true);
+    let occurrence = f.routine_run("routine-run", RunStatus::Running);
+    for (id, status) in [
+        ("queued-chat", RunStatus::Queued),
+        ("interrupted-chat", RunStatus::Interrupted),
+    ] {
+        f.run(id, status);
+        f.conn.execute(
+            "INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES (?1,'{}',1,'')",
+            [id],
+        ).unwrap();
+    }
+    let queued_events = store::events(&f.conn, "queued-chat", 0).unwrap();
+    let interrupted_events = store::events(&f.conn, "interrupted-chat", 0).unwrap();
+    let preferences = f.state()["preferences"].clone();
+    f.tick_routines(0);
+    let worker = BlockedWorker::start(&f, "routine-run");
+    f.tick_routines(180_000);
+    assert_eq!(f.state()["silence"]["routine-run"], f.start);
+    assert_eq!(f.event_count("routine-run", RunEventKind::Cancelled), 0);
+    f.tick_routines(480_000);
+    worker.stopped.recv_timeout(Duration::from_secs(3)).unwrap();
+    let run = store::required(&f.conn, "routine-run").unwrap();
+    assert_eq!(run.status, RunStatus::Cancelled);
+    assert_eq!(run.turn_end, Some(TurnEnd::Stopped));
+    let stalled = f.messages("stalled");
+    assert_eq!(stalled.len(), 1);
+    assert_eq!(
+        stalled[0]["body"],
+        "Arrêté : rien ne bougeait depuis 8 min (dernière étape : slow)."
+    );
+    assert_eq!(stalled[0]["payload"]["run_id"], "routine-run");
+    let count: u32 = f.conn.query_row(
+        "SELECT COUNT(*) FROM wrapper_notifications WHERE id=?1 AND kind='routine' AND card_id='stalled:routine-run'",
+        [format!("routine:{occurrence}")], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 1);
+    f.tick_routines(495_000);
+    f.app.tick_suspended(f.start + 510_000);
+    assert_eq!(
+        store::required(&f.conn, "queued-chat").unwrap().status,
+        RunStatus::Queued
+    );
+    assert_eq!(
+        store::required(&f.conn, "interrupted-chat").unwrap().status,
+        RunStatus::Interrupted
+    );
+    assert_eq!(
+        store::events(&f.conn, "queued-chat", 0).unwrap(),
+        queued_events
+    );
+    assert_eq!(
+        store::events(&f.conn, "interrupted-chat", 0).unwrap(),
+        interrupted_events
+    );
+    let errors: u32 = f.conn.query_row(
+        "SELECT COUNT(*) FROM wrapper_engine_runs WHERE run_id IN ('queued-chat','interrupted-chat') AND error<>''",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(errors, 0);
+    let before_late = store::events(&f.conn, "routine-run", 0).unwrap();
+    let calls = worker.calls.clone();
+    assert_eq!(worker.finish(), RunProgress::Ended(TurnEnd::Stopped));
+    f.tick_routines(525_000);
+    f.tick_routines(540_000);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.event_count("routine-run", RunEventKind::Cancelled), 1);
+    assert_eq!(
+        store::events(&f.conn, "routine-run", 0).unwrap(),
+        before_late
+    );
+    assert_eq!(f.messages("stalled"), stalled);
+    assert_eq!(f.state()["preferences"], preferences);
+    assert_one_stalled_notice(
+        &mut f,
+        &format!("routine:{occurrence}"),
+        "routine",
+        "routine-run",
+        true,
+    );
+}
+
+#[test]
+fn routine_only_tick_stops_a_silent_child_once_and_preserves_live_siblings() {
+    let mut f = Fixture::new();
+    f.routine_run("parent", RunStatus::AwaitingChildren);
+    f.routine_child("parent", "child", RunStatus::Running);
+    f.routine_child("parent", "sibling", RunStatus::Running);
+    f.tick_routines(0);
+    let worker = BlockedWorker::start(&f, "child");
+    f.clock(180_000);
+    f.provider().pulse_run("sibling");
+    f.tick_routines(180_000);
+    assert_eq!(f.state()["silence"]["child"], f.start);
+    f.clock(480_000);
+    f.provider().pulse_run("sibling");
+    f.tick_routines(480_000);
+    worker.stopped.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(
+        store::required(&f.conn, "child").unwrap().status,
+        RunStatus::Cancelled
+    );
+    assert_eq!(
+        store::required(&f.conn, "parent").unwrap().status,
+        RunStatus::AwaitingChildren
+    );
+    assert_eq!(
+        store::required(&f.conn, "sibling").unwrap().status,
+        RunStatus::Running
+    );
+    assert_eq!(f.notification_count("sibling"), 0);
+    assert_eq!(worker.finish(), RunProgress::Ended(TurnEnd::Stopped));
+    f.tick(495_000);
+    f.tick_routines(510_000);
+    assert_eq!(f.event_count("child", RunEventKind::Cancelled), 1);
+    assert_eq!(f.messages("stalled").len(), 1);
+    assert_eq!(f.notification_count("child"), 1);
+    let failed: String = f
+        .conn
+        .query_row(
+            "SELECT json_extract(status,'$.status') FROM delegation_graph WHERE id='edge-child'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(failed, "failed");
+    let wakes: u32 = f.conn.query_row(
+        "SELECT COUNT(*) FROM engine_run_wakes WHERE run_id='parent' AND cause='child' AND reference='edge-child' AND state='pending'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(wakes, 1);
+}
+
+#[test]
+fn routine_only_tick_preserves_human_waits_and_suspended_tick_authority() {
+    for status in [
+        RunStatus::AwaitingApproval,
+        RunStatus::AwaitingHumanInput,
+        RunStatus::Interrupted,
+    ] {
+        let mut f = Fixture::new();
+        f.routine_run("waiting", status);
+        f.routine_run("parent", RunStatus::AwaitingChildren);
+        f.routine_child("parent", "human-child", RunStatus::AwaitingHumanInput);
+        f.tick_routines(0);
+        f.tick_routines(1_200_000);
+        assert_eq!(f.state()["silence"], json!({}));
+        assert_eq!(store::required(&f.conn, "waiting").unwrap().status, status);
+        assert_eq!(
+            store::required(&f.conn, "parent").unwrap().status,
+            RunStatus::AwaitingChildren
+        );
+        assert_eq!(
+            store::required(&f.conn, "human-child").unwrap().status,
+            RunStatus::AwaitingHumanInput
+        );
+        assert!(f.messages("stalled").is_empty());
+        for id in ["waiting", "parent", "human-child"] {
+            assert_eq!(f.event_count(id, RunEventKind::Cancelled), 0);
+        }
+    }
+    let mut f = Fixture::new();
+    f.routine_run("running", RunStatus::Running);
+    f.tick_routines(0);
+    f.clock(480_000);
+    f.app.tick_suspended(f.start + 480_000);
+    assert_eq!(
+        store::required(&f.conn, "running").unwrap().status,
+        RunStatus::Running
+    );
+    assert_eq!(f.state()["silence"], json!({}));
+    f.tick_routines(480_000);
+    assert_eq!(
+        store::required(&f.conn, "running").unwrap().status,
+        RunStatus::Cancelled
+    );
+}
+
+#[test]
+fn routine_only_tick_uses_real_pulses_without_refreshing_its_own_scan() {
+    let mut f = Fixture::new();
+    f.routine_run("pulsing", RunStatus::Running);
+    f.tick_routines(0);
+    for elapsed in (10_000..=720_000).step_by(10_000) {
+        f.clock(elapsed);
+        f.provider().pulse_run("pulsing");
+        f.tick_routines(elapsed);
+        assert_eq!(f.state()["silence"], json!({}));
+        assert_eq!(
+            store::required(&f.conn, "pulsing").unwrap().status,
+            RunStatus::Running
+        );
+    }
+    f.tick_routines(900_000);
+    assert_eq!(f.state()["silence"]["pulsing"], f.start + 720_000);
+    f.clock(901_000);
+    f.provider().pulse_run("pulsing");
+    assert_eq!(f.state()["silence"], json!({}));
+    f.tick_routines(1_381_000);
+    assert_eq!(f.event_count("pulsing", RunEventKind::Cancelled), 1);
+    assert_eq!(f.messages("stalled").len(), 1);
+}
+
+#[test]
+fn routine_only_tick_keeps_routine_and_delegation_notice_preferences_and_restart_dedup() {
+    for category in ["routine", "delegation"] {
+        for enabled in [false, true] {
+            for reply in [false, true] {
+                let mut f = Fixture::new();
+                stalled_notice_settings(&mut f, category, enabled, reply);
+                let occurrence = f.routine_run(
+                    "routine-run",
+                    if category == "routine" {
+                        RunStatus::Running
+                    } else {
+                        RunStatus::AwaitingChildren
+                    },
+                );
+                let (id, run) = if category == "routine" {
+                    (format!("routine:{occurrence}"), "routine-run")
+                } else {
+                    f.routine_child("routine-run", "child", RunStatus::Running);
+                    ("stalled:child".to_owned(), "child")
+                };
+                f.tick_routines(0);
+                f.tick_routines(480_000);
+                f.tick_routines(495_000);
+                assert_eq!(f.event_count(run, RunEventKind::Cancelled), 1);
+                assert_eq!(f.messages("stalled").len(), 1);
+                assert_one_stalled_notice(&mut f, &id, category, run, enabled);
+            }
+        }
+    }
+}
+
+#[test]
+fn routine_only_tick_keeps_dnd_and_focus_delivery_rules() {
+    for (dnd, focused, expected) in [(true, false, 0), (false, true, 0), (false, false, 1)] {
+        let mut f = Fixture::new();
+        let occurrence = f.routine_run("routine-run", RunStatus::Running);
+        let conversation = store::required(&f.conn, "routine-run")
+            .unwrap()
+            .conversation_id;
+        let mut settings = f.app.api("GET", "/api/notifications", b"").unwrap()["settings"].clone();
+        settings["enabled"] = json!(true);
+        settings["routine"] = json!(true);
+        settings["dnd"] = json!(dnd);
+        f.post("/api/notifications/settings", settings.clone());
+        f.tick_routines(0);
+        f.tick_routines(480_000);
+        let polled = f.post(
+            "/api/notifications/poll",
+            json!({
+                "focused":focused,"visible":focused,"conversation_id":conversation,
+            }),
+        );
+        assert_eq!(polled["settings"], settings);
+        assert_eq!(polled["deliveries"].as_array().unwrap().len(), expected);
+        let count: u32 = f
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_notifications WHERE id=?1",
+                [format!("routine:{occurrence}")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

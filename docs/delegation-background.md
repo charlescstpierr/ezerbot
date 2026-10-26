@@ -75,6 +75,7 @@ Le test vérifie une réponse persistée au second message avant de libérer cet
 | Imbrication, mode et contexte refusés | `background_refuses_nested_tasks_unknown_modes_and_inaccessible_selected_context_atomically` |
 | Groupe et routine | `groups_and_routine_tasks_refuse_background_and_keep_wait_delegation` |
 | Nouveau tour concurrent | `return_admission_waits_for_a_concurrent_user_turn_to_finish` |
+| Message reçu après réservation du retour | `a_new_user_message_during_the_return_keeps_both_replies_in_durable_order` |
 | Échec enfant | `a_child_that_ends_without_complete_task_returns_a_failure_through_the_parent_model` |
 
 Les tests internes du module vérifient aussi le contrôle d'attempt, les frontières Task Done et fin du run, l'arrêt d'un retour Interrupted et le texte durable requis pour livrer.

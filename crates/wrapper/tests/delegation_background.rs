@@ -1155,6 +1155,76 @@ fn a_reserved_return_survives_reopening_before_its_first_model_call() {
 }
 
 #[test]
+fn a_new_user_message_during_the_return_keeps_both_replies_in_durable_order() {
+    let mut f = Fixture::new(true);
+    let scenario = one_background(&f);
+    let c = f.conversation();
+    let parent = f.start(&c, "return-before-new-message");
+    let edge = f.children(&parent).remove(0);
+    f.tick();
+    wait("enfant fini avant concurrence retour", || {
+        matches!(f.status(&edge), DelegationStatus::Done { .. })
+            && f.provider.status()["titling"] == false
+    });
+    let (gate, at) = f.hold_next_response();
+    f.tick();
+    f.tick();
+    f.wait_request(at);
+    let trigger = Trigger::DelegationReturn {
+        parent_run_id: parent.run_id.clone(),
+    };
+    let returned = store::latest_run_for_trigger(&f.db(), &trigger)
+        .unwrap()
+        .unwrap();
+    assert_eq!(returned.status, RunStatus::Running);
+    f.send(
+        &c,
+        "after-return-admission",
+        "Une autre question pendant le retour.",
+    );
+    f.wait_user(&c, "after-return-admission", RunStatus::Finished);
+    assert!(!gate.load(Ordering::SeqCst));
+    assert!(f
+        .projected(&c)
+        .iter()
+        .any(|message| message["body"] == ANSWER));
+    gate.store(true, Ordering::SeqCst);
+    assert_eq!(f.wait_return(&parent).run_id, returned.run_id);
+    let db = f.db();
+    let ordinal = |id: &str| -> i64 {
+        db.query_row(
+            "SELECT ordinal FROM wrapper_messages WHERE conversation_id=?1 AND message_id=?2",
+            params![c, id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert!(ordinal(&returned.run_id) < ordinal("after-return-admission"));
+    let projected = f.projected(&c);
+    assert!(
+        projected
+            .iter()
+            .position(|message| message["body"] == RETURN)
+            .unwrap()
+            < projected
+                .iter()
+                .position(|message| message["body"] == ANSWER)
+                .unwrap()
+    );
+    assert_eq!(
+        projected
+            .iter()
+            .filter(|message| message["body"] == RETURN)
+            .count(),
+        1
+    );
+    assert_eq!(scenario.return_calls.load(Ordering::SeqCst), 1);
+    f.reopen(true);
+    f.tick();
+    assert_eq!(scenario.return_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn invalidation_during_the_return_model_call_rejects_late_text() {
     for action in [
         "stop-origin",

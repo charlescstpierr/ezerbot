@@ -83,3 +83,49 @@ Le test `background_probes_use_indexes_with_tenfold_terminal_history` compte les
 Il multiplie l'historique terminal du même fil par dix et accepte au plus 24 instructions supplémentaires par sonde.
 Il contrôle les plans `EXPLAIN QUERY PLAN` des reçus actifs, des membres, des runs actifs et des marqueurs reset.
 Ce contrôle porte sur le coût des requêtes, pas sur la vitesse du modèle ou du réseau.
+
+## Notifications et délégations du retour
+
+Le retour possède sa propre entrée `engine_reply` et sa propre notification `reply:<run_id>`.
+La projection des réponses terminées accepte son trigger `delegation_return` sur cette entrée persistée.
+Elle attend la fin du run de retour.
+La projection des soumissions reste limitée au trigger utilisateur, dont la référence désigne un message.
+Un succès enfant conserve sa notification distincte et ne remplace pas la notification du résumé.
+Un enfant échoué peut donc recevoir un résumé parent terminé et sa notification.
+Un résumé échoué ou annulé ne produit aucune notification de réponse terminée.
+L'outbox existante conserve les règles de visibilité, de consommation et de replay.
+
+Le Chat de retour peut déléguer avec le mode `wait`, absent ou explicite.
+Son contexte réunit les membres background du run initial et ses propres résultats wait.
+Chaque arête est validée contre le run propriétaire de sa provenance et son mode.
+Les résultats wait du run initial restent exclus du retour.
+Le dernier groupe réveillé est conservé en entier, même au-delà des cinq résultats récents.
+Les deux provenances partagent le masquage et la borne globale du bloc de résultats.
+Les refus restent liés au run courant.
+
+| Site concerné en ronde 2 | Test de comportement |
+| --- | --- |
+| Trigger persisté, réservation, réponse modèle et entrée `engine_reply` | `background_keeps_the_parent_available_and_delivers_one_later_model_reply_in_the_same_thread` |
+| Projection `engine_reply`, bon fil, identité, consommation et réouverture | `a_return_notifies_only_its_persisted_finished_reply_once_after_open_and_restart`, parcours modèle et outbox dans `a_return_model_waits_for_its_own_child_and_resumes_with_both_result_origins` |
+| Enfant échoué puis résumé parent terminé | `a_failed_child_still_notifies_the_finished_parent_return_without_a_child_success`, `a_child_that_ends_without_complete_task_returns_a_failure_through_the_parent_model` |
+| Signal enfant distinct, retour en cours, échoué ou annulé | `a_child_success_stays_distinct_from_a_running_failed_or_cancelled_parent_return` |
+| Projection `submission`, référence du trigger et déduplication des deux ancres utilisateur | `user_message_reply_sources_keep_their_card_and_share_one_durable_identity`, fausse correspondance de soumission dans le test de retour |
+| `result_context`, dernier groupe suspendu, résultats récents et arêtes des deux parents | `a_return_model_waits_for_its_own_child_and_resumes_with_both_result_origins` |
+| Wait absent et explicite, lot de six, contexte sélectionné, masquage et borne commune | Même test de retour, avec quatre scénarios complets |
+| Suivi du wait enfant du retour, `InputReceived`, `InputConsumed` et complétion périmée | Scénario suivi du même test de retour, plus `a_followup_rejects_stale_completion_and_is_consumed_once_by_the_same_background_child` |
+| Lots mixtes initiaux, exclusion du wait initial et modes ordinaires | `a_mixed_batch_waits_only_for_wait_children_and_returns_background_results_separately`, `omitted_mode_and_explicit_wait_preserve_the_same_parent_resume_contract` |
+| Coût des deux requêtes de résultats indexées | `background_probes_use_indexes_with_tenfold_terminal_history` |
+| Coût des notifications avant et après le nouveau filtre | `consumed_user_and_return_history_keeps_linear_source_cost_and_full_message_keys` |
+
+Les autres consommateurs recensés gardent leur contrat.
+`projection_hints` joint les soumissions utilisateur, tandis que le retour utilise une entrée `engine_reply`.
+La liste des tâches ne crée aucune nouvelle carte pour le Chat de retour.
+L'admission background et la régénération restent réservées aux triggers utilisateur.
+Le stockage du trigger, le type Chat et l'assemblage du contexte valident déjà le retour.
+Les autorités de stop, reset, suppression et attempt restent celles du reçu.
+
+La sonde de notification double l'historique consommé de 1 000 à 2 000 lignes.
+Elle mesure la vraie requête de sources avec `StatementStatus::VmStep`, avant et après le filtre.
+Son coût attendu reste linéaire, avec un plafond explicite de deux fois la petite mesure plus 128 instructions.
+Les plans avant et après doivent conserver les deux recherches par la clé complète compte, fil et message.
+Aucune amélioration de vitesse réseau ou modèle n'est déduite de ces mesures.

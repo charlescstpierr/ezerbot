@@ -1897,28 +1897,27 @@ fn result_context(conn: &Connection, request: &ContextRequest) -> Result<Option<
     }
     let mut stmt = conn.prepare(RESULT_IDS)?;
     ids.extend(
-        stmt.query_map(
-            params![
-                origin,
-                if returning {
-                    i64::MAX
-                } else {
-                    RECENT_RESULTS as i64
-                },
-                returning
-            ],
-            |r| r.get::<_, String>(0),
-        )?
+        stmt.query_map(params![request.run_id, RECENT_RESULTS as i64, false], |r| {
+            r.get::<_, String>(0)
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?,
     );
+    if returning {
+        ids.extend(
+            stmt.query_map(params![origin, i64::MAX, true], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+    }
     let mut seen = HashSet::new();
     let mut children = Vec::new();
     for id in ids.into_iter().filter(|id| seen.insert(id.clone())) {
-        if background::contains(conn, &id)? != returning {
+        let background = background::contains(conn, &id)?;
+        if background && !returning {
             continue;
         }
+        let parent = if background { origin } else { &request.run_id };
         if let Some(edge) = graph::get(conn, &id)?.filter(|d| {
-            d.parent_run_id == origin
+            d.parent_run_id == parent
                 && !matches!(
                     d.status,
                     DelegationStatus::Queued | DelegationStatus::Running

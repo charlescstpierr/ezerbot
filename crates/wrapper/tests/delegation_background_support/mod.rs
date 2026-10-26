@@ -13,6 +13,7 @@ pub type ReplyFor = Arc<dyn Fn(&Value) -> ScriptedResponse + Send + Sync>;
 pub struct Seen {
     pub bodies: Vec<Value>,
     pub response_gate: Option<(usize, Arc<AtomicBool>)>,
+    pub instruction_gate: Option<(String, Arc<AtomicBool>)>,
     pub reply_for: Option<ReplyFor>,
 }
 
@@ -66,7 +67,17 @@ impl FakeOpenAi {
                             .response_gate
                             .as_ref()
                             .filter(|(at, _)| *at == seen.bodies.len())
-                            .map(|(_, gate)| gate.clone());
+                            .map(|(_, gate)| gate.clone())
+                            .or_else(|| {
+                                seen.instruction_gate
+                                    .as_ref()
+                                    .filter(|(text, _)| {
+                                        request_body["instructions"]
+                                            .as_str()
+                                            .is_some_and(|instructions| instructions.contains(text))
+                                    })
+                                    .map(|(_, gate)| gate.clone())
+                            });
                         (reply, gate)
                     }
                     "/backend-api/wham/usage" => (

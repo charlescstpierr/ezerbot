@@ -40,7 +40,7 @@ UNION ALL
 SELECT 'reply:'||r.run_id, 'reply', r.conversation_id, 'reply-'||r.run_id, 'Réponse terminée'
  FROM engine_runs r CROSS JOIN wrapper_messages m ON m.account_id=?1
  AND m.conversation_id=r.conversation_id AND m.message_id=r.run_id AND m.kind='engine_reply'
- WHERE r.trigger_kind='user_message' AND r.status='finished'
+ WHERE r.trigger_kind IN ('user_message','delegation_return') AND r.status='finished'
  AND NOT EXISTS (SELECT 1 FROM wrapper_notifications n WHERE n.account_id=?1 AND n.id='reply:'||r.run_id)
 UNION ALL
 SELECT 'input:'||q.id, json_extract(q.kind_json,'$.kind'),

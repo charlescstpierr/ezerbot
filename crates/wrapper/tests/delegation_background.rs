@@ -1604,7 +1604,7 @@ fn a_child_that_ends_without_complete_task_returns_a_failure_through_the_parent_
     }));
     let c = f.conversation();
     let parent = f.start(&c, "failed-child");
-    f.wait_return(&parent);
+    let returned = f.wait_return(&parent);
     let edge = f.children(&parent).remove(0);
     assert!(matches!(edge.status, DelegationStatus::Failed { .. }));
     let body = scenario.return_bodies.lock().unwrap()[0].to_string();
@@ -1617,6 +1617,20 @@ fn a_child_that_ends_without_complete_task_returns_a_failure_through_the_parent_
         .any(|message| message["body"] == failed_reply));
     assert_eq!(scenario.child_calls.load(Ordering::SeqCst), 1);
     assert_eq!(scenario.return_calls.load(Ordering::SeqCst), 1);
+    let notifications = f.app.api("GET", "/api/notifications", b"").unwrap();
+    let reply_id = format!("reply:{}", returned.run_id);
+    let summaries = notifications["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["id"] == reply_id)
+        .collect::<Vec<_>>();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0]["conversation_id"], c);
+    assert_eq!(
+        summaries[0]["card_id"],
+        format!("reply-{}", returned.run_id)
+    );
 }
 
 #[test]
@@ -1628,6 +1642,14 @@ fn a_return_model_waits_for_its_own_child_and_resumes_with_both_result_origins()
         (Some("wait"), 1, true),
     ] {
         let mut f = Fixture::new(true);
+        let followup_gate = Arc::new(AtomicBool::new(false));
+        if followup {
+            f.server.seen.lock().unwrap().instruction_gate =
+                Some(("CONTEXTE_ATTENTE_RETOUR".into(), followup_gate.clone()));
+        }
+        let mut prefs = f.app.api("GET", "/api/notifications", b"").unwrap()["settings"].clone();
+        prefs["enabled"] = json!(true);
+        f.post("/api/notifications/settings", prefs);
         let hidden = ["VALEUR", "ATTENTE", "567"].join("_");
         let vault = Vault::open(&f.path.with_extension("secrets.json")).unwrap();
         vault.set("RETURN_WAIT_SECRET", "test", &hidden).unwrap();
@@ -1679,6 +1701,10 @@ fn a_return_model_waits_for_its_own_child_and_resumes_with_both_result_origins()
         }));
         let c = f.conversation();
         let parent = f.start(&c, "return-wait-origin");
+        f.post(
+            "/api/notifications/open",
+            json!({"id":format!("reply:{}", parent.run_id)}),
+        );
         let trigger = Trigger::DelegationReturn {
             parent_run_id: parent.run_id.clone(),
         };
@@ -1705,14 +1731,24 @@ fn a_return_model_waits_for_its_own_child_and_resumes_with_both_result_origins()
         let waiting = store::awaiting_references(&f.db(), &returned.run_id).unwrap();
         assert_eq!(waiting.len(), count);
         assert!(own.iter().all(|edge| waiting.contains(&edge.id)));
+        let reply_id = format!("reply:{}", returned.run_id);
+        let before = f.app.api("GET", "/api/notifications", b"").unwrap();
+        assert!(!before["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == reply_id));
         if followup {
-            let (gate, at) = f.hold_next_response();
-            f.tick();
-            f.wait_request(at);
+            wait("requête wait bloquée avant le suivi", || {
+                f.tick();
+                scenario.child_calls.load(Ordering::SeqCst) == 2
+            });
+            assert!(!followup_gate.load(Ordering::SeqCst));
+            assert_eq!(f.status(&own[0]), DelegationStatus::Running);
             let input = json!({"parent_conversation_id":c,"task_id":own[0].id,"message_id":"return-child-input","body":"Ajoute une vérification de retour."});
             f.post("/api/delegation/send", input.clone());
             f.post("/api/delegation/send", input);
-            gate.store(true, Ordering::SeqCst);
+            followup_gate.store(true, Ordering::SeqCst);
         }
         let finished = f.wait_return(&parent);
         assert_eq!(finished.run_id, returned.run_id);
@@ -1805,9 +1841,38 @@ fn a_return_model_waits_for_its_own_child_and_resumes_with_both_result_origins()
                 .count(),
             1
         );
+        let poll = json!({"focused":false,"visible":false,"conversation_id":null});
+        let delivered = f.post("/api/notifications/poll", poll.clone());
+        let replies = delivered["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["id"] == reply_id)
+            .collect::<Vec<_>>();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0]["conversation_id"], c);
+        assert_eq!(replies[0]["card_id"], format!("reply-{}", returned.run_id));
+        let opened = f.post("/api/notifications/open", json!({"id":reply_id}));
+        assert_eq!(opened["conversation_id"], c);
         for _ in 0..3 {
             f.tick();
         }
+        f.reopen(true);
+        let replay = f.post("/api/notifications/poll", poll);
+        assert!(!replay["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == reply_id));
+        let rows: u64 = f
+            .db()
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_notifications WHERE id=?1",
+                [&reply_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
         assert_eq!(scenario.return_calls.load(Ordering::SeqCst), 2);
     }
 }

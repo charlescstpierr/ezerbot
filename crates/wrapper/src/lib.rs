@@ -743,7 +743,7 @@ impl App {
         migrate_default_bot_name(&connection)?;
         features::migrate(&connection)?;
         if !default_bot_existed {
-            connection.execute("INSERT INTO wrapper_disclosure_trust(kind,key,epoch) SELECT 'bot',?1||':grokbot',epoch FROM wrapper_disclosure_epoch WHERE singleton=1 ON CONFLICT DO NOTHING", [ACCOUNT])?;
+            connection.execute("INSERT INTO wrapper_disclosure_trust(kind,key,epoch) SELECT 'bot',?1||':grokbot',epoch FROM wrapper_disclosure_epoch WHERE singleton=1 ON CONFLICT(kind,key) DO UPDATE SET epoch=excluded.epoch", [ACCOUNT])?;
         }
         features::local::startup(&connection)?;
         features::screen::startup(path);

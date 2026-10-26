@@ -83,7 +83,7 @@ pub(super) fn stamp(conn: &Connection, kind: &str, key: &str) -> Result<(), ApiE
         return Err(refused());
     }
     conn.execute(
-        "INSERT INTO wrapper_disclosure_trust VALUES (?1,?2,?3) ON CONFLICT DO NOTHING",
+        "INSERT INTO wrapper_disclosure_trust VALUES (?1,?2,?3) ON CONFLICT(kind,key) DO UPDATE SET epoch=excluded.epoch",
         rusqlite::params![kind, key, epoch],
     )?;
     Ok(())

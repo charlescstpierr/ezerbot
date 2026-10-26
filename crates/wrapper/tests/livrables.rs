@@ -1741,3 +1741,37 @@ fn a_new_default_bot_keeps_public_provenance() {
     assert!(items[0]["entry_id"].is_string());
     f.opens(&items[0]);
 }
+
+#[test]
+fn a_deleted_file_can_be_created_again_with_current_public_coverage() {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    let request = json!({"name":"Retour public","format":"md","content":"Texte public du retour"});
+    f.call(&chat, "original-public", "create_document", request.clone());
+    let original = f.list("")[0]["id"].as_str().unwrap().to_owned();
+    let path = f.path.with_extension("secrets.json");
+    let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("_privacy");
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    f.reopen();
+    assert!(f.list("")[0]["id"].is_null());
+    f.post("/api/conversations/delete", json!({"id":chat}));
+    let plan = f.post("/api/storage/preview", json!({}));
+    assert_eq!(plan["count"], 1);
+    f.post(
+        "/api/storage/clean",
+        json!({"token":plan["token"],"confirm":true}),
+    );
+    let chat = f.chat("alpha");
+    f.call(&chat, "recreated-public", "create_document", request);
+    let item = f.list("")[0].clone();
+    assert_eq!(item["id"], original);
+    let preview = body(
+        &mut f,
+        "GET",
+        item["open_url"].as_str().unwrap(),
+        json!(null),
+    );
+    assert!(preview.contains("Texte public du retour"));
+    assert!(!preview.contains("Aperçu indisponible"));
+}

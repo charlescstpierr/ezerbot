@@ -119,7 +119,7 @@ pub fn record(
             "La création ne peut pas être reliée à sa conversation.",
         )
     })?;
-    conn.execute(
+    let inserted = conn.execute(
         "INSERT INTO wrapper_livrables VALUES (?1,?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT DO NOTHING",
         params![
             card,
@@ -132,7 +132,9 @@ pub fn record(
             ctx.now_ms
         ],
     )?;
-    super::disclosure::stamp(conn, "creation", &card)?;
+    if inserted > 0 {
+        super::disclosure::stamp(conn, "creation", &card)?;
+    }
     Ok(())
 }
 

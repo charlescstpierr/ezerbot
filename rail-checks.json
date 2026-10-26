@@ -1,0 +1,120 @@
+[
+  {
+    "check": "cinq destinations nommées",
+    "result": [
+      "Conversations",
+      "Sujets",
+      "Routines",
+      "Notifications",
+      "Réglages"
+    ]
+  },
+  {
+    "check": "Pages masqué si vide",
+    "result": true
+  },
+  {
+    "check": "bot courant Atelier",
+    "result": true
+  },
+  {
+    "check": "Routines du bot courant et actif",
+    "result": true
+  },
+  {
+    "check": "Échap ferme Routines",
+    "result": true
+  },
+  {
+    "check": "Notifications ouvertes et actif",
+    "result": true
+  },
+  {
+    "check": "Réglages ouverts et actif",
+    "result": true
+  },
+  {
+    "check": "Mémoire accessible",
+    "result": true
+  },
+  {
+    "check": "Sujets au clavier",
+    "result": true
+  },
+  {
+    "check": "vrai formulaire de sujet",
+    "result": true
+  },
+  {
+    "check": "Tab atteint Conversations",
+    "result": true
+  },
+  {
+    "check": "Conversations au clavier",
+    "result": true
+  },
+  {
+    "check": "raccourci recherche",
+    "result": true
+  },
+  {
+    "check": "recherche filtre réellement",
+    "result": true
+  },
+  {
+    "check": "sélection du fil",
+    "result": true
+  },
+  {
+    "check": "nouveau fil garde son bot",
+    "result": true
+  },
+  {
+    "check": "liste longue sans recouvrement",
+    "result": {
+      "items": 32,
+      "last": {
+        "x": 62,
+        "y": 483.375,
+        "width": 176,
+        "height": 41.25,
+        "top": 483.375,
+        "right": 238,
+        "bottom": 524.625,
+        "left": 62
+      },
+      "content": {
+        "x": 57,
+        "y": 9,
+        "width": 186,
+        "height": 542,
+        "top": 9,
+        "right": 243,
+        "bottom": 551,
+        "left": 57
+      },
+      "rail": {
+        "x": 9,
+        "y": 9,
+        "width": 48,
+        "height": 542,
+        "top": 9,
+        "right": 57,
+        "bottom": 551,
+        "left": 9
+      }
+    }
+  },
+  {
+    "check": "dernier fil sélectionnable",
+    "result": true
+  },
+  {
+    "check": "plancher typographique et pas de Local",
+    "result": true
+  },
+  {
+    "check": "plus ouvre le vrai éditeur bot",
+    "result": true
+  }
+]

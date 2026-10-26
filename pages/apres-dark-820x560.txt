@@ -1,0 +1,61 @@
+Conversations
+Nouvelle conversation
+⌘ N
+⌘ K
+Mémoire
+0
+BOTS
+Ezerbot
+SUJETS
+
+Regroupez plusieurs fils sous un sujet.
+
+Pages
+Trois forfaits
+CONVERSATIONS
+
+Aujourd’hui
+
+Vérification visuelle
+Vérification visuelle
+Ezerbot
+/
+Vérification visuelle
+Créer un groupe
+Membres
+Fais-moi une page des forfaits
+Envoyé
+Ezerbot
+22 h 00
+Outil · write_pageAppel terminé
+
+Voici la Page.
+
+Bon résultat
+Mauvais résultat
+Renommer
+Ouvrir en pleine page
+Trois forfaits
+
+Tout < 30 € par mois
+
+Offre choisie : Confort
+
+Offre	Prix	
+Essentiel	9 €	Choisir
+Confort	19 €	Choisir
+Famille	29 €	Choisir
+
+
+
+
+● Enregistrer une réunion
+Ezerbot
+GPT Test
+medium
+Standard
+Mode voix
+Mémo vocal
+Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne
+Quota de votre abonnement ChatGPT ·
+Gérer l’utilisation

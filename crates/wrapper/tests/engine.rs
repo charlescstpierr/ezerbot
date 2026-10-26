@@ -654,11 +654,6 @@ fn reset_keeps_memory_but_hides_history() {
 #[test]
 fn long_conversation_compacts_and_keeps_transcript() {
     let mut f = Fixture::new(false);
-    let private = "Réponds avec des phrases simples même après un résumé du fil.";
-    f.post(
-        "/api/bots/update",
-        json!({"id":"grokbot","instructions":private}),
-    );
     let c = f.conversation();
     f.post("/api/engine/config", json!({"estimated_tokens":12000}));
     for n in 0..8 {
@@ -705,22 +700,75 @@ fn long_conversation_compacts_and_keeps_transcript() {
         .as_str()
         .unwrap()
         .contains(&summary.text));
-    let instructions = body["instructions"].as_str().unwrap();
-    assert!(instructions.contains("answer without calling any tool"));
-    assert!(instructions.contains("Use a tool only when you need to read external state or act"));
-    assert!(instructions.contains("do not check or verify by reflex"));
-    assert!(instructions.contains(private));
-    assert!(
-        instructions
-            .find("answer without calling any tool")
-            .unwrap()
-            < instructions.find(private).unwrap()
+    assert!(!body.to_string().contains(&format!("0{}", "x".repeat(100))));
+}
+#[test]
+fn connected_compaction_keeps_direct_answer_contract_and_private_instructions() {
+    let mut f = Fixture::new(true);
+    let private = "Réponds avec des phrases simples même après un résumé du fil.";
+    f.post(
+        "/api/bots/update",
+        json!({"id":"grokbot","instructions":private}),
     );
-    assert!(body["tools"]
-        .as_array()
+    let c = f.conversation();
+    f.post("/api/engine/config", json!({"estimated_tokens":12000}));
+    for n in 0..8 {
+        let message = format!("connected-long-{n}");
+        f.send(&c, &message, &format!("{}{}", n, "x".repeat(12000)));
+        assert_eq!(f.done(&c, &message)["body"], "Bonjour **vous**");
+    }
+    let final_message = "Use the summarized conversation";
+    f.send(&c, "connected-long-final", final_message);
+    assert_eq!(
+        f.done(&c, "connected-long-final")["body"],
+        "Bonjour **vous**"
+    );
+    let run = f.run("connected-long-final");
+    assert_eq!(run.status, RunStatus::Finished);
+    assert_eq!(run.kind, RunKind::Chat);
+    assert_eq!(run.task_status, None);
+    assert!(store::events(&f.db(), &run.run_id, 0)
         .unwrap()
         .iter()
-        .any(|tool| tool["name"] == "read_file"));
+        .all(|event| event.kind != RunEventKind::ToolCall));
+    let summary = grokbot_engine::compaction::latest(&f.db(), &c)
+        .unwrap()
+        .unwrap();
+    let seen = f.server.seen.lock().unwrap();
+    assert!(seen.bodies.iter().any(|body| {
+        body["instructions"].as_str().is_some_and(|text| {
+            text.starts_with("Summarize the supplied conversation evidence concisely.")
+        })
+    }));
+    let bodies: Vec<_> = seen
+        .bodies
+        .iter()
+        .filter(|body| {
+            body["input"].as_array().is_some_and(|input| {
+                input
+                    .iter()
+                    .any(|item| item["role"] == "user" && item["content"] == final_message)
+            })
+        })
+        .collect();
+    assert_eq!(bodies.len(), 1);
+    let body = bodies[0];
+    let instructions = body["instructions"].as_str().unwrap();
+    assert!(instructions.contains(&summary.text));
+    let private_position = instructions.find(private).unwrap();
+    for clause in [
+        "answer without calling any tool",
+        "Use a tool only when you need to read external state or act",
+        "do not check or verify by reflex",
+        "without begin_task or complete_task",
+        "provide the requested content as response text",
+    ] {
+        assert!(instructions.find(clause).unwrap() < private_position);
+    }
+    let tools = body["tools"].as_array().unwrap();
+    for name in ["begin_task", "complete_task", "read_file", "remember"] {
+        assert!(tools.iter().any(|tool| tool["name"] == name));
+    }
     assert!(!body.to_string().contains(&format!("0{}", "x".repeat(100))));
 }
 #[test]

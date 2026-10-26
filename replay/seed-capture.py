@@ -9,6 +9,7 @@ from drive import browser, eval_js, wait_js, theme_js
 
 parser = argparse.ArgumentParser()
 parser.add_argument('evidence', type=Path)
+parser.add_argument('--seed-only', action='store_true')
 args = parser.parse_args()
 e = args.evidence
 summary = eval_js(e, '''async () => {
@@ -26,6 +27,10 @@ summary = eval_js(e, '''async () => {
   return {bots:GrokbotPanels.state.bots.length, conversations:GrokbotPanels.state.conversations.length};
 }''')
 wait_js(e, '() => document.querySelectorAll(".sidebar-bot").length >= 5 && document.querySelectorAll("#conversation-list .conversation-item").length >= 32', 'données latérales absentes')
+if args.seed_only:
+    (e / 'seed-summary.json').write_text(json.dumps(summary, indent=2)+'\n')
+    print(json.dumps(summary))
+    raise SystemExit(0)
 shots = e / 'sidebar'
 shots.mkdir(exist_ok=True)
 for theme in ('dark', 'light'):

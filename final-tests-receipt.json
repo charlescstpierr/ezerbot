@@ -1,0 +1,12 @@
+{
+  "execution_sha": "be2cedd617db0161bab4d3192170dc9369497056",
+  "cwd": "/Users/cstpierrecharles/.treehouse/pm/ez-i561",
+  "command": "source /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i561/env.sh\n/Users/cstpierrecharles/.treehouse/pm/_orch/bin/test-gate node --test --test-concurrency=1 app/ui/select-bot.test.cjs app/ui/sidebar-rail.test.cjs app/ui/panels/topics.test.cjs app/ui/panels/memory-space.test.cjs app/ui/panels/memory-add.test.cjs app/ui/panels/memory-detail.test.cjs app/ui/panels/memory-filter.test.cjs app/ui/panels/memory-graph.test.cjs app/ui/panels/memory-links.test.cjs app/ui/panels/memory-review.test.cjs app/ui/panels/memory-used.test.cjs app/ui/panels/pages.test.cjs app/ui/panels/pages-browser.test.cjs app/ui/panels/pages-app-browser.test.cjs app/ui/panels/routines.test.cjs app/web/src/deep-link-navigation.test.js app/web/src/notifications-ui.test.js app/ui/composer-bar.test.cjs app/web/src/generated-dialogs.test.js > /Users/cstpierrecharles/.treehouse/pm/_orch/pages/evidence/i561/final-tests.log 2>&1",
+  "log": "final-tests.log",
+  "log_sha256": "7967d68267c95c654226c79e4c11ef223337f31a0561847e3a8193fe4658ef6e",
+  "tests": 357,
+  "pass": 357,
+  "fail": 0,
+  "cancelled": 0,
+  "skipped": 0
+}

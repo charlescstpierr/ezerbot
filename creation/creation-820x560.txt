@@ -1,0 +1,45 @@
+Conversations
+Nouvelle conversation
+⌘ N
+⌘ K
+Mémoire
+0
+BOTS
+Ezerbot
+Assistant preuve
+SUJETS
+
+Regroupez plusieurs fils sous un sujet.
+
+CONVERSATIONS
+
+Aujourd’hui
+
+OK
+Assistant preuve
+/
+OK
+Créer un groupe
+Membres
+Message de preuve du nouveau bot.
+Envoyé
+Assistant preuve
+22 h 26
+
+OK
+
+Bon résultat
+Mauvais résultat
+
+
+
+
+● Enregistrer une réunion
+Assistant preuve
+GPT Test
+medium
+Mode voix
+Mémo vocal
+Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne
+Quota de votre abonnement ChatGPT ·
+Gérer l’utilisation

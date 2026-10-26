@@ -1,0 +1,94 @@
+[
+  {
+    "file": "sidebar/dark-1440x900.png",
+    "sha": "be2cedd617db0161bab4d3192170dc9369497056",
+    "run": "final-dimensions",
+    "theme": "dark",
+    "expected": [
+      1440,
+      900
+    ],
+    "ihdr": [
+      1440,
+      900
+    ],
+    "viewport": {
+      "innerWidth": 1440,
+      "innerHeight": 900,
+      "devicePixelRatio": 1,
+      "clientWidth": 1440,
+      "clientHeight": 900
+    },
+    "sha256": "bb46c34a823a353947b4c22c1adbcc9d6aa52c19b6155d693f4f9ba3bb0e670e",
+    "method": "nouvelle capture Chrome Mac, viewport émulée desktop DPR 1"
+  },
+  {
+    "file": "sidebar/dark-820x560.png",
+    "sha": "be2cedd617db0161bab4d3192170dc9369497056",
+    "run": "final-dimensions",
+    "theme": "dark",
+    "expected": [
+      820,
+      560
+    ],
+    "ihdr": [
+      820,
+      560
+    ],
+    "viewport": {
+      "innerWidth": 820,
+      "innerHeight": 560,
+      "devicePixelRatio": 1,
+      "clientWidth": 820,
+      "clientHeight": 560
+    },
+    "sha256": "c33aaf6811f32a2844df79f7c35b0ce41a4385222ab85b59384cadb04d461724",
+    "method": "nouvelle capture Chrome Mac, viewport émulée desktop DPR 1"
+  },
+  {
+    "file": "sidebar/light-1440x900.png",
+    "sha": "be2cedd617db0161bab4d3192170dc9369497056",
+    "run": "final-dimensions",
+    "theme": "light",
+    "expected": [
+      1440,
+      900
+    ],
+    "ihdr": [
+      1440,
+      900
+    ],
+    "viewport": {
+      "innerWidth": 1440,
+      "innerHeight": 900,
+      "devicePixelRatio": 1,
+      "clientWidth": 1440,
+      "clientHeight": 900
+    },
+    "sha256": "7f54c9a8d96d442e0c2c079c3f10d1e07e38a3781274876aac982cb920323c0b",
+    "method": "nouvelle capture Chrome Mac, viewport émulée desktop DPR 1"
+  },
+  {
+    "file": "sidebar/light-820x560.png",
+    "sha": "be2cedd617db0161bab4d3192170dc9369497056",
+    "run": "final-dimensions",
+    "theme": "light",
+    "expected": [
+      820,
+      560
+    ],
+    "ihdr": [
+      820,
+      560
+    ],
+    "viewport": {
+      "innerWidth": 820,
+      "innerHeight": 560,
+      "devicePixelRatio": 1,
+      "clientWidth": 820,
+      "clientHeight": 560
+    },
+    "sha256": "198738f769b5c23a8f51b837bcf45d0a5f831fc4742fc1770a29a049fc7a6759",
+    "method": "nouvelle capture Chrome Mac, viewport émulée desktop DPR 1"
+  }
+]

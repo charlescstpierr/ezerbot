@@ -1,10 +1,160 @@
 {
   "runs": [
-    "before",
-    "final",
-    "final-v2",
-    "final-pages"
+    {
+      "run": "before",
+      "build_sha": "eff4b4134a02c549583dff0e96a95f3a9518c325",
+      "wrapper_pid": 21006,
+      "wrapper_pid_alive": false,
+      "cleanup": {
+        "auth": "arrete",
+        "wrapper": "arrete",
+        "fake": "arrete",
+        "chrome": "arrete",
+        "axi": {
+          "session": "pm-i561",
+          "result": "arrete",
+          "code": 0
+        }
+      },
+      "home_removed": true,
+      "receipt": "before/cleanup.json"
+    },
+    {
+      "run": "final",
+      "build_sha": "ca9dd4ed30a55e7f236ef208f5a178f7e4e0fc5d",
+      "wrapper_pid": 32435,
+      "wrapper_pid_alive": false,
+      "cleanup": {
+        "auth": "arrete",
+        "wrapper": "arrete",
+        "fake": "arrete",
+        "chrome": "arrete",
+        "axi": {
+          "session": "pm-i561",
+          "result": "arrete",
+          "code": 0
+        }
+      },
+      "home_removed": true,
+      "receipt": "final/cleanup.json"
+    },
+    {
+      "run": "final-v2",
+      "build_sha": "be2cedd617db0161bab4d3192170dc9369497056",
+      "wrapper_pid": 46291,
+      "wrapper_pid_alive": false,
+      "cleanup": {
+        "auth": "arrete",
+        "wrapper": "arrete",
+        "fake": "arrete",
+        "chrome": "arrete",
+        "axi": {
+          "session": "pm-i561",
+          "result": "arrete",
+          "code": 0
+        }
+      },
+      "home_removed": true,
+      "receipt": "final-v2/cleanup.json"
+    },
+    {
+      "run": "final-pages",
+      "build_sha": "be2cedd617db0161bab4d3192170dc9369497056",
+      "wrapper_pid": 53223,
+      "wrapper_pid_alive": false,
+      "cleanup": {
+        "auth": "arrete",
+        "wrapper": "arrete",
+        "fake": "arrete",
+        "chrome": "arrete",
+        "axi": {
+          "session": "pm-i561",
+          "result": "arrete",
+          "code": 0
+        }
+      },
+      "home_removed": true,
+      "receipt": "final-pages/cleanup.json"
+    },
+    {
+      "run": "final-create",
+      "build_sha": "be2cedd617db0161bab4d3192170dc9369497056",
+      "wrapper_pid": 63482,
+      "wrapper_pid_alive": false,
+      "cleanup": {
+        "auth": "arrete",
+        "wrapper": "arrete",
+        "fake": "arrete",
+        "chrome": "arrete",
+        "axi": {
+          "session": "pm-i561",
+          "result": "arrete",
+          "code": 0
+        }
+      },
+      "home_removed": true,
+      "receipt": "final-create/cleanup.json"
+    },
+    {
+      "run": "final-create-v2",
+      "build_sha": "be2cedd617db0161bab4d3192170dc9369497056",
+      "wrapper_pid": 72571,
+      "wrapper_pid_alive": false,
+      "cleanup": {
+        "auth": "arrete",
+        "wrapper": "arrete",
+        "fake": "arrete",
+        "chrome": "arrete",
+        "axi": {
+          "session": "pm-i561",
+          "result": "arrete",
+          "code": 0
+        }
+      },
+      "home_removed": true,
+      "receipt": "final-create-v2/cleanup.json"
+    },
+    {
+      "run": "final-create-v3",
+      "build_sha": "be2cedd617db0161bab4d3192170dc9369497056",
+      "wrapper_pid": 74962,
+      "wrapper_pid_alive": false,
+      "cleanup": {
+        "auth": "arrete",
+        "wrapper": "arrete",
+        "fake": "arrete",
+        "chrome": "arrete",
+        "axi": {
+          "session": "pm-i561",
+          "result": "arrete",
+          "code": 0
+        }
+      },
+      "home_removed": true,
+      "receipt": "final-create-v3/cleanup.json"
+    },
+    {
+      "run": "final-dimensions",
+      "build_sha": "be2cedd617db0161bab4d3192170dc9369497056",
+      "wrapper_pid": 76007,
+      "wrapper_pid_alive": false,
+      "cleanup": {
+        "auth": "arrete",
+        "wrapper": "arrete",
+        "fake": "arrete",
+        "chrome": "arrete",
+        "axi": {
+          "session": "pm-i561",
+          "result": "arrete",
+          "code": 0
+        }
+      },
+      "home_removed": true,
+      "receipt": "final-dimensions/cleanup.json"
+    }
   ],
   "wrapper_pids_alive": 0,
-  "signed_run_roots_remaining": 0
+  "signed_run_roots_remaining": 0,
+  "control_home_removed": true,
+  "scope": "Seulement les huit runs attribués à pm-i561 ; aucun processus ni verrou étranger touché."
 }

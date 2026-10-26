@@ -1,0 +1,324 @@
+[
+  {
+    "file": "after/dark-1440x900.png",
+    "ihdr": [
+      1440,
+      900
+    ],
+    "expected_from_name": [
+      1440,
+      900
+    ],
+    "sha256": "bb46c34a823a353947b4c22c1adbcc9d6aa52c19b6155d693f4f9ba3bb0e670e",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "after/dark-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "c33aaf6811f32a2844df79f7c35b0ce41a4385222ab85b59384cadb04d461724",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "after/light-1440x900.png",
+    "ihdr": [
+      1440,
+      900
+    ],
+    "expected_from_name": [
+      1440,
+      900
+    ],
+    "sha256": "7f54c9a8d96d442e0c2c079c3f10d1e07e38a3781274876aac982cb920323c0b",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "after/light-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "198738f769b5c23a8f51b837bcf45d0a5f831fc4742fc1770a29a049fc7a6759",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "before/dark-1440x855.png",
+    "ihdr": [
+      1440,
+      855
+    ],
+    "expected_from_name": [
+      1440,
+      855
+    ],
+    "sha256": "e79a699526043a0afb7da4f71b08a3fbacad24f9bc750a7506699332fb12cf68",
+    "provenance": "before sur eff4b4134a02c549583dff0e96a95f3a9518c325"
+  },
+  {
+    "file": "before/dark-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "c6040be0eea3964e571bda860c222d00bb2e175a3597d8aab1afc99c73e367ab",
+    "provenance": "before sur eff4b4134a02c549583dff0e96a95f3a9518c325"
+  },
+  {
+    "file": "before/light-1440x855.png",
+    "ihdr": [
+      1440,
+      855
+    ],
+    "expected_from_name": [
+      1440,
+      855
+    ],
+    "sha256": "e8351125979e9855dddb35a1d21fbff05fbc95ea9746b56c4783fa16a9fa262f",
+    "provenance": "before sur eff4b4134a02c549583dff0e96a95f3a9518c325"
+  },
+  {
+    "file": "before/light-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "3d7e0049c238e0102f2bbda2d3093eaf2126afbf3be9524f44283f7a71b0c1b4",
+    "provenance": "before sur eff4b4134a02c549583dff0e96a95f3a9518c325"
+  },
+  {
+    "file": "creation/creation-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "5437bbbd55cb9d2af76204d566469c5db4eee9fbc13e842b80ad9bf450c45b08",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "navigation/conversations-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "0f0f21960a86acf6718746188c6c4bb2bbbc0c77902438341aef7630412abd1f",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "navigation/defilement-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "eb0b37d5baa0c61e409163e469ed96b9d072779e4ef2c979612a9961f6c3b046",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "navigation/memoire-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "b6e79dc1759d7ea9377200bc190b085391f2db2ead8987217cb132e40d5f66ee",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "navigation/notifications-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "a8e7381618c0bb23bae91fbaecfd12699f6070a274642200e7ca2fc5ab959108",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "navigation/reglages-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "376b18f02a4e3f91f1dae98f959e6c11e11de16e4176464fabc0a5ceebe2920d",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "navigation/routines-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "1e1dd1c2d07cb61c55b3547252dc678bcc71da29378a102ebc52ccebb1eefeba",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "navigation/sujets-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "6acd9fe197365dd63b9bab55a870abc5f7609ff1a9211d85334beef3e28064f0",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "pages/apres-dark-1140x780.png",
+    "ihdr": [
+      1140,
+      780
+    ],
+    "expected_from_name": [
+      1140,
+      780
+    ],
+    "sha256": "2e03665d98be799c75aeb0bd23107f32359eb0a837625592390aee6daf8c1d15",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "pages/apres-dark-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "718470cb1f0ddf4677657bca0f6c485d7c8f8516bf2abbb0aaa8245ea818fbec",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "pages/apres-light-1140x780.png",
+    "ihdr": [
+      1140,
+      780
+    ],
+    "expected_from_name": [
+      1140,
+      780
+    ],
+    "sha256": "b166b56c4e6f65e3d3cbda73d50692e31f647e56d78d58e1069c279d18767fb5",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "pages/apres-light-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "4511b0b8f7b4c5e05e065a5078031db690729e54a40000495cacb6ef75e59908",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "pages/avant-dark-1140x780.png",
+    "ihdr": [
+      1140,
+      780
+    ],
+    "expected_from_name": [
+      1140,
+      780
+    ],
+    "sha256": "38713540eeccea6f6c0b3a637598765561f33aff0a6d2f0f3d66f25321c7797f",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "pages/avant-dark-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "0694fb66732e38428d0a092d72aa4c1a53c56223952b730cfd551e9a18eb7c85",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "pages/avant-light-1140x780.png",
+    "ihdr": [
+      1140,
+      780
+    ],
+    "expected_from_name": [
+      1140,
+      780
+    ],
+    "sha256": "0cf35abfe65f8ade7dc98d8e639c0c73c048eacbb43daeb4fb21c690eac96a1d",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "pages/avant-light-820x560.png",
+    "ihdr": [
+      820,
+      560
+    ],
+    "expected_from_name": [
+      820,
+      560
+    ],
+    "sha256": "b58aa31ae780156339871143a23b4f1b74910d430c6c46e51267ffe8c24ac983",
+    "provenance": "be2cedd617db0161bab4d3192170dc9369497056"
+  },
+  {
+    "file": "references/page-2-rendered.png",
+    "ihdr": [
+      1440,
+      855
+    ],
+    "expected_from_name": null,
+    "sha256": "8824a68653bbfe4aa975bfc8714cff169d99474c29aab61e80fe428ad26cd71b",
+    "provenance": "board de r\u00e9f\u00e9rence"
+  }
+]

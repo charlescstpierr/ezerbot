@@ -10,7 +10,7 @@ Le wrapper est compilé puis lancé avec HOME, base, profil Chrome et session pm
 
 ## Captures Mac
 
-Les quatre captures après contiennent cinq bots et 32 fils. Le texte capturé accompagne chaque PNG.
+Les quatre captures après contiennent cinq bots et 32 fils. Le texte capturé accompagne chaque PNG. Ces quatre images proviennent du nouveau run final-dimensions avec viewport explicite et IHDR vérifié. Les grands après précédents, réellement 1440×855, sont rejetés. Le reçu receipts/png-dimensions.json couvre tous les PNG publiés. Les avant de grande taille sont étiquetés 1440×855 selon leur IHDR réel.
 
 | Taille | Sombre | Clair |
 | --- | --- | --- |
@@ -25,7 +25,7 @@ Le parcours Mac ajoute 20 contrôles DOM et clavier. Les cinq destinations ont l
 
 [rail-checks.json](rail-checks.json) conserve les résultats et les rectangles de la liste. Le dernier fil est entièrement visible, puis sélectionné après défilement. Le rail reste séparé. Les textes de la barre latérale sont au moins à 11,5 px. La carte de compte et l’indicateur Local sont absents.
 
-Le test du rail utilise le vrai wrapper et une Page créée par write_page. Il vérifie Pages absent, présent puis absent en changeant de bot. Les groupes de dates sont contrôlés avec quatre dates connues. Les captures Pages supplémentaires sont dans pages/.
+Le test du rail utilise le vrai wrapper et une Page créée par write_page. Il vérifie Pages absent, présent puis absent en changeant de bot. Les groupes de dates sont contrôlés avec quatre dates connues. Les captures Pages supplémentaires sont dans pages/. Le complément dans creation/ crée un bot par le vrai formulaire ouvert avec le plus, garde ce bot avec ⌘N et enregistre une conversation en tapant puis en envoyant un message par Entrée.
 
 [Les montages et leurs tests](mounts-and-tests.md) recensent tous les chemins modifiés. Le fil, ses cartes et le composer ne sont pas modifiés.
 

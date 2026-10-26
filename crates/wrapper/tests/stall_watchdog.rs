@@ -1137,3 +1137,152 @@ fn stalled_group_turns_do_not_offer_a_regeneration_the_route_refuses() {
         .unwrap_err();
     assert_eq!(error.status, 409);
 }
+
+fn stalled_notice_settings(f: &mut Fixture, kind: &str, enabled: bool, reply: bool) {
+    let mut settings = f.app.api("GET", "/api/notifications", b"").unwrap()["settings"].clone();
+    settings["enabled"] = json!(true);
+    settings["reply"] = json!(reply);
+    settings[kind] = json!(enabled);
+    f.post("/api/notifications/settings", settings);
+}
+
+fn assert_one_stalled_notice(f: &mut Fixture, id: &str, kind: &str, run: &str, enabled: bool) {
+    let input = json!({"focused":false,"visible":false,"conversation_id":null});
+    let polled = f.post("/api/notifications/poll", input.clone());
+    assert_eq!(
+        polled["deliveries"].as_array().unwrap().len(),
+        usize::from(enabled)
+    );
+    if enabled {
+        assert_eq!(polled["deliveries"][0]["id"], id);
+        assert_eq!(polled["deliveries"][0]["kind"], kind);
+        assert_eq!(polled["deliveries"][0]["card_id"], format!("stalled:{run}"));
+    }
+    let inbox = f.app.api("GET", "/api/notifications", b"").unwrap();
+    assert_eq!(inbox["items"].as_array().unwrap().len(), 1);
+    assert_eq!(inbox["unread"], 1);
+    assert_eq!(inbox["items"][0]["id"], id);
+    assert_eq!(inbox["items"][0]["kind"], kind);
+    assert_eq!(inbox["items"][0]["card_id"], format!("stalled:{run}"));
+    let count: u32 = f
+        .conn
+        .query_row("SELECT COUNT(*) FROM wrapper_notifications", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(
+        f.post("/api/notifications/poll", input.clone())["deliveries"],
+        json!([])
+    );
+    f.restart(540_000);
+    assert_eq!(
+        f.post("/api/notifications/poll", input)["deliveries"],
+        json!([])
+    );
+    let reopened = f.app.api("GET", "/api/notifications", b"").unwrap();
+    assert_eq!(reopened["items"], inbox["items"]);
+    assert_eq!(reopened["unread"], 1);
+}
+
+#[test]
+fn stalled_occurrence_has_one_notice_and_obeys_routine_independently_of_reply() {
+    use grokbot_scheduler::occurrences::{self, OccurrenceStatus};
+    for routine_enabled in [false, true] {
+        for reply in [false, true] {
+            let mut f = Fixture::new();
+            stalled_notice_settings(&mut f, "routine", routine_enabled, reply);
+            let routine = f.post(
+                "/api/routines",
+                json!({
+                    "bot_id":"grokbot","name":"Silent routine","prompt":"Wait",
+                    "schedule":"@every 1h","time_zone":"UTC","enabled":false
+                }),
+            )["routine"]
+                .clone();
+            let occurrence = occurrences::run_now(
+                &f.conn,
+                routine["routine_id"].as_str().unwrap(),
+                "watchdog",
+                f.start as i64,
+            )
+            .unwrap();
+            f.insert_run(
+                "routine-run",
+                routine["conversation_id"].as_str().unwrap(),
+                Trigger::Occurrence {
+                    occurrence_id: occurrence.occurrence_id.clone(),
+                },
+                RunStatus::Running,
+            );
+            occurrences::attach_run(&f.conn, &occurrence.occurrence_id, "routine-run").unwrap();
+            assert!(matches!(
+                occurrences::get(&f.conn, &occurrence.occurrence_id).unwrap().unwrap().status,
+                OccurrenceStatus::Running { run_id } if run_id == "routine-run"
+            ));
+            assert_eq!(
+                store::required(&f.conn, "routine-run").unwrap().status,
+                RunStatus::Running
+            );
+            f.tick(0);
+            f.tick(540_000);
+            let run = store::required(&f.conn, "routine-run").unwrap();
+            assert_eq!(run.status, RunStatus::Cancelled);
+            assert_eq!(run.turn_end, Some(TurnEnd::Stopped));
+            assert_eq!(f.event_count("routine-run", RunEventKind::Cancelled), 1);
+            assert!(matches!(
+                occurrences::get(&f.conn, &occurrence.occurrence_id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                OccurrenceStatus::Failed { .. }
+            ));
+            assert_one_stalled_notice(
+                &mut f,
+                &format!("routine:{}", occurrence.occurrence_id),
+                "routine",
+                "routine-run",
+                routine_enabled,
+            );
+        }
+    }
+}
+
+#[test]
+fn stalled_child_notice_obeys_delegation_independently_of_reply_and_preserves_failure_wake() {
+    for delegation_enabled in [false, true] {
+        for reply in [false, true] {
+            let mut f = Fixture::new();
+            stalled_notice_settings(&mut f, "delegation", delegation_enabled, reply);
+            f.run("parent", RunStatus::AwaitingChildren);
+            f.child("parent", "child", RunStatus::Running);
+            f.tick(0);
+            f.tick(540_000);
+            let child = store::required(&f.conn, "child").unwrap();
+            assert_eq!(child.status, RunStatus::Cancelled);
+            assert_eq!(child.turn_end, Some(TurnEnd::Stopped));
+            assert_eq!(f.event_count("child", RunEventKind::Cancelled), 1);
+            assert_eq!(
+                store::required(&f.conn, "parent").unwrap().status,
+                RunStatus::AwaitingChildren
+            );
+            let edge: String = f.conn.query_row(
+                "SELECT json_extract(status,'$.status') FROM delegation_graph WHERE id='edge-child'",
+                [], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(edge, "failed");
+            let wakes: u32 = f.conn.query_row(
+                "SELECT COUNT(*) FROM engine_run_wakes WHERE run_id='parent' AND cause='child' AND reference='edge-child' AND state='pending'",
+                [], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(wakes, 1);
+            assert_one_stalled_notice(
+                &mut f,
+                "stalled:child",
+                "delegation",
+                "child",
+                delegation_enabled,
+            );
+        }
+    }
+}

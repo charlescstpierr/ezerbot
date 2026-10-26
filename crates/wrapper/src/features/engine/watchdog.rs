@@ -443,7 +443,15 @@ pub fn record(
         &id,
         time,
     )?;
-    ctx.connection.execute("INSERT OR IGNORE INTO wrapper_notifications VALUES (?1,?2,'stalled',?3,?2,'Tâche arrêtée après un silence prolongé',?4,1,0)",params![ACCOUNT,id,run.conversation_id,time])?;
+    let (notification_id, kind) = match &run.trigger {
+        Trigger::UserMessage { .. } => (id.clone(), "reply"),
+        Trigger::Delegation { .. } => (id.clone(), "delegation"),
+        Trigger::Occurrence { occurrence_id } => (format!("routine:{occurrence_id}"), "routine"),
+    };
+    ctx.connection.execute(
+        "INSERT OR IGNORE INTO wrapper_notifications VALUES (?1,?2,?3,?4,?5,'Tâche arrêtée après un silence prolongé',?6,1,0)",
+        params![ACCOUNT, notification_id, kind, run.conversation_id, id, time],
+    )?;
     Ok(())
 }
 

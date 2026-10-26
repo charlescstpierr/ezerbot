@@ -92,7 +92,7 @@ impl Settings {
         self.enabled
             && !self.dnd
             && match kind {
-                "reply" | "stalled" => self.reply,
+                "reply" => self.reply,
                 "approval" => self.approval,
                 "form" => self.form,
                 "secret" => self.secret,

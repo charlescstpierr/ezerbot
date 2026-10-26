@@ -32,8 +32,8 @@
 
 .page-stage { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--pane); border-left: 1px solid var(--line); }
 .main-panel.page-full > .page-stage { border-left: 0; }
-.page-stage-bar { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
-.page-rename { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; }
+.page-stage-bar { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.page-rename { flex: 1 1 140px; min-width: 0; display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em; }
 .page-rename .text-input { padding: 8px 10px; font-size: 13px; font-weight: 550; letter-spacing: 0; }
 .page-stage-bar .secondary-button { flex: 0 0 auto; padding: 8px 10px; white-space: nowrap; }
 .page-diagnostic { margin: 14px; padding: 12px 14px; border: 1px solid var(--warning-line); border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); font-size: 12px; line-height: 1.5; }
@@ -54,6 +54,15 @@
 .page-choice:hover { background: var(--soft); color: var(--text); }
 .page-canvas ul, .page-canvas ol { margin: 0 0 14px; padding-left: 18px; }
 .page-canvas li { margin: 4px 0; }
+.page-comments { flex: 0 1 auto; max-height: 35%; overflow: auto; list-style: none; margin: 0; padding: 0 14px; border-bottom: 1px solid var(--line); }
+.page-comment-item { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.page-comment-item:last-child { border-bottom: 0; }
+.page-comment-item p { margin: 0 0 8px; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
+.page-comment-state { margin-right: 10px; color: var(--muted); font-size: 12px; }
+.page-markers { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.page-anchor-line { position: absolute; border-bottom: 2px solid var(--accent-ink); }
+.page-anchor-number { position: absolute; pointer-events: auto; min-width: 18px; height: 18px; padding: 0 4px; border: 1px solid var(--line); border-radius: 50%; background: var(--pane); color: var(--accent-ink); font-size: 10px; line-height: 16px; }
+.page-anchor-number:focus-visible, .page-comment-item:focus { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 @media (max-width: 860px) {
   .main-panel:has(.page-stage:not([hidden])) {

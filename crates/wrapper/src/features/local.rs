@@ -101,7 +101,7 @@ pub fn is_read(name: &str) -> bool {
 pub fn tools() -> Vec<ToolSpec> {
     let path = json!({"type":"string","description":"Chemin absolu sur le Mac."});
     [
-        ("run_shell", "Exécuter une commande sur le Mac après approbation. Pas un sandbox. Ne pas détacher une commande avec & ou nohup. background=true lance une tâche de fond : pas de plafond de 30 s ni de 120 s, carte En cours dans le fil, sortie consultable, bouton Arrêter, puis Terminée et le code. Le fil reste utilisable. Sans background, le délai est 30 s par défaut et 120 s au plus. timeout_ms est ignoré quand background est true.", json!({"command":{"type":"string"},"cwd":path,"timeout_ms":{"type":"integer","minimum":100,"maximum":120000,"description":"Ignoré si background est true. Sinon 30 s par défaut, 120 s au plus."},"output_limit":{"type":"integer","minimum":1024,"maximum":1048576},"background":{"type":"boolean","description":"true : tâche de fond sans plafond de temps. Absent ou false : premier plan."}}), json!(["command","cwd","timeout_ms","output_limit"])),
+        ("run_shell", "Exécuter une commande sur le Mac après approbation. Pas un sandbox. Ne pas détacher une commande avec & ou nohup. background=true lance une tâche de fond : pas de plafond de 30 s ni de 120 s, carte En cours dans le fil, sortie consultable, bouton Arrêter, puis Terminée et le code. Le fil reste utilisable. Sans background, le délai est 30 s par défaut et 120 s au plus. timeout_ms est ignoré quand background est true.", json!({"command":{"type":"string"},"description":{"type":"string","minLength":1,"maxLength":80,"description":"Ce que fait la commande, en une courte phrase en mots humains dans la langue de l’utilisateur. Pas de commande brute. Texte d’affichage uniquement, sans autorité sur les permissions."},"cwd":path,"timeout_ms":{"type":"integer","minimum":100,"maximum":120000,"description":"Facultatif. Ignoré si background est true. Sinon 30 s par défaut, 120 s au plus."},"output_limit":{"type":"integer","minimum":1024,"maximum":1048576,"description":"Facultatif. Sortie cumulée de 128 Kio par défaut, 1 Mio au plus."},"background":{"type":"boolean","description":"true : tâche de fond sans plafond de temps. Absent ou false : premier plan."}}), json!(["command","description","cwd"])),
         ("read_file", "Lire un fichier UTF-8 borné. Lecture sans carte seulement dans un dossier accordé.", json!({"path":path}), json!(["path"])),
         ("list_directory", "Lister un dossier (1000 entrées maximum).", json!({"path":path}), json!(["path"])),
         ("write_file", "Créer ou remplacer un fichier UTF-8 après approbation. expected_sha256=null exige un nouveau fichier ; sinon fournir le SHA-256 obtenu par read_file. Pas de création implicite de dossiers.", json!({"path":path,"content":{"type":"string"},"expected_sha256":{"type":["string","null"]}}), json!(["path","content","expected_sha256"]))
@@ -283,6 +283,7 @@ struct WriteArgs {
 #[serde(deny_unknown_fields)]
 struct ShellArgs {
     command: String,
+    description: String,
     cwd: String,
     #[serde(default = "timeout")]
     timeout_ms: u64,
@@ -301,6 +302,21 @@ fn args<T: serde::de::DeserializeOwned>(call: &ToolCall) -> Result<T, ApiError> 
     serde_json::from_value(call.arguments.clone())
         .map_err(|_| ApiError::new(400, "Arguments de l’outil local invalides."))
 }
+fn shell_args(call: &ToolCall) -> Result<ShellArgs, ApiError> {
+    let description = call.arguments.get("description").and_then(Value::as_str);
+    if !description.is_some_and(|text| {
+        !text.trim().is_empty()
+            && text.chars().count() <= 80
+            && text.chars().any(char::is_alphabetic)
+            && !text.chars().any(char::is_control)
+    }) {
+        return Err(ApiError::new(
+            400,
+            "Une description en mots humains de 1 à 80 caractères est requise pour run_shell.",
+        ));
+    }
+    args(call)
+}
 pub fn validate(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
     if !is_tool(&call.name) {
         return Err(ApiError::new(400, "Outil local inconnu."));
@@ -313,7 +329,7 @@ pub fn validate(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
     }
     match call.name.as_str() {
         "run_shell" => {
-            let a: ShellArgs = args(call)?;
+            let a = shell_args(call)?;
             absolute(&a.cwd)?;
             let timeout_ok = a.background || (100..=120_000).contains(&a.timeout_ms);
             if a.command.trim().is_empty()
@@ -469,7 +485,7 @@ fn touches_app_data_at(
             }
         }
         "run_shell" => {
-            let a: ShellArgs = args(call)?;
+            let a = shell_args(call)?;
             shell_touches_app_data(ctx, &a.command, &a.cwd)
         }
         _ => Ok(false),
@@ -1182,7 +1198,7 @@ pub(crate) fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: Arc<AtomicBool
             return Err(ApiError::new(409, "Action annulée."));
         }
         match call.name.as_str() {
-            "run_shell" => shell(ctx, call, args(call)?, cancel),
+            "run_shell" => shell(ctx, call, shell_args(call)?, cancel),
             "write_file" => write(ctx, call, args(call)?),
             "read_file" => {
                 let path = read_path(ctx, call)?;
@@ -1784,7 +1800,7 @@ fn shell(
                 super::shell_tasks::finish(&db, &run_id, &call_id);
             });
         return Ok(
-            json!({"command":a.command,"cwd":cwd,"status":"en cours","exit_code":Value::Null,"signal":Value::Null,"stdout":"","stderr":"","truncated":false,"output_incomplete":false,"background":true}),
+            json!({"command":a.command,"description":a.description,"cwd":cwd,"status":"en cours","exit_code":Value::Null,"signal":Value::Null,"stdout":"","stderr":"","truncated":false,"output_incomplete":false,"background":true}),
         );
     }
     let start = Instant::now();
@@ -1815,7 +1831,7 @@ fn shell(
     let (stdout, t1, i1) = out.join().unwrap_or_else(|_| (String::new(), false, true));
     let (stderr, t2, i2) = err.join().unwrap_or_else(|_| (String::new(), false, true));
     Ok(
-        json!({"command":a.command,"cwd":cwd,"status":state,"exit_code":status.and_then(|s|s.code()),"signal":signal,"stdout":stdout,"stderr":stderr,"truncated":t1||t2,"output_incomplete":i1||i2}),
+        json!({"command":a.command,"description":a.description,"cwd":cwd,"status":state,"exit_code":status.and_then(|s|s.code()),"signal":signal,"stdout":stdout,"stderr":stderr,"truncated":t1||t2,"output_incomplete":i1||i2}),
     )
 }
 #[cfg(not(unix))]
@@ -1838,6 +1854,24 @@ mod tests {
         contracts::{with_tx, RunBudgets, RunKind, Trigger},
         model::{self, Run, RunStatus},
     };
+    #[test]
+    fn shell_omitted_limits_parse_to_the_existing_host_defaults() {
+        let mut call = ToolCall {
+            call_id: "defaults".into(),
+            name: "run_shell".into(),
+            arguments: json!({"command":"printf oui","description":"Afficher le résultat","cwd":"/work"}),
+        };
+        let parsed = shell_args(&call).unwrap();
+        assert_eq!(parsed.timeout_ms, 30_000);
+        assert_eq!(parsed.output_limit, 131_072);
+        assert!(!parsed.background);
+        call.arguments["timeout_ms"] = json!(120_000);
+        call.arguments["output_limit"] = json!(1_048_576);
+        let parsed = shell_args(&call).unwrap();
+        assert_eq!(parsed.timeout_ms, 120_000);
+        assert_eq!(parsed.output_limit, 1_048_576);
+    }
+
     #[test]
     fn admitted_non_individual_authority_cannot_read_app_data_at_the_effect_boundary() {
         let guard = grokbot_test_support::TestDir::new("ezerbot-data-boundary");

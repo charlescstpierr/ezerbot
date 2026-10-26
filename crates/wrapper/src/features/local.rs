@@ -1546,6 +1546,8 @@ fn shell(
                   finished: Arc<AtomicBool>,
                   slot: Arc<Mutex<super::shell_tasks::Piece>>,
                   echoes: Option<std::sync::mpsc::Receiver<Vec<u8>>>| {
+        let provider = ctx.provider.clone();
+        let pulse_run = ctx.run_id.map(str::to_owned);
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
             let mut buffer = [0; 8192];
@@ -1564,6 +1566,11 @@ fn shell(
                 let changed = absorb_output(bytes, &quota, chunk, truncated, &mut allocated);
                 if !echo {
                     prompt.push(chunk);
+                    if !chunk.is_empty() {
+                        if let Some(id) = &pulse_run {
+                            provider.pulse_run(id);
+                        }
+                    }
                 }
                 if let Ok(mut piece) = slot.lock() {
                     if changed {

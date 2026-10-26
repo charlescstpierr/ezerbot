@@ -3,6 +3,8 @@
 //! separate from forgetting. Budgets/recovery policy are local reconstruction.
 //! Summary bounds follow RC06, with the 70% fallback from `compaction-runtimes.md`.
 
+pub mod watchdog;
+
 use crate::*;
 use grokbot_domain::{ConversationId, DeliveryReceipt, MessageId, Refusal, TranscriptEntryId};
 use grokbot_engine::contracts::{
@@ -155,6 +157,7 @@ pub(super) fn budget(conn: &Connection) -> grokbot_engine::contracts::Result<Con
 }
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
+    watchdog::migrate(conn)?;
     store::migrate(conn)?;
     compaction::migrate(conn)?;
     conn.execute_batch(
@@ -1138,6 +1141,7 @@ pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Res
     Ok(())
 }
 pub fn tick(ctx: &super::Context<'_>) {
+    let _ = watchdog::scan(ctx);
     tick_selected(ctx, false, false);
 }
 pub(crate) fn tick_routines(ctx: &super::Context<'_>) {
@@ -1321,6 +1325,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
         [&run.run_id],
         |row| row.get(0),
     )?;
+    let seq = watchdog::latest_seq(ctx.connection, &run.run_id)?;
     let Some(cancel) = ctx.provider.claim_run(&run.run_id) else {
         return Ok(());
     };
@@ -1329,6 +1334,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
         id: run.run_id.clone(),
         titling: live,
     };
+    ctx.provider.watchdog().start(&run.run_id, seq);
     // Mark before the final event can stop UI polling; clear even on unwind.
     if live {
         ctx.provider.title_started();
@@ -1508,6 +1514,25 @@ impl<'a> Services<'a> {
     }
 }
 impl RunServices for Services<'_> {
+    fn on_activity(&mut self, id: &str, activity: run_loop::RunActivity<'_>) {
+        if let run_loop::RunActivity::ToolStarted(name) = activity {
+            let call = grokbot_engine::contracts::ToolCall {
+                call_id: String::new(),
+                name: name.into(),
+                arguments: json!({}),
+            };
+            let internal = !self.is_external_tool(&call) && !self.is_journaled_external_tool(&call);
+            watchdog::activity(self.provider, id, activity);
+            self.provider
+                .watchdog()
+                .activity_kind(id, None, Some(internal));
+        } else {
+            watchdog::activity(self.provider, id, activity);
+        }
+    }
+    fn on_run_committed(&mut self, run: &Run, through_seq: u64) {
+        self.provider.watchdog().committed(run, through_seq);
+    }
     fn context(&mut self, run: &Run) -> grokbot_engine::contracts::Result<ModelRequest> {
         let mut input = run_input(self.connection, &run.run_id)?;
         let (model, effort, service_tier): (String, Option<String>, Option<String>) =
@@ -1890,6 +1915,7 @@ impl RunServices for Services<'_> {
             )
             .map_err(engine_error)?;
         }
+        watchdog::record(&self.ctx(conn, &run), event, &run).map_err(engine_error)?;
         // Check the forms reaction before the legacy void registry hook; any
         // invalidation/retargeting failure rolls back this event and is retried.
         let ctx = self.ctx(conn, &run);
@@ -2921,6 +2947,9 @@ pub fn reply(
     )?))
 }
 pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> {
+    if kind == "stalled" {
+        return watchdog::entry(ctx, id);
+    }
     if kind == "engine_reply" {
         let run = store::get(ctx.connection, id).ok()??;
         return run_reply(ctx.connection, &run, format!("reply-{id}")).ok();

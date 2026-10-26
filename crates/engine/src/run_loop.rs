@@ -30,6 +30,13 @@ pub enum RunEventPoint {
     BeforeCommit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunActivity<'a> {
+    Model,
+    ToolStarted(&'a str),
+    ToolFinished(&'a str),
+}
+
 pub trait RunServices {
     #[cfg(any(test, debug_assertions))]
     fn transaction_checkpoint(&mut self, _run_id: &str, _point: RunEventPoint) -> Result<()> {
@@ -140,6 +147,10 @@ pub trait RunServices {
     /// ALL external lifecycle writers (stop/regenerate/recovery) must use
     /// cancel()/with_run_events(), never a bare model mutation followed by a hook.
     fn on_run_event(&mut self, conn: &Connection, event: &RunEvent) -> Result<()>;
+    /// Live activity, including tool calls whose transaction later rolls back.
+    fn on_activity(&mut self, _run_id: &str, _activity: RunActivity<'_>) {}
+    /// Infallible receipt after new run events commit and release the writer.
+    fn on_run_committed(&mut self, _run: &Run, _through_seq: u64) {}
     /// Resolved form/secret/child data, placed at the original call's output,
     /// not prepended to context before the call that requested it.
     fn resolution(
@@ -211,15 +222,24 @@ pub fn with_run_events<T>(
                 |row| row.get(0),
             )?;
             let value = operation(&tx, services)?;
-            for event in store::events(&tx, run_id, seq)? {
-                if let Err(error) = services.on_run_event(&tx, &event) {
+            let events = store::events(&tx, run_id, seq)?;
+            for event in &events {
+                if let Err(error) = services.on_run_event(&tx, event) {
                     hook_failed = true;
                     return Err(error);
                 }
             }
+            let committed = if let Some(event) = events.last() {
+                Some((store::required(&tx, run_id)?, event.seq))
+            } else {
+                None
+            };
             #[cfg(any(test, debug_assertions))]
             services.transaction_checkpoint(run_id, RunEventPoint::BeforeCommit)?;
             tx.commit()?;
+            if let Some((run, through_seq)) = committed {
+                services.on_run_committed(&run, through_seq);
+            }
             Ok(value)
         })();
         match result {
@@ -489,8 +509,24 @@ pub fn cancel(
     run_id: &str,
     end: TurnEnd,
 ) -> Result<Run> {
+    cancel_if(conn, services, run_id, end, |_, _| Ok(true))
+}
+
+/// Recheck cancellation eligibility under the writer before settling any call.
+/// A false predicate returns the current run without events or reactions.
+pub fn cancel_if(
+    conn: &Connection,
+    services: &mut dyn RunServices,
+    run_id: &str,
+    end: TurnEnd,
+    mut predicate: impl FnMut(&Connection, &Run) -> Result<bool>,
+) -> Result<Run> {
     commit(conn, services, run_id, |conn, _| {
-        if !store::required(conn, run_id)?.status.is_terminal() {
+        let run = store::required(conn, run_id)?;
+        if !predicate(conn, &run)? {
+            return Ok(run);
+        }
+        if !run.status.is_terminal() {
             settle_pending(
                 conn,
                 run_id,
@@ -901,7 +937,10 @@ fn execute_external(
         return Ok(Some(progress));
     }
     debug_assert!(conn.is_autocommit());
-    let outcome = services.call_external_tool(conn, &run, call)?;
+    services.on_activity(run_id, RunActivity::ToolStarted(&call.name));
+    let outcome = services.call_external_tool(conn, &run, call);
+    services.on_activity(run_id, RunActivity::ToolFinished(&call.name));
+    let outcome = outcome?;
     if matches!(outcome, ToolOutcome::Suspend { .. }) {
         return Err(invalid("external effects must return a final outcome"));
     }
@@ -1052,7 +1091,10 @@ fn execute_journaled_external(
                 })?;
                 return Ok(None);
             }
-            services.call_journaled_external_tool(&run, call)
+            services.on_activity(run_id, RunActivity::ToolStarted(&call.name));
+            let outcome = services.call_journaled_external_tool(&run, call);
+            services.on_activity(run_id, RunActivity::ToolFinished(&call.name));
+            outcome
         }
     };
     let code = code.unwrap_or_else(|| ToolCode::of(&outcome));
@@ -1231,7 +1273,10 @@ fn execute(
         } else if matches!(call.name.as_str(), "begin_task" | "complete_task") {
             builtin(conn, &*services, &mut run, call)?
         } else {
-            services.call_tool(conn, &run, call)?
+            services.on_activity(run_id, RunActivity::ToolStarted(&call.name));
+            let outcome = services.call_tool(conn, &run, call);
+            services.on_activity(run_id, RunActivity::ToolFinished(&call.name));
+            outcome?
         };
         if services.is_cancelled(run_id)
             || store::required(conn, run_id)?.status != RunStatus::Running
@@ -1416,6 +1461,9 @@ fn drive(
         let mut completed = false;
         let mut persistence_error = false;
         let result = gateway.stream(&request, &mut |event| {
+            if !matches!(event, ModelEvent::ContextEstimate { .. }) {
+                services.on_activity(run_id, RunActivity::Model);
+            }
             if checkpoint(conn, services, run_id)
                 .inspect_err(|_| persistence_error = true)?
                 .is_some()
@@ -1593,6 +1641,14 @@ mod tests {
             Ok(())
         }
     }
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum ObservedActivity {
+        Model,
+        ToolStarted(String),
+        ToolEffect(String),
+        ToolFinished(String),
+    }
+
     #[derive(Default)]
     struct Services {
         specs: Vec<ToolSpec>,
@@ -1621,6 +1677,9 @@ mod tests {
         own_captures: Vec<String>,
         seen_arguments: Vec<Value>,
         checkpoints: Option<TransactionCheckpoints>,
+        activities: Vec<(String, ObservedActivity)>,
+        committed: Vec<(Run, u64)>,
+        commit_observer: Option<Connection>,
     }
     impl RunServices for Services {
         fn transaction_checkpoint(&mut self, run_id: &str, point: RunEventPoint) -> Result<()> {
@@ -1661,9 +1720,13 @@ mod tests {
         fn call_tool(
             &mut self,
             conn: &Connection,
-            _: &Run,
+            run: &Run,
             call: &ToolCall,
         ) -> Result<ToolOutcome> {
+            self.activities.push((
+                run.run_id.clone(),
+                ObservedActivity::ToolEffect(call.name.clone()),
+            ));
             self.calls.push(call.call_id.clone());
             self.seen_arguments.push(call.arguments.clone());
             conn.execute("INSERT INTO effects VALUES (?1)", [&call.call_id])?;
@@ -1749,7 +1812,11 @@ mod tests {
         fn is_journaled_external_tool(&self, call: &ToolCall) -> bool {
             self.journaled_external && call.name != "external"
         }
-        fn call_journaled_external_tool(&mut self, _: &Run, _: &ToolCall) -> ToolOutcome {
+        fn call_journaled_external_tool(&mut self, run: &Run, call: &ToolCall) -> ToolOutcome {
+            self.activities.push((
+                run.run_id.clone(),
+                ObservedActivity::ToolEffect(call.name.clone()),
+            ));
             self.external_calls += 1;
             if self.cancel_in_tool {
                 self.cancel.store(true, Ordering::SeqCst);
@@ -1779,6 +1846,31 @@ mod tests {
             )?;
             self.hooks.push(event.clone());
             Ok(())
+        }
+        fn on_activity(&mut self, run_id: &str, activity: RunActivity<'_>) {
+            self.activities.push((
+                run_id.into(),
+                match activity {
+                    RunActivity::Model => ObservedActivity::Model,
+                    RunActivity::ToolStarted(name) => ObservedActivity::ToolStarted(name.into()),
+                    RunActivity::ToolFinished(name) => ObservedActivity::ToolFinished(name.into()),
+                },
+            ));
+        }
+        fn on_run_committed(&mut self, run: &Run, through_seq: u64) {
+            if let Some(observer) = &self.commit_observer {
+                writer_available(observer).expect("commit receipt must release the writer");
+                assert_eq!(store::required(observer, &run.run_id).unwrap(), *run);
+                let latest: u64 = observer
+                    .query_row(
+                        "SELECT MAX(seq) FROM engine_run_events WHERE run_id=?1",
+                        [&run.run_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(latest, through_seq);
+            }
+            self.committed.push((run.clone(), through_seq));
         }
         fn resolution(&mut self, _: &Connection, _: &Run, _: &str) -> Result<Option<Value>> {
             Ok(self.resolved.clone())
@@ -1820,6 +1912,10 @@ mod tests {
         execute(&conn, &mut services, "run", &call)?;
         assert_eq!(services.calls, vec!["outside"]);
         assert_eq!(
+            observed_tool_activity(&services),
+            expected_tool_activity("external")
+        );
+        assert_eq!(
             conn.query_row("SELECT count(*) FROM grants_used", [], |r| r
                 .get::<_, i64>(0))?,
             1
@@ -1848,6 +1944,10 @@ mod tests {
         services.specs.clear(); // After process restart, MCP has no live client.
         execute(&conn, &mut services, "run", &call)?;
         assert_eq!(services.calls.len(), 1);
+        assert_eq!(
+            observed_tool_activity(&services),
+            expected_tool_activity("external")
+        );
         assert!(store::events(&conn, "run", 0)?
             .iter()
             .any(|e| e.kind == RunEventKind::ToolResult
@@ -1938,6 +2038,296 @@ mod tests {
         })
         .unwrap()
     }
+    fn observed_tool_activity(services: &Services) -> Vec<(String, ObservedActivity)> {
+        services
+            .activities
+            .iter()
+            .filter(|(_, activity)| *activity != ObservedActivity::Model)
+            .cloned()
+            .collect()
+    }
+    fn expected_tool_activity(name: &str) -> Vec<(String, ObservedActivity)> {
+        vec![
+            ("run".into(), ObservedActivity::ToolStarted(name.into())),
+            ("run".into(), ObservedActivity::ToolEffect(name.into())),
+            ("run".into(), ObservedActivity::ToolFinished(name.into())),
+        ]
+    }
+
+    #[test]
+    fn commit_receipts_observe_committed_events_without_a_writer_and_skip_rollbacks() -> Result<()>
+    {
+        let directory = grokbot_test_support::TestDir::new("engine-commit-receipts");
+        let path = directory.join("engine.sqlite");
+        let conn = setup(Connection::open(&path)?, false, RunBudgets::default())?;
+        let observer = Connection::open(&path)?;
+        observer.busy_timeout(Duration::ZERO)?;
+        let mut services = Services {
+            commit_observer: Some(observer),
+            fail_hook_once: Some(RunEventKind::TextDelta),
+            ..Default::default()
+        };
+        commit(&conn, &mut services, "run", |conn, services| {
+            model::set_running_at(conn, "run", now_ms())?;
+            checkpoint_effect(conn, services)
+        })?;
+        assert_eq!(services.committed.len(), 1);
+        assert_eq!(services.committed[0].0.status, RunStatus::Running);
+        assert_eq!(services.committed[0].1, 2);
+        assert_eq!(count(&conn, "effects"), 1);
+        commit(&conn, &mut services, "run", |conn, _| {
+            conn.execute("INSERT INTO effects VALUES ('no-event')", [])?;
+            Ok(())
+        })?;
+        let error = commit(&conn, &mut services, "run", |conn, _| {
+            store::append_event(
+                conn,
+                "run",
+                RunEventKind::TextDelta,
+                &json!({"text":"lost"}),
+            )?;
+            Err::<(), _>(invalid("operation rolled back"))
+        });
+        assert!(error.is_err());
+        services.fail_final_hook = true;
+        assert!(finish_response(&conn, &mut services, "run", TurnEnd::Finished, None).is_err());
+        assert_eq!(services.committed.len(), 1);
+        assert_eq!(store::required(&conn, "run")?.status, RunStatus::Running);
+        assert_eq!(store::events(&conn, "run", 0)?.len(), 2);
+        services.fail_final_hook = false;
+        cancel(&conn, &mut services, "run", TurnEnd::Stopped)?;
+        assert_eq!(services.committed.len(), 2);
+        assert_eq!(services.committed[1].0.status, RunStatus::Cancelled);
+        cancel(&conn, &mut services, "run", TurnEnd::Stopped)?;
+        assert_eq!(services.committed.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn conditional_cancellation_rechecks_under_the_writer_before_settling_calls() -> Result<()> {
+        let (conn, _) = external_fixture()?;
+        let before = store::required(&conn, "run")?;
+        let events = store::events(&conn, "run", 0)?;
+        let mut services = Services::default();
+        let mut checked = false;
+        assert_eq!(
+            cancel_if(
+                &conn,
+                &mut services,
+                "run",
+                TurnEnd::Stopped,
+                |conn, run| {
+                    assert!(!conn.is_autocommit());
+                    assert_eq!(run, &before);
+                    assert_eq!(pending_calls(&store::events(conn, "run", 0)?)?.len(), 1);
+                    checked = true;
+                    Ok(false)
+                }
+            )?,
+            before
+        );
+        assert!(checked);
+        assert!(
+            cancel_if(&conn, &mut services, "run", TurnEnd::Stopped, |_, _| {
+                Err(invalid("eligibility unavailable"))
+            })
+            .is_err()
+        );
+        assert_eq!(store::events(&conn, "run", 0)?, events);
+        assert!(services.hooks.is_empty());
+        assert!(services.committed.is_empty());
+        let cancelled = cancel_if(
+            &conn,
+            &mut services,
+            "run",
+            TurnEnd::Stopped,
+            |conn, run| {
+                assert!(!conn.is_autocommit());
+                Ok(run.status == RunStatus::Running)
+            },
+        )?;
+        assert_eq!(cancelled.status, RunStatus::Cancelled);
+        assert!(pending_calls(&store::events(&conn, "run", 0)?)?.is_empty());
+        assert_eq!(services.hooks.len(), 2);
+        assert_eq!(services.committed, vec![(cancelled, 4)]);
+        Ok(())
+    }
+
+    #[test]
+    fn model_activity_includes_provider_events_and_excludes_context_estimates() -> Result<()> {
+        let conn = database(false, RunBudgets::default())?;
+        let gateway = Scripted::new(vec![response(vec![
+            ModelEvent::ContextEstimate {
+                estimate: ContextEstimate {
+                    characters: 12,
+                    characters_per_token: 4,
+                    tool_characters: 0,
+                },
+            },
+            ModelEvent::Reasoning {
+                item_id: "reasoning".into(),
+                encrypted_content: "opaque".into(),
+            },
+            ModelEvent::TextDelta {
+                text: "answer".into(),
+            },
+            ModelEvent::Usage {
+                usage: crate::contracts::TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 2,
+                    cached_input_tokens: 0,
+                },
+            },
+        ])]);
+        let mut services = Services::default();
+        run(&conn, &gateway, &mut services, "run")?;
+        assert_eq!(
+            services.activities,
+            vec![("run".into(), ObservedActivity::Model); 4]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn activity_brackets_each_tool_dispatch_even_when_cancelled() -> Result<()> {
+        for (external, journaled) in [(false, false), (true, false), (false, true)] {
+            for cancel_in_tool in [false, true] {
+                let conn = database(false, RunBudgets::default())?;
+                let gateway = Scripted::new(vec![
+                    response(vec![call("effect", "work", json!({}))]),
+                    response(vec![]),
+                ]);
+                let mut services = Services {
+                    specs: vec![spec("work", true)],
+                    standing: Some(AuthorizedBy::Rule {
+                        rule_id: "test".into(),
+                    }),
+                    external,
+                    journaled_external: journaled,
+                    cancel_in_tool,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    run(&conn, &gateway, &mut services, "run")?,
+                    RunProgress::Ended(if cancel_in_tool {
+                        TurnEnd::Stopped
+                    } else {
+                        TurnEnd::Finished
+                    })
+                );
+                assert_eq!(
+                    observed_tool_activity(&services),
+                    expected_tool_activity("work")
+                );
+                assert_eq!(services.calls.len() + services.external_calls, 1);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn activity_finishes_when_fallible_tool_dispatches_return_an_error() -> Result<()> {
+        for external in [false, true] {
+            let conn = database(false, RunBudgets::default())?;
+            let gateway = Scripted::new(vec![response(vec![call("effect", "work", json!({}))])]);
+            let mut services = Services {
+                specs: vec![spec("work", true)],
+                standing: Some(AuthorizedBy::Rule {
+                    rule_id: "test".into(),
+                }),
+                external,
+                error_in_tool: true,
+                ..Default::default()
+            };
+            assert!(run(&conn, &gateway, &mut services, "run").is_err());
+            assert_eq!(
+                store::required(&conn, "run")?.status,
+                RunStatus::Interrupted
+            );
+            assert_eq!(
+                observed_tool_activity(&services),
+                expected_tool_activity("work")
+            );
+            assert_eq!(services.calls.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn waiting_or_denied_approvals_never_report_a_tool_start() -> Result<()> {
+        for (external, journaled) in [(false, false), (true, false), (false, true)] {
+            for (deny, detach) in [(false, false), (false, true), (true, false)] {
+                let conn = database(false, RunBudgets::default())?;
+                let call = call_event("guarded", "work");
+                with_tx(&conn, |conn| {
+                    model::set_running_at(conn, "run", now_ms())?;
+                    store::append_event(conn, "run", RunEventKind::ToolCall, &json!(call))?;
+                    Ok::<(), Error>(())
+                })?;
+                let mut services = Services {
+                    specs: vec![spec("work", true)],
+                    external,
+                    journaled_external: journaled,
+                    deny,
+                    detach,
+                    ..Default::default()
+                };
+                execute(&conn, &mut services, "run", &call)?;
+                assert!(services.activities.is_empty());
+                assert!(services.calls.is_empty());
+                assert_eq!(services.external_calls, 0);
+            }
+        }
+        Ok::<(), Error>(())
+    }
+
+    #[test]
+    fn recovering_either_external_admission_does_not_report_tool_activity() -> Result<()> {
+        for journaled in [false, true] {
+            let conn = database(false, RunBudgets::default())?;
+            let call = call_event("admitted", "work");
+            with_tx(&conn, |conn| {
+                model::set_running_at(conn, "run", now_ms())?;
+                store::append_event(conn, "run", RunEventKind::ToolCall, &json!(call))?;
+                if journaled {
+                    conn.execute(
+                        "INSERT INTO engine_external_tools(run_id,call_id,outcome) VALUES ('run',?1,?2)",
+                        rusqlite::params![call.call_id, serde_json::to_string(&ToolOutcome::Done { output: json!({"restored":true}) })?],
+                    )?;
+                } else {
+                    conn.execute(
+                        "INSERT INTO engine_tool_admissions VALUES ('run',?1,?2,NULL)",
+                        rusqlite::params![call.call_id, external_digest(&call)?],
+                    )?;
+                }
+                Ok::<(), Error>(())
+            })?;
+            let mut services = Services {
+                specs: vec![spec("work", true)],
+                external: !journaled,
+                journaled_external: journaled,
+                ..Default::default()
+            };
+            let gateway = Scripted::new(vec![response(vec![])]);
+            assert_eq!(
+                run(&conn, &gateway, &mut services, "run")?,
+                RunProgress::Ended(TurnEnd::Finished)
+            );
+            assert!(observed_tool_activity(&services).is_empty());
+            assert!(services.calls.is_empty());
+            assert_eq!(services.external_calls, 0);
+            let events = store::events(&conn, "run", 0)?;
+            let result = events
+                .iter()
+                .find(|event| event.kind == RunEventKind::ToolResult)
+                .unwrap();
+            assert_eq!(
+                result.payload["code"],
+                if journaled { "ok" } else { "uncertain" }
+            );
+        }
+        Ok::<(), Error>(())
+    }
 
     struct TransactionCheckpoints {
         run_id: &'static str,
@@ -1954,7 +2344,7 @@ mod tests {
     impl CheckpointHandle {
         fn expect(&self, point: RunEventPoint) -> Result<()> {
             assert_eq!(checkpoint_receive(&self.arrived, self.deadline)?, point);
-            Ok(())
+            Ok::<(), Error>(())
         }
         fn resume(&self) {
             self.resume.send(()).unwrap();
@@ -2052,11 +2442,11 @@ mod tests {
             RunEventKind::TextDelta,
             &json!({"text":"checkpoint"}),
         )?;
-        Ok(())
+        Ok::<(), Error>(())
     }
     fn writer_available(conn: &Connection) -> Result<()> {
         Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?.rollback()?;
-        Ok(())
+        Ok::<(), Error>(())
     }
 
     #[test]
@@ -2256,6 +2646,9 @@ mod tests {
                 assert!(results[id]["elapsed_ms"].is_u64(), "{mode} {id}");
                 assert!(results[id]["started_ms"].is_u64(), "{mode} {id}");
             }
+            let mut activity = expected_tool_activity("work");
+            activity.extend(expected_tool_activity("flaky"));
+            assert_eq!(observed_tool_activity(&services), activity);
         }
         Ok(())
     }
@@ -2335,6 +2728,10 @@ mod tests {
         };
         run(&conn, &gateway, &mut services, "run")?;
         assert_eq!(services.external_calls, 1);
+        assert_eq!(
+            observed_tool_activity(&services),
+            expected_tool_activity("work")
+        );
         assert_eq!(services.approval_calls, 1);
         assert_eq!(count(&conn, "engine_external_tools"), 1);
         assert_eq!(
@@ -3773,6 +4170,10 @@ mod tests {
             .iter()
             .any(|event| event.kind == RunEventKind::ToolCall));
         assert_eq!(count(&conn, "effects"), 0);
+        assert_eq!(
+            services.activities,
+            vec![("run".into(), ObservedActivity::Model); 2]
+        );
         Ok(())
     }
 

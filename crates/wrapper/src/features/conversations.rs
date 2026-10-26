@@ -45,25 +45,33 @@ pub fn routes(
 fn state_revision(
     connection: &rusqlite::Connection,
     path: &std::path::Path,
+    silence_revision: u64,
 ) -> Result<String, ApiError> {
     let external: u64 = connection.pragma_query_value(None, "data_version", |row| row.get(0))?;
     Ok(format!(
-        "{}.{}.{}.{}.{}",
+        "{}.{}.{}.{}.{}.{}",
         std::process::id(),
         external,
         connection.total_changes(),
         super::screen::revision(path),
         super::updates::revision(),
+        silence_revision,
     ))
 }
 
 fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     match path {
-        "/api/ping" => Ok(json!({"revision": state_revision(&app.connection, &app.db_path)?})),
+        "/api/ping" => Ok(
+            json!({"revision": state_revision(&app.connection, &app.db_path, app.provider.watchdog().revision())?}),
+        ),
         "/api/state" => {
             // Capture before reading: a concurrent write during serialization
             // must cause another refresh, never be mistaken for observed data.
-            let revision = state_revision(&app.connection, &app.db_path)?;
+            let revision = state_revision(
+                &app.connection,
+                &app.db_path,
+                app.provider.watchdog().revision(),
+            )?;
             let (theme, accent) = app.preferences()?;
             let provider = app.provider.status();
             let resolved = app.resolved_model()?;
@@ -76,6 +84,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     "model": resolved.as_ref().map(|(model, _, _)| model),
                     "effort": resolved.as_ref().and_then(|(_, effort, _)| effort.as_ref()), },
                 "provider": provider, "state_revision": revision,
+                "silence": app.provider.watchdog().silence(),
             });
             // Each capability is merged under its own fixed key.
             for (key, value) in super::state(&app.feature_context())

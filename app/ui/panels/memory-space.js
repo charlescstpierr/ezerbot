@@ -99,16 +99,16 @@
   }
   const scopeLabel = (fact) => (fact.scope === "topic" ? (fact.topic_name ? `Sujet · ${fact.topic_name}` : "Sujet") : fact.scope === "team" ? "Équipe" : "Privé");
   function mount() {
-    const sidebar = byId("sidebar");
+    const bots = byId("sidebar")?.querySelector(".sidebar-bots");
     const dock = document.querySelector(".composer-dock");
-    if (!sidebar || !dock) return false;
+    if (!bots || !dock) return false;
     const wrapper = node("div", "sidebar-memory");
     entry = node("button", "conversation-item memory-entry");
     entry.type = "button";
     entry.append(node("span", "conversation-name", "Mémoire"), node("span", "memory-entry-count"));
     entry.addEventListener("click", () => { recalled = used = null; show(); });
     wrapper.append(entry);
-    sidebar.insertBefore(wrapper, sidebar.querySelector(".sidebar-bots"));
+    bots.parentElement.insertBefore(wrapper, bots);
     screen = node("section", "memory-space");
     screen.hidden = true;
     const switcher = node("div", "memory-space-switch");

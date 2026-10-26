@@ -56,23 +56,30 @@
       <symbol id="i-bot" viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="5"/><path d="M12 8V4.5M9.5 13v2m5-2v2"/></symbol>
       <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M12 17v4m-5 0h10"/></symbol>
       <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
     </defs>
   </svg>
 
   <button class="sidebar-scrim" id="sidebar-scrim" aria-label="Fermer la liste des conversations" tabindex="-1"></button>
   <aside class="sidebar" id="sidebar" aria-label="Conversations">
-    <div class="brand-row">
-      <a class="brand" href="#" id="home-link" aria-label="Ezerbot, accueil"><span class="brand-mascot" data-mascot="brand" aria-hidden="true"></span><span>ezerbot<span class="brand-period">.</span></span></a>
-      <button class="icon-button sidebar-close" id="sidebar-close" aria-label="Fermer la liste"><svg class="icon"><use href="#i-close"/></svg></button>
-    </div>
+    <nav class="sidebar-rail" aria-label="Navigation principale">
+      <a class="brand" href="#" id="home-link" aria-label="Ezerbot, accueil" title="Ezerbot, accueil"><span class="brand-mascot" data-mascot="brand" aria-hidden="true"></span></a>
+      <button class="rail-button" type="button" data-sidebar-destination="conversations" aria-label="Conversations" title="Conversations" aria-controls="conversation-list" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-chat"/></svg></button>
+      <button class="rail-button" type="button" data-sidebar-destination="topics" aria-label="Sujets" title="Sujets" aria-controls="sidebar-topics" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></button>
+      <button class="rail-button" type="button" data-sidebar-destination="routines" aria-label="Routines" title="Routines" aria-haspopup="dialog" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg></button>
+      <div class="rail-bottom">
+        <button class="rail-button" type="button" data-sidebar-destination="notifications" aria-label="Notifications" title="Notifications" aria-haspopup="dialog" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg></button>
+        <button class="rail-button" id="settings-button" type="button" data-sidebar-destination="settings" aria-label="Réglages" title="Réglages" aria-haspopup="dialog" aria-controls="settings-dialog" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg></button>
+      </div>
+    </nav>
+    <div class="sidebar-content">
+    <div class="sidebar-heading"><h2>Conversations</h2><button class="icon-button sidebar-close" id="sidebar-close" aria-label="Fermer la liste"><svg class="icon"><use href="#i-close"/></svg></button></div>
     <button class="new-chat" id="new-chat"><svg class="icon"><use href="#i-plus"/></svg><span>Nouvelle conversation</span><kbd>⌘ N</kbd></button>
     <label class="search-field"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="search" type="search" autocomplete="off" placeholder="Rechercher" aria-label="Rechercher une conversation"><kbd>⌘ K</kbd></label>
     <div class="sidebar-bots" role="group" aria-labelledby="sidebar-bots-label"><div class="sidebar-filter-row"><span class="section-label" id="sidebar-bots-label">BOTS</span><button class="favorites-filter add-bot" type="button" data-new-bot aria-label="Nouveau bot" title="Nouveau bot"><svg class="icon"><use href="#i-plus"/></svg></button></div><div class="sidebar-bot-list" id="sidebar-bot-list"></div></div>
     <div class="sidebar-topics" id="sidebar-topics" role="group" aria-labelledby="sidebar-topics-label" hidden><div class="sidebar-filter-row"><span class="section-label" id="sidebar-topics-label">SUJETS</span><button class="favorites-filter add-topic" id="new-topic" type="button" aria-label="Nouveau sujet" title="Nouveau sujet"><svg class="icon"><use href="#i-plus"/></svg></button></div><div class="topic-list" id="topic-list"></div></div>
     <div class="sidebar-filter-row"><span class="section-label">CONVERSATIONS</span><button id="favorites-filter" class="favorites-filter" aria-label="Afficher les favoris" aria-pressed="false" title="Afficher les favoris"><svg class="icon"><use href="#i-star"/></svg></button></div>
-    <nav class="conversation-list" id="conversation-list" aria-label="Vos conversations"><p class="sidebar-empty">Vos conversations apparaîtront ici.</p></nav>
-    <div class="sidebar-bottom">
-      <button class="account-button" id="settings-button"><span class="account-avatar" id="account-avatar">V</span><span class="account-copy"><strong id="account-name">Espace personnel</strong><span>Paramètres de l’application</span></span><svg class="icon"><use href="#i-settings"/></svg></button>
+    <nav class="conversation-list" id="conversation-list" aria-label="Vos conversations" tabindex="-1"><p class="sidebar-empty">Vos conversations apparaîtront ici.</p></nav>
     </div>
   </aside>
 

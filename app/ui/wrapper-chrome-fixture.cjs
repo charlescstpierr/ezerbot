@@ -16,7 +16,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// The scripted model. A user message "create_document:{json}" makes it call that tool with the
+// The scripted model. A user message "create_document:{json}" or "write_page:{json}" calls that tool with the
 // JSON as arguments; once the tool output is back (or for anything else: titles, memory) it
 // answers with one short text. The tool call and the catalogue follow the shapes the real
 // provider parses, as in crates/wrapper/tests/support and .cursor/skills/verify-ezerbot.
@@ -49,16 +49,17 @@ function scriptedReply(raw) {
   const input = Array.isArray(payload.input) ? payload.input : [];
   const answered = input.some((item) => item?.type === "function_call_output");
   const lastUser = [...input].reverse().find((item) => item?.role === "user");
-  const request = strings(lastUser).find((text) => text.startsWith("create_document:"));
-  const offered = (payload.tools || []).some((tool) => tool?.name === "create_document");
+  const toolName = ["create_document", "write_page"].find((name) => strings(lastUser).some((text) => text.startsWith(`${name}:`)));
+  const request = strings(lastUser).find((text) => toolName && text.startsWith(`${toolName}:`));
+  const offered = (payload.tools || []).some((tool) => tool?.name === toolName);
   if (request && offered && !answered) {
     const call = {
       id: "fc-fixture",
       type: "function_call",
       status: "completed",
       call_id: `fixture-${Buffer.from(request).toString("base64url").slice(-24)}`,
-      name: "create_document",
-      arguments: request.slice("create_document:".length),
+      name: toolName,
+      arguments: request.slice(toolName.length + 1),
     };
     return sse([{ type: "response.output_item.done", item: call }, { type: "response.completed" }]);
   }
@@ -200,7 +201,7 @@ async function untilTrue(read, message, ms = 20000) {
 // `documents` ({ title, name, format, content }) through /api/conversations and /api/send and
 // waits for each create_document result; opens the app in Chrome. Resolves with the app's URL
 // and `evaluate(source)`, which runs `source` (an expression, usually a function) in the page.
-async function launchFixture(t, { documents, binary = join(__dirname, "../../target/debug/grokbot-wrapper") }) {
+async function launchFixture(t, { documents, viewport, binary = join(__dirname, "../../target/debug/grokbot-wrapper") }) {
   const root = mkdtempSync(join(tmpdir(), "grokbot-fixture-"));
   const dbDir = join(root, "db");
   mkdirSync(dbDir);
@@ -302,8 +303,9 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
     watches.push(await identity.authenticateBrowser(cdp, url));
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
+    if (viewport) await cdp.send("Emulation.setDeviceMetricsOverride", { ...viewport, deviceScaleFactor: 1, mobile: false });
     await cdp.send("Page.navigate", { url });
-    return { url, evaluate: (source) => whileRunning(evaluate(source)), details };
+    return { url, evaluate: (source) => whileRunning(evaluate(source)), details, database: join(dbDir, "app.sqlite") };
   })());
 }
 

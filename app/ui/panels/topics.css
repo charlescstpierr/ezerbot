@@ -1,12 +1,4 @@
 /* Sujets : section de la barre latérale, page d’un sujet et dialogues. */
-/* La section SUJETS prend de la place : la barre défile plutôt que de superposer ses blocs, et CONVERSATIONS garde au moins deux lignes. */
-.sidebar:has(.sidebar-topics:not([hidden])) { overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
-.sidebar:has(.sidebar-topics:not([hidden])) > * { flex-shrink: 0; }
-.sidebar:has(.sidebar-topics:not([hidden])) > .conversation-list { flex: 1 0 96px; }
-.sidebar:has(.sidebar-topics:not([hidden])) > .sidebar-bottom { position: sticky; bottom: 0; z-index: 1; margin-bottom: -15px; padding-bottom: 15px; background: var(--sidebar); }
-.sidebar:has(.sidebar-topics:not([hidden])) > .search-field { margin-bottom: 14px; }
-.sidebar:has(.sidebar-topics:not([hidden])) > .brand-row { margin-bottom: 18px; }
-/* Une fenêtre basse garde la place pour les fils : la note « Chez vous » attend une fenêtre plus haute. */
 .sidebar-topics { margin-bottom: 8px; }
 .topic-list { max-height: min(44dvh, 360px); overflow-y: auto; margin: 0 -3px; padding: 0 3px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .topic-folder { margin-bottom: 2px; }

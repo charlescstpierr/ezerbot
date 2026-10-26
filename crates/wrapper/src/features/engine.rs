@@ -1515,20 +1515,17 @@ impl<'a> Services<'a> {
 }
 impl RunServices for Services<'_> {
     fn on_activity(&mut self, id: &str, activity: run_loop::RunActivity<'_>) {
-        if let run_loop::RunActivity::ToolStarted(name) = activity {
+        let internal = if let run_loop::RunActivity::ToolStarted(name) = activity {
             let call = grokbot_engine::contracts::ToolCall {
                 call_id: String::new(),
                 name: name.into(),
                 arguments: json!({}),
             };
-            let internal = !self.is_external_tool(&call) && !self.is_journaled_external_tool(&call);
-            watchdog::activity(self.provider, id, activity);
-            self.provider
-                .watchdog()
-                .activity_kind(id, None, Some(internal));
+            !self.is_external_tool(&call) && !self.is_journaled_external_tool(&call)
         } else {
-            watchdog::activity(self.provider, id, activity);
-        }
+            false
+        };
+        watchdog::activity(self.provider, id, activity, internal);
     }
     fn on_run_committed(&mut self, run: &Run, through_seq: u64) {
         self.provider.watchdog().committed(run, through_seq);

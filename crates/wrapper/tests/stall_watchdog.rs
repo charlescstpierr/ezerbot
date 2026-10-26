@@ -105,14 +105,14 @@ impl Fixture {
                 },
             )?;
             let mut run = model::set_running_at(conn, id, self.start as i64)?;
-            run.status = status;
-            store::save(conn, &run)?;
             store::append_event(
                 conn,
                 id,
                 RunEventKind::ToolCall,
                 &json!({"call_id":"call", "name":"slow", "arguments":{}, "response":1}),
             )?;
+            run.status = status;
+            store::save(conn, &run)?;
             Ok::<(), grokbot_engine::contracts::Error>(())
         })
         .unwrap();
@@ -858,6 +858,7 @@ fn last_event_lookup_is_indexed_and_bounded_with_large_event_history() {
     ).unwrap();
     let (after_seq, large) = measure(&f.conn);
     assert_eq!(after_seq, before_seq + 20_000);
+    println!("latest-seq VmStep small={small} large={large} rows_added=20000");
     assert!(small > 0);
     assert!(
         large <= small + 4,
@@ -877,6 +878,7 @@ fn last_event_lookup_is_indexed_and_bounded_with_large_event_history() {
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap()
         .join("\n");
+    println!("latest-seq plan={plan}");
     assert!(plan.contains("SEARCH engine_run_events"), "{plan}");
     assert!(plan.contains("run_id=?"), "{plan}");
     assert!(!plan.contains("SCAN "), "{plan}");
@@ -930,6 +932,7 @@ fn stalled_entry_lookup_is_bounded_with_ten_times_more_old_stalls() {
     seed(&f.conn, 101, 1_000);
     let (large_entry, large) = measure(&f.conn);
     assert_eq!(small_entry, large_entry);
+    println!("stalled-entry VmStep small={small} large={large} old_rows=100/1000");
     assert!(small > 0);
     assert!(
         large <= small + 4,
@@ -946,6 +949,7 @@ fn stalled_entry_lookup_is_bounded_with_ten_times_more_old_stalls() {
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap()
         .join("\n");
+    println!("stalled-entry plan={plan}");
     assert!(plan.contains("SEARCH wrapper_run_stalls"), "{plan}");
     assert!(plan.contains("run_id=?"), "{plan}");
     assert!(!plan.contains("SCAN "), "{plan}");
@@ -1012,7 +1016,95 @@ fn stalled_chat_regenerates_the_real_source_message_through_the_existing_route()
             attempt: attempt + 2,
         }
     );
-    assert_eq!(f.event_count("stalled-source", RunEventKind::Cancelled), 1);
+    let ends: Vec<_> = store::events(&f.conn, "stalled-source", 0)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == RunEventKind::Cancelled)
+        .map(|event| event.payload["turn_end"].clone())
+        .collect();
+    assert_eq!(ends, vec![json!("stopped"), json!("superseded")]);
     assert_eq!(f.notification_count("stalled-source"), 1);
     assert_eq!(f.messages("stalled"), stalled);
+}
+
+#[test]
+fn thresholds_are_inclusive_and_the_scan_does_not_refresh_activity() {
+    let mut f = Fixture::new();
+    f.provider().watchdog_test_policy(watchdog::Policy {
+        soft_ms: 180_000,
+        hard_ms: 480_000,
+        scan_ms: 1,
+    });
+    f.run("boundary", RunStatus::Running);
+    f.tick(0);
+    f.tick(179_999);
+    assert_eq!(f.state()["silence"], json!({}));
+    f.tick(180_000);
+    assert_eq!(f.state()["silence"]["boundary"], f.start);
+    f.tick(479_999);
+    assert_eq!(
+        store::required(&f.conn, "boundary").unwrap().status,
+        RunStatus::Running
+    );
+    f.tick(480_000);
+    assert_eq!(
+        store::required(&f.conn, "boundary").unwrap().status,
+        RunStatus::Cancelled
+    );
+    assert_eq!(f.event_count("boundary", RunEventKind::Cancelled), 1);
+}
+
+#[test]
+fn a_background_command_keeps_its_own_card_without_a_run_stall() {
+    let mut f = Fixture::new();
+    f.run("background", RunStatus::Running);
+    f.conn.execute("INSERT INTO wrapper_shell_tasks(run_id,call_id,status) VALUES ('background','shell','en cours')",[]).unwrap();
+    f.tick(0);
+    f.tick(1_200_000);
+    assert_eq!(f.state()["silence"], json!({}));
+    assert_eq!(
+        store::required(&f.conn, "background").unwrap().status,
+        RunStatus::Running
+    );
+    assert_eq!(f.notification_count("background"), 0);
+    assert!(f.messages("stalled").is_empty());
+}
+
+#[test]
+fn a_running_parent_cannot_cancel_a_human_branch_or_a_live_sibling() {
+    let mut f = Fixture::new();
+    f.run("parent", RunStatus::Running);
+    f.child("parent", "human", RunStatus::AwaitingApproval);
+    f.child("parent", "active", RunStatus::Running);
+    f.tick(0);
+    f.tick(540_000);
+    assert_eq!(
+        store::required(&f.conn, "parent").unwrap().status,
+        RunStatus::Running
+    );
+    assert_eq!(
+        store::required(&f.conn, "human").unwrap().status,
+        RunStatus::AwaitingApproval
+    );
+    assert_eq!(
+        store::required(&f.conn, "active").unwrap().status,
+        RunStatus::Cancelled
+    );
+    assert_eq!(f.notification_count("parent"), 0);
+    assert_eq!(f.notification_count("human"), 0);
+    assert_eq!(f.notification_count("active"), 1);
+}
+
+#[test]
+fn a_child_pulse_removes_its_waiting_parents_signal_immediately() {
+    let mut f = Fixture::new();
+    f.run("parent", RunStatus::AwaitingChildren);
+    f.child("parent", "child", RunStatus::Running);
+    f.tick(0);
+    f.tick(240_000);
+    assert_eq!(f.state()["silence"]["parent"], f.start);
+    assert_eq!(f.state()["silence"]["child"], f.start);
+    f.clock(241_000);
+    f.provider().pulse_run("child");
+    assert_eq!(f.state()["silence"], json!({}));
 }

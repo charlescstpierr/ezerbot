@@ -162,6 +162,14 @@ impl Registry {
                     state.parents.get(&current).cloned()
                 };
             }
+            if run.status.is_terminal() {
+                let mut parent = state.parents.get(&run.run_id).cloned();
+                let mut seen = HashSet::new();
+                while let Some(id) = parent.filter(|id| seen.insert(id.clone())) {
+                    Self::touch(&mut state, &id, time, None);
+                    parent = state.parents.get(&id).cloned();
+                }
+            }
             return;
         }
         let Some(watch) = state.watches.get_mut(&run.run_id) else {
@@ -290,7 +298,7 @@ pub const LATEST_SEQ_SQL: &str =
     "SELECT seq FROM engine_run_events WHERE run_id=?1 ORDER BY seq DESC LIMIT 1";
 #[doc(hidden)]
 pub const STALLED_ENTRY_SQL: &str =
-    "SELECT step,created_at FROM wrapper_run_stalls WHERE run_id=?1";
+    "SELECT step,created_at,wrapper_late_approvals.run_id IS NOT NULL FROM wrapper_run_stalls LEFT JOIN wrapper_late_approvals USING(run_id) WHERE wrapper_run_stalls.run_id=?1";
 
 pub(crate) fn latest_seq(conn: &Connection, id: &str) -> grokbot_engine::contracts::Result<u64> {
     Ok(conn
@@ -318,9 +326,6 @@ fn eligible(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<b
     if background {
         return Ok(false);
     }
-    if run.status == RunStatus::Running {
-        return Ok(true);
-    }
     let mut statement = conn.prepare("WITH RECURSIVE children(id) AS (
         SELECT child_run_id FROM delegation_graph WHERE parent_run_id=?1 AND json_extract(status,'$.status')='running'
         UNION SELECT d.child_run_id FROM delegation_graph d JOIN children c ON d.parent_run_id=c.id WHERE json_extract(d.status,'$.status')='running')
@@ -328,10 +333,16 @@ fn eligible(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<b
     let statuses = statement
         .query_map([&run.run_id], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(statuses.iter().any(|s| s == "running")
-        && !statuses
-            .iter()
-            .any(|s| matches!(s.as_str(), "awaiting_approval" | "awaiting_human_input")))
+    Ok(
+        (run.status == RunStatus::Running || statuses.iter().any(|s| s == "running"))
+            && !statuses
+                .iter()
+                .any(|s| matches!(s.as_str(), "awaiting_approval" | "awaiting_human_input")),
+    )
+}
+
+fn has_active_child(conn: &Connection, id: &str) -> grokbot_engine::contracts::Result<bool> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM delegation_graph d JOIN engine_runs c ON c.run_id=d.child_run_id WHERE d.parent_run_id=?1 AND json_extract(d.status,'$.status')='running' AND c.status IN ('running','awaiting_children'))", [id], |r| r.get(0))?)
 }
 
 pub(super) fn scan(ctx: &super::super::Context<'_>) -> Result<(), ApiError> {
@@ -348,7 +359,7 @@ pub(super) fn scan(ctx: &super::super::Context<'_>) -> Result<(), ApiError> {
             }
         }
     }
-    let mut statement = ctx.connection.prepare("SELECT d.child_run_id,d.parent_run_id FROM delegation_graph d JOIN engine_runs p ON p.run_id=d.parent_run_id WHERE p.status='awaiting_children' AND json_extract(d.status,'$.status')='running'")?;
+    let mut statement = ctx.connection.prepare("SELECT d.child_run_id,d.parent_run_id FROM delegation_graph d JOIN engine_runs p ON p.run_id=d.parent_run_id WHERE p.status IN ('running','awaiting_children') AND json_extract(d.status,'$.status')='running'")?;
     let parents = statement
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<HashMap<String, String>>>()?;
@@ -358,7 +369,7 @@ pub(super) fn scan(ctx: &super::super::Context<'_>) -> Result<(), ApiError> {
         ctx.connection.busy_timeout(Duration::from_secs(3))?;
         if result.as_ref().is_err_and(|e| matches!(e, Error::Sqlite(rusqlite::Error::SqliteFailure(e,_)) if matches!(e.code,rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))) {
             let current = store::required(ctx.connection, &run.run_id)?;
-            if candidate.internal_active && eligible(ctx.connection, &current)? && registry.claim(&run.run_id, &candidate, latest_seq(ctx.connection, &run.run_id)?, ctx.now_ms) {
+            if candidate.internal_active && eligible(ctx.connection, &current)? && !has_active_child(ctx.connection, &run.run_id)? && registry.claim(&run.run_id, &candidate, latest_seq(ctx.connection, &run.run_id)?, ctx.now_ms) {
                 ctx.provider.cancel_run(&run.run_id);
                 stop(ctx, &run, &candidate)?;
             }
@@ -379,7 +390,10 @@ fn stop(
         &run.run_id,
         TurnEnd::Stopped,
         |conn, current| {
-            if current.status != RunStatus::Running || !eligible(conn, current)? {
+            if current.status != RunStatus::Running
+                || !eligible(conn, current)?
+                || has_active_child(conn, &run.run_id)?
+            {
                 return Ok(false);
             }
             let seq = latest_seq(conn, &run.run_id)?;
@@ -439,9 +453,11 @@ pub(super) fn entry(ctx: &super::super::Context<'_>, id: &str) -> Option<Message
     {
         return None;
     }
-    let (step, time): (String, u64) = ctx
+    let (step, time, late): (String, u64, bool) = ctx
         .connection
-        .query_row(STALLED_ENTRY_SQL, [run_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_row(STALLED_ENTRY_SQL, [run_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
         .optional()
         .ok()??;
     let message_id = match &run.trigger {
@@ -450,14 +466,6 @@ pub(super) fn entry(ctx: &super::super::Context<'_>, id: &str) -> Option<Message
         }
         _ => None,
     };
-    let late: bool = ctx
-        .connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM wrapper_late_approvals WHERE run_id=?1)",
-            [run_id],
-            |r| r.get(0),
-        )
-        .ok()?;
     Some(card(
         id,
         "stalled",
@@ -467,7 +475,12 @@ pub(super) fn entry(ctx: &super::super::Context<'_>, id: &str) -> Option<Message
     ))
 }
 
-pub(crate) fn activity(provider: &Provider, id: &str, activity: run_loop::RunActivity<'_>) {
+pub(crate) fn activity(
+    provider: &Provider,
+    id: &str,
+    activity: run_loop::RunActivity<'_>,
+    internal_tool: bool,
+) {
     let step = match activity {
         run_loop::RunActivity::Model => "réponse du modèle",
         run_loop::RunActivity::ToolStarted(name) | run_loop::RunActivity::ToolFinished(name) => {
@@ -483,7 +496,7 @@ pub(crate) fn activity(provider: &Provider, id: &str, activity: run_loop::RunAct
         }
     };
     let internal = match activity {
-        run_loop::RunActivity::ToolStarted(_) => Some(true),
+        run_loop::RunActivity::ToolStarted(_) => Some(internal_tool),
         run_loop::RunActivity::ToolFinished(_) => Some(false),
         _ => None,
     };

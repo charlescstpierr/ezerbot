@@ -369,7 +369,7 @@ fn legacy_inflight_local_allow_and_new_standing_read_rules_cannot_grant() {
             let run=model::start(conn,&Run {run_id:tool.into(),bot_id:DEFAULT_BOT.id.into(),conversation_id:chat.clone(),trigger:Trigger::UserMessage {message_id:tool.into(),attempt:0},kind:RunKind::Chat,status:RunStatus::Running,task_status:None,turn_end:None,budgets:RunBudgets::default(),started_at:crate::now() as i64})?;
             let ctx=Context {connection:conn,bot_id:Some(&run.bot_id),conversation_id:Some(&run.conversation_id),run_id:Some(&run.run_id),..app.feature_context()};
             let arguments=match tool {
-                "run_shell"=>json!({"command":"printf test","cwd":root}),
+                "run_shell"=>json!({"description":"Afficher un résultat factice","command":"printf test","cwd":root}),
                 "write_file"=>json!({"path":root.join("nouveau.txt"),"content":"test","expected_sha256":null}),
                 "list_directory"=>json!({"path":root}),
                 _=>json!({"path":file}),

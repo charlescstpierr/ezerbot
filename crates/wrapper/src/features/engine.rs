@@ -80,7 +80,16 @@ struct ConnectionTest {
 struct Empty {}
 
 empty_hooks!(tools, call_tool, link_attachments);
-const BASE_INSTRUCTIONS: &str = "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$. Si tu ne peux vraiment pas avancer sans une réponse de Charles, pose ta question avec l'outil attendre_reponse ; sinon avance sans la poser.";
+const BASE_INSTRUCTIONS: &str = concat!(
+    "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$. Si tu ne peux vraiment pas avancer sans une réponse de Charles, pose ta question avec l'outil attendre_reponse ; sinon avance sans la poser.",
+    "\n\nAvant le premier appel d'outil, écris une courte phrase qui dit ce que tu vas faire. ",
+    "Entre les étapes importantes d'un travail à plusieurs outils, écris une courte mise à jour en mots humains, sans commenter chaque appel. ",
+    "Termine par une réponse courte, chaleureuse et claire qui dit ce qui a été fait ou trouvé. Fournis tout le contenu demandé. ",
+    "Si un outil échoue, essaie discrètement une autre approche raisonnable en respectant les refus et les approbations. ",
+    "Sinon, explique en une phrase simple ce qui n'a pas marché et le prochain pas possible, sans jargon, code d'erreur ni sortie brute. ",
+    "N'annonce jamais un succès que les résultats ne confirment pas. ",
+    "Ne recopie pas les commandes ou les chemins sauf demande explicite.",
+);
 const INTERRUPTED: &str = "La réponse a été interrompue avant la fin. Vous pouvez la relancer.";
 const CONTEXT_TOO_LARGE: &str = "Le texte et les pièces jointes dépassent ce que le modèle peut lire en un message. Raccourcissez le texte ou joignez moins de documents dans un nouveau message.";
 fn context_budget_failed(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<bool> {

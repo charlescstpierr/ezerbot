@@ -3834,8 +3834,10 @@ mod projection_tests {
                 emit(ModelEvent::Completed)
             }
         }
-        struct Effects;
-        impl RunServices for Effects {
+        struct Effects<'a> {
+            host: Services<'a>,
+        }
+        impl RunServices for Effects<'_> {
             fn context(&mut self, _: &Run) -> grokbot_engine::contracts::Result<ModelRequest> {
                 Ok(ModelRequest {
                     model: "fixture".into(),
@@ -3887,10 +3889,10 @@ mod projection_tests {
             }
             fn on_run_event(
                 &mut self,
-                _: &Connection,
-                _: &RunEvent,
+                conn: &Connection,
+                event: &RunEvent,
             ) -> grokbot_engine::contracts::Result<()> {
-                Ok(())
+                self.host.on_run_event(conn, event)
             }
         }
         let dir = grokbot_test_support::TestDir::new("loop-guard-reply");
@@ -3899,14 +3901,25 @@ mod projection_tests {
             .execute_batch("CREATE TABLE loop_projection_effects(value INTEGER)")
             .unwrap();
         grokbot_engine::contracts::with_tx(&app.connection, |conn| -> grokbot_engine::contracts::Result<()> {
+            conn.execute("INSERT INTO wrapper_conversations(account_id,id,title,title_customized,created_at,updated_at,bot_id) VALUES (?1,'cards','Cards',0,1,1,?2)", params![ACCOUNT,DEFAULT_BOT.id])?;
             model::start(conn, &Run {run_id:"loop-projection".into(),bot_id:DEFAULT_BOT.id.into(),conversation_id:"cards".into(),
                 trigger:user_trigger("cards","loop-message",0),kind:RunKind::Task,status:RunStatus::Queued,
                 task_status:Some(TaskStatus::Working),turn_end:None,budgets:RunBudgets::default(),started_at:1})?;
             conn.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES ('loop-projection','{}',0,'simulated')", [])?;
             Ok(())
         }).unwrap();
+        let mut effects = Effects {
+            host: Services {
+                path: &app.db_path,
+                provider: &app.provider,
+                connection: &app.connection,
+                cancel: Arc::new(AtomicBool::new(false)),
+                bot_id: None,
+                host_mcp: false,
+            },
+        };
         assert_eq!(
-            run_loop::run(&app.connection, &Gateway, &mut Effects, "loop-projection").unwrap(),
+            run_loop::run(&app.connection, &Gateway, &mut effects, "loop-projection").unwrap(),
             run_loop::RunProgress::Ended(TurnEnd::Stopped)
         );
         let run = store::required(&app.connection, "loop-projection").unwrap();
@@ -3937,6 +3950,39 @@ mod projection_tests {
         assert!(!events
             .iter()
             .any(|event| event.kind == RunEventKind::TurnEnded));
+        assert_eq!(
+            store::loop_guard_count(&app.connection, "loop-projection").unwrap(),
+            3
+        );
+        assert_eq!(app.connection.query_row(
+            "SELECT count(*) FROM wrapper_messages WHERE conversation_id='cards' AND kind='engine_task'",
+            [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+        super::super::turns::record(&app.connection, "loop-projection").unwrap();
+        let summary: String = app
+            .connection
+            .query_row(
+                "SELECT entry FROM wrapper_turn_log WHERE run_id='loop-projection'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let summary: Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(summary["model_calls"], 1);
+        assert_eq!(summary["tool_calls"], 5);
+        assert_eq!(summary["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            summary["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tool| tool["code"] == "not_executed")
+                .count(),
+            3
+        );
+        for public in [summary.to_string(), reply.payload.to_string()] {
+            assert!(!public.contains("effective_attempt"));
+            assert!(!public.contains("fingerprint"));
+        }
     }
 
     #[test]

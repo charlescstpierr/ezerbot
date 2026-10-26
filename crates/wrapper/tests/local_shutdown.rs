@@ -95,7 +95,7 @@ impl Host {
             .as_str()
             .unwrap()
             .to_owned();
-        let args = json!({"command":"touch started; (sleep 1; touch orphan-sentinel) & wait","cwd":self.root,"timeout_ms":5000,"output_limit":4096});
+        let args = json!({"description":"Vérifier l’arrêt des tâches","command":"touch started; (sleep 1; touch orphan-sentinel) & wait","cwd":self.root,"timeout_ms":5000,"output_limit":4096});
         self.server.seen.lock().unwrap().responses.push_back(ScriptedResponse::events(&[
             json!({"type":"response.output_item.done","item":{"id":"fc-shutdown","type":"function_call","status":"completed","call_id":"shutdown","name":"run_shell","arguments":args.to_string()}}),json!({"type":"response.completed"})]));
         self.post("/api/send",json!({"conversation_id":chat,"message_id":"shutdown-message","body":"Démarrer la commande de test jetable"}));

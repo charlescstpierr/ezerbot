@@ -898,7 +898,7 @@ fn a_child_finishing_before_the_parent_acknowledges_waits_for_the_original_turn_
         .parent_bodies
         .lock()
         .unwrap()
-        .next_back()
+        .last()
         .unwrap()
         .to_string()
         .contains(SUMMARY));
@@ -1347,13 +1347,12 @@ fn a_followup_rejects_stale_completion_and_is_consumed_once_by_the_same_backgrou
         .unwrap()
         .bodies
         .iter()
-        .filter(|body| {
+        .rfind(|body| {
             body["instructions"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("You are executing a Task:")
         })
-        .last()
         .unwrap()
         .to_string()
         .contains("Ajoute une conclusion française."));

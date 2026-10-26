@@ -80,7 +80,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
-    if !(1..=3).contains(&version) {
+    if !(1..=4).contains(&version) {
         return Err(invalid(format!(
             "unsupported engine schema version {version}"
         )));
@@ -108,7 +108,36 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             UPDATE component_versions SET version=3 WHERE component='engine';
             RELEASE engine_estimate_migration;")?;
     }
+    if version < 4 {
+        conn.execute_batch("SAVEPOINT engine_loop_guard_migration;
+            CREATE INDEX IF NOT EXISTS engine_effective_attempt_tail
+                ON engine_run_events(run_id,seq DESC)
+                WHERE kind='tool_result' AND json_type(payload,'$.effective_attempt')='object';
+            CREATE INDEX IF NOT EXISTS engine_loop_guard_run
+                ON engine_run_events(run_id) WHERE kind='loop_guard';
+            CREATE INDEX IF NOT EXISTS engine_tool_result_call
+                ON engine_run_events(run_id,json_extract(payload,'$.call_id')) WHERE kind='tool_result';
+            UPDATE component_versions SET version=4 WHERE component='engine';
+            RELEASE engine_loop_guard_migration;")?;
+    }
     Ok(())
+}
+
+pub(crate) const LOOP_GUARD_COUNT_SQL: &str =
+    "SELECT COUNT(*) FROM engine_run_events WHERE run_id=?1 AND kind='loop_guard'";
+pub(crate) const TOOL_RESULT_EXISTS_SQL: &str =
+    "SELECT EXISTS(SELECT 1 FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' AND json_extract(payload,'$.call_id')=?2)";
+
+pub fn loop_guard_count(conn: &Connection, run_id: &str) -> Result<u32> {
+    Ok(conn.query_row(LOOP_GUARD_COUNT_SQL, [run_id], |row| row.get(0))?)
+}
+
+pub(crate) fn tool_result_exists(conn: &Connection, run_id: &str, call_id: &str) -> Result<bool> {
+    Ok(
+        conn.query_row(TOOL_RESULT_EXISTS_SQL, params![run_id, call_id], |row| {
+            row.get(0)
+        })?,
+    )
 }
 
 /// One row per provider response, so duplicate telemetry cannot double-count a run.
@@ -938,7 +967,7 @@ mod tests {
                 [],
                 |row| row.get::<_, i64>(0)
             )?,
-            3
+            4
         );
         assert!(model::start(&conn, &sample()).is_err());
         Ok(())
@@ -1010,7 +1039,7 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )
         };
-        assert_eq!(version(&conn)?, 3);
+        assert_eq!(version(&conn)?, 4);
         let legacy = conn.query_row(
             "SELECT context_characters,characters_per_token,tool_characters
             FROM engine_response_usage WHERE response=1",

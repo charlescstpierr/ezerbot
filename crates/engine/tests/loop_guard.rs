@@ -896,7 +896,7 @@ fn recovered_external_results_and_uncertain_admissions_never_create_attempt_proo
     for route in [Route::Admitted, Route::Journaled] {
         for known in [false, true] {
             let conn = database()?;
-            with_tx(&conn, |conn| {
+            with_tx(&conn, |conn| -> Result<()> {
                 model::set_running_at(
                     conn,
                     "run",

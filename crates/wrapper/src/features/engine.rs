@@ -3898,7 +3898,7 @@ mod projection_tests {
         app.connection
             .execute_batch("CREATE TABLE loop_projection_effects(value INTEGER)")
             .unwrap();
-        grokbot_engine::contracts::with_tx(&app.connection, |conn| {
+        grokbot_engine::contracts::with_tx(&app.connection, |conn| -> grokbot_engine::contracts::Result<()> {
             model::start(conn, &Run {run_id:"loop-projection".into(),bot_id:DEFAULT_BOT.id.into(),conversation_id:"cards".into(),
                 trigger:user_trigger("cards","loop-message",0),kind:RunKind::Task,status:RunStatus::Queued,
                 task_status:Some(TaskStatus::Working),turn_end:None,budgets:RunBudgets::default(),started_at:1})?;

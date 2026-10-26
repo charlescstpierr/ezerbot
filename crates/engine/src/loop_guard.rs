@@ -115,7 +115,7 @@ mod tests {
         for history in [1_000, 10_000] {
             let conn = Connection::open_in_memory()?;
             store::migrate(&conn)?;
-            with_tx(&conn, |conn| {
+            with_tx(&conn, |conn| -> Result<()> {
                 model::start(
                     conn,
                     &Run {

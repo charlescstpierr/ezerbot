@@ -119,7 +119,9 @@ impl StreamServer {
 impl Drop for StreamServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        self.frames.take();
+        if let Some(frames) = self.frames.take() {
+            let _ = frames.send(Frame::Complete);
+        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -210,7 +212,7 @@ fn ignored_sse_event_clears_silence_before_any_model_event_is_committed() {
         "ignored SSE clears silence while the stream stays open",
         || {
             active = f.app.api("GET", "/api/state", b"").unwrap();
-            active["silence"] == json!({})
+            active["silence"] == json!({}) && active["state_revision"] != silent["state_revision"]
         },
     );
     assert_ne!(active["state_revision"], silent["state_revision"]);

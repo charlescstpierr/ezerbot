@@ -22,7 +22,7 @@ test("le panneau réel conserve les sélections, annote les passages et isole le
   const root = mkdtempSync(join(tmpdir(), "ezerbot-pages-ui-"));
   let chrome, cdp;
   let current = clone(original);
-  const other = { ...clone(original), id: "b", title: "Autre Page", source_version: "b1", anchors: [] };
+  const other = { ...clone(original), id: "b", title: "Autre Page", source_version: "b1", anchors: [], document: { states: [], view: element("article", element("h1", "Autre Page"), element("p", "Contenu propre à B.")) } };
   const state = { conversations: [{ id: "review" }, { id: "other" }], pages: { by_bot: { grokbot: [current, other].map(page => ({ id: page.id, title: page.title, conversation_id: page.conversation_id, bot_id: page.bot_id })) } } };
   const calls = [];
   let heldRead = null, heldReadPath = "/api/pages/a", heldRevert = null, refuse = false;
@@ -146,15 +146,19 @@ test("le panneau réel conserve les sélections, annote les passages et isole le
   const late = heldRevert = deferred();
   await run(() => button("Revenir à avant").click());
   const releaseLate = await late.promise;
+  const otherRead = heldRead = deferred(); heldReadPath = "/api/pages/b";
   await run(() => { window.refuseNavigation = false; GrokbotPanels.panel.openPage("b"); });
+  const releaseOtherRead = await otherRead.promise;
   await until(() => document.querySelector(".page-rename input").value === "Autre Page");
   const otherCanvas = await run(() => document.querySelector(".page-canvas").innerHTML);
   releaseLate();
   await until(() => reverted === 3);
   assert.equal(await run(() => document.querySelector(".page-rename input").value), "Autre Page");
   assert.equal(await run(() => document.querySelector(".page-canvas").innerHTML), otherCanvas);
+  releaseOtherRead();
+  await until(() => document.querySelector(".page-canvas").textContent.includes("Contenu propre à B."));
 
-  const lateLoad = heldRead = deferred();
+  const lateLoad = heldRead = deferred(); heldReadPath = "/api/pages/a";
   await run(() => { GrokbotPanels.panel.openPage("a"); });
   const releaseLoad = await lateLoad.promise;
   await run(() => GrokbotPanels.panel.openPage("b"));

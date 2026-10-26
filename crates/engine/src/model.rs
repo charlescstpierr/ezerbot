@@ -83,8 +83,15 @@ impl Run {
         if (self.kind == RunKind::Chat) != self.task_status.is_none() {
             return Err(invalid("only Task runs carry a task status"));
         }
-        if !matches!(self.trigger, Trigger::UserMessage { .. }) && self.kind != RunKind::Task {
+        if matches!(
+            self.trigger,
+            Trigger::Occurrence { .. } | Trigger::Delegation { .. }
+        ) && self.kind != RunKind::Task
+        {
             return Err(invalid("occurrence and delegation runs must be Tasks"));
+        }
+        if matches!(self.trigger, Trigger::DelegationReturn { .. }) && self.kind != RunKind::Chat {
+            return Err(invalid("delegation returns must be Chats"));
         }
         let valid_end = match self.status {
             RunStatus::Cancelled => {
@@ -318,6 +325,29 @@ mod tests {
             assert_eq!(start(conn, &sample("unused-id", 0))?, run);
             assert_eq!(store::events(conn, "run-1", 0)?.len(), 1);
             assert!(store::get(conn, "unused-id")?.is_none());
+            Ok::<_, Error>(())
+        })
+    }
+
+    #[test]
+    fn delegation_return_is_one_chat_per_origin_without_task_completion() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        store::migrate(&conn)?;
+        with_tx(&conn, |conn| {
+            let mut proposed = sample("return", 0);
+            proposed.trigger = Trigger::DelegationReturn {
+                parent_run_id: "origin".into(),
+            };
+            let saved = start(conn, &proposed)?;
+            proposed.run_id = "retry".into();
+            assert_eq!(start(conn, &proposed)?, saved);
+            assert_eq!(saved.kind, RunKind::Chat);
+            assert_eq!(saved.task_status, None);
+            assert_eq!(store::events(conn, &saved.run_id, 0)?.len(), 1);
+            proposed.kind = RunKind::Task;
+            proposed.task_status = Some(TaskStatus::Working);
+            assert!(start(conn, &proposed).is_err());
+            assert!(store::get(conn, "retry")?.is_none());
             Ok::<_, Error>(())
         })
     }

@@ -292,7 +292,7 @@ fn initialize_database(conn: &Connection) -> Result<()> {
         CREATE TABLE fixture_authority(remaining INTEGER); INSERT INTO fixture_authority VALUES (1);
         CREATE TABLE fixture_audit(action TEXT); CREATE TABLE fixture_requests(id TEXT)",
     )?;
-    with_tx(&conn, |conn| {
+    with_tx(conn, |conn| {
         model::start(
             conn,
             &Run {

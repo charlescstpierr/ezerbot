@@ -1775,3 +1775,30 @@ fn a_deleted_file_can_be_created_again_with_current_public_coverage() {
     assert!(preview.contains("Texte public du retour"));
     assert!(!preview.contains("Aperçu indisponible"));
 }
+
+#[test]
+fn an_unavailable_vault_at_restart_refuses_presentations_without_blocking_the_app() {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.document(&chat, "before-unavailable", "Public", "md");
+    let path = f.path.with_extension("secrets.json");
+    let before = std::fs::read(&path).unwrap();
+    std::fs::write(&path, b"invalid fixture").unwrap();
+    f.reopen();
+    assert!(f.app.api("GET", "/api/livrables", b"").is_err());
+    assert_eq!(
+        f.db()
+            .query_row("SELECT count(*) FROM wrapper_disclosure_epoch", [], |r| {
+                r.get::<_, usize>(0)
+            })
+            .unwrap(),
+        0
+    );
+    std::fs::write(&path, before).unwrap();
+    f.document(&chat, "after-available", "Nouveau public", "md");
+    let items = f.list("");
+    assert_eq!(items.len(), 2);
+    assert!(items
+        .iter()
+        .any(|item| item["title"] == "Nouveau public.md"));
+}

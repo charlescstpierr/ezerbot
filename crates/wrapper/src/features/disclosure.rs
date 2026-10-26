@@ -52,10 +52,16 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), ApiError> {
     if conn.path().is_none_or(str::is_empty) {
         return Ok(());
     }
-    let snapshot = current_vault(conn)?
-        .privacy_snapshot()
-        .map_err(|_| refused())?;
-    conn.execute("INSERT INTO wrapper_disclosure_epoch VALUES (1,?1) ON CONFLICT(singleton) DO UPDATE SET epoch=excluded.epoch", [&snapshot.epoch])?;
+    let snapshot =
+        current_vault(conn).and_then(|vault| vault.privacy_snapshot().map_err(|_| refused()));
+    match snapshot {
+        Ok(snapshot) => {
+            conn.execute("INSERT INTO wrapper_disclosure_epoch VALUES (1,?1) ON CONFLICT(singleton) DO UPDATE SET epoch=excluded.epoch", [&snapshot.epoch])?;
+        }
+        Err(_) => {
+            conn.execute("DELETE FROM wrapper_disclosure_epoch", [])?;
+        }
+    }
     for (table, kind) in [
         ("wrapper_bots", "bot"),
         ("wrapper_conversations", "conversation"),
@@ -74,14 +80,23 @@ pub(super) fn stamp(conn: &Connection, kind: &str, key: &str) -> Result<(), ApiE
     let snapshot = current_vault(conn)?
         .privacy_snapshot()
         .map_err(|_| refused())?;
-    let epoch: String = conn.query_row(
-        "SELECT epoch FROM wrapper_disclosure_epoch WHERE singleton=1",
-        [],
-        |r| r.get(0),
-    )?;
-    if epoch != snapshot.epoch {
+    let epoch: Option<String> = conn
+        .query_row(
+            "SELECT epoch FROM wrapper_disclosure_epoch WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if epoch.as_ref().is_some_and(|epoch| *epoch != snapshot.epoch) {
         return Err(refused());
     }
+    if epoch.is_none() {
+        conn.execute(
+            "INSERT INTO wrapper_disclosure_epoch VALUES (1,?1)",
+            [&snapshot.epoch],
+        )?;
+    }
+    let epoch = snapshot.epoch;
     conn.execute(
         "INSERT INTO wrapper_disclosure_trust VALUES (?1,?2,?3) ON CONFLICT(kind,key) DO UPDATE SET epoch=excluded.epoch",
         rusqlite::params![kind, key, epoch],

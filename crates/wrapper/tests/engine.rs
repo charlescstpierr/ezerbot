@@ -932,6 +932,8 @@ fn connected_compaction_keeps_direct_answer_contract_and_private_instructions() 
     assert!(instructions.contains(&summary.text));
     let private_position = instructions.find(private).unwrap();
     for clause in [
+        "Avant le premier appel d'outil, écris une courte phrase qui dit ce que tu vas faire.",
+        "Termine par une réponse courte, chaleureuse et claire qui dit ce qui a été fait ou trouvé. Fournis tout le contenu demandé.",
         "answer without calling any tool",
         "Use a tool only when you need to read external state or act",
         "do not check or verify by reflex",

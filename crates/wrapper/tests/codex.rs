@@ -689,6 +689,17 @@ fn simple_chat_corpus_keeps_tools_available_and_finishes_without_calls() {
             assert_eq!(body["tool_choice"], "auto");
             assert_eq!(body["parallel_tool_calls"], false);
             let instructions = body["instructions"].as_str().unwrap();
+            for clause in [
+                "Avant le premier appel d'outil, écris une courte phrase qui dit ce que tu vas faire.",
+                "Entre les étapes importantes d'un travail à plusieurs outils, écris une courte mise à jour en mots humains, sans commenter chaque appel.",
+                "Termine par une réponse courte, chaleureuse et claire qui dit ce qui a été fait ou trouvé. Fournis tout le contenu demandé.",
+                "Si un outil échoue, essaie discrètement une autre approche raisonnable en respectant les refus et les approbations.",
+                "explique en une phrase simple ce qui n'a pas marché et le prochain pas possible, sans jargon, code d'erreur ni sortie brute.",
+                "N'annonce jamais un succès que les résultats ne confirment pas.",
+                "Ne recopie pas les commandes ou les chemins sauf demande explicite.",
+            ] {
+                assert!(instructions.contains(clause), "missing BASE clause {clause}");
+            }
             assert!(
                 instructions.contains("When the conversation or your existing knowledge is enough")
             );

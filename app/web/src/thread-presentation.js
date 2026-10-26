@@ -1,5 +1,4 @@
 const chatKinds = new Set([undefined, null, "message", "submission", "reply"]);
-const localTools = new Set(["run_shell", "read_file", "list_directory", "write_file", "document_action"]);
 const usefulCards = new Set(["form", "secret", "memory_auto", "memory_share", "memory_overflow", "topic_memory_offer", "meeting", "voice_call", "group_event", "group_notice", "delegation"]);
 const approvalProblems = {
   denied: "L’action a été refusée. Elle n’a pas été exécutée.",
@@ -58,27 +57,17 @@ function toolProblem(message) {
   return failureLabels[call?.name] || "L’action n’a pas abouti.";
 }
 
-function localLabel(call) {
-  const description = call?.arguments?.description;
-  const command = call?.arguments?.command;
-  if (typeof description === "string" && description.trim() && [...description].length <= 80
-    && !/[\n\r\u0000-\u001f/\\`|;<>$]/u.test(description)
-    && (typeof command !== "string" || !description.includes(command))) return description.trim();
-  return "Tâche sur votre Mac";
-}
-
 function problem(message, text, localState) {
   return { ...message, presentation: { kind: "problem", text, localState } };
 }
 
-export function presentThread(orderedMessages, { runs = null } = {}) {
+export function presentThread(orderedMessages) {
   const messages = [], interventions = [];
   const latestTasks = new Map();
   for (const message of orderedMessages) {
     if (message.kind === "task" && message.payload?.run_id
       && (!latestTasks.has(message.payload.run_id) || message.payload.event_kind === "task_changed")) latestTasks.set(message.payload.run_id, message.id);
   }
-  const liveRuns = Array.isArray(runs) ? new Map(runs.map((run) => [run.run_id, run])) : null;
   const failedReplies = new Set(orderedMessages.filter((message) => chatKinds.has(message.kind) && message.state === "failed")
     .map((message) => message.payload?.run_id).filter(Boolean));
   for (const message of orderedMessages) {
@@ -109,11 +98,9 @@ export function presentThread(orderedMessages, { runs = null } = {}) {
         messages.push(message);
         continue;
       }
-      const run = liveRuns ? liveRuns.get(runId) : { status: payload.run_status };
       const background = call?.name === "run_shell" && outcome?.output?.background === true && outcome.output.status === "en cours";
-      const pending = !outcome && run?.status === "running";
-      if (localTools.has(call?.name) && runId && call.call_id && (background || pending)) {
-        interventions.push({ kind: "local", message, background, label: localLabel(call) });
+      if (background && runId && call.call_id) {
+        interventions.push({ kind: "local", message });
       }
       const failure = toolProblem(message);
       if (failure) messages.push(problem(message, failure, outcome?.status === "failed" ? "failed" : outcome?.output?.status));

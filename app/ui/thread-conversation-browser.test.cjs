@@ -11,7 +11,7 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const pause = () => new Promise(done => setTimeout(done, 20));
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const created = "2026-10-25T12:00:00.000Z";
-const traces = ["trace-command-565", "/fixture/cwd-565", "trace-output-565", "opaque-json-565", "trace-tool-565", "trace-server-565", "Préparation d’un outil"];
+const traces = ["trace-command-565", "/fixture/cwd-565", "trace-output-565", "opaque-json-565", "trace-tool-565", "trace-server-565", "Préparation d’un outil", "Lecture automatique de démonstration", "Actions disponibles", "Tâche sur votre Mac"];
 const user = (id, body) => ({ id, role: "user", kind: "message", body, state: "echoed", created_at: created });
 const reply = (body, state = "streaming", parts = [{ body, before: "tool-a" }]) => ({
   id: "reply-main", role: "assistant", kind: "reply", body, state, created_at: created,
@@ -21,7 +21,7 @@ const run = (status = "running", run_id = "run-main", conversation_id = "parent"
 const tool = (id, name = "trace-tool-565", outcome = { status: "done", output: { stdout: "trace-output-565", data: "opaque-json-565" } }, run_id = "run-main") => ({
   id, role: "assistant", kind: "tool", body: "", state: "echoed", created_at: created,
   payload: { run_id, run_status: "running", authorized_by: { kind: "yolo" },
-    call: { call_id: `call-${id}`, name, arguments: { command: "printf trace-command-565", cwd: "/fixture/cwd-565", data: "opaque-json-565", timeout_ms: 10000, output_limit: 2000 } },
+    call: { call_id: `call-${id}`, name, arguments: { description: "Lecture automatique de démonstration", command: "printf trace-command-565", cwd: "/fixture/cwd-565", data: "opaque-json-565", timeout_ms: 10000, output_limit: 2000 } },
     ...(name === "trace-tool-565" ? { connector: { server: "trace-server-565", tool: name } } : {}), outcome },
 });
 const approval = (id, status = "pending", run_id = "run-main") => ({
@@ -101,6 +101,7 @@ async function fixture(t, phone) {
     if (path === "/api/local/tasks/stop" || path === "/api/stop") {
       const message = parent().messages.find(item => item.kind === "tool" && item.payload.run_id === (body.run_id || body.message_id));
       if (message) { message.payload.outcome = { status: "done", output: { background: true, status: "arrêtée", stdout: "trace-output-565" } }; message.payload.run_status = "cancelled"; }
+      for (const reply of parent().messages.filter(item => item.kind === "reply" && item.payload?.run_id === body.message_id)) reply.state = "stopped";
       state.engine.runs = state.engine.runs.filter(item => item.run_id !== (body.run_id || body.message_id));
       state.state_revision += 1;
       json({ conversation: parent() }); return;
@@ -203,15 +204,25 @@ async function fixture(t, phone) {
       assert.equal(await evaluate(() => GrokbotPanels.busy), false, "l’activité ne dépend pas d’un envoi HTTP en cours");
     },
     async cleanThread() {
-      const dom = await evaluate(() => ({ html: document.querySelector(".gb-thread").outerHTML, tools: document.querySelectorAll('.gb-thread [data-card-kind="tool"]:not(.gb-generated-image-card), .gb-thread [data-card-kind="approval"], .gb-thread .gb-local-command, .gb-thread .gb-engine-data').length }));
-      assert.equal(dom.tools, 0, "aucune carte ni donnée d’exécution ne subsiste dans le fil");
-      for (const trace of traces) assert.equal(dom.html.includes(trace), false, `le DOM du fil ne contient pas ${trace}`);
+      const dom = await evaluate(() => {
+        const surface = document.querySelector(".gb-conversation").cloneNode(true);
+        surface.querySelectorAll('[data-card-kind="approval"]').forEach(request => request.remove());
+        return { html: surface.outerHTML, tools: surface.querySelectorAll('[data-card-kind="tool"]:not(.gb-generated-image-card), .gb-local-command, .gb-engine-data').length };
+      });
+      assert.equal(dom.tools, 0, "aucune carte ni donnée d’exécution automatique ne subsiste dans toute la conversation");
+      for (const trace of traces) assert.equal(dom.html.includes(trace), false, `le DOM de la conversation, hors consentement canonique, ne contient pas ${trace}`);
       const document = await cdp.send("DOM.getDocument");
-      const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: document.root.nodeId, selector: ".gb-thread" });
+      const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: document.root.nodeId, selector: ".gb-conversation" });
       const ax = await cdp.send("Accessibility.queryAXTree", { nodeId });
       assert.ok(ax.nodes.some(node => node.name?.value), "le contrôle lit un arbre d’accessibilité non vide");
-      const accessible = JSON.stringify(ax.nodes);
-      for (const trace of traces) assert.equal(accessible.includes(trace), false, `l’accessibilité du fil ne contient pas ${trace}`);
+      const requests = await cdp.send("DOM.querySelectorAll", { nodeId, selector: '[data-card-kind="approval"]' });
+      const canonical = new Set();
+      for (const request of requests.nodeIds) {
+        const requestAX = await cdp.send("Accessibility.queryAXTree", { nodeId: request });
+        for (const node of requestAX.nodes) canonical.add(node.nodeId);
+      }
+      const accessible = JSON.stringify(ax.nodes.filter(node => !canonical.has(node.nodeId)));
+      for (const trace of traces) assert.equal(accessible.includes(trace), false, `l’accessibilité de toute la conversation, hors consentement canonique, ne contient pas ${trace}`);
     },
     async capture(label) {
       if (!phone || !process.env.I565_SCREENSHOTS) return;
@@ -253,7 +264,9 @@ for (const phone of [false, true]) test(`conversation réelle ${phone ? "iPhone 
     assert.deepEqual(await app.run(() => [...document.querySelectorAll(".gb-thread .gb-markdown")].map(node => node.textContent.trim())), [first]);
     saved[1] = reply(`${first}\n${second}`, "streaming", [{ body: first, before: "tool-a" }, { body: second, before: "tool-b" }]);
     await app.refresh(); await app.thinking(true);
-    saved.push(tool("tool-c")); await app.refresh(); await app.thinking(true); await app.cleanThread();
+    const pending = tool("tool-c", "run_shell"); delete pending.payload.outcome;
+    saved.push(pending); await app.refresh(); await app.thinking(true); await app.cleanThread();
+    assert.equal(await app.run(() => document.querySelector(".gb-interventions")), null, "un appel automatique au premier plan ne devient pas une liste d’actions voisine");
     assert.deepEqual(await app.run(() => [...document.querySelectorAll(".gb-thread .gb-markdown")].map(node => node.textContent.trim())), [first, second], "plusieurs appels sans phrase intermédiaire gardent les ancres des fragments");
     const revised = "Je consulte maintenant le dossier.";
     saved[1] = reply(`${revised}\n${second}\n${final}`, "echoed", [{ body: revised, before: "tool-a" }, { body: second, before: "tool-b" }, { body: final }]);
@@ -365,9 +378,12 @@ for (const phone of [false, true]) test(`conversation réelle ${phone ? "iPhone 
     await app.cleanThread();
     const foreground = tool("foreground", "run_shell", undefined, "run-shell-live");
     delete foreground.payload.outcome;
-    app.setMessages([user("question", "Lis le dossier."), foreground], [run("running", "run-shell-live")]);
+    const foregroundReply = { ...reply("Je lis le dossier."), id: "reply-run-shell-live", payload: { run_id: "run-shell-live", parts: [{ body: "Je lis le dossier." }] } };
+    app.setMessages([user("question", "Lis le dossier."), foregroundReply, foreground], [run("running", "run-shell-live")]);
     await app.refresh(); await app.thinking(true); await app.cleanThread();
-    const cancel = app.hold("/api/stop"); await app.enter(".gb-interventions .gb-local-stop");
+    assert.equal(await app.run(() => document.querySelector(".gb-interventions")), null);
+    await app.until(() => document.getElementById("send-button").dataset.mode === "stop" && !document.getElementById("send-button").disabled);
+    const cancel = app.hold("/api/stop"); await app.enter("#send-button");
     assert.deepEqual((await cancel.seen).body, { conversation_id: "parent", message_id: "run-shell-live" });
     cancel.release(); await app.until(() => !document.querySelector(".gb-local-stop")); await app.thinking(false);
   });

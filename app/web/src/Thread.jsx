@@ -304,7 +304,7 @@ function ConversationNote({ message, createMascot }) {
   </article>;
 }
 
-export function Thread({ messages, runs = null, activity = [], busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed, onOpenSource, onOpenMemory, onOpenPage }) {
+export function Thread({ messages, activity = [], busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed, onOpenSource, onOpenMemory, onOpenPage }) {
   const [openMenuId, setOpenMenuId] = useState(null);
   const onMenuOpenChange = (messageId, open) => setOpenMenuId((current) => messageMenuOpenId(current, messageId, open));
   const appearance = useAppearance();
@@ -319,7 +319,7 @@ export function Thread({ messages, runs = null, activity = [], busy = false, onC
   const plugins = useMemo(() => ({ code, mermaid, math: createMathPlugin() }), [mermaid, arrived]);
   const threadAction = isGroup || isTask ? undefined : onThread;
   const actions = useMemo(() => ({ onCopy, onReact, onThread: threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource, onOpenMemory }), [onCopy, onReact, threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource, onOpenMemory]);
-  const presentation = useMemo(() => presentThread(collapseMemoryReceipts(orderThread(messages), isGroup), { runs }), [messages, isGroup, runs]);
+  const presentation = useMemo(() => presentThread(collapseMemoryReceipts(orderThread(messages), isGroup)), [messages, isGroup]);
   const ordered = presentation.messages;
   const localCount = presentation.interventions.filter((item) => item.kind === "local").length;
   useLayoutEffect(() => {
@@ -409,8 +409,7 @@ export function Thread({ messages, runs = null, activity = [], busy = false, onC
         })}
         <div className="gb-overlay" ref={overlay} />
       </div>
-      {presentation.interventions.length > 0 && <section className="gb-interventions" aria-label="Actions disponibles" ref={interventionsRoot} onFocusCapture={(event) => { interventionFocus.current = event.target; }}>
-        <h2>Actions disponibles</h2>
+      {presentation.interventions.length > 0 && <section className="gb-interventions" aria-label="Demandes et contrôles" ref={interventionsRoot} onFocusCapture={(event) => { interventionFocus.current = event.target; }}>
         {presentation.interventions.map((intervention, index) => {
           const { message } = intervention;
           const onAction = (action, detail) => onCardAction?.(message, action, detail);

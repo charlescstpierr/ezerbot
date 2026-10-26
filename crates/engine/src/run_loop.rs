@@ -991,13 +991,7 @@ fn execute_external(
         let repeated = repeated_call(conn, &run, fingerprint.as_deref())?;
         finish_approval(conn, by.is_some(), repeated.is_some())?;
         if let Some(fingerprint) = repeated {
-            return Ok(Start::Complete(block_call(
-                conn,
-                &run,
-                call,
-                &fingerprint,
-                rule,
-            )?));
+            return Ok(Start::Complete(block_call(conn, &run, call, &fingerprint)?));
         }
         if services.is_cancelled(run_id)
             || store::budget_usage(conn, run_id, now_ms())?.elapsed_ms >= run.budgets.duration_ms
@@ -1154,7 +1148,6 @@ fn execute_journaled_external(
                 &run,
                 call,
                 &fingerprint,
-                rule,
             )?));
         }
         if services.is_cancelled(run_id) {

@@ -383,6 +383,9 @@ for (const phone of [false, true]) test(`conversation réelle ${phone ? "iPhone 
     await app.refresh(); await app.thinking(true); await app.cleanThread();
     assert.equal(await app.run(() => document.querySelector(".gb-interventions")), null);
     await app.until(() => document.getElementById("send-button").dataset.mode === "stop" && !document.getElementById("send-button").disabled);
+    foregroundReply.state = "echoed";
+    await app.refresh(); await app.thinking(true); await app.cleanThread();
+    assert.equal(await app.run(() => document.getElementById("send-button").dataset.mode), "stop", "un run actif reste arrêtable après la dernière phrase du bot");
     const cancel = app.hold("/api/stop"); await app.enter("#send-button");
     assert.deepEqual((await cancel.seen).body, { conversation_id: "parent", message_id: "run-shell-live" });
     cancel.release(); await app.until(() => !document.querySelector(".gb-local-stop")); await app.thinking(false);

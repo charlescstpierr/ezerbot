@@ -1147,6 +1147,7 @@ pub fn tick(ctx: &super::Context<'_>) {
 /// Drive routine conversations and their children without admitting user chats.
 #[doc(hidden)]
 pub fn tick_routines(ctx: &super::Context<'_>) {
+    let _ = watchdog::scan(ctx);
     tick_selected(ctx, true, false);
 }
 /// Resume a run parked on an approval without starting queued child tasks.

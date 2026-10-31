@@ -279,10 +279,16 @@ fn a_failed_delivery_keeps_the_destinations_of_the_notifications_still_on_the_de
 }
 
 #[test]
-fn after_the_bus_restarts_the_next_delivery_reconnects() {
+fn after_the_bus_restarts_the_next_delivery_reconnects_and_forgets_the_old_destinations() {
     let mut desk = Desk::new();
-    let host = desk.host(true);
+    let log = desk.home.path().join("clicked.log");
+    let handler = recording_handler(desk.home.path(), &log);
+    assert!(register(&desk.home, &handler).status.success());
+    let second = desk.conversation();
+    desk.add_notification("reply:two", &second);
+    // First on both buses: a new bus hands out the same unique name again.
     let server = FakeNotifications::new(&desk.bus);
+    let host = desk.host(true);
     assert_eq!(
         desk.deliver(&host, "reply:one"),
         json!({"status":"delivered"})
@@ -290,12 +296,17 @@ fn after_the_bus_restarts_the_next_delivery_reconnects() {
     drop(server);
     desk.bus.restart(&desk.home);
     let server = FakeNotifications::new(&desk.bus);
-    assert_eq!(desk.deliver(&host, "reply:one"), json!({"status":"error"}));
+    assert_eq!(desk.deliver(&host, "reply:two"), json!({"status":"error"}));
     assert_eq!(
-        desk.deliver(&host, "reply:one"),
+        desk.deliver(&host, "reply:two"),
         json!({"status":"delivered"})
     );
     assert_eq!(server.calls().len(), 1);
+    server.click(1);
+    let link = format!("ezerbot://app/v1/thread?id={second}\n");
+    wait_for("the handler to receive the thread of the new bus", || {
+        fs::read_to_string(&log).is_ok_and(|text| text == link)
+    });
 }
 
 #[test]

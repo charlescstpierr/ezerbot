@@ -17,6 +17,7 @@ members = [
   "crates/delegation",
   "crates/attachments",
   "crates/test-support",
+  "crates/linux-desktop",
 ]
 
 [workspace.package]
@@ -52,6 +53,7 @@ grokbot-submission-journal = { path = "crates/submission-journal" }
 grokbot-replica = { path = "crates/replica" }
 grokbot-store = { path = "crates/store" }
 grokbot-session = { path = "crates/session" }
+grokbot-linux-desktop = { path = "crates/linux-desktop" }
 
 # build.rs compresses every UI file at Brotli quality 11. Unoptimized that takes
 # about a minute on each rerun, so the crates that do the work are optimized in

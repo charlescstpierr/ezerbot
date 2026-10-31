@@ -47,24 +47,18 @@ fn connect(bus: &Bus) -> Result<Notifier, Unavailable> {
     Ok(notifier)
 }
 
-/// Runs `action` on the one process-wide notifier, connecting on first use. Servers send a
-/// click to the connection that showed the notification, so a failure drops the connection
-/// only when the bus is gone: the next delivery then reconnects.
+/// Runs `action` on the one process-wide notifier. Servers send a click to the connection
+/// that showed the notification, so it is replaced only when the bus no longer answers.
 fn with_live<T>(
     bus: &Bus,
     action: impl FnOnce(&Notifier) -> Result<T, Unavailable>,
 ) -> Result<T, Unavailable> {
     let mut slot = live();
-    if slot.is_none() {
+    if !slot.as_ref().is_some_and(Notifier::is_connected) {
         *slot = Some(connect(bus)?);
-    }
-    let notifier = slot.as_ref().expect("connected above");
-    let result = action(notifier);
-    if result.is_err() && !notifier.is_connected() {
-        *slot = None;
         targets().clear();
     }
-    result
+    action(slot.as_ref().expect("connected above"))
 }
 
 fn deliver(bus: &Bus, title: &str, conversation: &str) -> Result<(), Unavailable> {

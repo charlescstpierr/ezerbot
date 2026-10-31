@@ -61,6 +61,10 @@ function toolProblem(payload, settledApprovals) {
 function toolSentence({ call, outcome, run_id: runId }, spoken) {
   if (outcome?.status !== "done") return null;
   if (hostRun(runId)) return outcome.output?.message;
+  if (call?.name === "run_shell" && outcome.output?.background === true && outcome.output.status === "terminé") {
+    const description = humanSentence(call.arguments?.description, "");
+    return description ? `Tâche terminée : ${description}` : "La tâche de fond est terminée.";
+  }
   const question = call?.name === "attendre_reponse" ? call.arguments?.question : null;
   return question && !spoken.get(runId)?.includes(question) ? question : null;
 }

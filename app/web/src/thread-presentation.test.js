@@ -168,6 +168,19 @@ test("un connecteur à rétablir le dit sans bouton ni nom d’outil", () => {
   assert.equal(note, "Le connecteur GitHub ne répond plus. Ouvrez Paramètres › Connecteurs pour le rétablir.");
 });
 
+test("un programme de fond terminé le dit, car rien ne réveille le modèle", () => {
+  const finished = (description) => {
+    const program = tool({ outcome: { status: "done", output: { background: true, status: "terminé", stdout: "trace", exit_code: 0 } } });
+    program.payload.call = { call_id: "call", name: "run_shell", arguments: { command: "make", description } };
+    return program;
+  };
+  assert.deepEqual(notes([finished("Compiler le projet")]), ["Tâche terminée : Compiler le projet"]);
+  assert.deepEqual(notes([finished(undefined)]), ["La tâche de fond est terminée."]);
+  const running = finished("Compiler le projet");
+  running.payload.outcome.output.status = "en cours";
+  assert.deepEqual(notes([running]), []);
+});
+
 test("une question de tâche reste lisible dans le fil, une seule fois", () => {
   const ask = tool({ outcome: { status: "done", output: { status: "signalée" } } });
   ask.payload.call = { call_id: "call", name: "attendre_reponse", arguments: { question: "Quel dossier dois-je ranger ?" } };

@@ -32,7 +32,7 @@ L'outil attend la connexion du wrapper, l'état propre à chaque vue, les police
 
 La fixture ferme les connexions HTTP après chaque réponse pour éviter les chargements d'assets suspendus observés sur la box. Le pilote signale un document sans focus au module des notifications avant de créer la conversation factice. Sa notification reste ainsi disponible pour la vue dédiée.
 
-Les builds utilisent `CARGO_BUILD_JOBS=3`. Le script contrôle l'espace disponible avant chaque build et refuse de continuer sous 25 Gio libres. Les fichiers temporaires et les processus de l'exécution sont nettoyés en cas de réussite ou d'échec.
+Les builds utilisent `CARGO_BUILD_JOBS=3`. Avant chaque build, le script contrôle les systèmes de fichiers du cache Cargo, du worktree temporaire et des captures. Il refuse de continuer si l'un dispose de moins de 25 Gio libres. Sur la box, il affiche aussi `df -BG /workspace`. Les fichiers temporaires et les processus de l'exécution sont nettoyés en cas de réussite ou d'échec.
 
 ## À capturer sur le Mac (optionnel)
 

@@ -52,11 +52,14 @@ run() {
   return "$status"
 }
 disk_guard() {
-  local free
-  df -BG /workspace
-  free=$(df -B1 /workspace | awk 'NR == 2 { print $4 }')
-  [[ $free =~ ^[0-9]+$ ]] || fail 'Cannot determine free space with df -B1 /workspace.'
-  (( free >= 25 * 1024 * 1024 * 1024 )) || fail "Need at least 25 GiB free on /workspace; df reports ${free} bytes."
+  local free directory
+  if [[ -d /workspace ]]; then df -BG /workspace; fi
+  for directory in "$cache" "$scratch" "$output"; do
+    df -BG -- "$directory"
+    free=$(df -B1 -P -- "$directory" | awk 'NR == 2 { print $4 }')
+    [[ $free =~ ^[0-9]+$ ]] || fail "Cannot determine free space for $directory."
+    (( free >= 25 * 1024 * 1024 * 1024 )) || fail "Need at least 25 GiB free on the filesystem containing $directory; df reports ${free} bytes."
+  done
 }
 
 git -C "$root" worktree add --detach "$worktree" "$sha" >/dev/null

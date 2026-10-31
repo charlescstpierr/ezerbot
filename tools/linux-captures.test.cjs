@@ -23,10 +23,11 @@ function repository(t) {
   for (const path of ["app/ui/wrapper-chrome-fixture.cjs", "app/ui/local-api-client.cjs", "app/web/package-lock.json"]) fs.writeFileSync(join(repo, path), "{}");
   fs.writeFileSync(join(repo, ".gitignore"), "target/\nartifacts/\n");
   const log = join(root, "commands.jsonl");
+  const diskLog = join(root, "disk-checks.jsonl");
   const control = join(root, "control");
   fs.writeFileSync(control, "success");
   const executable = (name, code) => fs.writeFileSync(join(bin, name), `#!${process.execPath}\n${code}`, { mode: 0o700 });
-  executable("df", `const fs=require('node:fs'); const low=fs.readFileSync(${JSON.stringify(control)},'utf8')==='disk'; console.log('Filesystem 1B-blocks Used Available Use% Mounted'); console.log('test 200000000000 0 '+(process.argv.includes('-BG')?'100G':low?'26843545599':'100000000000')+' 0% /workspace');`);
+  executable("df", `const fs=require('node:fs'); fs.appendFileSync(${JSON.stringify(diskLog)},JSON.stringify(process.argv.slice(2))+'\\n'); const mode=fs.readFileSync(${JSON.stringify(control)},'utf8'); const path=process.argv.at(-1); const low=mode==='disk'||(mode==='disk-tmp'&&path.startsWith('/tmp/ezcap.'))||(mode==='disk-output'&&path.endsWith('/artifacts/captures-linux')); console.log('Filesystem 1B-blocks Used Available Use% Mounted'); console.log('test 200000000000 0 '+(process.argv.includes('-BG')?'100G':low?'26843545599':'100000000000')+' 0% /workspace');`);
   executable("npm", `const fs=require('node:fs'),cp=require('node:child_process'); fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({tool:'npm',args:process.argv.slice(2),cwd:process.cwd(),sha:cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim()})+'\\n'); const mode=fs.readFileSync(${JSON.stringify(control)},'utf8'); if(mode==='web') process.exit(6); if(mode==='hold'){fs.writeFileSync(${JSON.stringify(join(root, "held-pid"))},String(process.pid));setInterval(()=>{},1000);}`);
   executable("cargo", `const fs=require('node:fs'),p=require('node:path'); fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({tool:'cargo',cwd:process.cwd(),sha:process.env.EZERBOT_GIT_COMMIT,unix:process.env.EZERBOT_GIT_COMMIT_UNIX,jobs:process.env.CARGO_BUILD_JOBS})+'\\n'); if(fs.readFileSync(${JSON.stringify(control)},'utf8')==='cargo') process.exit(7); fs.mkdirSync(p.join(process.env.CARGO_TARGET_DIR,'debug'),{recursive:true}); fs.writeFileSync(p.join(process.env.CARGO_TARGET_DIR,'debug/grokbot-wrapper'),'built '+process.env.EZERBOT_GIT_COMMIT,{mode:0o700});`);
   executable("google-chrome", "process.exit(0);");
@@ -52,7 +53,7 @@ function repository(t) {
     assert.deepEqual(fs.readdirSync(join(repo, "target/linux-captures")).filter(name => name.startsWith("run.")), []);
     assert.deepEqual(fs.readdirSync(join(repo, "artifacts/captures-linux")).filter(name => name.startsWith(".staging-") || name.startsWith(".previous-")), []);
   };
-  return { root, repo, git, first, second, control, log, env, run, clean };
+  return { root, repo, git, first, second, control, log, diskLog, env, run, clean };
 }
 
 test("capture controller builds only the detached SHA and filters the runtime environment", t => {
@@ -71,6 +72,12 @@ test("capture controller builds only the detached SHA and filters the runtime en
   assert.equal(manifest.ambientDb, undefined);
   assert.match(manifest.home, /^\/tmp\/ezcap\.[^/]+\/home$/);
   assert.equal(fs.existsSync(manifest.home), false);
+  const diskChecks = fs.readFileSync(fixture.diskLog, "utf8").trim().split("\n").map(JSON.parse).filter(args => args.includes("-B1"));
+  assert.deepEqual([...new Set(diskChecks.map(args => args.at(-1)))].sort(), [
+    join(fixture.repo, "target/linux-captures"),
+    join(manifest.home, ".."),
+    join(fixture.repo, "artifacts/captures-linux"),
+  ].sort());
   const commands = fs.readFileSync(fixture.log, "utf8").trim().split("\n").map(JSON.parse);
   assert.equal(commands.length, 3);
   assert.ok(commands.every(command => command.sha === fixture.first && command.cwd.includes("/source")));
@@ -86,7 +93,7 @@ test("failure preserves a complete capture and removes staged output and worktre
   assert.equal(fixture.run(fixture.first).status, 0);
   const path = join(fixture.repo, "artifacts/captures-linux", fixture.first, "manifest.json");
   const previous = fs.readFileSync(path);
-  for (const failure of ["web", "cargo", "readiness", "disk"]) {
+  for (const failure of ["web", "cargo", "readiness", "disk", "disk-tmp", "disk-output"]) {
     fs.writeFileSync(fixture.control, failure);
     const result = fixture.run(fixture.first);
     assert.notEqual(result.status, 0, failure);

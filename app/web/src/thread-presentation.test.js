@@ -55,3 +55,8 @@ test("seul un tour épuisé sur une tâche ouverte avertit", () => {
   const done = presentThread([task("run:9", { event_kind: "turn_ended", turn_end: "budget_exhausted", task_status: { status: "done", summary: "Rapport envoyé." } })]).messages;
   assert.deepEqual(done.map((message) => [message.presentation.kind, message.presentation.text]), [["completion", "Rapport envoyé."]]);
 });
+
+test("la consigne d’une délégation reste lisible dans le fil de la tâche", () => {
+  const brief = { id: "brief", role: "user", kind: "delegation_brief", body: "Résume ce dossier.", attachments: [{ id: "piece" }], payload: { source: "delegation" } };
+  assert.deepEqual(presentThread([brief]).messages, [brief]);
+});

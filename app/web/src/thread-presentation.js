@@ -1,5 +1,5 @@
 const chatKinds = new Set([undefined, null, "message", "submission", "reply"]);
-const usefulCards = new Set(["form", "secret", "memory_auto", "memory_share", "memory_overflow", "topic_memory_offer", "meeting", "voice_call", "group_event", "group_notice", "delegation"]);
+const usefulCards = new Set(["form", "secret", "memory_auto", "memory_share", "memory_overflow", "topic_memory_offer", "meeting", "voice_call", "group_event", "group_notice", "delegation", "delegation_brief"]);
 const approvalProblems = {
   denied: "L’action a été refusée. Elle n’a pas été exécutée.",
   expired: "Cette demande a expiré. Aucune action n’a été faite.",

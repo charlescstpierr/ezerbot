@@ -7,6 +7,7 @@ use launch_identity::LaunchIdentity;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -164,6 +165,67 @@ const COMPRESSIBLE: [(&str, &str); 6] = [
     ("/panels.js", "text/javascript; charset=utf-8"),
     ("/manifest.webmanifest", "application/manifest+json"),
 ];
+
+/// Reads one answer as a browser does: the socket stays open for the next request unless the
+/// server retires it, so a kept socket is handed back to outlive the other connections.
+fn read_like_a_browser(socket: TcpStream) -> std::io::Result<Option<TcpStream>> {
+    let mut reader = BufReader::new(socket.try_clone()?);
+    let (mut length, mut retired) = (0, false);
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            match name.to_ascii_lowercase().as_str() {
+                "content-length" => length = value.trim().parse().unwrap(),
+                "connection" => retired = value.trim().eq_ignore_ascii_case("close"),
+                _ => {}
+            }
+        }
+    }
+    reader.read_exact(&mut vec![0; length])?;
+    Ok((!retired).then_some(socket))
+}
+
+fn load_a_page(host: &Host) -> usize {
+    let sockets: Vec<TcpStream> = (0..24)
+        .map(|_| {
+            let mut socket = TcpStream::connect(&host.address).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            write!(
+                socket,
+                "GET /styles.css HTTP/1.1\r\nHost: {}\r\nX-Ezerbot-Launch: {}\r\n\r\n",
+                host.address,
+                host.identity.value()
+            )
+            .unwrap();
+            socket
+        })
+        .collect();
+    let readers: Vec<_> = sockets
+        .into_iter()
+        .map(|socket| thread::spawn(move || read_like_a_browser(socket)))
+        .collect();
+    let answers: Vec<_> = readers
+        .into_iter()
+        .map(|reader| reader.join().unwrap())
+        .collect();
+    answers.iter().filter(|answer| answer.is_err()).count()
+}
+
+// Each fresh host wins or loses the race between its accept thread and its idle readers.
+#[test]
+fn a_page_load_burst_is_answered_while_the_browser_keeps_its_sockets_open() {
+    for _ in 0..5 {
+        assert_eq!(load_a_page(&Host::new()), 0, "sockets left unanswered");
+    }
+}
 
 #[test]
 fn the_best_accepted_encoding_is_sent_and_decodes_to_the_identity_body() {

@@ -9,6 +9,28 @@ Surface principale : l’interface web locale servie par `grokbot-wrapper` (coqu
 
 Deux instances peuvent tourner ensemble si chacune a son port, son `HOME`, sa base et sa session Chrome dédiée. Ne jamais piloter une instance que ce run n’a pas lancée. Ne jamais utiliser un compte ChatGPT réel.
 
+## Preuve sous Linux (plateforme principale)
+
+Une seule commande, depuis la racine d’un checkout propre (sources compilées commitées) :
+
+```bash
+bash .cursor/skills/verify-ezerbot/scripts/prove.sh --evidence <dossier-neuf-hors-dépôt>
+```
+
+Sous Linux, `prove.sh` passe la main à `scripts/prove-linux.sh`, qui réutilise l’outillage de `tools/linux-captures.cjs` (`docs/captures-linux.md`) au lieu du lanceur Mac :
+
+1. `doctor.py --prerequisites` vérifie Linux, `git`, `xvfb-run`, `Xvfb`, `xauth`, `flock`, `setsid`, `nice`, Node avec WebSocket, `npm`, Chrome ou Chromium, `~/.cargo/bin/cargo` (ou `EZERBOT_VERIFY_CARGO`) et 25 Gio libres. Lecture seule ; dernière ligne `doctor: ok` ou `doctor: echec`.
+2. Build de `HEAD` : `npm ci` et `npm run build` dans `app/web`, puis `cargo build -p grokbot-wrapper --locked` sous `nice`, `CARGO_BUILD_JOBS=3`, cible `target/verify-linux`, un seul build à la fois (verrou `flock`), commit gravé dans le binaire.
+3. Dossier de run court `/tmp/ezv.*` : `HOME`, `XDG_*` et `TMPDIR` dedans, environnement vidé (`env -i`). Le wrapper, le faux fournisseur local et un profil Chrome neuf y vivent. `trap` le supprime et tue le groupe de processus du run, en réussite comme en échec.
+4. `xvfb-run -a` (écran privé) lance `scripts/linux_drive.cjs`, qui pilote trois entrées de la carte : `accueil` (vue `home-dark`), `reponse-fil` (conversation factice et sa réponse terminée, `conversation-dark`) et `parametres-connecteurs` (dialogue des réglages, `settings-dark`). Le pilote refuse un wrapper dont le commit ou les assets servis diffèrent du checkout.
+5. `scripts/linux_verdict.py` écrit `report.md` : une ligne par entrée, puis `PASS <sha40>` ou `FIX <sha40>`. Code de sortie 0 pour PASS, 1 pour FIX, 2 pour une erreur d’outil ou un prérequis manquant.
+
+Preuves : `<dossier>/doctor.txt`, `<dossier>/report.md`, `<dossier>/captures/{manifest.json,result.json,*.png}`. Sans `--evidence`, le dossier est créé sous `$TMPDIR`. Un dossier sous le dépôt ou qui contient déjà `report.md` est refusé. Aucun chemin `/Users` ni `/Applications` n’intervient. Jamais de vrai compte ChatGPT ni du vrai `HOME`, ni de trousseau. Pour l’ancien substitut headless, poser `EZERBOT_VERIFY_BROWSER=chrome-headless`.
+
+Une vue manquante ou cassée donne `FIX` : `result.json` nomme l’étape qui a échoué et les captures déjà prises restent.
+
+## Mac
+
 Les chemins du Mac du capitaine sont les défauts ci-dessous. Chaque chemin s’écrase avec une variable d’environnement.
 
 | Variable | Défaut |
@@ -176,7 +198,10 @@ Tous les scripts vivent dans `.cursor/skills/verify-ezerbot/scripts/` et s’ex�
 | `scripts/compare.sh` | écarts de référence, lecture seule |
 | `scripts/verdict.sh` | `report.md` et ligne `PASS` / `FIX` |
 | `scripts/cleanup.sh` | arrêt ciblé, `HOME` retiré, preuves gardées |
-| `scripts/prove.sh` | enchaînement complet |
+| `scripts/prove.sh` | enchaînement complet (Linux : `prove-linux.sh`) |
+| `scripts/prove-linux.sh` | preuve Linux sous Xvfb, trois entrées, verdict, nettoyage |
+| `scripts/linux_drive.cjs` | pilote Linux branché sur `tools/linux-captures.cjs` |
+| `scripts/linux_verdict.py` | `report.md` et `PASS` / `FIX` de la preuve Linux |
 | `scripts/verify_lib.py self-check` | refuse le vrai home et le dossier Grokbot |
 
 Carte des sphères : `features/README.md`.
@@ -192,7 +217,7 @@ CHROME_DEVTOOLS_AXI_SESSION=verify-ezerbot \
 
 Elle suppose `~/.cargo/bin/cargo`, `~/.local/bin/chrome-devtools-axi` (ou `PATH`) et Google Chrome. Elle n’ouvre pas l’app du capitaine.
 
-Sous Linux, la même commande bascule toute seule sur `EZERBOT_VERIFY_BROWSER=chrome-headless` et écrit `stand-in.md`. Ce fichier liste ce que le substitut a fait et que le Mac ne fera pas. Ces points restent non prouvés tant que la commande ci-dessus n’a pas tourné sur le Mac.
+Sous Linux, la même commande lance la preuve Xvfb décrite plus haut. Avec `EZERBOT_VERIFY_BROWSER=chrome-headless` posé, elle garde l’ancien substitut headless et écrit `stand-in.md`. Ce fichier liste ce que le substitut a fait et que le Mac ne fera pas. Ces points restent non prouvés tant que la commande ci-dessus n’a pas tourné sur le Mac.
 
 ## Maintenance
 

@@ -40,7 +40,8 @@ def verdict(evidence: Path, sha: str) -> tuple[str, list[str]]:
         if passed:
             png_size(shot)
             digest = hashlib.sha256(shot.read_bytes()).hexdigest()
-            passed = hashes.get(item["file"]) == digest
+            # Sans manifeste (vue suivante en échec), l'empreinte n'est pas comparée ; le verdict reste FIX.
+            passed = manifest is None or hashes.get(item["file"]) == digest
         ok = ok and passed
         lines.append(f"| `{item['feature']}` | `{item['view']}` | `captures/{item['file']}` | {'ok' if passed else 'ÉCHEC'} |")
     if result.get("error"):

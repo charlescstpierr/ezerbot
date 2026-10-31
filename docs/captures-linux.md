@@ -4,6 +4,8 @@
 
 Le rendu utilise le vrai wrapper, son interface compilée et un fournisseur factice local. Le manifeste identifie ce rendu comme un repli Chromium. Ces captures prouvent l'interface web servie sous Linux. Elles ne prouvent pas une coque native Linux, absente lors de l'ajout de cet outil.
 
+La skill `verify-ezerbot` réutilise ce pilote pour sa preuve Linux (`prove-linux.sh`, trois vues et un verdict `PASS`/`FIX`).
+
 ## Prérequis
 
 La commande exige Linux, Git, Bash, Node avec WebSocket, npm, Rust, Chrome ou Chromium, Xvfb et xauth. Elle utilise aussi `flock` et `setsid`. Sur la box, Node 20 active WebSocket avec `--experimental-websocket`. Rust doit respecter `rust-toolchain.toml`. Sur la box, placez `/home/box/.cargo/bin` avant `/usr/bin` dans `PATH` pour utiliser rustup et Rust 1.99.1.

@@ -393,6 +393,7 @@
   }
 
   function paintList(pages) {
+    shell.section.hidden = pages.length === 0;
     shell.list.replaceChildren();
     if (!pages.length) {
       shell.list.append(node("p", "sidebar-empty", "Aucune Page pour l’instant."));

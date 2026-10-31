@@ -18,6 +18,7 @@
   let botDialogInitial = "";
   const defaultWelcome = $("welcome-description").textContent;
   let favoriteOnly = false;
+  let sidebarSection = "conversations";
   let connected = false;
   let connectionStatus = "loading";
   let busy = false;
@@ -184,6 +185,7 @@
       panelCall(panel, panel.composer?.mount, $("composer-attachments"));
       panelCall(panel, panel.onState, state);
       updateComposer();
+      syncSidebarRail();
       schedulePoll();
       return true;
     },
@@ -627,7 +629,23 @@
   }
 
   // Changer d’écran sans ouvrir de fil (un autre bot, l’accueil) ferme aussi la page d’un sujet.
-  function notifyNavigation() { for (const panel of panels.values()) panelCall(panel, panel.onNavigate); }
+  function notifyNavigation() {
+    sidebarSection = "conversations";
+    for (const panel of panels.values()) panelCall(panel, panel.onNavigate);
+    syncSidebarRail();
+  }
+
+  function syncSidebarRail() {
+    const active = document.querySelector(".routines-dialog[open]") ? "routines"
+      : document.querySelector(".notifications-dialog[open]") ? "notifications"
+      : $("settings-dialog").open ? "settings"
+      : document.querySelector(".main-panel").dataset.view === "topic" ? "topics" : sidebarSection;
+    for (const button of document.querySelectorAll("[data-sidebar-destination]")) {
+      const id = button.dataset.sidebarDestination;
+      button.setAttribute("aria-pressed", String(id === active));
+      if (id === "topics" || id === "routines") button.hidden = !panels.has(id);
+    }
+  }
 
   function selectConversation(id, focus = false) {
     navigationGeneration++;
@@ -680,10 +698,14 @@
     let previousGroup;
     const today = new Date().toDateString();
     const yesterday = new Date(Date.now() - 86400000).toDateString();
+    const weekStart = new Date();
+    weekStart.setHours(0, 0, 0, 0);
+    weekStart.setDate(weekStart.getDate() - (weekStart.getDay() + 6) % 7);
     for (const conversation of items) {
       const bot = botById(conversation.bot_id);
-      const date = timestamp(conversation.updated_at).toDateString();
-      const group = date === today ? "Aujourd’hui" : date === yesterday ? "Hier" : "Précédemment";
+      const updated = timestamp(conversation.updated_at);
+      const date = updated.toDateString();
+      const group = date === today ? "Aujourd’hui" : date === yesterday ? "Hier" : updated >= weekStart ? "Cette semaine" : "Précédemment";
       if (group !== previousGroup) { ui.list.append(element("p", "list-group-title", group)); previousGroup = group; }
       const button = element("button", `conversation-item${conversation.id === selectedId ? " active" : ""}`);
       button.type = "button";
@@ -1082,9 +1104,6 @@
     };
     const hasMessages = Boolean(conversation?.messages.length);
     ui.findOpen = findState.open;
-    const name = state.account.name || "Espace personnel";
-    $("account-name").textContent = name;
-    $("account-avatar").textContent = name.charAt(0).toLocaleUpperCase("fr");
     ui.title.textContent = conversation?.title || "Nouvelle conversation";
     const bot = currentBot();
     const label = $("workspace-label");
@@ -1127,6 +1146,7 @@
     renderProvider();
     for (const panel of panels.values()) panelCall(panel, panel.onState, state);
     updateComposer();
+    syncSidebarRail();
   }
 
   function pill(kind, label, value, enabled = true) {
@@ -1852,6 +1872,43 @@
   $("sidebar-close").addEventListener("click", closeSidebar);
   $("sidebar-scrim").addEventListener("click", closeSidebar);
   $("settings-button").addEventListener("click", () => { closeSidebar(); $("settings-dialog").showModal(); });
+  const sidebarActions = {
+    conversations() {
+      if (busy) return;
+      notifyNavigation();
+      render();
+      ui.list.scrollIntoView({ block: "start" });
+      ui.list.focus({ preventScroll: true });
+    },
+    topics() {
+      if (busy || !panels.has("topics")) return;
+      notifyNavigation();
+      render();
+      sidebarSection = "topics";
+      $("sidebar-topics").scrollIntoView({ block: "start" });
+      $("new-topic").focus({ preventScroll: true });
+    },
+    routines() {
+      const panel = panels.get("routines");
+      if (panel) panelCall(panel, panel.openSidebar);
+    },
+    notifications() {
+      const panel = panels.get("notifications");
+      if (panel) panelCall(panel, panel.openSidebar);
+    },
+  };
+  for (const button of document.querySelectorAll("[data-sidebar-destination]")) {
+    button.addEventListener("click", () => {
+      sidebarActions[button.dataset.sidebarDestination]?.();
+      syncSidebarRail();
+    });
+  }
+  document.addEventListener("click", syncSidebarRail);
+  document.addEventListener("toggle", syncSidebarRail, true);
+  document.addEventListener("close", syncSidebarRail, true);
+  if (typeof MutationObserver !== "undefined") {
+    new MutationObserver(syncSidebarRail).observe(document.querySelector(".main-panel"), { attributes: true, attributeFilter: ["data-view"] });
+  }
   document.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", () => button.closest("dialog").close()));
   function applyAccent(choice) {
     accentChoice = accents.includes(choice) ? choice : "citron";

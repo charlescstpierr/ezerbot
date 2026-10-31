@@ -340,7 +340,7 @@ fn after_a_restart_the_ids_of_other_applications_are_neither_closed_nor_opened()
         json!({"status":"delivered"})
     );
     assert_eq!(restarted.closed(), [] as [u32; 0]);
-    restarted.click(1);
+    restarted.click(2);
     restarted.click(65);
     let link = format!("ezerbot://app/v1/thread?id={second}\n");
     wait_for(

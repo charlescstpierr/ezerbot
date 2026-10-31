@@ -18,7 +18,7 @@ function sleep(ms) {
 
 // The scripted model. A user message "create_document:{json}" or "write_page:{json}" calls that tool with the
 // JSON as arguments; once the tool output is back (or for anything else: titles, memory) it
-// answers with one short text. A user message starting with "tool_conversation:" says one
+// answers with one short text. A user message "Regarde le dossier <path>" says one
 // sentence, lists that path with the real local tool, then leaves the run open: the follow-up
 // request never gets an answer. The tool call and the catalogue follow the shapes the real
 // provider parses, as in crates/wrapper/tests/support and .cursor/skills/verify-ezerbot.
@@ -53,13 +53,13 @@ function scriptedReply(raw) {
   const lastUser = [...input].reverse().find((item) => item?.role === "user");
   const toolName = ["create_document", "write_page"].find((name) => strings(lastUser).some((text) => text.startsWith(`${name}:`)));
   const request = strings(lastUser).find((text) => toolName && text.startsWith(`${toolName}:`));
-  const held = strings(lastUser).find((text) => text.startsWith("tool_conversation:"));
+  const held = strings(lastUser).map((text) => /^Regarde le dossier (\S+)$/.exec(text)?.[1]).find(Boolean);
   if (held && answered) return null;
   if (held) {
     return sse([
       { type: "response.created" },
       { type: "response.output_text.delta", delta: "Je regarde ce qu’il y a dans le dossier." },
-      { type: "response.output_item.done", item: { id: "fc-held", type: "function_call", status: "completed", call_id: "fixture-held", name: "list_directory", arguments: JSON.stringify({ path: held.slice("tool_conversation:".length) }) } },
+      { type: "response.output_item.done", item: { id: "fc-held", type: "function_call", status: "completed", call_id: "fixture-held", name: "list_directory", arguments: JSON.stringify({ path: held }) } },
       { type: "response.completed" },
     ]);
   }

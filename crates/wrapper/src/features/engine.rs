@@ -3046,8 +3046,12 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
             .flatten();
         if let Some((stored, authority)) = stored {
             if let Some(value) = stored.and_then(|s| serde_json::from_str(&s).ok()) {
+                // The engine also journals its own "unknown" result: only a different
+                // outcome settles the call.
+                if outcome.as_ref() != Some(&value) {
+                    code = None;
+                }
                 outcome = Some(value);
-                code = None;
             }
             if let Some(value) = authority.and_then(|s| serde_json::from_str(&s).ok()) {
                 admission = Some(value);
@@ -4182,6 +4186,15 @@ mod projection_tests {
         let id = format!("projection:{call}");
         let mut ctx = f.app.feature_context();
         ctx.conversation_id = Some("cards");
+        let card = entry(&ctx, "engine_tool", &id).unwrap();
+        assert_eq!(card.payload["code"], "uncertain");
+
+        ctx.connection
+            .execute(
+                "UPDATE engine_external_tools SET outcome=?1 WHERE call_id='call'",
+                [r#"{"status":"failed","reason":"Appel externe interrompu."}"#],
+            )
+            .unwrap();
         let card = entry(&ctx, "engine_tool", &id).unwrap();
         assert_eq!(card.payload["code"], "uncertain");
 

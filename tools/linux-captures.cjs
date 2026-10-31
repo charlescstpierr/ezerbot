@@ -11,7 +11,7 @@ const VIEWS = Object.freeze([
   { id: "settings-dark", label: "Réglages", action: "document.getElementById('settings-button').click()", ready: "document.getElementById('settings-dialog')?.open && document.querySelector('#settings-dialog .setting-section')" },
   { id: "routines-dark", label: "Routines", action: "document.querySelector('[data-sidebar-destination=routines]').click()", ready: "document.querySelector('.routines-dialog')?.open && document.querySelector('.routines-content')?.textContent.includes('Aucune routine pour ce bot.')" },
   { id: "notifications-dark", label: "Notifications", action: "document.querySelector('[data-sidebar-destination=notifications]').click()", ready: "document.querySelector('.notifications-dialog')?.open && document.querySelector('.notifications-dialog .notification-item')?.textContent.includes('Préparer la semaine')" },
-  { id: "conversation-tools-dark", label: "Conversation avec outils", action: "window.captureToolConversation()", ready: "window.captureToolRan?.() && document.getElementById('conversation-title')?.textContent === 'Ranger le dossier' && document.querySelector('.gb-thinking')?.textContent.includes('Réfléchit') && document.querySelector('.gb-conversation')?.textContent.includes('Je regarde ce qu’il y a dans le dossier.') && !document.querySelector('.gb-conversation [data-card-kind], .gb-conversation details, .gb-conversation-problem') && !/list_directory|tool_conversation|\\/tmp/.test(document.querySelector('.gb-conversation').textContent)" },
+  { id: "conversation-tools-dark", label: "Conversation avec outils", action: "window.captureToolConversation()", ready: "window.captureToolRan?.() && document.getElementById('conversation-title')?.textContent === 'Ranger le dossier' && document.querySelector('.gb-thinking')?.textContent.includes('Réfléchit') && document.querySelector('.gb-conversation')?.textContent.includes('Je regarde ce qu’il y a dans le dossier.') && !document.querySelector('.gb-conversation [data-card-kind], .gb-conversation details, .gb-conversation-problem') && ![...document.querySelectorAll('.gb-conversation .gb-assistant')].some(element => /list_directory|\\/tmp/.test(element.textContent))" },
 ]);
 
 async function bounded(work, description, signal, timeoutMs = 20000) {
@@ -108,7 +108,7 @@ async function capture(sha, binary, output, signal) {
       window.captureToolConversation = async () => {
         const {conversation} = await post('/api/conversations', {title:'Ranger le dossier'});
         window.captureToolRan = () => GrokbotPanels.state.conversations.find(item => item.id === conversation.id)?.messages?.some(message => message.kind === 'tool' && message.payload?.call?.name === 'list_directory' && message.payload.outcome?.status === 'done');
-        await post('/api/send', {conversation_id:conversation.id, message_id:'linux-capture-tools', body:'tool_conversation:/tmp'});
+        await post('/api/send', {conversation_id:conversation.id, message_id:'linux-capture-tools', body:'Regarde le dossier /tmp'});
         await GrokbotPanels.refresh();
         GrokbotPanels.openConversation(conversation.id);
       };

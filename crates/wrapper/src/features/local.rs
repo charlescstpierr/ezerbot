@@ -490,10 +490,15 @@ fn yolo_protected(ctx: &Context<'_>, path: &Path, home: Option<&Path>) -> Result
     }
     let roots = protected_roots(ctx, home)?;
     #[cfg(target_os = "linux")]
-    if let Ok(metadata) = fs::metadata(path) {
-        let folders: Vec<PathBuf> = roots.iter().filter(|r| r.is_dir()).cloned().collect();
-        if linked_into(&folders, &metadata)? {
+    {
+        if super::yolo::sandbox::shows_protected(path, &roots) {
             return Ok(true);
+        }
+        if let Ok(metadata) = fs::metadata(path) {
+            let folders: Vec<PathBuf> = roots.iter().filter(|r| r.is_dir()).cloned().collect();
+            if linked_into(&folders, &metadata)? {
+                return Ok(true);
+            }
         }
     }
     let shown = path.to_string_lossy().to_lowercase();

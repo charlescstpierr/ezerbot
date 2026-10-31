@@ -220,6 +220,40 @@ fn identity(path: &Path) -> Option<(u64, u64)> {
     fs::metadata(path).ok().map(|meta| (meta.dev(), meta.ino()))
 }
 
+/// Les chemins qui montrent le contenu de `roots` sans en faire partie. Ce qui est monté
+/// dans une racine y vit aussi : sa source en est une autre vue.
+fn aliases(roots: &[PathBuf], mounts: &[Mount]) -> Vec<PathBuf> {
+    let inner = mounts
+        .iter()
+        .filter(|mount| roots.iter().any(|root| mount.point.starts_with(root)))
+        .map(|mount| &mount.point);
+    let mut found = Vec::new();
+    for root in roots.iter().chain(inner) {
+        for (view, original) in views(root, mounts) {
+            let shown = identity(&view);
+            if shown.is_some() && shown == identity(&original) {
+                found.push(view);
+            }
+        }
+    }
+    found
+}
+
+/// Les outils fichiers ne passent pas par le bac à sable : ce chemin montre-t-il une racine
+/// protégée par un autre montage ? Une table illisible répond oui.
+pub fn shows_protected(path: &Path, protected: &[PathBuf]) -> bool {
+    let Ok(table) = read_table("/proc/self/mountinfo") else {
+        return true;
+    };
+    let roots: Vec<PathBuf> = protected
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .collect();
+    aliases(&roots, &mounts(&table))
+        .iter()
+        .any(|view| path.starts_with(view))
+}
+
 /// Tout ce que le shell ne doit pas atteindre : les racines protégées, chaque socket qui
 /// écoute sous le même uid (un bus de session peut être n'importe où) et chaque autre chemin
 /// qui montre ces racines.
@@ -242,20 +276,8 @@ fn masks(protected: &[PathBuf]) -> Result<Vec<PathBuf>, ApiError> {
     roots.dedup_by(|inner, outer| inner.starts_with(&*outer));
     let mounts = mounts(&table);
     refuse_outside_links(&roots, &mounts)?;
-    let mut masks = roots.clone();
-    // Ce qui est monté dans une racine y vit aussi : sa source est une autre vue à recouvrir.
-    let inner = mounts
-        .iter()
-        .filter(|mount| roots.iter().any(|root| mount.point.starts_with(root)))
-        .map(|mount| &mount.point);
-    for root in roots.iter().chain(inner) {
-        for (view, original) in views(root, &mounts) {
-            let shown = identity(&view);
-            if shown.is_some() && shown == identity(&original) {
-                masks.push(view);
-            }
-        }
-    }
+    let mut masks = aliases(&roots, &mounts);
+    masks.extend(roots);
     masks.sort();
     masks.dedup_by(|inner, outer| inner.starts_with(&*outer));
     Ok(masks)

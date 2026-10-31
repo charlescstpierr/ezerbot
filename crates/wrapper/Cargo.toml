@@ -32,6 +32,7 @@ tiny_http = "0.12"
 ureq = { version = "2", features = ["json"] }
 jsonwebtoken = "9"
 sha2 = "0.10"
+unicode-normalization = "0.1"
 base64 = "0.22"
 flate2 = "1"
 getrandom = "0.2"

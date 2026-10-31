@@ -219,18 +219,13 @@ impl Drop for ChildGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::atomic::AtomicU64};
+    use grokbot_test_support::TestDir;
+    use std::os::unix::fs::PermissionsExt;
 
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    struct Fixture(PathBuf);
+    struct Fixture(TestDir);
     impl Fixture {
         fn new(body: &str) -> Self {
-            let directory = std::env::temp_dir().join(format!(
-                "ezerbot-linux-test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir(&directory).unwrap();
+            let directory = TestDir::new("ezerbot-linux-test");
             let wrapper = directory.join("wrapper");
             fs::write(&wrapper, format!("#!/usr/bin/python3\nimport os,sys,time,signal\nroot=os.path.dirname(__file__)\nopen(root+'/pid','w').write(str(os.getpid()))\n{}\n", body)).unwrap();
             fs::set_permissions(wrapper, fs::Permissions::from_mode(0o700)).unwrap();
@@ -254,11 +249,6 @@ mod tests {
                 Err(nix::errno::Errno::ESRCH),
                 "wrapper survived cleanup"
             );
-        }
-    }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 

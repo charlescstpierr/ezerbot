@@ -584,6 +584,7 @@ name = "ezerbot-linux"
 version = "0.1.0"
 dependencies = [
  "getrandom",
+ "grokbot-test-support",
  "gtk",
  "nix",
  "percent-encoding",

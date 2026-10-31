@@ -18,25 +18,24 @@ Les conversations restent dans le dossier de données XDG d’Ezerbot.
 L’option `--data-dir /chemin/isolé` permet un lancement avec des données séparées.
 Le menu **Quitter Ezerbot**, Ctrl+Q et la fermeture de la fenêtre arrêtent aussi le wrapper.
 
-## Fonctions natives à suivre dans #598
+## Fonctions natives non portées
 
 Ces fonctions restent indisponibles sous Linux et leurs commandes sont masquées.
+L’inventaire de #598 renvoie vers les mêmes tickets.
 
-| Fonction | Travail restant |
-| --- | --- |
-| Dictée | Reconnaissance vocale native |
-| Microphone et mémos vocaux | Sélection et capture audio |
-| Appels et mode voix | Capture et lecture audio natives |
-| Enregistrement local de réunion | Capture audio locale |
-| Capture et contrôle de l’écran | Permissions et services du bureau |
-| Démonstrations | Capture des gestes et de l’écran |
-| Fenêtre flottante | Fenêtre et raccourci global Linux |
+| Fonction | Travail restant | Suivi |
+| --- | --- | --- |
+| Dictée | Reconnaissance vocale native | #606, #607 |
+| Microphone et mémos vocaux | Sélection et capture audio | #606, #607 |
+| Appels et mode voix | Capture et lecture audio natives | #607 |
+| Enregistrement local de réunion | Capture audio locale | #606, #607 |
+| Capture et contrôle de l’écran | Permissions et services du bureau | #608 |
+| Démonstrations | Capture des gestes et de l’écran | Dépend de #608 |
+| Fenêtre flottante | Fenêtre et raccourci global Linux | #609 |
 
-Les autres services de #598 comprennent Secret Service, les notifications D-Bus,
+Le bac à sable YOLO est suivi dans #528.
+Les services de #598 comprennent Secret Service, les notifications D-Bus,
 les liens profonds et l’ouverture par `xdg-open`.
-L’issue #598 exclut actuellement la voix, le microphone et la capture d’écran.
-Leur portage nécessite donc un ticket distinct si Charles le demande.
-Cette liste documente le suivi sans modifier cette issue.
 
 ## Preuve sans compte réel
 

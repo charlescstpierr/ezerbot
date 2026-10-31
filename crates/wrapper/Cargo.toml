@@ -66,3 +66,9 @@ rqrr = { version = "0.11", default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "=3.7.0", default-features = false }
 core-foundation = "0.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+grokbot-linux-desktop = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+grokbot-linux-desktop = { workspace = true, features = ["test-support"] }

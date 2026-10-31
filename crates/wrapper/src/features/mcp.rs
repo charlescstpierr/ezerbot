@@ -462,9 +462,13 @@ fn invalid(message: &str) -> ApiError {
 fn secret_name(id: &str) -> String {
     format!("MCP_{id}_ENV").to_uppercase()
 }
+#[cfg(target_os = "linux")]
+const UNREADABLE_STORE: &str = "Le service de secrets du bureau est verrouillé ou inaccessible : impossible de récupérer les variables privées de ce connecteur. Déverrouillez-le, puis utilisez « Vérifier le stockage » dans Paramètres.";
+#[cfg(not(target_os = "linux"))]
+const UNREADABLE_STORE: &str = "Le trousseau macOS est verrouillé ou inaccessible : impossible de récupérer les variables privées de ce connecteur. Déverrouillez-le, puis utilisez « Vérifier le stockage » dans Paramètres.";
 fn missing_private_value(vault: &grokbot_forms::vault::Vault, message: &str) -> ApiError {
     if vault.storage_status().backend == "file_fallback" {
-        invalid("Le trousseau macOS est verrouillé ou inaccessible : impossible de récupérer les variables privées de ce connecteur. Déverrouillez-le, puis utilisez « Vérifier le stockage » dans Paramètres.")
+        invalid(UNREADABLE_STORE)
     } else {
         invalid(message)
     }

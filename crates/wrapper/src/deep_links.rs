@@ -76,7 +76,7 @@ fn atom(value: &str) -> Result<(), ApiError> {
     validate_id(value).map_err(|_| invalid())
 }
 
-fn encode(value: &str) -> String {
+pub(crate) fn encode(value: &str) -> String {
     let mut result = String::new();
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {

@@ -51,6 +51,21 @@
   const pendingStates = new Set(["queued", "dispatching", "unknown"]);
 
   const panels = new Map();
+  const unavailablePanels = new Set(window.EzerbotShell?.platform === "linux" ? window.EzerbotShell.unavailablePanels : []);
+  if (window.EzerbotShell?.platform === "linux") {
+    const notice = document.createElement("p");
+    notice.id = "linux-native-services";
+    notice.textContent = "Indisponibles sous Linux : dictée, microphone, appels et mode voix, enregistrement local de réunion, capture et contrôle de l’écran, démonstrations et fenêtre flottante.";
+    $("settings-extensions").before(notice);
+    for (const paragraph of document.querySelectorAll(".setting-info p")) {
+      paragraph.textContent = paragraph.textContent.replace("sur ce Mac", "sur cet ordinateur");
+    }
+    for (const row of $("settings-shortcuts").querySelectorAll("div")) {
+      if (row.textContent.includes("Dicter un message")) row.hidden = true;
+      const key = row.querySelector("kbd");
+      if (key) key.textContent = key.textContent.replace("⌘", "Ctrl");
+    }
+  }
   const panelFailed = Symbol("panel-failed");
   const botCleanups = [];
   // Keep the original extras until a queued submission settles, even if state refresh replaces its DTO.
@@ -176,6 +191,7 @@
         panelError(panel?.id, new Error("Duplicate or missing panel id"));
         return false;
       }
+      if (unavailablePanels.has(panel.id)) return false;
       if (window.EzerbotIPhone?.remote && !["iphone", "notifications", "forms", "attachments", "multibot", "engine", "delegation", "local"].includes(panel.id)) return false;
       panels.set(panel.id, panel);
       if (!window.EzerbotIPhone?.remote || ["iphone", "notifications", "forms"].includes(panel.id)) {

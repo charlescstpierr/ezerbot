@@ -1,0 +1,45 @@
+name: Coque Linux
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-shell-build-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '3'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Libérer les SDK inutilisés de la VM éphémère
+        run: sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - name: Installer GTK et WebKitGTK
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+      - name: Installer le toolchain du dépôt
+        run: rustup show active-toolchain
+      - name: Vérifier le format Rust
+        run: cargo fmt --all -- --check
+      - name: Vérifier la coque Linux
+        run: |
+          df -BG "$GITHUB_WORKSPACE"
+          cargo clippy -p ezerbot-linux --all-targets --locked -- -D warnings
+          df -BG "$GITHUB_WORKSPACE"
+          cargo test -p ezerbot-linux --locked
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Vérifier le contrat JavaScript et les capacités Linux
+        run: node --test app/linux/tests/*.test.cjs app/ui/linux-capabilities.test.cjs
+      - name: Construire le lanceur Linux
+        env:
+          EZERBOT_BUILD_DEBUG: '1'
+        run: tools/build-app-linux.sh

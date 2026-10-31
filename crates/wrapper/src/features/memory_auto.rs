@@ -151,6 +151,35 @@ pub fn on_run_event(ctx: &Context<'_>, event: &RunEvent) {
     }
 }
 
+pub(super) const TICK_WORK: &str =
+    "SELECT EXISTS(SELECT 1 FROM memory_auto_jobs WHERE state='queued' OR state='running')";
+
+pub(super) fn claim_job(
+    conn: &Connection,
+    now: u64,
+    after_probe: impl FnOnce(bool),
+) -> Result<Option<String>, ApiError> {
+    let available: bool = conn.query_row(TICK_WORK, [], |r| r.get(0))?;
+    after_probe(available);
+    if !available {
+        return Ok(None);
+    }
+    let tx = super::write_transaction(conn)?;
+    tx.execute(
+        "UPDATE memory_auto_jobs SET state='done' WHERE state='running'",
+        [],
+    )?;
+    let id: Option<String> = tx.query_row("SELECT run_id FROM memory_auto_jobs WHERE state='queued' ORDER BY updated_at,run_id LIMIT 1", [], |r| r.get(0)).optional()?;
+    if let Some(id) = &id {
+        tx.execute(
+            "UPDATE memory_auto_jobs SET state='running',updated_at=?2 WHERE run_id=?1",
+            params![id, now],
+        )?;
+    }
+    tx.commit()?;
+    Ok(id)
+}
+
 pub fn tick(ctx: &Context<'_>) {
     if !ctx.provider.connected() {
         return;
@@ -160,22 +189,7 @@ pub fn tick(ctx: &Context<'_>) {
     let Some(_) = ctx.provider.claim_run("memory-auto-worker") else {
         return;
     };
-    let result = (|| -> Result<Option<String>, ApiError> {
-        let tx = super::write_transaction(ctx.connection)?;
-        tx.execute(
-            "UPDATE memory_auto_jobs SET state='done' WHERE state='running'",
-            [],
-        )?;
-        let id: Option<String> = tx.query_row("SELECT run_id FROM memory_auto_jobs WHERE state='queued' ORDER BY updated_at,run_id LIMIT 1", [], |r| r.get(0)).optional()?;
-        if let Some(id) = &id {
-            tx.execute(
-                "UPDATE memory_auto_jobs SET state='running',updated_at=?2 WHERE run_id=?1",
-                params![id, ctx.now_ms],
-            )?;
-        }
-        tx.commit()?;
-        Ok(id)
-    })();
+    let result = claim_job(ctx.connection, ctx.now_ms, |_| {});
     let Ok(Some(id)) = result else {
         ctx.provider.release_run("memory-auto-worker");
         return;

@@ -93,6 +93,8 @@ pub mod engine;
 pub mod floating;
 pub mod forms;
 pub mod generated;
+#[cfg(test)]
+mod idle_writes_tests;
 pub mod images;
 pub mod iphone;
 pub mod library;

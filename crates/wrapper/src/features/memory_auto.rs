@@ -642,7 +642,7 @@ fn extract(
     if human || form_overlap(conn, &input.text)? {
         return Ok(());
     }
-    let vault = Vault::open(&path.with_extension("secrets.json"))?;
+    let vault = Vault::open_app(&path.with_extension("secrets.json"))?;
     if redact::redact(&vault, &input.text)? != input.text {
         return Ok(());
     }

@@ -4,6 +4,7 @@ const { createServer } = require("node:http");
 const { spawn } = require("node:child_process");
 const { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } = require("node:fs");
 const { rm } = require("node:fs/promises");
+const { tmpdir } = require("node:os");
 const { join, resolve, extname, isAbsolute } = require("node:path");
 const { chromeBinary } = require("./chrome-binary.cjs");
 const { connectCdp } = require("./local-api-client.cjs");
@@ -40,8 +41,7 @@ const form = () => ({
 });
 
 async function fixture(t, phone) {
-  assert.ok(process.env.TMPDIR, "le lanceur fournit TMPDIR pour le profil isolé");
-  const root = mkdtempSync(join(resolve(process.env.TMPDIR), "thread-conversation-"));
+  const root = mkdtempSync(join(tmpdir(), "thread-conversation-"));
   const uiRoot = resolve(__dirname);
   const state = {
     account: { name: "Espace de test" }, mode: "simulated", state_revision: 1,

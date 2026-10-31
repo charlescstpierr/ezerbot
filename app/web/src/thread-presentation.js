@@ -117,7 +117,8 @@ export function presentThread(orderedMessages) {
       if (payload.status === "failed" && !failedReplies.has(payload.run_id)) messages.push(problem(completed ? { ...message, id: `${message.id}:problem` } : message, "Le dernier échange n’a pas abouti."));
       continue;
     }
-    if (usefulCards.has(message.kind) || message.kind === "turn-heading") messages.push(message);
+    if (message.kind === "reset") messages.push({ ...message, presentation: { kind: "notice", text: message.body } });
+    else if (usefulCards.has(message.kind) || message.kind === "turn-heading") messages.push(message);
   }
   const firstByRun = new Map();
   for (const message of messages) {

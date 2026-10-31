@@ -60,3 +60,8 @@ test("la consigne d’une délégation reste lisible dans le fil de la tâche", 
   const brief = { id: "brief", role: "user", kind: "delegation_brief", body: "Résume ce dossier.", attachments: [{ id: "piece" }], payload: { source: "delegation" } };
   assert.deepEqual(presentThread([brief]).messages, [brief]);
 });
+
+test("une remise à zéro du contexte reste une phrase visible, sans carte", () => {
+  const body = "Nouvelle conversation — la mémoire est conservée.";
+  assert.deepEqual(notes([{ id: "reset", role: "assistant", kind: "reset", body, payload: { reset: true } }]), [body]);
+});

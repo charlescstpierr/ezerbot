@@ -1,49 +1,293 @@
 //! Bac à sable du shell YOLO sous Linux : bubblewrap recouvre les racines protégées.
 use crate::ApiError;
+use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus, Scope};
 use std::{
+    collections::HashMap,
+    fs, io,
+    os::unix::{
+        ffi::OsStringExt,
+        fs::{FileTypeExt, MetadataExt},
+    },
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::OnceLock,
 };
 
 const BWRAP: &str = "/usr/bin/bwrap"; // chemin absolu : un PATH inscriptible ne doit pas pouvoir substituer un faux lanceur
 
-pub const UNAVAILABLE: &str = "Mode YOLO indisponible : le terminal ne peut pas démarrer sans son bac à sable. Installez bubblewrap (/usr/bin/bwrap), autorisez les espaces de noms utilisateur non privilégiés, puis relancez Ezerbot. En attendant, chaque action demande votre accord.";
+pub const UNAVAILABLE: &str = "Mode YOLO indisponible : le terminal ne peut pas démarrer sans son bac à sable. Installez bubblewrap (/usr/bin/bwrap), autorisez les espaces de noms utilisateur non privilégiés et utilisez un noyau Linux 6.12 ou plus récent (Landlock isole les sockets abstraits), puis relancez Ezerbot. En attendant, chaque action demande votre accord.";
 
-fn launcher(bwrap: &Path, protected: &[PathBuf], cwd: &Path) -> Command {
+/// Une ligne de `/proc/self/mountinfo` : `device` est `maj:min`, `root` le chemin du
+/// montage dans son système de fichiers, `point` l'endroit où il apparaît.
+struct Mount {
+    device: String,
+    root: PathBuf,
+    point: PathBuf,
+}
+
+fn unescape(field: &str) -> PathBuf {
+    let bytes = field.as_bytes();
+    let mut raw = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let octal = bytes
+            .get(at + 1..at + 4)
+            .filter(|digits| bytes[at] == b'\\' && digits.iter().all(|d| (b'0'..=b'7').contains(d)))
+            .and_then(|digits| u8::from_str_radix(std::str::from_utf8(digits).ok()?, 8).ok());
+        match octal {
+            Some(byte) => {
+                raw.push(byte);
+                at += 4;
+            }
+            None => {
+                raw.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    PathBuf::from(std::ffi::OsString::from_vec(raw))
+}
+
+fn mounts(table: &str) -> Vec<Mount> {
+    table
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split(' ');
+            let device = fields.nth(2)?;
+            let root = fields.next()?;
+            let point = fields.next()?;
+            // Un montage dont le dossier source a été supprimé ne montre plus rien.
+            (!root.ends_with("//deleted")).then(|| Mount {
+                device: device.to_owned(),
+                root: unescape(root),
+                point: unescape(point),
+            })
+        })
+        .collect()
+}
+
+fn join(base: &Path, rest: &Path) -> PathBuf {
+    if rest.as_os_str().is_empty() {
+        base.to_path_buf()
+    } else {
+        base.join(rest)
+    }
+}
+
+/// Les autres chemins qui montrent `path` (ou un de ses sous-dossiers) : un montage du même
+/// système de fichiers qui en expose la même partie. Chaque paire est (vue, original).
+fn views(path: &Path, mounts: &[Mount]) -> Vec<(PathBuf, PathBuf)> {
+    let Some(owner) = mounts
+        .iter()
+        .filter(|mount| path.starts_with(&mount.point))
+        .max_by_key(|mount| mount.point.components().count())
+    else {
+        return Vec::new();
+    };
+    let Ok(below) = path.strip_prefix(&owner.point) else {
+        return Vec::new();
+    };
+    let file = join(&owner.root, below);
+    let mut found = Vec::new();
+    for mount in mounts.iter().filter(|mount| mount.device == owner.device) {
+        let pair = if let Ok(rest) = file.strip_prefix(&mount.root) {
+            (join(&mount.point, rest), path.to_path_buf())
+        } else if let Ok(rest) = mount.root.strip_prefix(&file) {
+            (mount.point.clone(), join(path, rest))
+        } else {
+            continue;
+        };
+        if pair.0 != pair.1 {
+            found.push(pair);
+        }
+    }
+    found
+}
+
+/// Les chemins liés à un socket Unix qui écoute (`SO_ACCEPTCON`, drapeau `00010000`).
+/// Les sockets abstraits (`@…`) n'ont pas de fichier : Landlock s'en charge.
+fn listening_sockets(table: &str) -> Vec<PathBuf> {
+    table
+        .lines()
+        .filter_map(|line| {
+            let mut rest = line;
+            let mut fields = [""; 7];
+            for field in &mut fields {
+                rest = rest.trim_start();
+                let end = rest.find(char::is_whitespace)?;
+                (*field, rest) = rest.split_at(end);
+            }
+            let path = rest.strip_prefix(' ')?;
+            (fields[3] == "00010000" && path.starts_with('/')).then(|| PathBuf::from(path))
+        })
+        .collect()
+}
+
+/// Une table du noyau illisible ou qui n'est pas de l'UTF-8 ne se lit pas à moitié : le mode reste éteint.
+fn read_table(path: &str) -> Result<String, ApiError> {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or_else(|| ApiError::new(503, UNAVAILABLE))
+}
+
+fn refused(path: &Path, error: &io::Error) -> ApiError {
+    ApiError::new(
+        403,
+        format!(
+            "Mode YOLO : la donnée protégée {} n’a pas pu être vérifiée ({error}). La commande n’est pas lancée.",
+            path.display()
+        ),
+    )
+}
+
+/// Un lien dur est un second nom du même contenu : le masque d'un chemin ne le couvre pas.
+/// Chaque nom d'un objet à plusieurs liens doit se trouver dans une racine protégée.
+fn refuse_outside_links(roots: &[PathBuf]) -> Result<(), ApiError> {
+    let mut seen: HashMap<(u64, u64), (u64, u64, PathBuf)> = HashMap::new();
+    let mut pending = roots.to_vec();
+    while let Some(path) = pending.pop() {
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(refused(&path, &error)),
+        };
+        if meta.is_dir() {
+            let entries = match fs::read_dir(&path) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(refused(&path, &error)),
+            };
+            for entry in entries {
+                match entry {
+                    Ok(entry) => pending.push(entry.path()),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(refused(&path, &error)),
+                }
+            }
+        } else if !meta.file_type().is_symlink() && meta.nlink() > 1 {
+            seen.entry((meta.dev(), meta.ino()))
+                .or_insert((meta.nlink(), 0, path))
+                .1 += 1;
+        }
+    }
+    let outside = seen
+        .into_values()
+        .filter(|(links, names, _)| names < links)
+        .map(|(_, _, path)| path)
+        .min();
+    match outside {
+        None => Ok(()),
+        Some(path) => Err(ApiError::new(
+            403,
+            format!(
+                "Mode YOLO : la donnée protégée {path} a un lien dur hors de sa racine, que le bac à sable ne peut pas masquer. Retrouvez-le avec `find / -samefile '{path}'` puis supprimez-le, et relancez la commande.",
+                path = path.display()
+            ),
+        )),
+    }
+}
+
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    fs::metadata(path).ok().map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// Tout ce que le shell ne doit pas atteindre : les racines protégées, chaque socket qui
+/// écoute sous le même uid (un bus de session peut être n'importe où) et chaque autre chemin
+/// qui montre ces racines.
+fn masks(protected: &[PathBuf]) -> Result<Vec<PathBuf>, ApiError> {
+    let sockets = read_table("/proc/net/unix")?;
+    let table = read_table("/proc/self/mountinfo")?;
+    let uid = nix::unistd::Uid::effective().as_raw();
+    let mut roots: Vec<PathBuf> = protected
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .collect();
+    for socket in listening_sockets(&sockets) {
+        let ours = fs::symlink_metadata(&socket)
+            .is_ok_and(|meta| meta.file_type().is_socket() && meta.uid() == uid);
+        if let Some(real) = socket.canonicalize().ok().filter(|_| ours) {
+            roots.push(real);
+        }
+    }
+    roots.sort();
+    roots.dedup_by(|inner, outer| inner.starts_with(&*outer));
+    refuse_outside_links(&roots)?;
+    let mounts = mounts(&table);
+    let mut masks = roots.clone();
+    for root in &roots {
+        for (view, original) in views(root, &mounts) {
+            let shown = identity(&view);
+            if shown.is_some() && shown == identity(&original) {
+                masks.push(view);
+            }
+        }
+    }
+    masks.sort();
+    masks.dedup_by(|inner, outer| inner.starts_with(&*outer));
+    Ok(masks)
+}
+
+fn launcher(bwrap: &Path, masks: &[PathBuf], cwd: &Path) -> Command {
     // --unshare-user est explicite : sans lui, bwrap lancé en root (uid 0, même dans un
     // espace de noms) ne crée pas d'espace utilisateur et le shell garde de quoi démonter.
     // L'espace utilisateur refuse aussi /proc/<pid>/root et fd vers les processus de l'hôte.
     let mut command = Command::new(bwrap);
-    command.args(["--unshare-user", "--dev-bind", "/", "/"]);
-    let mut roots: Vec<PathBuf> = protected
-        .iter()
-        .filter_map(|r| r.canonicalize().ok())
-        .collect();
-    roots.sort();
-    roots.dedup_by(|inner, outer| inner.starts_with(&*outer));
-    for root in &roots {
-        if root.is_dir() {
+    command.args(["--unshare-user", "--bind", "/", "/", "--dev", "/dev"]);
+    for mask in masks {
+        if mask.is_dir() {
             command
                 .args(["--perms", "0000", "--tmpfs"])
-                .arg(root)
+                .arg(mask)
                 .arg("--remount-ro")
-                .arg(root);
+                .arg(mask);
         } else {
-            command.args(["--ro-bind", "/dev/null"]).arg(root);
+            command.args(["--ro-bind", "/dev/null"]).arg(mask);
         }
     }
     command.arg("--chdir").arg(cwd);
     command
 }
 
+/// Lance la commande dans un domaine Landlock qui ferme les sockets abstraits créés hors de
+/// lui : bubblewrap ne sépare pas l'espace de noms réseau, et un bus de session peut y vivre
+/// sans fichier à masquer. Landlock s'applique au fil appelant et le fork en hérite ; un fil
+/// jetable le porte, le reste du wrapper garde ses droits.
+pub fn spawn(command: &mut Command) -> io::Result<Child> {
+    fn confine() -> io::Result<()> {
+        let status = Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .scope(Scope::AbstractUnixSocket)
+            .and_then(|ruleset| ruleset.create())
+            .and_then(|ruleset| ruleset.restrict_self())
+            .map_err(io::Error::other)?;
+        match status.ruleset {
+            RulesetStatus::FullyEnforced => Ok(()),
+            _ => Err(io::Error::other(
+                "Landlock n’isole pas les sockets abstraits",
+            )),
+        }
+    }
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                confine()?;
+                command.spawn()
+            })
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("le fil de lancement a paniqué")))
+    })
+}
+
 fn probe(bwrap: &Path) -> bool {
-    launcher(bwrap, &[PathBuf::from("/tmp")], Path::new("/"))
+    let mut command = launcher(bwrap, &[PathBuf::from("/tmp")], Path::new("/"));
+    command
         .args(["/bin/sh", "-c", ":"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::null());
+    spawn(&mut command)
+        .and_then(|mut child| child.wait())
         .is_ok_and(|status| status.success())
 }
 
@@ -56,7 +300,7 @@ pub fn command(protected: &[PathBuf], cwd: &Path) -> Result<Command, ApiError> {
     if !available() {
         return Err(ApiError::new(503, UNAVAILABLE));
     }
-    let mut command = launcher(Path::new(BWRAP), protected, cwd);
+    let mut command = launcher(Path::new(BWRAP), &masks(protected)?, cwd);
     command.arg("/bin/sh");
     Ok(command)
 }
@@ -69,11 +313,13 @@ mod tests {
     use std::process::Output;
 
     fn run(protected: &[PathBuf], cwd: &Path, script: &str) -> Output {
-        launcher(Path::new(BWRAP), protected, cwd)
+        let mut command = launcher(Path::new(BWRAP), &masks(protected).unwrap(), cwd);
+        command
             .args(["/bin/sh", "-c", script])
             .stdin(Stdio::null())
-            .output()
-            .unwrap()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        spawn(&mut command).unwrap().wait_with_output().unwrap()
     }
 
     fn host(cwd: &Path, script: &str) -> Output {
@@ -184,5 +430,178 @@ mod tests {
         let beside = run(std::slice::from_ref(&data), &dir, &touch);
         assert!(beside.status.success(), "{beside:?}");
         assert!(witness.exists());
+    }
+
+    fn shown(pairs: Vec<(PathBuf, PathBuf)>) -> Vec<(String, String)> {
+        pairs
+            .into_iter()
+            .map(|(view, original)| (view.display().to_string(), original.display().to_string()))
+            .collect()
+    }
+
+    fn pair(view: &str, original: &str) -> (String, String) {
+        (view.to_owned(), original.to_owned())
+    }
+
+    #[test]
+    fn the_mount_table_decodes_octal_escapes_and_drops_deleted_sources() {
+        let table = "\
+36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw\n\
+40 36 8:1 /dos\\040espace /point\\040ici rw - ext4 /dev/sda1 rw\n\
+41 36 8:1 /disparu//deleted /x rw - ext4 /dev/sda1 rw\n\
+42 36 8:1 /tab\\011nl\\012bs\\134 /y rw - ext4 /dev/sda1 rw\n\
+43 36 8:1 /plein\\9 /z rw - ext4 /dev/sda1 rw\n";
+        let found = mounts(table);
+        let rows: Vec<(&str, String, String)> = found
+            .iter()
+            .map(|m| {
+                (
+                    m.device.as_str(),
+                    m.root.display().to_string(),
+                    m.point.display().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("98:0", "/mnt1".to_owned(), "/mnt2".to_owned()),
+                ("8:1", "/dos espace".to_owned(), "/point ici".to_owned()),
+                ("8:1", "/tab\tnl\nbs\\".to_owned(), "/y".to_owned()),
+                ("8:1", "/plein\\9".to_owned(), "/z".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_second_mount_of_the_same_device_is_a_view_and_a_sibling_folder_is_not() {
+        let table = mounts(
+            "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n\
+2 1 8:1 / /mnt/copie rw - ext4 /dev/sda1 rw\n\
+3 1 8:2 / /autre rw - ext4 /dev/sdb1 rw\n\
+4 1 8:1 /a/data2 /elsewhere rw - ext4 /dev/sda1 rw\n",
+        );
+        assert_eq!(
+            shown(views(Path::new("/a/data"), &table)),
+            [pair("/mnt/copie/a/data", "/a/data")]
+        );
+    }
+
+    #[test]
+    fn a_bind_of_a_subfolder_and_a_bind_of_the_folder_itself_are_views() {
+        let table = mounts(
+            "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n\
+2 1 8:1 /a/data /vue rw - ext4 /dev/sda1 rw\n\
+3 1 8:1 /a/data/sous /sous rw - ext4 /dev/sda1 rw\n\
+4 1 8:1 /a/data/sous/profond /profond rw - ext4 /dev/sda1 rw\n\
+5 1 8:1 /a /parent rw - ext4 /dev/sda1 rw\n",
+        );
+        assert_eq!(
+            shown(views(Path::new("/a/data"), &table)),
+            [
+                pair("/vue", "/a/data"),
+                pair("/sous", "/a/data/sous"),
+                pair("/profond", "/a/data/sous/profond"),
+                pair("/parent/data", "/a/data"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_view_of_a_path_on_a_subvolume_follows_the_root_of_its_mount() {
+        let table = mounts(
+            "1 0 0:30 /@home /home rw - btrfs /dev/sda2 rw\n\
+2 1 0:30 / /mnt/racine rw - btrfs /dev/sda2 rw\n\
+3 1 0:30 /@home /mnt/maison rw - btrfs /dev/sda2 rw\n",
+        );
+        assert_eq!(
+            shown(views(Path::new("/home/u/data"), &table)),
+            [
+                pair("/mnt/racine/@home/u/data", "/home/u/data"),
+                pair("/mnt/maison/u/data", "/home/u/data"),
+            ]
+        );
+        assert!(views(Path::new("/ailleurs"), &table).is_empty());
+    }
+
+    #[test]
+    fn the_deepest_mount_owns_a_path_and_the_last_wins_a_tie() {
+        let table = mounts(
+            "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n\
+2 1 8:3 / /a rw - ext4 /dev/sda3 rw\n\
+3 1 8:3 / /copie rw - ext4 /dev/sda3 rw\n\
+4 1 8:4 / /a rw - ext4 /dev/sda4 rw\n\
+5 1 8:4 / /dernier rw - ext4 /dev/sda4 rw\n",
+        );
+        assert_eq!(
+            shown(views(Path::new("/a/data"), &table)),
+            [pair("/dernier/data", "/a/data")]
+        );
+    }
+
+    #[test]
+    fn only_listening_sockets_with_an_absolute_path_are_kept() {
+        let table = "\
+Num       RefCount Protocol Flags    Type St Inode Path
+0000000000000000: 00000002 00000000 00010000 0001 01  4242 /run/user/1000/bus
+0000000000000000: 00000002 00000000 00010000 0001 01 12345 /tmp/un dossier/sock et.sock
+0000000000000000: 00000003 00000000 00000000 0001 03  4243 /run/user/1000/bus
+0000000000000000: 00000002 00000000 00010000 0001 01  4244 @/tmp/dbus-abstrait
+0000000000000000: 00000002 00000000 00010000 0001 01  4245 relatif/sock
+0000000000000000: 00000002 00000000 00010000 0001 01  4246
+";
+        let found: Vec<String> = listening_sockets(table)
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        assert_eq!(
+            found,
+            ["/run/user/1000/bus", "/tmp/un dossier/sock et.sock"]
+        );
+    }
+
+    #[test]
+    fn a_hard_link_between_two_names_inside_a_root_does_not_refuse_but_one_outside_does() {
+        let dir = TestDir::new("ezerbot-bwrap");
+        let data = dir.join("data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("a.txt"), "jeton").unwrap();
+        std::fs::hard_link(data.join("a.txt"), data.join("b.txt")).unwrap();
+        let real = data.canonicalize().unwrap();
+        assert!(masks(std::slice::from_ref(&data)).unwrap().contains(&real));
+
+        let outside = dir.join("dehors.txt");
+        std::fs::hard_link(data.join("a.txt"), &outside).unwrap();
+        let error = masks(std::slice::from_ref(&data)).unwrap_err();
+        assert_eq!(error.status, 403);
+        assert!(error.message.contains("lien dur"), "{}", error.message);
+        assert!(
+            error.message.contains("find / -samefile"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("a.txt"), "{}", error.message);
+        assert!(!error.message.contains("jeton"), "{}", error.message);
+
+        std::fs::remove_file(&outside).unwrap();
+        assert!(masks(std::slice::from_ref(&data)).is_ok());
+    }
+
+    #[test]
+    fn a_socket_of_ours_is_masked_only_while_it_listens_and_a_plain_file_never_is() {
+        let dir = TestDir::new("ezerbot-bwrap");
+        let path = dir.join("bus-inconnu");
+        let real = dir.canonicalize().unwrap().join("bus-inconnu");
+        let listener = UnixListener::bind(&path).unwrap();
+        assert!(masks(&[]).unwrap().contains(&real));
+        drop(listener);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "pas un socket").unwrap();
+        assert!(!masks(&[]).unwrap().contains(&real));
+        let closed = dir.join("ferme");
+        drop(UnixListener::bind(&closed).unwrap());
+        assert!(!masks(&[])
+            .unwrap()
+            .contains(&dir.canonicalize().unwrap().join("ferme")));
     }
 }

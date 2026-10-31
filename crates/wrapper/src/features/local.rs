@@ -1555,7 +1555,15 @@ fn shell(
             command.env(key, value);
         }
     }
-    let mut child = command.spawn().map_err(io_error)?;
+    #[cfg(target_os = "linux")]
+    let spawned = if yolo {
+        super::yolo::sandbox::spawn(&mut command)
+    } else {
+        command.spawn()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let spawned = command.spawn();
+    let mut child = spawned.map_err(io_error)?;
     drop(command); // Close the parent's copies of the child-side descriptors.
                    // The host's end of the pipe never blocks: a program that stopped reading
                    // refuses the line instead of freezing the app. (The program's end is a

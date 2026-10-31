@@ -496,6 +496,8 @@ fn ezerbot_data_and_credentials_stay_out_of_reach_even_in_yolo() {
         json!([]),
         "un refus du garde-fou n'est pas une action faite automatiquement"
     );
+    // Un lien dur hors des données refuse tout lancement de shell tant qu'il existe.
+    std::fs::remove_file(&alias).unwrap();
     // Le garde-fou ne bloque pas le travail ordinaire à côté.
     let out = f.runs_without_a_card("ordinaire", "run_shell", f.shell("printf utile"));
     assert_eq!(out["output"]["stdout"], "utile");

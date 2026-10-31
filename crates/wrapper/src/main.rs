@@ -373,6 +373,10 @@ fn payload(
     if request.body_length().is_some_and(|length| length > limit) {
         return Err(too_large(&path));
     }
+    // Success retires the connection, which waits for any body left unread.
+    if asset.is_some() && request.body_length().is_some_and(|length| length > 0) {
+        return Err(error(400, "Un fichier statique ne reçoit pas de corps."));
+    }
     if let Some(asset) = asset {
         let accept_encoding = headers
             .iter()

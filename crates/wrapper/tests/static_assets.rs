@@ -246,19 +246,24 @@ fn a_page_load_burst_is_answered_while_the_browser_keeps_its_sockets_open() {
 #[test]
 fn a_refused_request_is_answered_before_its_body_arrives() {
     let host = Host::new();
-    let mut socket = TcpStream::connect(&host.address).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(5)))
+    for (method, path, status) in [
+        ("POST", "/api/send", "403"),
+        ("GET", "/styles.css", "400"),
+    ] {
+        let mut socket = TcpStream::connect(&host.address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            socket,
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n",
+            host.address
+        )
         .unwrap();
-    write!(
-        socket,
-        "POST /api/send HTTP/1.1\r\nHost: {}\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n",
-        host.address
-    )
-    .unwrap();
-    let mut status = String::new();
-    BufReader::new(socket).read_line(&mut status).unwrap();
-    assert!(status.starts_with("HTTP/1.1 403"), "{status:?}");
+        let mut line = String::new();
+        BufReader::new(socket).read_line(&mut line).unwrap();
+        assert!(line.starts_with(&format!("HTTP/1.1 {status}")), "{line:?}");
+    }
 }
 
 #[test]

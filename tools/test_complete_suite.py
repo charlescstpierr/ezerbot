@@ -132,6 +132,15 @@ class CompleteSuiteTests(unittest.TestCase):
         }
         with patch.object(module.subprocess, "check_output", side_effect=read):
             self.assertEqual(module.inventory()["absent"], ["crates/sample/src/shared/leaf.rs::conventional"])
+        sources["crates/sample/src/lib.rs"] = '#[cfg(target_os="macos")] mod shared; #[cfg(target_os="linux")] #[path="shared.rs"] mod shared;'
+        sources["crates/sample/src/shared.rs"] = '''mod leaf;
+#[test] fn partial() { #[cfg(target_os="macos")] { check(); } }
+#[test] fn runtime() { if cfg!(target_os="macos") { check(); } }
+'''
+        with patch.object(module.subprocess, "check_output", side_effect=read):
+            result = module.inventory()
+        self.assertEqual(result["partial"], ["crates/sample/src/shared.rs::partial"])
+        self.assertEqual(result["runtime_branches"], ["crates/sample/src/shared.rs::runtime"])
 
     def test_cli_reports_failures_and_continues_without_publishing_diagnostics(self):
         LOGS.mkdir(parents=True, exist_ok=True)

@@ -224,7 +224,7 @@ def source_inventory(path, source, inherited=None):
 def inventory(ref="HEAD"):
     root = Path(__file__).resolve().parents[1]
     paths = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", ref], text=True, cwd=root, stderr=subprocess.DEVNULL).splitlines()
-    sources, reports, inherited = {}, {}, {}
+    sources, inherited = {}, {}
     for path in paths:
         if not path.startswith("crates/") or not path.endswith(".rs"):
             continue
@@ -295,8 +295,13 @@ def inventory(ref="HEAD"):
         if context in inherited and previous == combined:
             continue
         inherited[context] = combined
-        reports[context], children = read(context, combined)
+        _, children = read(context, combined)
         pending.extend(children)
+    gates_by_path = {}
+    for (path, _), gate in inherited.items():
+        previous = gates_by_path.get(path, (False, False))
+        gates_by_path[path] = tuple(before or after for before, after in zip(previous, gate))
+    reports = {path: source_inventory(path, sources[path], gate)[0] for path, gate in gates_by_path.items()}
     keys = ("absent", "partial", "runtime_branches", "ignored")
     result = {key: {entry for report in reports.values() for entry in report.get(key, [])} for key in keys}
     result["absent"] -= {entry for report in reports.values() for entry in report.get("linux_present", [])}

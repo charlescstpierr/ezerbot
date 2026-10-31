@@ -111,6 +111,11 @@ def node_results(raw, phase, files, macos):
             for file in files:
                 if path in (file, str(ROOT / file)) and 0 < int(line) <= len((ROOT / file).read_text().splitlines()):
                     identifier = phase + ":" + file + ":" + line
+        tested = identifier.split(":")[1]
+        for path, line in re.findall(r"([^\s()'\"]+):(\d+):\d+\)?\s*$", block.partition("stack:")[2], re.M):
+            if path == str(ROOT / tested):
+                identifier = phase + ":" + tested + ":" + line
+                break
         failures.append(identifier)
     if unexpected_skip or values["todo"] or values["cancelled"]:
         failures.append(phase + ":unexpected-skip")

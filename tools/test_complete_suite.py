@@ -86,6 +86,31 @@ class CompleteSuiteTests(unittest.TestCase):
                 self.assertIn("runner:preflight-failed", report["failures"])
                 self.assertIn("runner:incomplete", report["failures"])
 
+    def test_node_failure_names_the_failing_line_of_the_test(self):
+        spec = importlib.util.spec_from_file_location("runner", TOOLS / "run-complete-suite.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        file = "tools/test_complete_suite.py"
+        path = runner.ROOT / file
+        raw = f"""not ok 1 - sample
+  ---
+  location: '{path}:1:1'
+  error: 'PRIVATE_SENTINEL'
+  stack: |-
+    helper (/private/helper.cjs:9:9)
+    TestContext.<anonymous> ({path}:2:5)
+    async Test.run (node:internal/test_runner/test:1409:7)
+  ...
+# tests 1
+# pass 0
+# fail 1
+# skipped 0
+"""
+        _, failures, _ = runner.node_results(raw, "ui", [file], False)
+        self.assertEqual(failures, ["ui:" + file + ":2"])
+        _, failures, _ = runner.node_results(raw.replace("  stack: |-\n", "  nothing: |-\n"), "ui", [file], False)
+        self.assertEqual(failures, ["ui:" + file + ":1"])
+
     def test_inventory_resolves_explicit_paths_and_inherits_platforms(self):
         spec = importlib.util.spec_from_file_location("inventory", TOOLS / "suite-platform-inventory.py")
         module = importlib.util.module_from_spec(spec)

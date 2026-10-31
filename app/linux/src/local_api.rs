@@ -46,6 +46,10 @@ impl BackendOrigin {
     }
 
     pub fn allows_navigation(&self, raw: &str) -> bool {
+        if raw.starts_with("ezerbot-resource:") {
+            return self.resource_target(raw, &Method::GET).is_some();
+        }
+        let raw = raw.strip_prefix("blob:").unwrap_or(raw);
         let Ok(url) = Url::parse(raw) else {
             return false;
         };
@@ -272,6 +276,8 @@ mod tests {
     fn restricts_navigation_and_resource_paths() {
         let origin = BackendOrigin::parse("http://127.0.0.1:32123").unwrap();
         assert!(origin.allows_navigation("http://127.0.0.1:32123/#settings"));
+        assert!(origin.allows_navigation("blob:http://127.0.0.1:32123/export-id"));
+        assert!(origin.allows_navigation("ezerbot-resource://127.0.0.1:32123/api/file"));
         for raw in [
             "http://127.0.0.1:32123/api/file",
             "http://127.0.0.1:32123.evil.example/",
@@ -279,6 +285,9 @@ mod tests {
             "file:///tmp/file",
             "javascript:alert(1)",
             "data:text/html,hello",
+            "blob:https://outside.example/export-id",
+            "blob:http://127.0.0.1:32124/export-id",
+            "blob:null/export-id",
         ] {
             assert!(!origin.allows_navigation(raw));
         }

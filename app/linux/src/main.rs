@@ -189,6 +189,7 @@ mod linux {
         }
         let api = Arc::clone(&backend.api);
         let navigation = api.origin.clone();
+        let downloads = api.origin.clone();
         let resource_api = Arc::clone(&api);
         let webview = WebViewBuilder::new()
             .with_initialization_script_for_main_only(api.initialization_script(), true)
@@ -197,6 +198,7 @@ mod linux {
                 move |_, request, responder| Arc::clone(&resource_api).serve(request, responder),
             )
             .with_navigation_handler(move |url| navigation.allows_navigation(&url))
+            .with_download_started_handler(move |url, _| downloads.allows_navigation(&url))
             .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
             .with_permission_handler(|_| PermissionResponse::Deny)
             .with_incognito(true)
@@ -208,6 +210,8 @@ mod linux {
             webview: Some(webview),
             backend,
         });
+        let failure_proxy = event_loop.create_proxy();
+        let mut failure_dialog: Option<gtk::MessageDialog> = None;
         event_loop.run(move |event, _, control_flow| {
             let _keep_alive = (&window, &signals);
             *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
@@ -221,6 +225,9 @@ mod linux {
                     | Event::LoopDestroyed
             );
             if stopping {
+                if let Some(dialog) = failure_dialog.take() {
+                    dialog.close();
+                }
                 shell.take();
                 *control_flow = ControlFlow::Exit;
             } else if matches!(event, Event::MainEventsCleared)
@@ -234,9 +241,13 @@ mod linux {
                     gtk::ButtonsType::Close,
                     "Le service local Ezerbot s'est arrêté.",
                 );
-                dialog.run();
-                dialog.close();
-                *control_flow = ControlFlow::Exit;
+                let close_proxy = failure_proxy.clone();
+                dialog.connect_response(move |dialog, _| {
+                    dialog.close();
+                    let _ = close_proxy.send_event(ShellEvent::Quit);
+                });
+                dialog.show_all();
+                failure_dialog = Some(dialog);
             }
         });
     }

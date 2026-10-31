@@ -22,7 +22,7 @@ test("le panneau réel conserve les sélections, annote les passages et isole le
   const root = mkdtempSync(join(tmpdir(), "ezerbot-pages-ui-"));
   let chrome, cdp;
   let current = clone(original);
-  const other = { ...clone(original), id: "b", title: "Autre Page", source_version: "b1", anchors: [] };
+  const other = { ...clone(original), id: "b", title: "Autre Page", source_version: "b1", anchors: [], document: { states: [], view: element("article", element("table", element("tbody", element("tr", element("td", "Autre"))))) } };
   const state = { conversations: [{ id: "review" }, { id: "other" }], pages: { by_bot: { grokbot: [current, other].map(page => ({ id: page.id, title: page.title, conversation_id: page.conversation_id, bot_id: page.bot_id })) } } };
   const calls = [];
   let heldRead = null, heldReadPath = "/api/pages/a", heldRevert = null, refuse = false;

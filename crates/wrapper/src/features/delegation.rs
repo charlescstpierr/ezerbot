@@ -1367,7 +1367,18 @@ fn react(ctx: &Context<'_>, run: &Run) -> Result<()> {
         return Ok(());
     }
     let status = if run.status == RunStatus::Cancelled {
-        DelegationStatus::Cancelled
+        let stalled: bool = ctx.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM wrapper_run_stalls WHERE run_id=?1)",
+            [&run.run_id],
+            |r| r.get(0),
+        )?;
+        if stalled {
+            DelegationStatus::Failed {
+                reason: "La sous-tâche a été arrêtée après 8 min sans activité.".into(),
+            }
+        } else {
+            DelegationStatus::Cancelled
+        }
     } else if let Some((summary, captures)) = done {
         let vault = super::forms::vault(ctx).map_err(|_| invalid("vault unavailable"))?;
         let mut captures = captures.clone();

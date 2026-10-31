@@ -391,6 +391,44 @@ impl Provider {
     pub(crate) fn release_run(&self, id: &str) {
         self.primary.release_run(id);
     }
+    pub(crate) fn watchdog(&self) -> &crate::features::engine::watchdog::Registry {
+        &self.primary.inner.watchdog
+    }
+    /// A long tool calls this only when it receives new work or output.
+    pub fn pulse_run(&self, id: &str) {
+        self.watchdog().pulse(id);
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn watchdog_test_clock(&self, time: u64) {
+        self.watchdog().set_clock(time);
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn watchdog_test_policy(&self, policy: crate::features::engine::watchdog::Policy) {
+        self.watchdog().set_policy(policy);
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn watchdog_test_activity(
+        &self,
+        id: &str,
+        activity: grokbot_engine::run_loop::RunActivity<'_>,
+    ) {
+        crate::features::engine::watchdog::activity(self, id, activity, true);
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn watchdog_test_claim_run(
+        &self,
+        id: &str,
+    ) -> crate::features::engine::watchdog::TestRunLease {
+        crate::features::engine::watchdog::TestRunLease {
+            provider: self.clone(),
+            id: id.into(),
+            cancel: self.claim_run(id).expect("test run has one owner"),
+        }
+    }
     pub(crate) fn cancel_run(&self, id: &str) {
         self.primary.cancel_run(id);
         self.session().account_live_cancel(id);

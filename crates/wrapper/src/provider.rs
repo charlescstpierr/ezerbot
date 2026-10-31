@@ -344,6 +344,7 @@ struct Attempt {
 }
 
 struct Inner {
+    watchdog: crate::features::engine::watchdog::Registry,
     codex: bool,
     deadlines: Mutex<reliable::Deadlines>,
     closing: AtomicUsize,
@@ -860,6 +861,7 @@ impl Session {
         ));
         Self {
             inner: Arc::new(Inner {
+                watchdog: crate::features::engine::watchdog::Registry::default(),
                 codex,
                 deadlines: Mutex::new(reliable::Deadlines::default()),
                 closing: AtomicUsize::new(0),

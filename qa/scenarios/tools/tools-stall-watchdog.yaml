@@ -1,0 +1,33 @@
+title: Veilleur de tâche qui ne bouge plus
+
+scenario:
+  id: tools-stall-watchdog
+  surface: tools
+  coverage:
+    primary:
+      - tools.stall-watchdog
+  objective: Vérifier qu'un outil qui ne répond plus est signalé « toujours en cours » à 3 min, puis arrêté à 8 min avec une proposition de relance, sans toucher à une attente d'approbation.
+  successCriteria:
+    - L'état expose silence pour le run entre 3 et 8 minutes de silence.
+    - Le run est arrêté une seule fois après 8 minutes et le fil reçoit une entrée stalled.
+    - Une approbation en attente pendant plus de 8 minutes n'est jamais arrêtée.
+  codeRefs:
+    - crates/wrapper/src/features/mod.rs
+    - crates/engine/src/run_loop.rs
+  execution:
+    kind: flow
+    summary: Un faux connecteur dont l'outil ne répond jamais, avec une horloge accélérée ; notation mécanique sur la trace et l'état.
+    providerMode: live-codex
+    timeoutMs: 300000
+    retryCount: 0
+    config:
+      fakeConnectors: [slow]
+      fakeBehaviors:
+        slow.call: never_returns
+      clock: accelerated
+      messages:
+        - "Lance la synchronisation lente et dis-moi quand c'est fini."
+      checks:
+        - silence_flag_seen_between_3_and_8_min
+        - stalled_entry_count == 1
+        - run_status == stopped

@@ -416,6 +416,9 @@ impl Session {
                     log(http, "headers", None);
                 }
                 Ok(Wire::Progress) => {
+                    if let Some(id) = turn {
+                        self.inner.watchdog.activity(id, Some("réponse du modèle"));
+                    }
                     pace.event();
                 }
                 Ok(Wire::Notice(notice)) => {

@@ -97,7 +97,7 @@ fn invalid(message: &str) -> Error {
 /// Deliberately has no Serialize or Debug implementation.
 pub struct Vault {
     path: PathBuf,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     keychain: Option<keychain::Target>,
     signature_notice: Option<&'static str>,
     /// Test double of an active keychain that refuses mutations. Production
@@ -107,6 +107,10 @@ pub struct Vault {
 }
 #[cfg(target_os = "macos")]
 mod keychain;
+#[cfg(target_os = "linux")]
+mod secret_service;
+#[cfg(target_os = "linux")]
+use secret_service as keychain;
 std::thread_local! {
     static READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -154,7 +158,7 @@ impl Vault {
         }
         let vault = Self {
             path,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             keychain: None,
             signature_notice: None,
             #[cfg(any(test, debug_assertions))]
@@ -187,13 +191,18 @@ impl Vault {
     /// it instead of reading the vault again (`redact::app_patterns`, #328).
     pub(crate) fn open_app_known(path: &Path) -> Result<(Self, Vec<String>)> {
         let vault = Self::create(path)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let mut vault = vault;
         #[cfg(target_os = "macos")]
         match OS_MODE.load(std::sync::atomic::Ordering::Relaxed) {
             1 => vault.signature_notice = Some(keychain::signature_notice(&vault.path)),
             2 => vault.keychain = keychain::Target::for_app(),
             _ => (),
+        }
+        // No per-binary ACL here, so mode 1 (no stable signature) has no Linux meaning.
+        #[cfg(target_os = "linux")]
+        if OS_MODE.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+            vault.keychain = keychain::Target::for_app();
         }
         let values = vault.known_values()?;
         Ok((vault, values))
@@ -207,7 +216,7 @@ impl Vault {
         Ok(vault)
     }
     pub fn storage_status(&self) -> StorageStatus {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if self.keychain.is_some() {
             return keychain::status(&self.path);
         }
@@ -225,7 +234,7 @@ impl Vault {
     pub(crate) fn handle(&self) -> Self {
         Self {
             path: self.path.clone(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             keychain: self.keychain.clone(),
             signature_notice: self.signature_notice,
             #[cfg(any(test, debug_assertions))]
@@ -234,7 +243,7 @@ impl Vault {
     }
     /// Whether both handles read the same secrets: same file, same backend.
     pub(crate) fn same_store(&self, other: &Self) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if self.keychain.is_some() != other.keychain.is_some() {
             return false;
         }
@@ -408,7 +417,7 @@ impl Vault {
     // errors must not echo input: serde diagnostics can contain secret strings.
     fn read(&self) -> Result<Secrets> {
         READS.set(READS.get() + 1);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(target) = &self.keychain {
             return keychain::snapshot(self, target);
         }
@@ -447,11 +456,11 @@ impl Vault {
             self.write(&file)?;
             return Ok(());
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(target) = &self.keychain {
             return keychain::set(self, target, key, secrets.get(key).unwrap());
         }
-        #[cfg(not(any(test, debug_assertions, target_os = "macos")))]
+        #[cfg(not(any(test, debug_assertions, target_os = "macos", target_os = "linux")))]
         let _ = key;
         self.write(secrets)
     }
@@ -467,7 +476,7 @@ impl Vault {
                 "Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez.",
             ));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(target) = &self.keychain {
             return keychain::remove(self, target, key);
         }

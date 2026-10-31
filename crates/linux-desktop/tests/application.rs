@@ -1,4 +1,4 @@
-#![cfg(debug_assertions)]
+#![cfg(all(target_os = "linux", debug_assertions))]
 use grokbot_linux_desktop::{
     application::{deep_links, Inbox, Instance, Received, Remote},
     testing::{Home, PrivateBus},

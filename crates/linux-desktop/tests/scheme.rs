@@ -1,5 +1,8 @@
-#![cfg(debug_assertions)]
-use grokbot_linux_desktop::scheme::desktop_entry;
+#![cfg(all(target_os = "linux", debug_assertions))]
+use grokbot_linux_desktop::{
+    scheme::{desktop_entry, register},
+    Unavailable,
+};
 use std::path::Path;
 
 /// Reads an `Exec` value the way the desktop entry specification says: string escapes first,
@@ -77,4 +80,9 @@ fn the_percent_sign_is_literal_the_icon_is_plain_and_only_reserved_paths_are_quo
     assert!(!desktop_entry(Path::new("/x"), None).contains("Icon="));
     let spaced = desktop_entry(Path::new("/opt/Mon Ezerbot/ezerbot"), None);
     assert!(spaced.contains("Exec=\"/opt/Mon Ezerbot/ezerbot\" %u\n"));
+}
+
+#[test]
+fn a_relative_executable_is_refused_before_anything_is_written() {
+    assert_eq!(register(Path::new("bin/ezerbot"), None), Err(Unavailable));
 }

@@ -911,15 +911,39 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
     }
 }
 
+/// `--register-url-handler <exec> [<icon>]`: the one command the Linux build script or shell
+/// runs to make `ezerbot://` links open the application. It serves nothing.
+#[cfg(target_os = "linux")]
+fn register_url_handler() -> Option<Result<(), String>> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != "--register-url-handler" {
+        return None;
+    }
+    Some((|| {
+        let exec = args
+            .next()
+            .ok_or("--register-url-handler attend le chemin de l’exécutable.")?;
+        let icon = args.next().map(PathBuf::from);
+        let desktop = grokbot_linux_desktop::scheme::register(exec.as_ref(), icon.as_deref())
+            .map_err(|_| "Le gestionnaire ezerbot:// n’a pas pu être enregistré (xdg-mime est-il installé ?).")?;
+        println!("{}", desktop.display());
+        Ok(())
+    })())
+}
+
 fn main() {
-    let result = match options() {
+    #[cfg(target_os = "linux")]
+    let registered = register_url_handler();
+    #[cfg(not(target_os = "linux"))]
+    let registered = None;
+    let result = registered.unwrap_or_else(|| match options() {
         Ok(Some(options)) => match options.turns_summary.as_deref() {
             Some(day) => turns_summary(&options.db, day),
             None => serve(options).map_err(|error| error.to_string()),
         },
         Ok(None) => Ok(()),
         Err(error) => Err(error),
-    };
+    });
     if let Err(error) = result {
         eprintln!("Ezerbot Local : {error}");
         std::process::exit(1);

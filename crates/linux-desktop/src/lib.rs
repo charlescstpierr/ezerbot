@@ -6,8 +6,10 @@
 
 pub mod application;
 mod bus;
+pub mod notifications;
 pub mod open;
 pub mod scheme;
+pub mod secrets;
 #[cfg(all(feature = "test-support", debug_assertions))]
 pub mod testing;
 

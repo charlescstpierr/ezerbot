@@ -2,20 +2,31 @@
 //! fixture lives on a throwaway bus inside a throwaway home: nothing here may reach the
 //! session bus or a real keyring.
 use std::{
+    collections::HashMap,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use grokbot_test_support::TestDir;
-use zbus::blocking::Connection;
+use zbus::{
+    blocking::{connection::Builder, Connection, Proxy},
+    zvariant::{ObjectPath, OwnedObjectPath, OwnedValue},
+};
 
 use crate::Bus;
+
+const KEYRING_PASSWORD: &str = "ezerbot-throwaway-test-991";
+const SECRETS: &str = "org.freedesktop.secrets";
+const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
+const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 
 fn package(tool: &str) -> &'static str {
     match tool {
         "dbus-daemon" => "dbus-daemon",
+        "gnome-keyring-daemon" => "gnome-keyring",
         "update-desktop-database" => "desktop-file-utils",
         _ => "xdg-utils",
     }
@@ -161,7 +172,196 @@ impl PrivateBus {
     }
 }
 
-/// An executable script that appends its arguments to `log`, to stand in for a handler.
+/// A real `gnome-keyring-daemon` with an unlocked `login` collection, on its own bus.
+pub struct Keyring {
+    bus: PrivateBus,
+    home: Home,
+    daemon: Option<Process>,
+}
+
+impl Keyring {
+    pub fn new() -> Option<Self> {
+        if !tools(&["dbus-daemon", "gnome-keyring-daemon"]) {
+            return None;
+        }
+        let home = Home::new("ezk");
+        let bus = PrivateBus::new(&home);
+        let mut keyring = Self {
+            bus,
+            home,
+            daemon: None,
+        };
+        keyring.unlock();
+        Some(keyring)
+    }
+
+    pub fn bus(&self) -> Bus {
+        self.bus.bus()
+    }
+
+    pub fn address(&self) -> &str {
+        self.bus.address()
+    }
+
+    pub fn home(&self) -> &Home {
+        &self.home
+    }
+
+    fn service(&self) -> Proxy<'static> {
+        Proxy::new(
+            &self.bus.connection(),
+            SECRETS,
+            "/org/freedesktop/secrets",
+            "org.freedesktop.Secret.Service",
+        )
+        .unwrap()
+    }
+
+    fn collection(&self) -> Option<OwnedObjectPath> {
+        let path: OwnedObjectPath = self.service().call("ReadAlias", &"default").ok()?;
+        (path.as_str() != "/").then_some(path)
+    }
+
+    fn locked(&self) -> Option<bool> {
+        let path = self.collection()?;
+        Proxy::new(
+            &self.bus.connection(),
+            SECRETS,
+            path,
+            "org.freedesktop.Secret.Collection",
+        )
+        .ok()?
+        .get_property("Locked")
+        .ok()
+    }
+    pub fn lock(&self) {
+        let path = self.collection().unwrap();
+        let _: (Vec<OwnedObjectPath>, OwnedObjectPath) = self
+            .service()
+            .call("Lock", &(vec![ObjectPath::from(&path)],))
+            .unwrap();
+        assert_eq!(self.locked(), Some(true));
+    }
+
+    /// Restarts the daemon with the password: the `login` keyring file persists.
+    pub fn unlock(&mut self) {
+        self.stop();
+        let mut daemon = Command::new("gnome-keyring-daemon");
+        self.home
+            .env(&mut daemon)
+            .env("DBUS_SESSION_BUS_ADDRESS", self.bus.address())
+            .args(["--foreground", "--unlock", "--components=secrets"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut daemon = daemon.spawn().unwrap();
+        {
+            use std::io::Write;
+            let mut input = daemon.stdin.take().unwrap();
+            input.write_all(KEYRING_PASSWORD.as_bytes()).unwrap();
+        }
+        self.daemon = Some(Process(daemon));
+        wait_for("the unlocked login collection", || {
+            self.locked() == Some(false)
+        });
+    }
+    pub fn stop(&mut self) {
+        self.daemon = None;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notification {
+    pub app_name: String,
+    pub summary: String,
+    pub body: String,
+    pub actions: Vec<String>,
+    pub desktop_entry: Option<String>,
+    pub expire_timeout: i32,
+}
+
+struct Server(Arc<Mutex<Vec<Notification>>>);
+
+#[zbus::interface(name = "org.freedesktop.Notifications")]
+impl Server {
+    #[allow(clippy::too_many_arguments)]
+    fn notify(
+        &self,
+        app_name: String,
+        _replaces_id: u32,
+        _app_icon: String,
+        summary: String,
+        body: String,
+        actions: Vec<String>,
+        hints: HashMap<String, OwnedValue>,
+        expire_timeout: i32,
+    ) -> u32 {
+        let mut calls = self.0.lock().unwrap();
+        calls.push(Notification {
+            app_name,
+            summary,
+            body,
+            actions,
+            desktop_entry: hints
+                .get("desktop-entry")
+                .and_then(|value| String::try_from(value.try_clone().ok()?).ok()),
+            expire_timeout,
+        });
+        calls.len() as u32
+    }
+
+    fn get_capabilities(&self) -> Vec<String> {
+        vec!["actions".into(), "body".into()]
+    }
+
+    fn get_server_information(&self) -> (String, String, String, String) {
+        ("fake".into(), "ezerbot".into(), "1".into(), "1.2".into())
+    }
+}
+pub struct FakeNotifications {
+    connection: Connection,
+    calls: Arc<Mutex<Vec<Notification>>>,
+}
+
+impl FakeNotifications {
+    pub fn new(bus: &PrivateBus) -> Self {
+        let calls = Arc::default();
+        let connection = Builder::address(bus.address())
+            .unwrap()
+            .name(NOTIFICATIONS)
+            .unwrap()
+            .serve_at(NOTIFICATIONS_PATH, Server(Arc::clone(&calls)))
+            .unwrap()
+            .build()
+            .unwrap();
+        Self { connection, calls }
+    }
+
+    pub fn calls(&self) -> Vec<Notification> {
+        self.calls.lock().unwrap().clone()
+    }
+    pub fn click(&self, id: u32) {
+        self.invoke(id, "default");
+    }
+
+    pub fn invoke(&self, id: u32, action: &str) {
+        self.connection
+            .emit_signal(
+                None::<&str>,
+                NOTIFICATIONS_PATH,
+                NOTIFICATIONS,
+                "ActionInvoked",
+                &(id, action),
+            )
+            .unwrap();
+    }
+}
+
+impl Drop for FakeNotifications {
+    fn drop(&mut self) {
+        let _ = self.connection.clone().close();
+    }
+}
 pub fn recording_handler(directory: &Path, log: &Path) -> PathBuf {
     let script = directory.join("handler.sh");
     std::fs::write(

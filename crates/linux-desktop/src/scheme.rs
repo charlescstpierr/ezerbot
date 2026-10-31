@@ -65,7 +65,7 @@ pub fn register(exec: &Path, icon: Option<&Path>) -> Result<PathBuf, Unavailable
         path.to_str()
             .is_none_or(|text| text.chars().any(char::is_control))
     };
-    if controls(exec) || icon.is_some_and(controls) {
+    if !exec.is_absolute() || controls(exec) || icon.is_some_and(controls) {
         return Err(Unavailable);
     }
     let directory = data_home().ok_or(Unavailable)?.join("applications");

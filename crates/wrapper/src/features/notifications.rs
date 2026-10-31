@@ -8,6 +8,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+#[cfg(target_os = "linux")]
+mod desktop;
+
 empty_hooks!(
     tools,
     call_tool,
@@ -251,6 +254,10 @@ pub fn routes(
     if !path.starts_with("/api/notifications") {
         return None;
     }
+    #[cfg(target_os = "linux")]
+    if path == "/api/notifications/native" {
+        return Some(desktop::route(&app.connection, method, body));
+    }
     Some((|| {
         let tx = write_transaction(&app.connection)?;
         project(&tx, crate::now(), false)?;
@@ -387,7 +394,12 @@ pub(crate) fn background(app: &mut App) -> Result<(), ApiError> {
             writeln!(file, "{event}")
                 .map_err(|_| ApiError::new(500, "Notification de test non enregistrée."))?;
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(all(not(debug_assertions), target_os = "linux"))]
+        desktop::background(
+            event["title"].as_str().unwrap_or_default(),
+            event["conversation_id"].as_str().unwrap_or_default(),
+        )?;
+        #[cfg(all(not(debug_assertions), target_os = "macos"))]
         {
             let helper = std::env::current_exe()
                 .ok()

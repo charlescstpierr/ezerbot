@@ -5,7 +5,7 @@ const { spawn } = require("node:child_process");
 const { mkdtempSync, readFileSync, rmSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
-const { chromeBinary } = require("../chrome-binary.cjs");
+const { chromeBinary, pageTarget } = require("../chrome-binary.cjs");
 const { connectCdp } = require("../local-api-client.cjs");
 
 const pause = () => new Promise(resolve => setTimeout(resolve, 20));
@@ -22,7 +22,8 @@ test("le panneau réel conserve les sélections, annote les passages et isole le
   const root = mkdtempSync(join(tmpdir(), "ezerbot-pages-ui-"));
   let chrome, cdp;
   let current = clone(original);
-  const other = { ...clone(original), id: "b", title: "Autre Page", source_version: "b1", anchors: [] };
+  // Un contenu distinct : une restauration tardive de « a » peinte sur « b » se verrait dans le canevas.
+  const other = { ...clone(original), id: "b", title: "Autre Page", source_version: "b1", anchors: [], document: { states: [], view: element("article", element("h1", "Autre Page"), element("p", "Contenu distinct")) } };
   const state = { conversations: [{ id: "review" }, { id: "other" }], pages: { by_bot: { grokbot: [current, other].map(page => ({ id: page.id, title: page.title, conversation_id: page.conversation_id, bot_id: page.bot_id })) } } };
   const calls = [];
   let heldRead = null, heldReadPath = "/api/pages/a", heldRevert = null, refuse = false;
@@ -61,7 +62,7 @@ test("le panneau réel conserve les sélections, annote les passages et isole le
     if (chrome && chrome.exitCode === null) { chrome.kill("SIGTERM"); await new Promise(resolve => chrome.once("exit", resolve)); }
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10 });
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   chrome = spawn(chromeBinary(), ["--headless=new", "--no-sandbox", "--disable-gpu", "--use-mock-keychain", "--password-store=basic", "--remote-debugging-port=0", `--user-data-dir=${root}`, "about:blank"], { stdio: "ignore" });
@@ -71,8 +72,7 @@ test("le panneau réel conserve les sélections, annote les passages et isole le
     }
     throw new Error("Chrome n’a pas ouvert de port CDP");
   })();
-  const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then(response => response.json());
-  cdp = await connectCdp(targets.find(target => target.type === "page").webSocketDebuggerUrl);
+  cdp = await connectCdp((await pageTarget(port)).webSocketDebuggerUrl);
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1140, height: 780, deviceScaleFactor: 1, mobile: false });
   const run = async source => {
     const result = await cdp.send("Runtime.evaluate", { expression: `(${source})()`, awaitPromise: true, returnByValue: true });
@@ -147,7 +147,8 @@ test("le panneau réel conserve les sélections, annote les passages et isole le
   await run(() => button("Revenir à avant").click());
   const releaseLate = await late.promise;
   await run(() => { window.refuseNavigation = false; GrokbotPanels.panel.openPage("b"); });
-  await until(() => document.querySelector(".page-rename input").value === "Autre Page");
+  // Le titre s’affiche avant la lecture de la Page : on attend aussi son contenu.
+  await until(() => document.querySelector(".page-rename input").value === "Autre Page" && document.querySelector(".page-canvas h1")?.textContent === "Autre Page");
   const otherCanvas = await run(() => document.querySelector(".page-canvas").innerHTML);
   releaseLate();
   await until(() => reverted === 3);
@@ -158,10 +159,12 @@ test("le panneau réel conserve les sélections, annote les passages et isole le
   await run(() => { GrokbotPanels.panel.openPage("a"); });
   const releaseLoad = await lateLoad.promise;
   await run(() => GrokbotPanels.panel.openPage("b"));
-  await until(() => document.querySelector(".page-rename input").value === "Autre Page");
+  // Le titre s’affiche avant la lecture de la Page : on attend aussi son contenu.
+  await until(() => document.querySelector(".page-rename input").value === "Autre Page" && document.querySelector(".page-canvas h1")?.textContent === "Autre Page");
   releaseLoad();
   await pause();
   assert.equal(await run(() => document.querySelector(".page-rename input").value), "Autre Page");
+  assert.equal(await run(() => document.querySelector(".page-canvas h1")?.textContent), "Autre Page");
 
   current = { ...clone(original), source_version: "v5", has_previous: true };
   await run(() => GrokbotPanels.panel.openPage("a"));

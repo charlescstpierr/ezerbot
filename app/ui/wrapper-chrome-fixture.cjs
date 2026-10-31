@@ -10,7 +10,7 @@ const { createServer } = require("node:http");
 const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
-const { chromeBinary } = require("./chrome-binary.cjs");
+const { chromeBinary, pageTarget } = require("./chrome-binary.cjs");
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -136,17 +136,6 @@ function debuggingPort(directory, chrome) {
   })();
 }
 
-async function pageTarget(port) {
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
-    const found = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
-    if (found) return found;
-    await sleep(20);
-  }
-  throw new Error("chrome did not open a page target");
-}
-
 // First line of the child's stdout. Rejects, with the exit status, if the child ends first.
 function readLine(child, details = () => "") {
   const stream = child.stdout;
@@ -201,33 +190,47 @@ async function untilTrue(read, message, ms = 20000) {
 // `documents` ({ title, name, format, content }) through /api/conversations and /api/send and
 // waits for each create_document result; opens the app in Chrome. Resolves with the app's URL
 // and `evaluate(source)`, which runs `source` (an expression, usually a function) in the page.
-async function launchFixture(t, { documents, viewport, binary = join(__dirname, "../../target/debug/grokbot-wrapper") }) {
+async function launchFixture(t, { documents = [], viewport, headless = true, navigate = true, binary = join(__dirname, "../../target/debug/grokbot-wrapper") }) {
   const root = mkdtempSync(join(tmpdir(), "grokbot-fixture-"));
   const dbDir = join(root, "db");
   mkdirSync(dbDir);
+  const privateEnv = { PATH: process.env.PATH, LANG: "C.UTF-8", TZ: "UTC" };
+  for (const [key, directory] of Object.entries({ HOME: "home", XDG_CONFIG_HOME: "config", XDG_CACHE_HOME: "cache", XDG_DATA_HOME: "data", XDG_RUNTIME_DIR: "runtime", TMPDIR: "tmp" })) {
+    privateEnv[key] = join(root, directory);
+    mkdirSync(privateEnv[key], { mode: 0o700 });
+  }
   const fake = { server: null };
   const processes = { wrapper: null, chrome: null };
   const watches = [];
   let cdp;
+  let disposed = false;
   // Registered before anything can fail, and run by node:test when the test ends for any reason,
   // including the test timeout, where the awaited body never reaches a `finally`.
   t.after(async () => {
+    disposed = true;
     watches.forEach((watch) => watch.settle());
     cdp?.close();
     await Promise.all(Object.values(processes).map(child => {
       if (!alive(child)) return;
       return new Promise(resolve => {
         child.once("close", resolve);
-        child.kill("SIGKILL");
+        if (process.platform === "linux") {
+          try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+        } else child.kill("SIGKILL");
       });
     }));
     fake.server?.closeAllConnections();
     if (fake.server) await new Promise(resolve => fake.server.close(resolve));
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10 });
   });
   const whileRunning = (work) => Promise.race([work, ...watches.map((watch) => watch.failed)]);
 
   const openai = await startFakeOpenAi();
+  if (disposed) {
+    openai.server.closeAllConnections();
+    await new Promise(resolve => openai.server.close(resolve));
+    throw new Error("fixture closed during startup");
+  }
   fake.server = openai.server;
   writeFakeSession(dbDir);
 
@@ -235,13 +238,11 @@ async function launchFixture(t, { documents, viewport, binary = join(__dirname, 
   const identity = new LaunchIdentity();
   const wrapper = identity.spawn(binary, ["--port", "0", "--db", join(dbDir, "app.sqlite")], {
     env: {
-      PATH: process.env.PATH,
-      HOME: dbDir,
+      ...privateEnv,
       CFFIXED_USER_HOME: dbDir,
-      TMPDIR: tmpdir(),
-      LANG: process.env.LANG || "C.UTF-8",
       GROKBOT_FAKE_OPENAI: openai.base,
     },
+    detached: process.platform === "linux",
     stdio: ["ignore", "pipe", "pipe"],
   });
   processes.wrapper = wrapper;
@@ -252,8 +253,11 @@ async function launchFixture(t, { documents, viewport, binary = join(__dirname, 
   const chromeDir = join(root, "chrome");
   mkdirSync(chromeDir);
   const chrome = spawn(chromeBinary(), [
-    "--headless=new",
+    ...(headless ? ["--headless=new"] : []),
     "--no-sandbox",
+    "--no-first-run",
+    "--disable-background-networking",
+    "--disable-sync",
     "--disable-gpu",
     "--disable-dev-shm-usage",
     "--incognito",
@@ -266,7 +270,11 @@ async function launchFixture(t, { documents, viewport, binary = join(__dirname, 
     `--user-data-dir=${join(chromeDir, "profile")}`,
     "--window-size=1280,900",
     "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
+  ], {
+    env: { ...privateEnv, ...(process.env.DISPLAY ? { DISPLAY: process.env.DISPLAY } : {}), ...(process.env.XAUTHORITY ? { XAUTHORITY: process.env.XAUTHORITY } : {}) },
+    detached: process.platform === "linux",
+    stdio: ["ignore", "ignore", "pipe"],
+  });
   processes.chrome = chrome;
   watches.push(watchChild("chrome", chrome));
 
@@ -297,6 +305,7 @@ async function launchFixture(t, { documents, viewport, binary = join(__dirname, 
     const port = await debuggingPort(chromeDir, chrome);
     const target = await pageTarget(port);
     cdp = await connectCdp(target.webSocketDebuggerUrl);
+    if (disposed) { cdp.close(); throw new Error("fixture closed during startup"); }
     const evaluate = async (expression) => {
       const result = await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
       if (result.exceptionDetails) {
@@ -309,8 +318,8 @@ async function launchFixture(t, { documents, viewport, binary = join(__dirname, 
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     if (viewport) await cdp.send("Emulation.setDeviceMetricsOverride", { ...viewport, deviceScaleFactor: 1, mobile: false });
-    await cdp.send("Page.navigate", { url });
-    return { url, evaluate: (source) => whileRunning(evaluate(source)), details, database: join(dbDir, "app.sqlite") };
+    if (navigate) await cdp.send("Page.navigate", { url });
+    return { url, cdp, evaluate: (source) => whileRunning(evaluate(source)), details, database: join(dbDir, "app.sqlite") };
   })());
 }
 

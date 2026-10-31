@@ -170,7 +170,10 @@ const COMPRESSIBLE: [(&str, &str); 6] = [
 /// server retires it, so a kept socket is handed back to outlive the other connections.
 fn read_like_a_browser(socket: TcpStream) -> std::io::Result<Option<TcpStream>> {
     let mut reader = BufReader::new(socket.try_clone()?);
-    let (mut length, mut retired) = (0, false);
+    let (mut length, mut chunked, mut retired) = (0, false, false);
+    let mut status = String::new();
+    reader.read_line(&mut status)?;
+    assert!(status.starts_with("HTTP/1.1 200"), "{status:?}");
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -183,11 +186,24 @@ fn read_like_a_browser(socket: TcpStream) -> std::io::Result<Option<TcpStream>> 
             match name.to_ascii_lowercase().as_str() {
                 "content-length" => length = value.trim().parse().unwrap(),
                 "connection" => retired = value.trim().eq_ignore_ascii_case("close"),
+                "transfer-encoding" => chunked = value.trim().eq_ignore_ascii_case("chunked"),
                 _ => {}
             }
         }
     }
-    reader.read_exact(&mut vec![0; length])?;
+    if chunked {
+        loop {
+            let mut size = String::new();
+            reader.read_line(&mut size)?;
+            let size = usize::from_str_radix(size.trim(), 16).unwrap();
+            reader.read_exact(&mut vec![0; size + 2])?;
+            if size == 0 {
+                break;
+            }
+        }
+    } else {
+        reader.read_exact(&mut vec![0; length])?;
+    }
     Ok((!retired).then_some(socket))
 }
 
@@ -225,6 +241,24 @@ fn a_page_load_burst_is_answered_while_the_browser_keeps_its_sockets_open() {
     for _ in 0..5 {
         assert_eq!(load_a_page(&Host::new()), 0, "sockets left unanswered");
     }
+}
+
+#[test]
+fn a_refused_request_is_answered_before_its_body_arrives() {
+    let host = Host::new();
+    let mut socket = TcpStream::connect(&host.address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        socket,
+        "POST /api/send HTTP/1.1\r\nHost: {}\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n",
+        host.address
+    )
+    .unwrap();
+    let mut status = String::new();
+    BufReader::new(socket).read_line(&mut status).unwrap();
+    assert!(status.starts_with("HTTP/1.1 403"), "{status:?}");
 }
 
 #[test]

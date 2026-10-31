@@ -901,7 +901,13 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
                 Header::from_bytes("Content-Encoding", token).expect("validated response header"),
             );
         }
-        if let Err(error) = respond_retiring(request, response) {
+        // Retiring drains the body first, and a local refusal can precede a body that never comes.
+        let result = if remote || status < 400 {
+            respond_retiring(request, response)
+        } else {
+            request.respond(response)
+        };
+        if let Err(error) = result {
             eprintln!("Réponse HTTP interrompue : {error}");
         }
         if let Some(elapsed) = state_elapsed {

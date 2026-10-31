@@ -22,7 +22,8 @@ test("le panneau réel conserve les sélections, annote les passages et isole le
   const root = mkdtempSync(join(tmpdir(), "ezerbot-pages-ui-"));
   let chrome, cdp;
   let current = clone(original);
-  const other = { ...clone(original), id: "b", title: "Autre Page", source_version: "b1", anchors: [], document: { states: [], view: element("article", element("h1", "Autre Page"), element("p", "Contenu propre à B.")) } };
+  // Un contenu distinct : une restauration tardive de « a » peinte sur « b » se verrait dans le canevas.
+  const other = { ...clone(original), id: "b", title: "Autre Page", source_version: "b1", anchors: [], document: { states: [], view: element("article", element("h1", "Autre Page"), element("p", "Contenu distinct")) } };
   const state = { conversations: [{ id: "review" }, { id: "other" }], pages: { by_bot: { grokbot: [current, other].map(page => ({ id: page.id, title: page.title, conversation_id: page.conversation_id, bot_id: page.bot_id })) } } };
   const calls = [];
   let heldRead = null, heldReadPath = "/api/pages/a", heldRevert = null, refuse = false;
@@ -146,26 +147,25 @@ test("le panneau réel conserve les sélections, annote les passages et isole le
   const late = heldRevert = deferred();
   await run(() => button("Revenir à avant").click());
   const releaseLate = await late.promise;
-  const otherRead = heldRead = deferred(); heldReadPath = "/api/pages/b";
   await run(() => { window.refuseNavigation = false; GrokbotPanels.panel.openPage("b"); });
-  const releaseOtherRead = await otherRead.promise;
-  await until(() => document.querySelector(".page-rename input").value === "Autre Page");
+  // Le titre s’affiche avant la lecture de la Page : on attend aussi son contenu.
+  await until(() => document.querySelector(".page-rename input").value === "Autre Page" && document.querySelector(".page-canvas h1")?.textContent === "Autre Page");
   const otherCanvas = await run(() => document.querySelector(".page-canvas").innerHTML);
   releaseLate();
   await until(() => reverted === 3);
   assert.equal(await run(() => document.querySelector(".page-rename input").value), "Autre Page");
   assert.equal(await run(() => document.querySelector(".page-canvas").innerHTML), otherCanvas);
-  releaseOtherRead();
-  await until(() => document.querySelector(".page-canvas").textContent.includes("Contenu propre à B."));
 
-  const lateLoad = heldRead = deferred(); heldReadPath = "/api/pages/a";
+  const lateLoad = heldRead = deferred();
   await run(() => { GrokbotPanels.panel.openPage("a"); });
   const releaseLoad = await lateLoad.promise;
   await run(() => GrokbotPanels.panel.openPage("b"));
-  await until(() => document.querySelector(".page-rename input").value === "Autre Page");
+  // Le titre s’affiche avant la lecture de la Page : on attend aussi son contenu.
+  await until(() => document.querySelector(".page-rename input").value === "Autre Page" && document.querySelector(".page-canvas h1")?.textContent === "Autre Page");
   releaseLoad();
   await pause();
   assert.equal(await run(() => document.querySelector(".page-rename input").value), "Autre Page");
+  assert.equal(await run(() => document.querySelector(".page-canvas h1")?.textContent), "Autre Page");
 
   current = { ...clone(original), source_version: "v5", has_previous: true };
   await run(() => GrokbotPanels.panel.openPage("a"));

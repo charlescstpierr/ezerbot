@@ -40,7 +40,7 @@ UNION ALL
 SELECT 'reply:'||r.run_id, 'reply', r.conversation_id, 'reply-'||r.run_id, 'Réponse terminée'
  FROM engine_runs r CROSS JOIN wrapper_messages m ON m.account_id=?1
  AND m.conversation_id=r.conversation_id AND m.message_id=r.run_id AND m.kind='engine_reply'
- WHERE r.trigger_kind='user_message' AND r.status='finished'
+ WHERE r.trigger_kind IN ('user_message','delegation_return') AND r.status='finished'
  AND NOT EXISTS (SELECT 1 FROM wrapper_notifications n WHERE n.account_id=?1 AND n.id='reply:'||r.run_id)
 UNION ALL
 SELECT 'input:'||q.id, json_extract(q.kind_json,'$.kind'),
@@ -414,6 +414,327 @@ pub(crate) fn background(app: &mut App) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grokbot_engine::{
+        contracts::{with_tx, RunBudgets, RunKind, Trigger, TurnEnd},
+        model::{self, Run, RunStatus},
+        store,
+    };
+
+    fn reply_test_app() -> (grokbot_test_support::TestDir, App, String) {
+        let directory = grokbot_test_support::TestDir::new("notification-return");
+        let mut app = App::open(&directory.join("workspace.sqlite")).unwrap();
+        let conversation = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]
+            ["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        app.api(
+            "POST",
+            "/api/notifications/settings",
+            json!(Settings {
+                enabled: true,
+                ..Settings::default()
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        (directory, app, conversation)
+    }
+
+    fn start_reply(conn: &Connection, conversation: &str, id: &str, trigger: Trigger) {
+        with_tx(conn, |conn| -> grokbot_engine::contracts::Result<()> {
+            model::start(
+                conn,
+                &Run {
+                    run_id: id.into(),
+                    bot_id: "grokbot".into(),
+                    conversation_id: conversation.into(),
+                    trigger,
+                    kind: RunKind::Chat,
+                    status: RunStatus::Running,
+                    task_status: None,
+                    turn_end: None,
+                    budgets: RunBudgets::default(),
+                    started_at: 1_000,
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn end_reply(conn: &Connection, id: &str, status: RunStatus) {
+        with_tx(conn, |conn| {
+            let mut run = store::required(conn, id)?;
+            run.status = status;
+            run.turn_end = match status {
+                RunStatus::Finished => Some(TurnEnd::Finished),
+                RunStatus::Cancelled => Some(TurnEnd::Stopped),
+                _ => None,
+            };
+            store::save(conn, &run)
+        })
+        .unwrap();
+    }
+
+    fn poll_reply(app: &mut App) -> Value {
+        app.api(
+            "POST",
+            "/api/notifications/poll",
+            br#"{"focused":false,"visible":false,"conversation_id":null}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_return_notifies_only_its_persisted_finished_reply_once_after_open_and_restart() {
+        let (directory, mut app, conversation) = reply_test_app();
+        start_reply(
+            &app.connection,
+            &conversation,
+            "return-run",
+            Trigger::DelegationReturn {
+                parent_run_id: format!("{conversation}/source-message"),
+            },
+        );
+        app.connection.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,kind,created_at) VALUES (?1,?2,'source-message','submission',1000)", params![ACCOUNT, conversation]).unwrap();
+        assert_eq!(poll_reply(&mut app)["deliveries"], json!([]));
+        end_reply(&app.connection, "return-run", RunStatus::Finished);
+        assert_eq!(poll_reply(&mut app)["deliveries"], json!([]));
+        app.connection.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,kind,created_at) VALUES (?1,?2,'return-run','engine_reply',1000)", params![ACCOUNT, conversation]).unwrap();
+
+        let result = poll_reply(&mut app);
+        assert_eq!(
+            result["deliveries"],
+            json!([{"id":"reply:return-run","kind":"reply","conversation_id":conversation,
+                "card_id":"reply-return-run","title":"Réponse terminée"}])
+        );
+        let opened = app
+            .api(
+                "POST",
+                "/api/notifications/open",
+                br#"{"id":"reply:return-run"}"#,
+            )
+            .unwrap();
+        assert_eq!(opened["conversation_id"], conversation);
+        assert_eq!(opened["card_id"], "reply-return-run");
+        assert_eq!(poll_reply(&mut app)["deliveries"], json!([]));
+        drop(app);
+        let mut app = App::open(&directory.join("workspace.sqlite")).unwrap();
+        let replay = poll_reply(&mut app);
+        assert_eq!(replay["deliveries"], json!([]));
+        assert_eq!(replay["unread"], 0);
+        let rows: (u64, u64, u64) = app.connection.query_row("SELECT COUNT(*),SUM(unread),SUM(attempted) FROM wrapper_notifications WHERE account_id=?1 AND id='reply:return-run'", [ACCOUNT], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(rows, (1, 0, 1));
+    }
+
+    #[test]
+    fn a_failed_child_still_notifies_the_finished_parent_return_without_a_child_success() {
+        let (_directory, mut app, conversation) = reply_test_app();
+        start_reply(
+            &app.connection,
+            &conversation,
+            "parent-run",
+            Trigger::UserMessage {
+                message_id: format!("{conversation}/original-message"),
+                attempt: 0,
+            },
+        );
+        end_reply(&app.connection, "parent-run", RunStatus::Finished);
+        app.connection.execute("INSERT INTO delegation_graph VALUES ('failed-child','parent-run','parent-run','grokbot','other',1,NULL,NULL,'{}',?1)", [json!({"status":"failed","reason":"child failed"}).to_string()]).unwrap();
+        start_reply(
+            &app.connection,
+            &conversation,
+            "failure-summary",
+            Trigger::DelegationReturn {
+                parent_run_id: "parent-run".into(),
+            },
+        );
+        app.connection.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,kind,created_at) VALUES (?1,?2,'failure-summary','engine_reply',1000)", params![ACCOUNT, conversation]).unwrap();
+        assert_eq!(poll_reply(&mut app)["deliveries"], json!([]));
+        end_reply(&app.connection, "failure-summary", RunStatus::Finished);
+        let result = poll_reply(&mut app);
+        assert_eq!(
+            result["deliveries"],
+            json!([{"id":"reply:failure-summary","kind":"reply","conversation_id":conversation,
+                "card_id":"reply-failure-summary","title":"Réponse terminée"}])
+        );
+        assert_eq!(poll_reply(&mut app)["deliveries"], json!([]));
+    }
+
+    #[test]
+    fn a_child_success_stays_distinct_from_a_running_failed_or_cancelled_parent_return() {
+        for terminal in [RunStatus::Failed, RunStatus::Cancelled] {
+            let (_directory, mut app, conversation) = reply_test_app();
+            start_reply(
+                &app.connection,
+                &conversation,
+                "parent-run",
+                Trigger::UserMessage {
+                    message_id: format!("{conversation}/original-message"),
+                    attempt: 0,
+                },
+            );
+            end_reply(&app.connection, "parent-run", RunStatus::Finished);
+            app.connection.execute("INSERT INTO delegation_graph VALUES ('done-child','parent-run','parent-run','grokbot','other',1,NULL,NULL,'{}',?1)", [json!({"status":"done","result":"child result"}).to_string()]).unwrap();
+            start_reply(
+                &app.connection,
+                &conversation,
+                "return-run",
+                Trigger::DelegationReturn {
+                    parent_run_id: "parent-run".into(),
+                },
+            );
+            app.connection.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,kind,created_at) VALUES (?1,?2,'return-run','engine_reply',1000)", params![ACCOUNT, conversation]).unwrap();
+            assert_eq!(
+                poll_reply(&mut app)["deliveries"],
+                json!([{"id":"delegation:done-child","kind":"delegation","conversation_id":conversation,
+                    "card_id":"done-child","title":"Sous-tâche terminée"}])
+            );
+            end_reply(&app.connection, "return-run", terminal);
+            let result = poll_reply(&mut app);
+            assert_eq!(result["deliveries"], json!([]), "{terminal:?}");
+            assert_eq!(result["items"].as_array().unwrap().len(), 1);
+            assert_eq!(result["items"][0]["id"], "delegation:done-child");
+        }
+    }
+
+    #[test]
+    fn user_message_reply_sources_keep_their_card_and_share_one_durable_identity() {
+        for submission in [true, false] {
+            let (_directory, mut app, conversation) = reply_test_app();
+            start_reply(
+                &app.connection,
+                &conversation,
+                "user-run",
+                Trigger::UserMessage {
+                    message_id: format!("{conversation}/user-message"),
+                    attempt: 0,
+                },
+            );
+            if submission {
+                app.connection.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,kind,created_at) VALUES (?1,?2,'user-message','submission',1000)", params![ACCOUNT, conversation]).unwrap();
+            }
+            app.connection.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,kind,created_at) VALUES (?1,?2,'user-run','engine_reply',1000)", params![ACCOUNT, conversation]).unwrap();
+            end_reply(&app.connection, "user-run", RunStatus::Finished);
+            let result = poll_reply(&mut app);
+            let card = if submission {
+                "reply-user-message"
+            } else {
+                "reply-user-run"
+            };
+            assert_eq!(
+                result["deliveries"],
+                json!([{"id":"reply:user-run","kind":"reply","conversation_id":conversation,
+                    "card_id":card,"title":"Réponse terminée"}])
+            );
+            assert_eq!(result["items"].as_array().unwrap().len(), 1);
+            assert_eq!(poll_reply(&mut app)["deliveries"], json!([]));
+        }
+    }
+
+    #[test]
+    fn consumed_user_and_return_history_keeps_linear_source_cost_and_full_message_keys() {
+        use rusqlite::StatementStatus;
+
+        let (_directory, app, conversation) = reply_test_app();
+        let seed = |start: usize, end: usize, consumed: bool| {
+            let tx = app.connection.unchecked_transaction().unwrap();
+            for index in start..end {
+                let run = format!("history-{index}");
+                let (kind, reference) = if index % 2 == 0 {
+                    ("user_message", format!("{conversation}/message-{index}"))
+                } else {
+                    ("delegation_return", format!("origin-{index}"))
+                };
+                tx.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) VALUES (?1,'grokbot',?2,?3,?4,0,'finished','{}')", params![run, conversation, kind, reference]).unwrap();
+                tx.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,kind,created_at) VALUES (?1,?2,?3,'engine_reply',1000)", params![ACCOUNT, conversation, run]).unwrap();
+                if consumed {
+                    tx.execute("INSERT INTO wrapper_notifications VALUES (?1,?2,'reply',?3,?4,'Réponse terminée',1000,0,1)", params![ACCOUNT, format!("reply:{run}"), conversation, format!("reply-{run}")]).unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        };
+        seed(0, 1_000, true);
+        seed(10_000, 10_002, false);
+
+        let mut before = SOURCES
+            .split("UNION ALL")
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let filter_start = before[1].find(" WHERE ").unwrap();
+        let filter_end = filter_start + before[1][filter_start..].find(" AND r.status").unwrap();
+        before[1].replace_range(
+            filter_start..filter_end,
+            " WHERE r.trigger_kind='user_message'",
+        );
+        let before = before.join("UNION ALL");
+        let query = |sources: &str| {
+            format!("SELECT src.id FROM ({sources}) src JOIN wrapper_conversations c ON c.account_id=?1 AND c.id=src.conversation_id AND c.deleted=0 WHERE NOT EXISTS (SELECT 1 FROM wrapper_notifications n WHERE n.account_id=?1 AND n.id=src.id)")
+        };
+        let measure = |sources: &str| {
+            let query = query(sources);
+            let mut statement = app.connection.prepare(&query).unwrap();
+            let mut ids = statement
+                .query_map([ACCOUNT], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            ids.sort();
+            (ids, statement.get_status(StatementStatus::VmStep))
+        };
+        let (before_small_ids, before_small) = measure(&before);
+        let (after_small_ids, after_small) = measure(SOURCES);
+        seed(1_000, 2_000, true);
+        let (before_large_ids, before_large) = measure(&before);
+        let (after_large_ids, after_large) = measure(SOURCES);
+        assert_eq!(before_small_ids, vec!["reply:history-10000"]);
+        assert_eq!(before_large_ids, before_small_ids);
+        assert_eq!(
+            after_small_ids,
+            vec!["reply:history-10000", "reply:history-10001"]
+        );
+        assert_eq!(after_large_ids, after_small_ids);
+        for (name, small, large) in [
+            ("before", before_small, before_large),
+            ("after", after_small, after_large),
+        ] {
+            assert!(
+                large <= 2 * small + 128,
+                "{name}: 1000={small}, 2000={large}"
+            );
+            eprintln!("notification SOURCES {name}: history=1000 VmStep={small}; history=2000 VmStep={large}; ceiling=2x+128");
+        }
+        for (name, sources) in [("before", before.as_str()), ("after", SOURCES)] {
+            let mut statement = app
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {}", query(sources)))
+                .unwrap();
+            let plan = statement
+                .query_map([ACCOUNT], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let lookups = plan
+                .iter()
+                .filter(|line| line.contains("SEARCH m USING"))
+                .collect::<Vec<_>>();
+            assert_eq!(lookups.len(), 2, "{name}: {plan:#?}");
+            assert!(
+                lookups.iter().all(
+                    |line| line.contains("account_id=? AND conversation_id=? AND message_id=?")
+                ),
+                "{name}: {plan:#?}"
+            );
+            assert!(
+                !plan.iter().any(|line| line.contains("SCAN m")),
+                "{name}: {plan:#?}"
+            );
+            eprintln!("notification SOURCES {name} plan: {plan:#?}");
+        }
+    }
+
     #[test]
     fn reply_projection_uses_both_full_message_primary_key_lookups() {
         let guard = grokbot_test_support::TestDir::new("notification-plan");

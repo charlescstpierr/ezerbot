@@ -2265,6 +2265,85 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn file_tools_refuse_a_bind_mount_of_the_data_and_of_the_keyring() {
+        const INSIDE: &str = "EZERBOT_TEST_VUES_OUTILS";
+        if let Some(root) = std::env::var_os(INSIDE) {
+            let root = PathBuf::from(root);
+            let home = root.join("home");
+            let data = root.join("donnees");
+            let keyrings = home.join(".local/share/keyrings");
+            for (source, view) in [(&keyrings, "vue-trousseau"), (&data, "vue-donnees")] {
+                let bound = std::process::Command::new("mount")
+                    .arg("--bind")
+                    .arg(source)
+                    .arg(root.join(view))
+                    .status()
+                    .unwrap();
+                assert!(bound.success(), "{view}");
+            }
+            let app = crate::App::open(&data.join("workspace.sqlite")).unwrap();
+            let ctx = app.feature_context();
+            let call = |name: &str, path: &Path| ToolCall {
+                call_id: "c".into(),
+                name: name.into(),
+                arguments: if name == "write_file" {
+                    json!({"path": path, "content": "x", "expected_sha256": null})
+                } else {
+                    json!({"path": path})
+                },
+            };
+            for (name, path) in [
+                ("read_file", root.join("vue-trousseau/login")),
+                ("list_directory", root.join("vue-trousseau")),
+                ("write_file", root.join("vue-trousseau/intrus.txt")),
+                ("read_file", root.join("vue-donnees/jeton.json")),
+                ("write_file", root.join("vue-donnees/intrus.txt")),
+            ] {
+                assert!(
+                    touches_app_data_at(&ctx, &call(name, &path), Some(&home)).unwrap(),
+                    "{name} {}",
+                    path.display()
+                );
+            }
+            assert!(!touches_app_data_at(
+                &ctx,
+                &call("read_file", &root.join("ordinaire.txt")),
+                Some(&home)
+            )
+            .unwrap());
+            println!("refus-vu");
+            return;
+        }
+        let guard = grokbot_test_support::TestDir::new("ezerbot-vues");
+        let root = guard.to_path_buf();
+        let keyrings = root.join("home/.local/share/keyrings");
+        fs::create_dir_all(&keyrings).unwrap();
+        fs::write(keyrings.join("login"), "trousseau").unwrap();
+        fs::create_dir_all(root.join("donnees")).unwrap();
+        fs::write(root.join("donnees/jeton.json"), "jeton").unwrap();
+        fs::write(root.join("ordinaire.txt"), "utile").unwrap();
+        for view in ["vue-trousseau", "vue-donnees"] {
+            fs::create_dir(root.join(view)).unwrap();
+        }
+        let out = std::process::Command::new("/usr/bin/unshare")
+            .args(["--user", "--map-root-user", "--mount"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "features::local::tests::file_tools_refuse_a_bind_mount_of_the_data_and_of_the_keyring",
+                "--nocapture",
+            ])
+            .env(INSIDE, &root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("refus-vu"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
     fn file_tools_refuse_the_install_and_keychain_roots_even_when_the_database_is_elsewhere() {
         let guard = grokbot_test_support::TestDir::new("ezerbot-roots");
         let root = guard.to_path_buf();

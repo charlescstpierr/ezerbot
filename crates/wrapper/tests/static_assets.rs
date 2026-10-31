@@ -246,10 +246,7 @@ fn a_page_load_burst_is_answered_while_the_browser_keeps_its_sockets_open() {
 #[test]
 fn a_refused_request_is_answered_before_its_body_arrives() {
     let host = Host::new();
-    for (method, path, status) in [
-        ("POST", "/api/send", "403"),
-        ("GET", "/styles.css", "400"),
-    ] {
+    for (method, path, status) in [("POST", "/api/send", "403"), ("GET", "/styles.css", "400")] {
         let mut socket = TcpStream::connect(&host.address).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))

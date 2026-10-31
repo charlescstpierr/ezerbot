@@ -1,0 +1,39 @@
+# Contrôle Linux des pull requests
+
+Le workflow [CI Linux](../.github/workflows/linux-pr.yml) lance le job `linux-build-test` sur chaque pull request et chaque push sur `main`. Le checkout par défaut teste le commit de fusion de la pull request. Aucun filtre de chemin ne limite ce contrôle.
+
+Après le premier run, Charles marque `linux-build-test` comme contrôle requis dans la protection de `main`. Ce réglage est hors PR. Le job `compile` de [Coque macOS](../.github/workflows/macos-shell.yml) reste inchangé. Le choix de rendre ce contrôle macOS requis appartient aussi au réglage de protection, hors PR.
+
+Le job utilise Ubuntu 24.04, Node 24 et le toolchain de `rust-toolchain.toml`. Il installe `lsof` pour les tests de webhooks et vérifie le Chrome fourni par l'image Ubuntu avec `app/ui/chrome-binary.cjs`. Le cache contient les téléchargements Cargo et les dépendances compilées, avec une clé liée au système, à l'architecture, au toolchain, à `Cargo.lock` et au commit. Il ne contient ni journal ni données d'Ezerbot.
+
+Les commandes principales sont les suivantes.
+
+```sh
+rustup show active-toolchain
+npm ci --prefix app/web --no-audit --no-fund
+df -BG "$GITHUB_WORKSPACE"
+cargo build --workspace --locked
+df -BG "$GITHUB_WORKSPACE"
+cargo test --workspace --locked --no-fail-fast -- --skip a_command_that_reaches_the_data_without_naming_it_reads_nothing --exact
+node --test --test-reporter=tap app/web/src/*.test.js
+node --test --test-reporter=tap app/ui/*.test.cjs app/ui/panels/*.test.cjs
+```
+
+La seule exclusion est le test exact `a_command_that_reaches_the_data_without_naming_it_reads_nothing`, suivi dans [#528, bac à sable YOLO Linux](https://github.com/charlescstpierr/ezerbot/issues/528).
+
+Les échecs Linux préexistants à traiter dans [#596](https://github.com/charlescstpierr/ezerbot/issues/596) restent exécutés et rendent le contrôle rouge s'ils se reproduisent.
+
+- `connectors::linear_draft_refuses_a_bad_target_without_a_card_and_an_unknown_issue_without_an_effect`.
+- `state_scale::a_state_read_runs_the_same_statements_whatever_the_length_of_the_history`.
+
+Les tests Rust et les deux groupes de tests Node utilisent `!cancelled()`. Ils s'exécutent même après un échec antérieur, sauf annulation. Chaque échec conserve le statut rouge du job.
+
+Le job a une limite de 25 minutes. L'objectif est de terminer en moins de 25 minutes avec le cache chaud. Cette durée reste à mesurer sur GitHub Actions.
+
+La [suite nocturne Linux](../.github/workflows/suite-complete-linux.yml) et sa réparation dans [#594](https://github.com/charlescstpierr/ezerbot/issues/594) ne sont pas modifiées.
+
+Vérification locale du workflow.
+
+```sh
+actionlint .github/workflows/linux-pr.yml
+```

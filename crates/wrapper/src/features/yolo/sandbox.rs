@@ -261,10 +261,19 @@ fn masks(protected: &[PathBuf]) -> Result<Vec<PathBuf>, ApiError> {
     let sockets = read_table("/proc/net/unix")?;
     let table = read_table("/proc/self/mountinfo")?;
     let uid = nix::unistd::Uid::effective().as_raw();
-    let mut roots: Vec<PathBuf> = protected
-        .iter()
-        .filter_map(|root| root.canonicalize().ok())
-        .collect();
+    let mut roots = Vec::with_capacity(protected.len());
+    for root in protected {
+        match root.canonicalize() {
+            Ok(real) => roots.push(real),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) => {}
+            // Illisible n'est pas absent : un `chmod` depuis le shell la rendrait lisible, sans masque.
+            Err(error) => return Err(refused(root, &error)),
+        }
+    }
     for socket in listening_sockets(&sockets) {
         let ours = fs::symlink_metadata(&socket)
             .is_ok_and(|meta| meta.file_type().is_socket() && meta.uid() == uid);

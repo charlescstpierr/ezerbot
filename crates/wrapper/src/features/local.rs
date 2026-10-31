@@ -476,7 +476,8 @@ fn protected_roots(ctx: &Context<'_>, home: Option<&Path>) -> Result<Vec<PathBuf
                 ))
             });
         for sub in ["bus", "keyring"] {
-            roots.push(runtime.join(sub));
+            let root = runtime.join(sub);
+            roots.push(root.canonicalize().unwrap_or(root));
         }
     }
     Ok(roots)

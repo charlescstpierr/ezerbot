@@ -6,20 +6,16 @@ use grokbot_linux_desktop::{
 };
 use std::{sync::mpsc::channel, time::Duration};
 
-fn private_bus(label: &str) -> Option<(Home, PrivateBus)> {
-    if !grokbot_linux_desktop::testing::tools(&["dbus-daemon"]) {
-        return None;
-    }
+fn private_bus(label: &str) -> (Home, PrivateBus) {
+    grokbot_linux_desktop::testing::tools(&["dbus-daemon"]);
     let home = Home::new(label);
     let bus = PrivateBus::new(&home);
-    Some((home, bus))
+    (home, bus)
 }
 
 #[test]
 fn a_notification_carries_the_title_the_fixed_body_a_default_action_and_the_desktop_entry() {
-    let Some((_home, bus)) = private_bus("ezn") else {
-        return;
-    };
+    let (_home, bus) = private_bus("ezn");
     let server = FakeNotifications::new(&bus);
     let notifier = Notifier::connect(&bus.bus()).unwrap();
     assert!(notifier.is_ready());
@@ -45,9 +41,7 @@ fn a_notification_carries_the_title_the_fixed_body_a_default_action_and_the_desk
 
 #[test]
 fn only_the_default_action_reaches_the_click_handler() {
-    let Some((_home, bus)) = private_bus("ezn") else {
-        return;
-    };
+    let (_home, bus) = private_bus("ezn");
     let server = FakeNotifications::new(&bus);
     let notifier = Notifier::connect(&bus.bus()).unwrap();
     let (clicks, received) = channel();
@@ -68,9 +62,7 @@ fn only_the_default_action_reaches_the_click_handler() {
 
 #[test]
 fn without_a_notification_server_nothing_is_ready_and_sending_fails() {
-    let Some((_home, bus)) = private_bus("ezn") else {
-        return;
-    };
+    let (_home, bus) = private_bus("ezn");
     let notifier = Notifier::connect(&bus.bus()).unwrap();
     assert!(!notifier.is_ready());
     assert_eq!(

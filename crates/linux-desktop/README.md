@@ -33,6 +33,6 @@ interface publique, et elle est vide hors Linux.
    à `POST /api/notifications/native` (`status`, `authorize`, `presence`, `deliver`). Réponse
    `disabled` si aucun bus n’est permis, `granted` ou `error`, puis `delivered` ou `error`.
 5. Ouvrir les liens externes et les documents avec `open::launch(cible)`.
-6. Paquets que le CI doit installer pour que les tests tournent : `dbus-daemon gnome-keyring
-   xdg-utils` (`desktop-file-utils` est facultatif). Sans eux, avec `CI` défini, les tests
-   concernés affichent `SKIP` ; sans `CI`, ils échouent en nommant le paquet.
+6. Paquets que le CI doit installer : `dbus-daemon gnome-keyring xdg-utils` (`desktop-file-utils`
+   est facultatif). S’il en manque un, les tests concernés échouent en nommant le paquet, sous CI
+   comme ailleurs.

@@ -9,10 +9,8 @@ use std::{ffi::OsStr, fs, os::unix::fs::PermissionsExt, process::Command, time::
 /// A home whose only handler of `x-scheme-handler/ezertest` is a script that records its argument.
 fn handler_home(
     handler: impl Fn(&std::path::Path) -> std::path::PathBuf,
-) -> Option<(Home, std::path::PathBuf)> {
-    if !tools(&["xdg-open", "xdg-mime"]) {
-        return None;
-    }
+) -> (Home, std::path::PathBuf) {
+    tools(&["xdg-open", "xdg-mime"]);
     let home = Home::new("ezo");
     let log = home.path().join("received.log");
     let script = handler(home.path());
@@ -30,15 +28,12 @@ fn handler_home(
     home.env(&mut mime)
         .args(["default", "ezertest.desktop", "x-scheme-handler/ezertest"]);
     assert!(mime.status().unwrap().success());
-    Some((home, log))
+    (home, log)
 }
 
 #[test]
 fn xdg_open_hands_the_exact_target_to_the_registered_handler() {
-    let Some((home, log)) = handler_home(|dir| recording_handler(dir, &dir.join("received.log")))
-    else {
-        return;
-    };
+    let (home, log) = handler_home(|dir| recording_handler(dir, &dir.join("received.log")));
     let target = "ezertest://app/v1/thread?id=a%20b&x=1";
     let mut command = open::command(OsStr::new(target));
     home.env(&mut command);
@@ -50,14 +45,12 @@ fn xdg_open_hands_the_exact_target_to_the_registered_handler() {
 
 #[test]
 fn a_handler_that_keeps_running_does_not_hold_the_caller() {
-    let Some((home, _log)) = handler_home(|dir| {
+    let (home, _log) = handler_home(|dir| {
         let script = dir.join("slow.sh");
         fs::write(&script, "#!/bin/sh\nsleep 6\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         script
-    }) else {
-        return;
-    };
+    });
     let mut command = open::command(OsStr::new("ezertest://slow"));
     home.env(&mut command);
     let started = Instant::now();
@@ -67,9 +60,7 @@ fn a_handler_that_keeps_running_does_not_hold_the_caller() {
 
 #[test]
 fn a_target_without_a_handler_or_without_xdg_open_is_unavailable() {
-    let Some((home, _log)) = handler_home(|dir| dir.join("unused.sh")) else {
-        return;
-    };
+    let (home, _log) = handler_home(|dir| dir.join("unused.sh"));
     let mut failing = open::command(OsStr::new("ezerother://nobody"));
     home.env(&mut failing);
     assert_eq!(open::run(failing), Err(Unavailable));

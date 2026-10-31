@@ -17,10 +17,10 @@ struct Fixture {
     db: PathBuf,
 }
 impl Fixture {
-    fn new() -> Option<Self> {
-        let keyring = Keyring::new()?;
+    fn new() -> Self {
+        let keyring = Keyring::new();
         let db = keyring.home().path().join("workspace.sqlite");
-        Some(Self { keyring, db })
+        Self { keyring, db }
     }
     fn file(&self) -> PathBuf {
         self.db.with_extension("secrets.json")
@@ -63,7 +63,7 @@ impl Fixture {
 
 #[test]
 fn real_secret_service_migration_persistence_rotation_and_deletion() {
-    let Some(f) = Fixture::new() else { return };
+    let f = Fixture::new();
     let file = Vault::open(&f.file()).unwrap();
     file.set("FORM_TOKEN", "Formulaire", "valeur-factice-form-9931")
         .unwrap();
@@ -95,7 +95,7 @@ fn real_secret_service_migration_persistence_rotation_and_deletion() {
 
 #[test]
 fn locked_secret_service_refuses_plaintext_and_unconfirmed_delete_is_not_claimed() {
-    let Some(mut f) = Fixture::new() else { return };
+    let mut f = Fixture::new();
     let vault = f.vault();
     vault
         .set("TOKEN", "Test", "valeur-factice-before-lock")
@@ -136,7 +136,7 @@ fn locked_secret_service_refuses_plaintext_and_unconfirmed_delete_is_not_claimed
 
 #[test]
 fn a_service_that_disappears_refuses_new_secrets_and_keeps_the_old_ones() {
-    let Some(mut f) = Fixture::new() else { return };
+    let mut f = Fixture::new();
     let vault = f.vault();
     vault
         .set("TOKEN", "Test", "valeur-factice-before-stop")
@@ -165,7 +165,7 @@ fn a_service_that_disappears_refuses_new_secrets_and_keeps_the_old_ones() {
 
 #[test]
 fn wrapper_first_start_projects_storage_and_restart_uses_secret_service_without_plaintext() {
-    let Some(f) = Fixture::new() else { return };
+    let f = Fixture::new();
     Vault::open(&f.file())
         .unwrap()
         .set("TOKEN", "Test HTTP", "valeur-factice-http-9931")
@@ -198,7 +198,7 @@ fn wrapper_first_start_projects_storage_and_restart_uses_secret_service_without_
 
 #[test]
 fn mcp_after_locked_restart_explains_unavailable_store_instead_of_missing_variables() {
-    let Some(f) = Fixture::new() else { return };
+    let f = Fixture::new();
     let id = {
         let host = f.launch(None);
         host.post("/api/mcp/add", json!({"name":"Atelier jetable","command":"/usr/bin/false","arguments":[],"environment":{"API_TOKEN":"valeur-factice-mcp-locked"}}))["id"].as_str().unwrap().to_owned()
@@ -243,7 +243,7 @@ fn mcp_after_locked_restart_explains_unavailable_store_instead_of_missing_variab
 
 #[test]
 fn denied_deletion_rolls_back_the_mcp_connector_removal() {
-    let Some(mut f) = Fixture::new() else { return };
+    let mut f = Fixture::new();
     let id = {
         let host = f.launch(None);
         host.post("/api/mcp/add", json!({"name":"Suppression jetable","command":"/usr/bin/false","arguments":[],"environment":{"API_TOKEN":"valeur-factice-delete"}}))["id"].as_str().unwrap().to_owned()
@@ -285,7 +285,7 @@ fn denied_deletion_rolls_back_the_mcp_connector_removal() {
 
 #[test]
 fn debug_without_override_stays_on_file_even_when_a_keyring_is_on_the_ambient_bus() {
-    let Some(f) = Fixture::new() else { return };
+    let f = Fixture::new();
     Vault::open(&f.file())
         .unwrap()
         .set("TOKEN", "Sans override", "valeur-factice-no-override")
@@ -309,7 +309,7 @@ fn debug_without_override_stays_on_file_even_when_a_keyring_is_on_the_ambient_bu
 
 #[test]
 fn invalid_debug_override_never_falls_through_and_french_notice_is_visible() {
-    let Some(f) = Fixture::new() else { return };
+    let f = Fixture::new();
     Vault::open(&f.file())
         .unwrap()
         .set("TOKEN", "Test", "valeur-factice-file-9931")
@@ -334,9 +334,7 @@ fn invalid_debug_override_never_falls_through_and_french_notice_is_visible() {
         assert!(!notice.contains("non chiffré"));
         assert_eq!(state["forms"]["secrets"][0]["name"], "TOKEN");
     }
-    let Some(outside) = Fixture::new() else {
-        return;
-    };
+    let outside = Fixture::new();
     let link = f.keyring.home().path().join("bus-lien");
     let target = outside.bus();
     std::os::unix::fs::symlink(target.strip_prefix("unix:path=").unwrap(), &link).unwrap();

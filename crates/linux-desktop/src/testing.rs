@@ -27,7 +27,6 @@ fn package(tool: &str) -> &'static str {
     match tool {
         "dbus-daemon" => "dbus-daemon",
         "gnome-keyring-daemon" => "gnome-keyring",
-        "update-desktop-database" => "desktop-file-utils",
         _ => "xdg-utils",
     }
 }
@@ -37,20 +36,16 @@ fn on_path(tool: &str) -> bool {
         .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(tool).is_file()))
 }
 
-/// Whether every tool is installed. A missing one fails the test, except on CI where the
-/// packages are not installed yet: there the test says so and skips.
-pub fn tools(names: &[&str]) -> bool {
-    let Some(missing) = names.iter().find(|name| !on_path(name)) else {
-        return true;
-    };
+/// Fails the test when a tool is missing, on CI too: a test that returns early proves nothing.
+pub fn tools(names: &[&str]) {
     let test = std::thread::current().name().unwrap_or("test").to_owned();
-    assert!(
-        std::env::var_os("CI").is_some(),
-        "{test}: {missing} is absent, install the package {}",
-        package(missing)
-    );
-    eprintln!("SKIP {test}: {missing} absent");
-    false
+    for name in names {
+        assert!(
+            on_path(name),
+            "{test}: {name} is absent, install the package {}",
+            package(name)
+        );
+    }
 }
 
 pub fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
@@ -180,10 +175,8 @@ pub struct Keyring {
 }
 
 impl Keyring {
-    pub fn new() -> Option<Self> {
-        if !tools(&["dbus-daemon", "gnome-keyring-daemon"]) {
-            return None;
-        }
+    pub fn new() -> Self {
+        tools(&["dbus-daemon", "gnome-keyring-daemon"]);
         let home = Home::new("ezk");
         let bus = PrivateBus::new(&home);
         let mut keyring = Self {
@@ -192,7 +185,7 @@ impl Keyring {
             daemon: None,
         };
         keyring.unlock();
-        Some(keyring)
+        keyring
     }
 
     pub fn bus(&self) -> Bus {

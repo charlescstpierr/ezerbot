@@ -26,9 +26,7 @@ fn register(home: &Home, handler: &std::path::Path) -> std::process::Output {
 
 #[test]
 fn register_url_handler_makes_xdg_open_start_the_handler_with_the_exact_link() {
-    if !tools(&["xdg-open", "xdg-mime"]) {
-        return;
-    }
+    tools(&["xdg-open", "xdg-mime"]);
     let home = Home::new("ezw");
     let log = home.path().join("received.log");
     let handler = recording_handler(home.path(), &log);
@@ -73,10 +71,8 @@ struct Desk {
     conversation: String,
 }
 impl Desk {
-    fn new() -> Option<Self> {
-        if !tools(&["dbus-daemon", "xdg-open", "xdg-mime"]) {
-            return None;
-        }
+    fn new() -> Self {
+        tools(&["dbus-daemon", "xdg-open", "xdg-mime"]);
         let home = Home::new("ezw");
         let bus = PrivateBus::new(&home);
         let db = home.path().join("workspace.sqlite");
@@ -93,12 +89,12 @@ impl Desk {
                 params![conversation],
             )
             .unwrap();
-        Some(Self {
+        Self {
             home,
             bus,
             db,
             conversation,
-        })
+        }
     }
     fn add_notification(&self, id: &str, conversation: &str) {
         Connection::open(&self.db)
@@ -127,7 +123,7 @@ impl Desk {
 
 #[test]
 fn the_native_route_reports_the_service_and_delivers_the_stored_title_with_a_fixed_body() {
-    let Some(desk) = Desk::new() else { return };
+    let desk = Desk::new();
     let server = FakeNotifications::new(&desk.bus);
     let host = desk.host(true);
     for command in ["status", "authorize"] {
@@ -170,7 +166,7 @@ fn the_native_route_reports_the_service_and_delivers_the_stored_title_with_a_fix
 
 #[test]
 fn without_the_session_override_the_native_route_is_disabled_and_sends_nothing() {
-    let Some(desk) = Desk::new() else { return };
+    let desk = Desk::new();
     let server = FakeNotifications::new(&desk.bus);
     let host = linux_host::launch(&desk.home, &desk.db, None, Some(desk.bus.address()));
     assert_eq!(
@@ -186,7 +182,7 @@ fn without_the_session_override_the_native_route_is_disabled_and_sends_nothing()
 
 #[test]
 fn a_lost_notification_server_is_an_error_and_the_next_delivery_reconnects() {
-    let Some(desk) = Desk::new() else { return };
+    let desk = Desk::new();
     let host = desk.host(true);
     assert_eq!(desk.deliver(&host, "reply:one"), json!({"status":"error"}));
     let server = FakeNotifications::new(&desk.bus);
@@ -206,7 +202,7 @@ fn a_lost_notification_server_is_an_error_and_the_next_delivery_reconnects() {
 
 #[test]
 fn clicking_a_notification_opens_its_thread_through_the_registered_link_handler() {
-    let Some(desk) = Desk::new() else { return };
+    let desk = Desk::new();
     let log = desk.home.path().join("clicked.log");
     let handler = recording_handler(desk.home.path(), &log);
     assert!(register(&desk.home, &handler).status.success());
@@ -226,7 +222,7 @@ fn clicking_a_notification_opens_its_thread_through_the_registered_link_handler(
 
 #[test]
 fn after_the_notification_server_restarts_a_reused_id_opens_the_newest_thread() {
-    let Some(desk) = Desk::new() else { return };
+    let desk = Desk::new();
     let log = desk.home.path().join("clicked.log");
     let handler = recording_handler(desk.home.path(), &log);
     assert!(register(&desk.home, &handler).status.success());

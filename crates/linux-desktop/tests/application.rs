@@ -14,10 +14,8 @@ use zbus::{blocking::Proxy, zvariant::Value};
 
 const WAIT: Duration = Duration::from_secs(5);
 
-fn two_instances() -> Option<(Home, PrivateBus, Inbox, Remote)> {
-    if !grokbot_linux_desktop::testing::tools(&["dbus-daemon"]) {
-        return None;
-    }
+fn two_instances() -> (Home, PrivateBus, Inbox, Remote) {
+    grokbot_linux_desktop::testing::tools(&["dbus-daemon"]);
     let home = Home::new("eza");
     let bus = PrivateBus::new(&home);
     let Ok(Instance::Primary(inbox)) = Instance::claim(&bus.bus()) else {
@@ -26,14 +24,12 @@ fn two_instances() -> Option<(Home, PrivateBus, Inbox, Remote)> {
     let Ok(Instance::Secondary(remote)) = Instance::claim(&bus.bus()) else {
         panic!("the second instance must reach the first");
     };
-    Some((home, bus, inbox, remote))
+    (home, bus, inbox, remote)
 }
 
 #[test]
 fn a_second_instance_hands_its_links_and_its_activation_to_the_first() {
-    let Some((_home, bus, inbox, remote)) = two_instances() else {
-        return;
-    };
+    let (_home, bus, inbox, remote) = two_instances();
     let link = "ezerbot://app/v1/thread?id=abc".to_owned();
     remote.open(std::slice::from_ref(&link)).unwrap();
     assert_eq!(inbox.recv_timeout(WAIT), Some(Received::Open(link)));
@@ -57,9 +53,7 @@ fn a_second_instance_hands_its_links_and_its_activation_to_the_first() {
 
 #[test]
 fn links_that_are_not_ezerbot_or_too_long_never_reach_the_inbox() {
-    let Some((_home, _bus, inbox, remote)) = two_instances() else {
-        return;
-    };
+    let (_home, _bus, inbox, remote) = two_instances();
     let prefix = "ezerbot://app/v1/open?text=";
     let long = format!("{prefix}{}", "a".repeat(2048));
     let at_limit = format!("{prefix}{}", "a".repeat(2048 - prefix.len()));
@@ -84,9 +78,7 @@ fn links_that_are_not_ezerbot_or_too_long_never_reach_the_inbox() {
 
 #[test]
 fn the_seventeenth_pending_link_is_refused_without_blocking() {
-    let Some((_home, _bus, inbox, remote)) = two_instances() else {
-        return;
-    };
+    let (_home, _bus, inbox, remote) = two_instances();
     let link = |n: usize| format!("ezerbot://app/v1/thread?id=t{n}");
     for n in 0..16 {
         remote.open(&[link(n)]).unwrap();

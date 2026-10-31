@@ -6,6 +6,7 @@ mod launch_identity;
 #[path = "support/linux_host.rs"]
 mod linux_host;
 use grokbot_linux_desktop::{
+    notifications::{Alert, Notifier},
     open,
     testing::{recording_handler, tools, wait_for, FakeNotifications, Home, PrivateBus},
 };
@@ -53,7 +54,12 @@ fn register_url_handler_makes_xdg_open_start_the_handler_with_the_exact_link() {
 #[test]
 fn xdg_open_reaches_a_handler_whose_path_needs_quoting() {
     tools(&["xdg-open", "xdg-mime"]);
-    for folder in ["Mon Ezerbot", "100%", "a\"b'c`d$e\\f&g(h)#i*j~k;l<m>n|o?p"] {
+    for folder in [
+        "Mon Ezerbot",
+        "100%",
+        "a=b",
+        "a\"b'c`d$e\\f&g(h)#i*j~k;l<m>n|o?p",
+    ] {
         let home = Home::new("ezw");
         let log = home.path().join("received.log");
         let directory = home.path().join(folder);
@@ -259,14 +265,13 @@ fn a_failed_delivery_keeps_the_destinations_of_the_notifications_still_on_the_de
         desk.deliver(&host, "reply:one"),
         json!({"status":"delivered"})
     );
-    drop(server);
+    server.refuse_next();
     assert_eq!(desk.deliver(&host, "reply:one"), json!({"status":"error"}));
-    let restarted = FakeNotifications::new(&desk.bus);
     assert_eq!(
         host.post("/api/notifications/native", json!({"command":"status"})),
         json!({"status":"granted"})
     );
-    restarted.click(1);
+    server.click(1);
     let link = format!("ezerbot://app/v1/thread?id={}\n", desk.conversation);
     wait_for("the handler to receive the thread link", || {
         fs::read_to_string(&log).is_ok_and(|text| text == link)
@@ -303,6 +308,45 @@ fn past_the_limit_the_oldest_notification_is_closed_and_every_other_click_still_
     wait_for("the handler to receive the second thread", || {
         fs::read_to_string(&log).is_ok_and(|text| text == link)
     });
+}
+
+#[test]
+fn after_a_restart_the_ids_of_other_applications_are_neither_closed_nor_opened() {
+    let desk = Desk::new();
+    let log = desk.home.path().join("clicked.log");
+    let handler = recording_handler(desk.home.path(), &log);
+    assert!(register(&desk.home, &handler).status.success());
+    let second = desk.conversation();
+    desk.add_notification("reply:two", &second);
+    let server = FakeNotifications::new(&desk.bus);
+    let host = desk.host(true);
+    for _ in 0..64 {
+        desk.deliver(&host, "reply:one");
+    }
+    assert_eq!(server.calls().len(), 64);
+    drop(server);
+    let restarted = FakeNotifications::new(&desk.bus);
+    let other = Notifier::connect(&desk.bus.bus()).unwrap();
+    for _ in 0..64 {
+        other
+            .send(&Alert {
+                title: "Autre application",
+                body: "",
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        desk.deliver(&host, "reply:two"),
+        json!({"status":"delivered"})
+    );
+    assert_eq!(restarted.closed(), [] as [u32; 0]);
+    restarted.click(1);
+    restarted.click(65);
+    let link = format!("ezerbot://app/v1/thread?id={second}\n");
+    wait_for(
+        "the handler to receive the thread of the newest alert",
+        || fs::read_to_string(&log).is_ok_and(|text| text == link),
+    );
 }
 
 #[test]

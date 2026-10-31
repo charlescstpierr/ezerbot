@@ -10,12 +10,13 @@ interface publique, et elle est vide hors Linux.
   (DH). Elle ne déverrouille jamais : verrouillée, elle est indisponible. Si le service demande de
   confirmer une écriture ou une suppression, l’attente est bornée à 10 s, puis l’opération échoue.
 - `notifications` : `org.freedesktop.Notifications` sur une connexion longue, clic en `ActionInvoked`.
-  Le wrapper garde la destination des 64 dernières alertes et ferme les plus anciennes.
+  Une alerte est identifiée par son serveur et son numéro, car un serveur redémarré réutilise les
+  numéros. Le wrapper garde la destination des 64 dernières alertes et ferme les plus anciennes.
 - `application` : instance unique et boîte de réception des liens sur `org.freedesktop.Application`
   (au plus 16 liens en attente, 2048 octets chacun, comme `app/native/main.m`).
 - `scheme` : entrée `.desktop` et enregistrement de `x-scheme-handler/ezerbot` par `xdg-mime`. La
   branche générique de `xdg-open` ne sait pas lire un `Exec` entre guillemets : un exécutable dont le
-  chemin contient une espace, un `%` ou un caractère réservé passe par un petit lanceur écrit à côté
+  chemin contient une espace, un `%`, un `=` ou un caractère réservé passe par un petit lanceur écrit à côté
   de l’entrée. Si le dossier de données a lui-même un tel chemin, l’enregistrement est refusé.
 - `open` : `xdg-open` sans shell, sans attendre l’application ouverte.
 - `testing` (fonctionnalité `test-support`) : HOME isolé, `dbus-daemon` sans activation, vrai

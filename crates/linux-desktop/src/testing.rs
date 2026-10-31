@@ -6,7 +6,10 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -175,7 +178,7 @@ pub struct Keyring {
 }
 
 impl Keyring {
-    pub fn new() -> Self {
+    pub fn start() -> Self {
         tools(&["dbus-daemon", "gnome-keyring-daemon"]);
         let home = Home::new("ezk");
         let bus = PrivateBus::new(&home);
@@ -277,6 +280,7 @@ pub struct Notification {
 struct Sent {
     calls: Mutex<Vec<Notification>>,
     closed: Mutex<Vec<u32>>,
+    refuse_next: AtomicBool,
 }
 
 struct Server(Arc<Sent>);
@@ -294,7 +298,10 @@ impl Server {
         actions: Vec<String>,
         hints: HashMap<String, OwnedValue>,
         expire_timeout: i32,
-    ) -> u32 {
+    ) -> zbus::fdo::Result<u32> {
+        if self.0.refuse_next.swap(false, Ordering::SeqCst) {
+            return Err(zbus::fdo::Error::Failed("refused".into()));
+        }
         let mut calls = self.0.calls.lock().unwrap();
         calls.push(Notification {
             app_name,
@@ -306,7 +313,7 @@ impl Server {
                 .and_then(|value| String::try_from(value.try_clone().ok()?).ok()),
             expire_timeout,
         });
-        calls.len() as u32
+        Ok(calls.len() as u32)
     }
 
     fn close_notification(&self, id: u32) {
@@ -342,6 +349,11 @@ impl FakeNotifications {
 
     pub fn calls(&self) -> Vec<Notification> {
         self.sent.calls.lock().unwrap().clone()
+    }
+
+    /// The next `Notify` fails, as when the server is busy: it stays up and keeps its ids.
+    pub fn refuse_next(&self) {
+        self.sent.refuse_next.store(true, Ordering::SeqCst);
     }
 
     pub fn closed(&self) -> Vec<u32> {

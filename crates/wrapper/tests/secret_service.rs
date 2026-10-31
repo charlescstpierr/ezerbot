@@ -18,7 +18,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let keyring = Keyring::new();
+        let keyring = Keyring::start();
         let db = keyring.home().path().join("workspace.sqlite");
         Self { keyring, db }
     }

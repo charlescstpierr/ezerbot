@@ -5,7 +5,7 @@ const LABEL: &str = "Ezerbot — TOKEN";
 
 #[test]
 fn values_round_trip_through_the_encrypted_session_and_replace_in_place() {
-    let keyring = Keyring::new();
+    let keyring = Keyring::start();
     let ours = Collection::open(&keyring.bus(), "scope-a".into()).unwrap();
     let other = Collection::open(&keyring.bus(), "scope-b".into()).unwrap();
     // Not UTF-8, and longer than one cipher block: a wrong key or padding would show.
@@ -37,7 +37,7 @@ fn values_round_trip_through_the_encrypted_session_and_replace_in_place() {
 
 #[test]
 fn a_locked_collection_refuses_every_operation_and_writes_nothing() {
-    let mut keyring = Keyring::new();
+    let mut keyring = Keyring::start();
     let collection = Collection::open(&keyring.bus(), "scope-a".into()).unwrap();
     collection
         .put_verified("TOKEN", LABEL, b"fake-before-lock")
@@ -65,7 +65,7 @@ fn a_locked_collection_refuses_every_operation_and_writes_nothing() {
 
 #[test]
 fn a_service_that_is_gone_is_unavailable() {
-    let mut keyring = Keyring::new();
+    let mut keyring = Keyring::start();
     let collection = Collection::open(&keyring.bus(), "scope-a".into()).unwrap();
     keyring.stop();
     assert_eq!(collection.entries().unwrap_err(), Unavailable);

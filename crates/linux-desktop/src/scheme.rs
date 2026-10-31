@@ -12,12 +12,13 @@ const SCHEME_MIME: &str = "x-scheme-handler/ezerbot";
 
 /// Whether a path can stand as the first word of `Exec` exactly as written. The specification
 /// wants a reserved character quoted and `%` doubled, but the generic path of `xdg-open` undoes
-/// neither: no spelling suits both, so any other path goes through a launcher.
+/// neither: no spelling suits both, so any other path goes through a launcher. It also starts
+/// the program with `env`, which takes a word holding `=` for a variable.
 fn plain(path: &Path) -> bool {
     path.to_str().is_some_and(|text| {
         !text
             .chars()
-            .any(|c| c.is_control() || " \"'\\><~|&;$*?#()`%".contains(c))
+            .any(|c| c.is_control() || " \"'\\><~|&;$*?#()`%=".contains(c))
     })
 }
 

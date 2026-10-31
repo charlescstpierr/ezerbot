@@ -3,7 +3,7 @@
 //! fixed, so no model text, tool argument or secret name reaches the desktop.
 use super::*;
 use grokbot_linux_desktop::{
-    notifications::{Alert, Notifier},
+    notifications::{Alert, Notifier, Shown},
     open, Bus, Unavailable,
 };
 use serde::de::IgnoredAny;
@@ -20,22 +20,22 @@ const REMEMBERED: usize = 64;
 
 static LIVE: Mutex<Option<Notifier>> = Mutex::new(None);
 /// Outlives the connection: notifications stay on the desktop after a failed delivery.
-static TARGETS: Mutex<VecDeque<(u32, String)>> = Mutex::new(VecDeque::new());
+static TARGETS: Mutex<VecDeque<(Shown, String)>> = Mutex::new(VecDeque::new());
 
 fn live() -> MutexGuard<'static, Option<Notifier>> {
     LIVE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn targets() -> MutexGuard<'static, VecDeque<(u32, String)>> {
+fn targets() -> MutexGuard<'static, VecDeque<(Shown, String)>> {
     TARGETS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn connect(bus: &Bus) -> Result<Notifier, Unavailable> {
     let notifier = Notifier::connect(bus)?;
-    notifier.on_click(|id| {
+    notifier.on_click(|clicked| {
         let conversation = targets()
             .iter()
-            .find_map(|(known, conversation)| (*known == id).then(|| conversation.clone()));
+            .find_map(|(shown, conversation)| (*shown == clicked).then(|| conversation.clone()));
         if let Some(conversation) = conversation {
             let link = format!(
                 "ezerbot://app/v1/thread?id={}",
@@ -66,18 +66,16 @@ fn with_live<T>(
 
 fn deliver(bus: &Bus, title: &str, conversation: &str) -> Result<(), Unavailable> {
     with_live(bus, |notifier| {
-        let id = notifier.send(&Alert { title, body: BODY })?;
+        let shown = notifier.send(&Alert { title, body: BODY })?;
         let evicted = {
             let mut targets = targets();
-            // A restarted server counts from 1 again: the id now means this notification alone.
-            targets.retain(|(known, _)| *known != id);
-            targets.push_back((id, conversation.to_owned()));
+            targets.push_back((shown, conversation.to_owned()));
             (targets.len() > REMEMBERED)
                 .then(|| targets.pop_front())
                 .flatten()
         };
-        if let Some((id, _)) = evicted {
-            let _ = notifier.close(id);
+        if let Some((oldest, _)) = evicted {
+            let _ = notifier.close(&oldest);
         }
         Ok(())
     })

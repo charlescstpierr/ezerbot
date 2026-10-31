@@ -646,7 +646,8 @@ Num       RefCount Protocol Flags    Type St Inode Path
             "{}",
             error.message
         );
-        assert!(error.message.contains("a.txt"), "{}", error.message);
+        let named = real.display().to_string();
+        assert!(error.message.contains(&named), "{}", error.message);
         assert!(!error.message.contains("jeton"), "{}", error.message);
 
         std::fs::remove_file(&outside).unwrap();

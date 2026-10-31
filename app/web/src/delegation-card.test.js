@@ -76,6 +76,16 @@ function mount() {
   };
 }
 
+test("a failed or refused delegation keeps its reason as plain prose", () => {
+  for (const [status, reason] of [["failed", "La sous-tâche s’est arrêtée sans terminer son travail."], ["refused", "La limite de sous-tâches est atteinte."]]) {
+    setEdge([]);
+    edge.status = { status, reason };
+    const out = html();
+    assert.ok(out.includes(reason), status);
+    assert.doesNotMatch(out, /<details|<summary|<pre/);
+  }
+});
+
 test("two captures show Avant then Après with their legend, after the visible result", () => {
   setEdge([BEFORE, AFTER]);
   const out = html();

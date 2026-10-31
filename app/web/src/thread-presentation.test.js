@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { presentThread } from "./thread-presentation.js";
+import { conversationReplyError, presentThread, threadActivity, visibleActivity } from "./thread-presentation.js";
+import { replyProblemState } from "./connection-view.js";
 
 const engineReasons = [
   "Résultat inconnu après interruption. Action non relancée ; vérifiez son effet avant de réessayer.",
@@ -64,4 +66,128 @@ test("la consigne d’une délégation reste lisible dans le fil de la tâche", 
 test("une remise à zéro du contexte reste une phrase visible, sans carte", () => {
   const body = "Nouvelle conversation — la mémoire est conservée.";
   assert.deepEqual(notes([{ id: "reset", role: "assistant", kind: "reset", body, payload: { reset: true } }]), [body]);
+});
+
+const source = (path) => readFileSync(new URL(`../../../crates/wrapper/src/${path}`, import.meta.url), "utf8");
+const sentences = (text) => [...text.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(([, literal]) => literal.replace(/\{[^}]*\}/g, ""))
+  .filter((literal) => /^[A-ZÉ].* .*[.…]$/u.test(literal));
+const provider = source("provider.rs");
+const engine = source("features/engine.rs").split("\n").filter((line) => /^const |let group_error|SET error=\?2/.test(line)).join("\n");
+const emitted = [...new Set([
+  ...sentences(provider.slice(provider.indexOf("pub(crate) fn failure("), provider.indexOf("fn text("))),
+  ...sentences(source("provider/reliable.rs").split("#[cfg(test)]")[0]),
+  ...sentences(engine),
+])];
+
+test("chaque diagnostic rédigé par le moteur reste tel quel dans le fil", () => {
+  assert.ok(emitted.length >= 15, `${emitted.length} phrases lues dans le moteur`);
+  for (const error of emitted) assert.equal(conversationReplyError({ error }), error);
+});
+
+test("un modèle refusé garde la consigne d’en choisir un autre", () => {
+  const error = "OpenAI n’accepte pas ce modèle « o9 » avec votre connexion. Choisissez un autre modèle avec le bouton « Modèle » sous la zone de message, puis relancez la réponse ou envoyez un nouveau message.";
+  const view = replyProblemState({ error_kind: "other", error: conversationReplyError({ error }) });
+  assert.match(view.error, /Choisissez un autre modèle/);
+  assert.equal(view.advice, null);
+});
+
+test("un dépassement de contexte demande une conversation plus courte, jamais un nouveau message", () => {
+  const error = "Le fil dépasse le budget de contexte disponible. Ouvrez une conversation plus courte ; aucun ancien message n’a été supprimé ni résumé automatiquement.";
+  const view = replyProblemState({ error_kind: "context", error: conversationReplyError({ error_kind: "context", error }) }, { isGroup: true });
+  assert.equal(view.error, error);
+  assert.equal(view.advice, null);
+  assert.equal(view.retry, false);
+});
+
+test("la limite d’usage garde la phrase du moteur", () => {
+  const error = "Ezerbot a atteint la limite d’utilisation que lui accorde votre abonnement ChatGPT. Votre quota Codex peut rester disponible. Pour ajuster cette limite : ChatGPT → Réglages → Utilisation.";
+  assert.equal(conversationReplyError({ error_kind: "limit", error }), error);
+});
+
+test("le détail brut d’un fournisseur laisse sa phrase et disparaît seul", () => {
+  assert.equal(conversationReplyError({ error: "OpenAI a refusé la demande (erreur 400) : Invalid 'input[3].call_id'." }), "OpenAI a refusé la demande (erreur 400).");
+  assert.equal(conversationReplyError({ error: "OpenAI a signalé une erreur pendant la réponse : {\"code\":\"x\"}" }), "OpenAI a signalé une erreur pendant la réponse.");
+  assert.equal(conversationReplyError({ error: "Le service d’OpenAI est indisponible (HTTP 503). Réessayez dans quelques minutes. Détail : <html>busy</html>" }), "Le service d’OpenAI est indisponible (HTTP 503). Réessayez dans quelques minutes.");
+  assert.equal(conversationReplyError({ error: "OpenAI a refusé la demande (erreur 429) : You exceeded your quota." }), "OpenAI a refusé la demande (erreur 429) : You exceeded your quota.");
+});
+
+test("un diagnostic purement technique ou absent devient une phrase", () => {
+  for (const error of ['{"command":"ls","cwd":"/tmp"}', "/opt/ezerbot/run failed", "", null, undefined]) assert.equal(conversationReplyError({ error }), "La réponse n’a pas abouti. Réessayez.");
+});
+
+const host = (name, outcome, extra = {}) => ({ id: "mcp-host-a:2", role: "assistant", kind: "tool", payload: { run_id: "mcp-host-a", call: { call_id: "mcp-host-a-call", name, arguments: { id: "generated_1", action: "save", path: "/home/charles/copie.pdf" } }, outcome, ...extra } });
+const resolved = (run_id, tool, status, extra = {}) => ({ id: `approval-${run_id}`, role: "assistant", kind: "approval", payload: { run_id, kind: { tool }, status: { status }, ...extra } });
+
+test("« Enregistrer sous… » laisse un accusé sans aucun bot pour le dire", () => {
+  const save = host("document_action", { status: "done", output: { message: "Copie enregistrée.", path: "/home/charles/copie.pdf" } });
+  const { messages, interventions } = presentThread([resolved("mcp-host-a", "document_action", "resolved"), save]);
+  assert.deepEqual(interventions, []);
+  assert.deepEqual(messages.map((message) => [message.id, message.presentation?.kind, message.presentation?.text]), [["mcp-host-a:2", "notice", "Copie enregistrée."]]);
+  assert.doesNotMatch(JSON.stringify(messages[0].presentation), /copie\.pdf|document_action/);
+});
+
+test("une action des paramètres garde sa consigne et la raison de son échec", () => {
+  const code = "Ouvrez github.com/login/device dans votre navigateur, puis entrez le code affiché dans Paramètres › Connecteurs.";
+  assert.deepEqual(notes([host("mcp_start_github", { status: "done", output: { message: code, outils: [] } })]), [code]);
+  const reason = "Ce fichier existe déjà : choisissez un autre nom.";
+  assert.deepEqual(notes([host("document_action", { status: "failed", reason })]), [reason]);
+  assert.deepEqual(notes([host("document_action", { status: "failed", reason: "os error 13 at /home/charles/copie.pdf" })]), ["L’action sur le document n’a pas abouti."]);
+});
+
+test("le modèle qui agit garde la parole : son outil réussi reste silencieux", () => {
+  const save = { ...tool({ outcome: { status: "done", output: { message: "Copie enregistrée." } } }) };
+  save.payload.call = { call_id: "call", name: "document_action", arguments: {} };
+  assert.deepEqual(notes([save]), []);
+});
+
+test("une action refusée se dit une seule fois quand sa demande est dans le fil", () => {
+  const refused = tool({ approval_status: "denied", outcome: { status: "failed", reason: "L’action a été refusée." } });
+  assert.deepEqual(notes([resolved("run", "run_shell", "denied"), refused]), ["L’action a été refusée. Elle n’a pas été exécutée."]);
+  assert.deepEqual(notes([refused]), ["L’action a été refusée et n’a pas été exécutée."]);
+});
+
+test("un refus automatique garde le motif du relecteur", () => {
+  const review = { answer: { decision: "deny", reason: "Cette commande efface des fichiers hors du projet." } };
+  assert.deepEqual(notes([resolved("run", "run_shell", "denied", { review })]), ["L’action a été refusée automatiquement : Cette commande efface des fichiers hors du projet."]);
+});
+
+test("les refus déjà rédigés pour l’utilisateur gardent leur consigne", () => {
+  const off = "Cet outil est désactivé pour ce bot dans Paramètres › Terminal et fichiers sur ce Mac.";
+  assert.deepEqual(notes([tool({ outcome: { status: "failed", reason: off } })]), [off]);
+  assert.match(notes([tool({ outcome: { status: "failed", reason: "Une autorisation permanente refuse cette action." } })])[0], /Paramètres › Autorisations permanentes/);
+  assert.match(notes([tool({ outcome: { status: "failed", reason: "not executed: stopped" } })])[0], /Action non exécutée/);
+});
+
+test("un connecteur à rétablir le dit sans bouton ni nom d’outil", () => {
+  const [note] = notes([tool({ connector: { server: "GitHub", tool: "lister", recoverable: true }, outcome: { status: "failed", reason: "transport closed" } })]);
+  assert.equal(note, "Le connecteur GitHub ne répond plus. Ouvrez Paramètres › Connecteurs pour le rétablir.");
+});
+
+test("une question de tâche reste lisible dans le fil, une seule fois", () => {
+  const ask = tool({ outcome: { status: "done", output: { status: "signalée" } } });
+  ask.payload.call = { call_id: "call", name: "attendre_reponse", arguments: { question: "Quel dossier dois-je ranger ?" } };
+  assert.deepEqual(notes([ask]), ["Quel dossier dois-je ranger ?"]);
+  assert.deepEqual(notes([{ ...reply, body: "Je bloque. Quel dossier dois-je ranger ?" }, ask]), []);
+});
+
+test("un résumé de contexte se dit en une phrase, sans son contenu", () => {
+  const [note] = notes([{ id: "summary", role: "assistant", kind: "summary", body: "trace", payload: { text: "trace" } }]);
+  assert.match(note, /résumé le début/);
+  assert.doesNotMatch(note, /trace/);
+});
+
+test("une entrée inconnue reste visible plutôt que disparaître", () => {
+  const entry = { id: "new", role: "assistant", kind: "future_card", body: "" };
+  assert.deepEqual(presentThread([entry]).messages, [entry]);
+});
+
+test("une attente dans la conversation principale se dit, une demande présente suffit", () => {
+  const runs = [{ run_id: "child", bot_id: "helper", conversation_id: "c", status: "awaiting_approval" }, { run_id: "work", bot_id: "grokbot", conversation_id: "c", status: "running" }, { run_id: "kids", conversation_id: "c", status: "awaiting_children" }];
+  const activity = threadActivity({ runs, conversationId: "c", engineConnected: true });
+  assert.deepEqual(activity.map((run) => [run.run_id, run.status]), [["child", "awaiting_approval"], ["work", "running"]]);
+  assert.deepEqual(visibleActivity(activity, { messages: [], interventions: [] }).map((run) => run.run_id), ["child", "work"]);
+  const pending = { id: "ask", kind: "approval", payload: { run_id: "child", status: { status: "pending" } } };
+  assert.deepEqual(visibleActivity(activity, presentThread([pending])).map((run) => run.run_id), ["work"]);
+  const form = { id: "form", kind: "form", payload: { run_id: "child", status: { status: "pending" } } };
+  assert.deepEqual(visibleActivity(activity, presentThread([form])).map((run) => run.run_id), ["work"]);
 });

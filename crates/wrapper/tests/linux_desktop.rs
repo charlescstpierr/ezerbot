@@ -279,6 +279,26 @@ fn a_failed_delivery_keeps_the_destinations_of_the_notifications_still_on_the_de
 }
 
 #[test]
+fn after_the_bus_restarts_the_next_delivery_reconnects() {
+    let mut desk = Desk::new();
+    let host = desk.host(true);
+    let server = FakeNotifications::new(&desk.bus);
+    assert_eq!(
+        desk.deliver(&host, "reply:one"),
+        json!({"status":"delivered"})
+    );
+    drop(server);
+    desk.bus.restart(&desk.home);
+    let server = FakeNotifications::new(&desk.bus);
+    assert_eq!(desk.deliver(&host, "reply:one"), json!({"status":"error"}));
+    assert_eq!(
+        desk.deliver(&host, "reply:one"),
+        json!({"status":"delivered"})
+    );
+    assert_eq!(server.calls().len(), 1);
+}
+
+#[test]
 fn past_the_limit_the_oldest_notification_is_closed_and_every_other_click_still_works() {
     let desk = Desk::new();
     let log = desk.home.path().join("clicked.log");
@@ -340,7 +360,7 @@ fn after_a_restart_the_ids_of_other_applications_are_neither_closed_nor_opened()
         json!({"status":"delivered"})
     );
     assert_eq!(restarted.closed(), [] as [u32; 0]);
-    restarted.click(2);
+    restarted.invoke(2, "default");
     restarted.click(65);
     let link = format!("ezerbot://app/v1/thread?id={second}\n");
     wait_for(

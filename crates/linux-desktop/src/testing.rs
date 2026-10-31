@@ -16,6 +16,7 @@ use std::{
 use grokbot_test_support::TestDir;
 use zbus::{
     blocking::{connection::Builder, Connection, Proxy},
+    message::Header,
     zvariant::{ObjectPath, OwnedObjectPath, OwnedValue},
 };
 
@@ -127,8 +128,23 @@ pub struct PrivateBus {
 
 impl PrivateBus {
     pub fn new(home: &Home) -> Self {
+        let address = format!("unix:path={}", home.path().join("bus").display());
+        let daemon = Self::start(home, &address);
+        Self {
+            address,
+            _daemon: daemon,
+        }
+    }
+
+    /// Every connection dies with the daemon; the address stays the same.
+    pub fn restart(&mut self, home: &Home) {
+        let _ = self._daemon.0.kill();
+        let _ = self._daemon.0.wait();
+        self._daemon = Self::start(home, &self.address);
+    }
+
+    fn start(home: &Home, address: &str) -> Process {
         let socket = home.path().join("bus");
-        let address = format!("unix:path={}", socket.display());
         let config = home.path().join("bus.conf");
         std::fs::write(
             &config,
@@ -151,10 +167,7 @@ impl PrivateBus {
             assert!(daemon.try_wait().unwrap().is_none(), "dbus-daemon exited");
             std::os::unix::net::UnixStream::connect(&socket).is_ok()
         });
-        Self {
-            address,
-            _daemon: Process(daemon),
-        }
+        Process(daemon)
     }
 
     pub fn address(&self) -> &str {
@@ -279,6 +292,7 @@ pub struct Notification {
 #[derive(Default)]
 struct Sent {
     calls: Mutex<Vec<Notification>>,
+    clients: Mutex<Vec<String>>,
     closed: Mutex<Vec<u32>>,
     refuse_next: AtomicBool,
 }
@@ -290,6 +304,7 @@ impl Server {
     #[allow(clippy::too_many_arguments)]
     fn notify(
         &self,
+        #[zbus(header)] header: Header<'_>,
         app_name: String,
         _replaces_id: u32,
         _app_icon: String,
@@ -302,6 +317,8 @@ impl Server {
         if self.0.refuse_next.swap(false, Ordering::SeqCst) {
             return Err(zbus::fdo::Error::Failed("refused".into()));
         }
+        let client = header.sender().expect("a bus names the sender").to_string();
+        self.0.clients.lock().unwrap().push(client);
         let mut calls = self.0.calls.lock().unwrap();
         calls.push(Notification {
             app_name,
@@ -360,14 +377,21 @@ impl FakeNotifications {
         self.sent.closed.lock().unwrap().clone()
     }
 
+    /// Like GNOME Shell and Dunst: only the connection that sent the notification hears of it.
     pub fn click(&self, id: u32) {
-        self.invoke(id, "default");
+        let client = self.sent.clients.lock().unwrap()[id as usize - 1].clone();
+        self.emit(Some(&client), id, "default");
     }
 
+    /// Like the servers that broadcast: every connection hears of it.
     pub fn invoke(&self, id: u32, action: &str) {
+        self.emit(None, id, action);
+    }
+
+    fn emit(&self, destination: Option<&str>, id: u32, action: &str) {
         self.connection
             .emit_signal(
-                None::<&str>,
+                destination,
                 NOTIFICATIONS_PATH,
                 NOTIFICATIONS,
                 "ActionInvoked",

@@ -669,6 +669,10 @@ fn the_kernel_refuses_the_data_however_the_command_reaches_it() {
             format!(r#"for n in /proc/{pid}/fd/*; do readlink "$n"; done"#),
         ),
         (
+            "descripteurs-herites",
+            r#"for n in /proc/self/fd/*; do readlink "$n"; done"#.to_owned(),
+        ),
+        (
             "espace-imbrique-umount",
             r#"D=da; unshare -Urm sh -c 'umount -l "$1"; grep -r refresh "$1"' sh "$PWD"/"$D"ta"#.to_owned(),
         ),
@@ -685,6 +689,15 @@ fn the_kernel_refuses_the_data_however_the_command_reaches_it() {
         assert!(!stdout.contains("rc=0"), "{id} a réussi : {out}");
         if id == "hote-cwd" {
             assert!(!stdout.contains("[package]"), "{id} lit l'hôte : {out}");
+        }
+        if id == "descripteurs-herites" {
+            assert!(stdout.contains("socket:"), "{id} n'a rien lu : {out}");
+            assert!(
+                stdout.lines().all(|target| target == "/dev/null"
+                    || target.starts_with("socket:")
+                    || target.starts_with("pipe:")),
+                "{id} hérite d'un fichier : {out}"
+            );
         }
         if id == "hote-fd" {
             assert_eq!(stdout, "", "{id} lit les descripteurs de l'hôte : {out}");

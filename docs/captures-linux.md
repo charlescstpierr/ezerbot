@@ -30,7 +30,7 @@ Chaque exécution crée sa propre base, sa fausse session et son profil Chrome. 
 
 L'outil attend la connexion du wrapper, l'état propre à chaque vue, les polices et le rendu. Un délai maximal provoque un échec. Un délai fixe ne valide pas un écran prêt.
 
-Le wrapper ferme ses connexions HTTP après chaque réponse réussie, ce qui évite les chargements d'assets suspendus observés sur la box. Le pilote signale un document sans focus au module des notifications avant de créer la conversation factice. Sa notification reste ainsi disponible pour la vue dédiée.
+Le pool corrigé de `vendor/tiny_http` donne un fil à chaque connexion keep-alive, ce qui évite les chargements d'assets suspendus observés sur la box. Le pilote signale un document sans focus au module des notifications avant de créer la conversation factice. Sa notification reste ainsi disponible pour la vue dédiée.
 
 Les builds utilisent `CARGO_BUILD_JOBS=3`. Avant chaque build, le script contrôle les systèmes de fichiers du cache Cargo, du worktree temporaire et des captures. Il refuse de continuer si l'un dispose de moins de 25 Gio libres. Sur la box, il affiche aussi `df -BG /workspace`. Les fichiers temporaires et les processus de l'exécution sont nettoyés en cas de réussite ou d'échec.
 

@@ -304,14 +304,10 @@ fn remote_disabled(request: Request) -> std::io::Result<()> {
     writer.flush()
 }
 
-/// Retire every HTTP connection at its response. tiny_http reads each open socket
-/// on one pool thread, and a burst larger than its four idle threads is queued
-/// without starting more: a browser's kept-alive sockets would hold the queued
-/// requests of its page load until it closes them. A private socket must also not
-/// outlive a host restart.
+/// Retire private HTTP connections at every response, also across host restarts.
 /// Keep tiny_http's framing (including ranges, cookies, chunking and HEAD), but
 /// add the hop-by-hop header on the wire because Response filters that header.
-fn respond_retiring(
+fn respond_remote(
     request: Request,
     response: Response<std::io::Cursor<Vec<u8>>>,
 ) -> std::io::Result<()> {
@@ -372,10 +368,6 @@ fn payload(
     let limit = body_limit(&path);
     if request.body_length().is_some_and(|length| length > limit) {
         return Err(too_large(&path));
-    }
-    // Success retires the connection, which waits for any body left unread.
-    if asset.is_some() && request.body_length().is_some_and(|length| length > 0) {
-        return Err(error(400, "Un fichier statique ne reçoit pas de corps."));
     }
     if let Some(asset) = asset {
         let accept_encoding = headers
@@ -445,7 +437,7 @@ fn webhook_respond(request: Request, reply: grokbot_wrapper::features::routine_w
     for (name, value) in headers {
         response.add_header(Header::from_bytes(name, value).expect("webhook response header"));
     }
-    if let Err(error) = respond_retiring(request, response) {
+    if let Err(error) = respond_remote(request, response) {
         eprintln!("Réponse webhook interrompue : {error}");
     }
 }
@@ -905,9 +897,8 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
                 Header::from_bytes("Content-Encoding", token).expect("validated response header"),
             );
         }
-        // Retiring drains the body first, and a local refusal can precede a body that never comes.
-        let result = if remote || status < 400 {
-            respond_retiring(request, response)
+        let result = if remote {
+            respond_remote(request, response)
         } else {
             request.respond(response)
         };

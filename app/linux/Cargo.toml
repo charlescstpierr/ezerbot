@@ -21,3 +21,7 @@ wry = "=0.57.1"
 
 [dev-dependencies]
 grokbot-test-support.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rusqlite.workspace = true
+x11-dl = "2.21"

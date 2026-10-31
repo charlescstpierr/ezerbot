@@ -588,6 +588,7 @@ dependencies = [
  "gtk",
  "nix",
  "percent-encoding",
+ "rusqlite",
  "serde",
  "serde_json",
  "signal-hook",
@@ -595,6 +596,7 @@ dependencies = [
  "ureq",
  "url",
  "wry",
+ "x11-dl",
 ]
 
 [[package]]

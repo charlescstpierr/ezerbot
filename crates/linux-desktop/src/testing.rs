@@ -185,9 +185,9 @@ impl PrivateBus {
 
 /// A real `gnome-keyring-daemon` with an unlocked `login` collection, on its own bus.
 pub struct Keyring {
+    daemon: Option<Process>,
     bus: PrivateBus,
     home: Home,
-    daemon: Option<Process>,
 }
 
 impl Keyring {
@@ -196,9 +196,9 @@ impl Keyring {
         let home = Home::new("ezk");
         let bus = PrivateBus::new(&home);
         let mut keyring = Self {
+            daemon: None,
             bus,
             home,
-            daemon: None,
         };
         keyring.unlock();
         keyring

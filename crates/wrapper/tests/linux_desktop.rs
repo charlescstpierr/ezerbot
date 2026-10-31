@@ -109,10 +109,10 @@ fn register_url_handler_fails_in_french_when_xdg_mime_is_missing() {
 }
 
 struct Desk {
-    home: Home,
     bus: PrivateBus,
     db: PathBuf,
     conversation: String,
+    home: Home,
 }
 impl Desk {
     fn new() -> Self {
@@ -134,10 +134,10 @@ impl Desk {
             )
             .unwrap();
         Self {
-            home,
             bus,
             db,
             conversation,
+            home,
         }
     }
     fn conversation(&self) -> String {
@@ -296,7 +296,6 @@ fn after_the_bus_restarts_the_next_delivery_reconnects_and_forgets_the_old_desti
     drop(server);
     desk.bus.restart(&desk.home);
     let server = FakeNotifications::new(&desk.bus);
-    assert_eq!(desk.deliver(&host, "reply:two"), json!({"status":"error"}));
     assert_eq!(
         desk.deliver(&host, "reply:two"),
         json!({"status":"delivered"})

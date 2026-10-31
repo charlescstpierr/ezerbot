@@ -6,6 +6,8 @@ Après le premier run, Charles marque `linux-build-test` comme contrôle requis 
 
 Le job utilise Ubuntu 24.04, Node 24 et le toolchain de `rust-toolchain.toml`. Il installe `lsof` pour les tests de webhooks et vérifie le Chrome fourni par l'image Ubuntu avec `app/ui/chrome-binary.cjs`. Le cache contient les téléchargements Cargo et les dépendances compilées, avec une clé liée au système, à l'architecture, au toolchain, à `Cargo.lock` et au commit. Il ne contient ni journal ni données d'Ezerbot.
 
+La restauration et la sauvegarde du cache sont séparées. Une compilation réussie permet la sauvegarde même si les tests échouent, sauf annulation. Une clé déjà restaurée à l'identique n'est pas sauvegardée à nouveau.
+
 Les commandes principales sont les suivantes.
 
 ```sh

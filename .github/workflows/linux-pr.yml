@@ -40,7 +40,8 @@ jobs:
           sudo apt-get install --no-install-recommends -y lsof
       - name: Vérifier Chrome fourni par Ubuntu
         run: node -e "console.log(require('./app/ui/chrome-binary.cjs').chromeBinary())"
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cargo-cache
         with:
           path: |
             ~/.cargo/registry/index
@@ -55,6 +56,7 @@ jobs:
       - name: Installer les dépendances web
         run: npm ci --prefix app/web --no-audit --no-fund
       - name: Compiler le workspace Rust
+        id: build
         run: |
           df -BG "$GITHUB_WORKSPACE"
           cargo build --workspace --locked
@@ -70,3 +72,14 @@ jobs:
       - name: Tester app/ui
         if: ${{ !cancelled() }}
         run: node --test --test-reporter=tap app/ui/*.test.cjs app/ui/panels/*.test.cjs
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}

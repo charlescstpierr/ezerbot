@@ -2,7 +2,8 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { createServer } = require("node:http");
 const { spawn } = require("node:child_process");
-const { mkdtempSync, readFileSync, rmSync, existsSync } = require("node:fs");
+const { mkdtempSync, readFileSync, existsSync } = require("node:fs");
+const { rm } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const { chromeBinary } = require("../chrome-binary.cjs");
@@ -94,10 +95,18 @@ async function fixture(t) {
   });
   t.after(async () => {
     cdp?.close();
-    if (chrome && chrome.exitCode === null) { chrome.kill("SIGTERM"); await new Promise(done => chrome.once("exit", done)); }
+    if (chrome && chrome.exitCode === null && chrome.signalCode === null) {
+      const exited = new Promise(done => chrome.once("exit", done));
+      chrome.kill("SIGTERM");
+      let timer;
+      await Promise.race([exited, new Promise(done => { timer = setTimeout(done, 3000); })]);
+      clearTimeout(timer);
+      if (chrome.exitCode === null && chrome.signalCode === null) { chrome.kill("SIGKILL"); await exited; }
+    }
+    server.closeAllConnections();
     server.closeAllConnections();
     await new Promise(done => server.close(done));
-    rmSync(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
     t.diagnostic(JSON.stringify(calls.map(({ url, reader }) => ({ url, reader }))));
   });
   await new Promise(done => server.listen(0, "127.0.0.1", done));

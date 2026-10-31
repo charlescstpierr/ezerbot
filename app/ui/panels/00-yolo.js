@@ -30,14 +30,15 @@
     settings.className = "setting-section yolo-settings";
     settings.replaceChildren(node("h3", "Mode YOLO (tous les droits)"));
     if (!yolo || yolo.error) { settings.append(node("p", yolo?.error || "Mode YOLO indisponible.")); return; }
+    if (yolo.unavailable) { const blocked = node("p", yolo.unavailable, "yolo-error"); blocked.setAttribute("role", "alert"); settings.append(blocked); }
     const on = yolo.mode === "yolo";
     settings.append(node("p", on
       ? "Activé : tous les outils sont ouverts (terminal et fichiers dans votre dossier personnel, connecteurs, écran du Mac, documents, délégation, routines, mémoire) et les approbations partent seules. Chaque action reste visible dans le fil (« Fait automatiquement ») et dans le journal ci-dessous."
       : "Désactivé : chaque action protégée affiche une carte d’approbation, et les outils puissants suivent leurs réglages un à un. Le Mode YOLO les ouvre tous d’un seul clic."));
     const modes = node("div", null, "yolo-modes"); modes.setAttribute("role", "group"); modes.setAttribute("aria-label", "Mode d’autorisation");
     modes.append(
-      modeButton("yolo", yolo.mode, "Mode YOLO (tous les droits)", "Rien ne demande de carte."),
-      modeButton("ask", yolo.mode, "Demander avant d’agir", "Une carte avant chaque action protégée."),
+      modeButton("yolo", yolo.saved || yolo.mode, "Mode YOLO (tous les droits)", "Rien ne demande de carte."),
+      modeButton("ask", yolo.saved || yolo.mode, "Demander avant d’agir", "Une carte avant chaque action protégée."),
     );
     settings.append(modes);
     const problem = node("p", error, "yolo-error"); problem.setAttribute("role", "alert"); problem.hidden = !error;

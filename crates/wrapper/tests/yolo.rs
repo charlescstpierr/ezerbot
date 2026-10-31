@@ -761,9 +761,13 @@ fn a_kernel_without_namespaces_keeps_the_yolo_mode_off() {
     let yolo = f.yolo();
     assert_eq!(yolo["mode"], "ask", "{yolo}");
     assert!(
-        yolo["error"].as_str().unwrap_or("").contains("bubblewrap"),
+        yolo["unavailable"]
+            .as_str()
+            .unwrap_or("")
+            .contains("bubblewrap"),
         "{yolo}"
     );
+    assert_eq!(yolo["saved"], "yolo", "{yolo}");
     for bot in yolo["bots"].as_array().unwrap() {
         assert_eq!(bot["effective"], "ask", "{bot}");
     }
@@ -791,6 +795,7 @@ fn a_kernel_without_namespaces_keeps_the_yolo_mode_off() {
     assert_eq!(request.status, requests::RequestStatus::Pending);
     assert!(!f.root().join("lance.txt").exists());
     f.mode("ask");
+    assert_eq!(f.yolo()["saved"], "ask");
 }
 
 /// Un auditeur local qui compte les connexions reçues.

@@ -494,7 +494,8 @@ pub fn state(ctx: &Context<'_>) -> Value {
             "home": std::env::var("HOME").ok(),
         });
         if let Some(message) = unavailable() {
-            state["error"] = json!(message);
+            state["unavailable"] = json!(message);
+            state["saved"] = json!(global_mode(conn));
         }
         Ok(state)
     };

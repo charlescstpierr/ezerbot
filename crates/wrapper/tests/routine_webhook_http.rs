@@ -20,6 +20,101 @@ use support::wait;
 
 const DNS: &str = "mac.qa.ts.net";
 
+#[cfg(target_os = "linux")]
+fn tcp_listeners(pid: u32) -> BTreeSet<String> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    let process = PathBuf::from(format!("/proc/{pid}"));
+    let mut socket_inodes = BTreeSet::new();
+    for entry in fs::read_dir(process.join("fd"))
+        .unwrap_or_else(|error| panic!("read socket descriptors for PID {pid}: {error}"))
+    {
+        let path = entry.expect("read process descriptor entry").path();
+        let target = match fs::read_link(&path) {
+            Ok(target) => target,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("read descriptor {} for PID {pid}: {error}", path.display()),
+        };
+        if let Some(inode) = target
+            .to_str()
+            .and_then(|target| target.strip_prefix("socket:["))
+            .and_then(|target| target.strip_suffix(']'))
+        {
+            socket_inodes.insert(inode.parse::<u64>().expect("parse socket inode"));
+        }
+    }
+
+    let mut listeners = BTreeSet::new();
+    for table in ["tcp", "tcp6"] {
+        let contents = match fs::read_to_string(process.join("net").join(table)) {
+            Ok(contents) => contents,
+            Err(error) if table == "tcp6" && error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => panic!("read {table} sockets for PID {pid}: {error}"),
+        };
+        for line in contents.lines().skip(1) {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            assert!(fields.len() >= 10, "invalid {table} socket row: {line}");
+            if fields[3] != "0A"
+                || !socket_inodes
+                    .contains(&fields[9].parse::<u64>().expect("parse TCP socket inode"))
+            {
+                continue;
+            }
+            let (address, port) = fields[1].split_once(':').expect("TCP local address");
+            let port = u16::from_str_radix(port, 16).expect("parse TCP local port");
+            let address = if table == "tcp" {
+                IpAddr::V4(Ipv4Addr::from(
+                    u32::from_str_radix(address, 16)
+                        .expect("parse IPv4 address")
+                        .to_ne_bytes(),
+                ))
+            } else {
+                assert_eq!(address.len(), 32, "invalid IPv6 address: {address}");
+                let mut octets = [0; 16];
+                for (index, bytes) in octets.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    bytes.copy_from_slice(
+                        &u32::from_str_radix(&address[index * 8..index * 8 + 8], 16)
+                            .expect("parse IPv6 address word")
+                            .to_ne_bytes(),
+                    );
+                }
+                IpAddr::V6(Ipv6Addr::from(octets))
+            };
+            listeners.insert(SocketAddr::new(address, port).to_string());
+        }
+    }
+    listeners
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tcp_listeners(pid: u32) -> BTreeSet<String> {
+    let output = Command::new("lsof")
+        .args([
+            "-nP",
+            "-a",
+            "-p",
+            &pid.to_string(),
+            "-iTCP",
+            "-sTCP:LISTEN",
+            "-Fn",
+        ])
+        .output()
+        .expect("inspect the wrapper's TCP listeners with lsof");
+    assert!(
+        output.status.success(),
+        "lsof failed for wrapper PID {pid}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .map(str::to_owned)
+        .collect()
+}
+
 struct Host {
     child: Option<Child>,
     identity: LaunchIdentity,
@@ -152,22 +247,8 @@ esac
             .unwrap()
     }
     fn listeners(&self) -> BTreeSet<String> {
-        let pid = self.child.as_ref().unwrap().id().to_string();
-        let output = Command::new("lsof")
-            .args(["-nP", "-a", "-p", &pid, "-iTCP", "-sTCP:LISTEN", "-Fn"])
-            .output()
-            .expect("inspect the wrapper's TCP listeners with lsof");
-        assert!(
-            output.status.success(),
-            "lsof failed for wrapper PID {pid}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let listeners: BTreeSet<String> = String::from_utf8(output.stdout)
-            .unwrap()
-            .lines()
-            .filter_map(|line| line.strip_prefix('n'))
-            .map(str::to_owned)
-            .collect();
+        let pid = self.child.as_ref().unwrap().id();
+        let listeners = tcp_listeners(pid);
         assert!(
             listeners.contains(self.url.trim_start_matches("http://")),
             "desktop API listener missing for wrapper PID {pid}: {listeners:?}"
@@ -303,6 +384,36 @@ fn now() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn proc_lists_owned_listeners_with_their_bound_addresses() {
+    let loopback = TcpListener::bind("127.0.0.1:0").unwrap();
+    let wildcard = TcpListener::bind("0.0.0.0:0").unwrap();
+    let ipv6 = match TcpListener::bind("[::1]:0") {
+        Ok(listener) => Some(listener),
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(nix::libc::EAFNOSUPPORT | nix::libc::EADDRNOTAVAIL)
+            ) =>
+        {
+            None
+        }
+        Err(error) => panic!("bind IPv6 loopback listener: {error}"),
+    };
+    let client = std::net::TcpStream::connect(loopback.local_addr().unwrap()).unwrap();
+    let (_accepted, _) = loopback.accept().unwrap();
+    let listeners = tcp_listeners(std::process::id());
+    for listener in [&loopback, &wildcard].into_iter().chain(ipv6.as_ref()) {
+        let address = listener.local_addr().unwrap().to_string();
+        assert!(
+            listeners.contains(&address),
+            "missing {address}: {listeners:?}"
+        );
+    }
+    assert!(!listeners.contains(&client.local_addr().unwrap().to_string()));
 }
 
 #[test]

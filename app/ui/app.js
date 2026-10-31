@@ -85,7 +85,9 @@
   // Le démarrage n’attend pas le Mac : la table native remplace la table vide dès qu’elle est lue.
   const unavailable = () => { throw new Error("Notation indisponible."); };
   let ratings = { list() { return []; }, recordGood: unavailable, recordBad: unavailable, exportDocument() { return { notations: [] }; } };
-  const ratingsReady = openRatings().then((table) => { if (table) ratings = table; }, () => {});
+  let ratingsOpening = null;
+  const ratingsReady = () => ratingsOpening ??= openRatings().then((table) => { if (table) ratings = table; }, () => { ratingsOpening = null; });
+  ratingsReady();
   let pendingRating = null;
   let findState = { open: false, query: "", index: 0, matches: [], conversationId: null };
   let followAfterLayout = null;
@@ -1725,7 +1727,7 @@
   }
 
   async function exportConversation() {
-    await ratingsReady;
+    await ratingsReady();
     const conversation = currentConversation();
     if (!conversation) return;
     const notations = ratings.list().filter((row) => row.conversation_id === conversation.id);
@@ -1735,7 +1737,7 @@
   }
 
   async function exportRatings() {
-    await ratingsReady;
+    await ratingsReady();
     downloadJson(ratings.exportDocument(), "ezerbot-notations.json");
     closeMenu();
   }
@@ -1794,7 +1796,7 @@
   async function rateGood(message) {
     const conversation = currentConversation();
     if (!conversation || !message?.id) return;
-    await ratingsReady;
+    await ratingsReady();
     try { await ratings.recordGood({ conversationId: conversation.id, messageId: message.id, runId: message.payload?.run_id || null }); }
     catch { notify("Impossible d’enregistrer la notation."); return; }
     notify("Bon résultat enregistré.");
@@ -2074,7 +2076,7 @@
   $("rating-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!pendingRating) return;
-    await ratingsReady;
+    await ratingsReady();
     const selected = [...$("rating-form").querySelectorAll('input[name="motif"]')].find((input) => input.checked);
     try { await ratings.recordBad({
       conversationId: pendingRating.conversationId,

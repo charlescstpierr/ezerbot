@@ -50,28 +50,30 @@ struct RatingsDocument {
 }
 
 // The Linux shell's origin changes with its port on every launch, so browser
-// storage cannot keep these. The document stays opaque, as in the macOS bridge.
-fn ratings(app: &App, method: &str, body: &[u8]) -> Result<Value, ApiError> {
+// storage cannot keep these. Each write resends a window's whole document: rows
+// merge by id so that two windows on one data folder keep each other's votes.
+fn ratings(app: &mut App, method: &str, body: &[u8]) -> Result<Value, ApiError> {
     if method == "GET" {
-        let value: Option<Option<String>> = app
+        let mut statement = app
             .connection
-            .query_row(
-                "SELECT ratings FROM wrapper_preferences WHERE account_id = ?1",
-                [ACCOUNT],
-                |row| row.get(0),
-            )
-            .optional()?;
-        return Ok(json!({"value": value.flatten()}));
+            .prepare("SELECT row FROM wrapper_ratings ORDER BY rowid")?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(json!({"value": format!("[{}]", rows.join(","))}));
     }
+    let invalid = || ApiError::new(400, "Notation invalide.");
     let input: RatingsDocument = parse(body)?;
-    if !serde_json::from_str::<Value>(&input.value).is_ok_and(|value| value.is_array()) {
-        return Err(ApiError::new(400, "Notation invalide."));
+    let rows: Vec<Value> = serde_json::from_str(&input.value).map_err(|_| invalid())?;
+    let transaction = app.connection.transaction()?;
+    for row in &rows {
+        let id = row["id"].as_str().ok_or_else(invalid)?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO wrapper_ratings (id, row) VALUES (?1, ?2)",
+            params![id, row.to_string()],
+        )?;
     }
-    let (theme, accent) = app.preferences()?;
-    app.connection.execute(
-        "INSERT INTO wrapper_preferences (account_id, theme, accent, ratings) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(account_id) DO UPDATE SET ratings = excluded.ratings",
-        params![ACCOUNT, theme, accent, input.value],
-    )?;
+    transaction.commit()?;
     Ok(json!({"ok": true}))
 }
 

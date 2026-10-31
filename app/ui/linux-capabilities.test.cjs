@@ -56,37 +56,49 @@ test("macOS without a Linux capability object keeps its native panels and shortc
   assert.match(app.paragraph.textContent, /sur ce Mac/);
 });
 
-async function openRatings({ shell, webkit }) {
+function ratingsContext({ shell, webkit, read = async () => ({ value: "[]" }) }) {
   const calls = [];
-  const rating = source.slice(source.indexOf("  async function openRatings() {"), source.indexOf("  // Le démarrage n’attend pas le Mac"));
+  const rating = source.slice(source.indexOf("  async function openRatings() {"), source.indexOf("  let pendingRating = null;"));
   const context = {
     window: {
       EzerbotShell: shell, webkit,
       GrokbotChat: {
-        createNativeRatingTable: (bridge) => ({ table: "durable", bridge }),
+        createNativeRatingTable: async (bridge) => { await bridge.postMessage({ command: "read" }); return { table: "durable", bridge }; },
         createRatingTable: () => ({ table: "browser" }),
       },
     },
     localStorage: {},
-    api: async (path, body) => { calls.push([path, body]); return { value: "[]" }; },
+    api: async (path, body) => { calls.push([path, body]); return body ? { ok: true } : read(); },
   };
-  const table = await runInNewContext(`${rating}\nopenRatings();`, context);
-  return { table, calls };
+  runInNewContext(`${rating}\nglobalThis.opened = async () => { await ratingsReady(); return ratings; };`, context);
+  return { opened: context.opened, calls };
 }
 
-test("Linux keeps ratings in the wrapper because browser storage cannot survive a restart", async () => {
-  const { table, calls } = await openRatings({ shell: { platform: "linux" } });
-  assert.equal(table.table, "durable");
-  assert.equal(await table.bridge.postMessage({ command: "read" }), "[]");
-  await table.bridge.postMessage({ command: "write", value: "[1]" });
+test("Linux routes ratings to the wrapper, whose storage outlives the shell's origin", async () => {
+  const { opened, calls } = ratingsContext({ shell: { platform: "linux" } });
+  const { table, bridge } = await opened();
+  assert.equal(table, "durable");
+  await bridge.postMessage({ command: "write", value: "[1]" });
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["/api/ratings", null], ["/api/ratings", { value: "[1]" }]]);
 });
 
+test("a failed first ratings read is retried instead of disabling ratings for the session", async () => {
+  let reads = 0;
+  const { opened } = ratingsContext({
+    shell: { platform: "linux" },
+    read: async () => { reads += 1; if (reads === 1) throw new Error("moteur indisponible"); return { value: "[]" }; },
+  });
+  const unavailable = await opened();
+  assert.throws(() => unavailable.recordGood(), /Notation indisponible/);
+  assert.equal((await opened()).table, "durable");
+  assert.equal(reads, 2);
+});
+
 test("macOS keeps its native ratings bridge and a plain browser its local table", async () => {
-  const native = { postMessage() {} };
-  const mac = await openRatings({ webkit: { messageHandlers: { ezerbotRatings: native } } });
-  assert.equal(mac.table.bridge, native);
-  assert.equal((await openRatings({})).table.table, "browser");
+  const native = { postMessage: async () => "[]" };
+  const mac = await ratingsContext({ webkit: { messageHandlers: { ezerbotRatings: native } } }).opened();
+  assert.equal(mac.bridge, native);
+  assert.equal((await ratingsContext({}).opened()).table, "browser");
 });
 
 test("Linux screen and demonstration modules do not create controls before registration", () => {

@@ -250,8 +250,11 @@ CREATE TABLE IF NOT EXISTS wrapper_preferences (
     accent TEXT NOT NULL DEFAULT 'citron',
     model TEXT,
     effort TEXT,
-    fast INTEGER NOT NULL DEFAULT 0,
-    ratings TEXT
+    fast INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS wrapper_ratings (
+    id TEXT PRIMARY KEY,
+    row TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS wrapper_generation (
     account_id TEXT NOT NULL,
@@ -707,7 +710,6 @@ impl App {
             ("wrapper_preferences", "model", "TEXT"),
             ("wrapper_preferences", "effort", "TEXT"),
             ("wrapper_preferences", "fast", "INTEGER NOT NULL DEFAULT 0"),
-            ("wrapper_preferences", "ratings", "TEXT"),
             (
                 "wrapper_messages",
                 "kind",

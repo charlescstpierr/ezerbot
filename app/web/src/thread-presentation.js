@@ -47,7 +47,8 @@ export function conversationReplyError(message) {
 }
 
 function toolProblem(message) {
-  const { call, outcome, approval_status } = message.payload || {};
+  const { call, outcome, approval_status, code } = message.payload || {};
+  if (code === "uncertain") return "L’action a été interrompue et son résultat est inconnu. Vérifiez son effet avant de réessayer.";
   if (outcome?.status !== "failed" && !outcome?.output?.isError
     && !["échec", "annulé", "délai dépassé", "arrêtée"].includes(outcome?.output?.status)) return null;
   if (approvalProblems[approval_status]) return approvalProblems[approval_status];
@@ -107,6 +108,7 @@ export function presentThread(orderedMessages) {
       continue;
     }
     if (message.kind === "task") {
+      if (payload.event_kind === "turn_ended" && payload.turn_end === "budget_exhausted" && payload.task_status?.status !== "done") messages.push(problem(message, "Le budget de ce tour est épuisé : la tâche n’est pas terminée."));
       if (latestTasks.get(payload.run_id) !== message.id) continue;
       const completed = payload.task_status?.status === "done" && typeof payload.task_status.summary === "string" && payload.task_status.summary.trim();
       if (completed) {

@@ -3027,6 +3027,7 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         )
         .unwrap_or_else(|_| run.bot_id.clone());
     let mut outcome = result.as_ref().map(|e| e.payload["outcome"].clone());
+    let mut code = result.as_ref().map(|e| e.payload["code"].clone());
     // A cancellation settles the engine call immediately, but the process owner
     // may finish draining its bounded output a few milliseconds later.
     if event.payload["name"]
@@ -3046,6 +3047,7 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         if let Some((stored, authority)) = stored {
             if let Some(value) = stored.and_then(|s| serde_json::from_str(&s).ok()) {
                 outcome = Some(value);
+                code = None;
             }
             if let Some(value) = authority.and_then(|s| serde_json::from_str(&s).ok()) {
                 admission = Some(value);
@@ -3066,7 +3068,7 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         "tool",
         String::new(),
         json!({"run_id":run_id,"run_status":run.status,"call":display_call,"outcome":outcome.clone(),
-            "authorized_by":admission,"requesting_bot":requester,
+            "code":code,"authorized_by":admission,"requesting_bot":requester,
             "approval_status":super::forms::tool_approval_status(ctx,run_id,&call),
             "screen_image":screen_image,
             "connector":super::mcp::call_display(ctx,&call.name,&call.arguments)}),

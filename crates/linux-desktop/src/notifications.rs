@@ -50,6 +50,19 @@ impl Notifier {
         DesktopProxy::new(&self.connection).map_err(|_| Unavailable)
     }
 
+    /// Whether the bus still answers, whatever the state of the notification server.
+    pub fn is_connected(&self) -> bool {
+        self.connection
+            .call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus.Peer"),
+                "Ping",
+                &(),
+            )
+            .is_ok()
+    }
+
     pub fn is_ready(&self) -> bool {
         self.proxy()
             .is_ok_and(|proxy| proxy.get_capabilities().is_ok())

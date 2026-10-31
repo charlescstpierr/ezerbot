@@ -19,7 +19,7 @@ const BODY: &str = "Ouvrez Ezerbot pour consulter cet événement.";
 const REMEMBERED: usize = 64;
 
 static LIVE: Mutex<Option<Notifier>> = Mutex::new(None);
-/// Outlives the connection: notifications stay on the desktop after a failed delivery.
+/// Outlives the connection: a server that broadcasts clicks still reaches the next one.
 static TARGETS: Mutex<VecDeque<(Shown, String)>> = Mutex::new(VecDeque::new());
 
 fn live() -> MutexGuard<'static, Option<Notifier>> {
@@ -47,8 +47,9 @@ fn connect(bus: &Bus) -> Result<Notifier, Unavailable> {
     Ok(notifier)
 }
 
-/// Runs `action` on the one process-wide notifier, connecting on first use. A failure drops
-/// the connection so that the next delivery reconnects.
+/// Runs `action` on the one process-wide notifier, connecting on first use. Servers send a
+/// click to the connection that showed the notification, so a failure drops the connection
+/// only when the bus is gone: the next delivery then reconnects.
 fn with_live<T>(
     bus: &Bus,
     action: impl FnOnce(&Notifier) -> Result<T, Unavailable>,
@@ -57,8 +58,9 @@ fn with_live<T>(
     if slot.is_none() {
         *slot = Some(connect(bus)?);
     }
-    let result = action(slot.as_ref().expect("connected above"));
-    if result.is_err() {
+    let notifier = slot.as_ref().expect("connected above");
+    let result = action(notifier);
+    if result.is_err() && !notifier.is_connected() {
         *slot = None;
     }
     result

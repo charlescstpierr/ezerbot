@@ -32,7 +32,7 @@
     if (!yolo || yolo.error) { settings.append(node("p", yolo?.error || "Mode YOLO indisponible.")); return; }
     const on = yolo.mode === "yolo";
     settings.append(node("p", on
-      ? "Activé : tous les outils sont ouverts (terminal et fichiers dans votre dossier personnel, connecteurs, écran du Mac, documents, délégation, routines, mémoire) et les approbations partent seules. Chaque action reste visible dans le fil (« Fait automatiquement ») et dans le journal ci-dessous."
+      ? "Activé : tous les outils sont ouverts (terminal et fichiers dans votre dossier personnel, connecteurs, écran du Mac, documents, délégation, routines, mémoire) et les approbations partent seules. Les actions restent dans le journal ci-dessous. La conversation montre les réponses du bot et les documents ou images qu’il vous remet."
       : "Désactivé : chaque action protégée affiche une carte d’approbation, et les outils puissants suivent leurs réglages un à un. Le Mode YOLO les ouvre tous d’un seul clic."));
     const modes = node("div", null, "yolo-modes"); modes.setAttribute("role", "group"); modes.setAttribute("aria-label", "Mode d’autorisation");
     modes.append(

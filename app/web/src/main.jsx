@@ -16,6 +16,7 @@ import { createVoiceReader, voiceNeedsAction } from "./voice-conversation.js";
 import { mountFloating } from "./floating.jsx";
 import { sourceOpening } from "./sources.js";
 import { demonstrationSummaryView } from "./demonstration-presentation.js";
+import { threadActivity } from "./thread-presentation.js";
 
 const roots = new WeakMap();
 if (document.getElementById("floating-root")) mountFloating(document.getElementById("floating-root"));
@@ -45,7 +46,7 @@ window.GrokbotChat = {
   composerConnectionState,
   renderThread(container, props) {
     if (!roots.has(container)) roots.set(container, createRoot(container));
-    roots.get(container).render(<Thread {...props} />);
+    roots.get(container).render(<Thread {...props} activity={threadActivity(props)} />);
   },
 
   // Returns a stand-in for the former <textarea>.

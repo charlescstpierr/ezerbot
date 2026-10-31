@@ -163,7 +163,7 @@
 }
 
 /* The small part of Tailwind's reset that Streamdown's classes rely on. */
-:where(.gb-thread) :where(*, ::before, ::after) { border: 0 solid var(--line); }
+:where(.gb-thread, .gb-interventions) :where(*, ::before, ::after) { border: 0 solid var(--line); }
 :where(.gb-markdown, .gb-overlay) :where(h1, h2, h3, h4, h5, h6, p, ul, ol, pre, blockquote, figure, table) { margin: 0; }
 :where(.gb-markdown, .gb-overlay) :where(ul, ol) { padding: 0; }
 :where(.gb-markdown, .gb-overlay) :where(table) { border-collapse: collapse; text-indent: 0; }
@@ -171,6 +171,12 @@
 :where(.gb-markdown, .gb-overlay) :where(button) { padding: 0; }
 
 .gb-thread { --gb-avatar-width: 30px; width: min(760px, calc(100% - 54px)); margin: 0 auto; padding: 30px 0 22px; display: flex; flex-direction: column; gap: 26px; }
+.gb-interventions { --gb-avatar-width: 30px; width: min(760px, calc(100% - 54px)); margin: 0 auto; padding: 0 0 22px; display: flex; flex-direction: column; gap: 16px; }
+.gb-interventions .lucide { width: 14px; height: 14px; }
+.gb-local-intervention { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.gb-local-intervention .gb-local-input, .gb-local-intervention .gb-local-failure { flex-basis: 100%; }
+.gb-conversation-note > p { margin: 0; font-size: 14px; line-height: 1.75; }
+.gb-delegation-result { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.75; }
 .gb-thread .lucide, .gb-composer .lucide { width: 14px; height: 14px; flex: 0 0 auto; stroke-width: 1.8; }
 .gb-icon-button { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; color: var(--subtle); transition: background .15s, color .15s; }
 .gb-icon-button:hover { background: var(--soft); color: var(--text); }
@@ -272,6 +278,8 @@ button.gb-quote-chip:hover { color: var(--text); }
 .gb-markdown [data-streamdown="code-block-body"]:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 
 .gb-typing { align-items: center; }
+.gb-thinking { align-items: center; color: var(--muted); font-size: 13px; gap: 10px; }
+.gb-thinking .gb-avatar { width: 22px; height: 20px; margin: 0; }
 .gb-queued { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border-radius: 8px; background: var(--soft); color: var(--muted); font-size: 11.5px; }
 .gb-stop-solid { fill: currentColor; }
 .gb-group-stopped { color: var(--muted); }
@@ -313,6 +321,7 @@ a.gb-retry { text-decoration: none; }
 @keyframes gb-dot { 0%, 60%, 100% { transform: translateY(0); opacity: .45; } 30% { transform: translateY(-4px); opacity: 1; } }
 @media (max-width: 760px) {
   .gb-thread { --gb-avatar-width: 26px; width: calc(100% - 32px); padding-top: 24px; gap: 22px; }
+  .gb-interventions { --gb-avatar-width: 26px; width: calc(100% - 32px); }
   .gb-bubble { max-width: 92%; }
   .gb-avatar { width: 26px; height: 23px; }
 }

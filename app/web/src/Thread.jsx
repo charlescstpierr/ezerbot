@@ -23,7 +23,9 @@ import { citeMarkdown, hasSources, textWithSources } from "./sources.js";
 import { PageQuote } from "./page-quote.jsx";
 import { SourcesContext, SourcesLine, citeComponents, citeTags } from "./sources.jsx";
 import { MemoryUsedPill } from "./memory-used.jsx";
-import { signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
+import { signInCardState, replyProblemState, visibleNotice } from "./connection-view.js";
+import { presentThread, conversationReplyError } from "./thread-presentation.js";
+import { LocalIntervention } from "./local-intervention.jsx";
 
 // A capability adds only cards/<name>.jsx exporting `kind` and `Card`.
 // Cards receive message, busy, and onAction(action, detail), routed by the shell.
@@ -177,10 +179,6 @@ function UserMessage({ message, memoSpeed, busy, onCopy, onRetry, onReact, onThr
   );
 }
 
-function Dots() {
-  return <div className="gb-dots" aria-hidden="true"><i /><i /><i /></div>;
-}
-
 function SignInCard({ message, actions }) {
   const view = signInCardState({ message, ...actions });
   return (
@@ -196,7 +194,7 @@ function SignInCard({ message, actions }) {
 }
 
 function ReplyProblem({ message, actions }) {
-  const { signin, advice, error, retry, retryDisabled, retryTitle } = replyProblemState(message, actions);
+  const { signin, advice, error, retry, retryDisabled, retryTitle } = replyProblemState({ ...message, error: conversationReplyError(message) }, actions);
   if (signin) return <SignInCard message={message} actions={actions} />;
   const limit = message.error_kind === "limit";
   return (
@@ -223,7 +221,6 @@ function TurnLabel({ message }) {
 function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName, onRateGood, onRateBad, menuOpen, onMenuOpenChange }) {
   const content = useRef(null);
   const streaming = message.state === "streaming";
-  const toolPreparing = preparingTool(message);
   const queued = message.payload?.turn_status === "queued";
   const group = Boolean(message.payload?.turn_id || actions.isGroup);
   const cited = hasSources(message);
@@ -271,11 +268,11 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
               </SourcesContext.Provider>
             </div>
           )
-          : queued && message.payload?.wait_reason === "signin" ? <SignInCard message={message} actions={actions} /> : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : "En attente"}</span> : streaming && !toolPreparing && <Dots />}
+          : queued && message.payload?.wait_reason === "signin" ? <SignInCard message={message} actions={actions} /> : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : "En attente"}</span> : null}
         <MessageAttachments message={message} align="start" markdown />
         {!streaming && <div className="gb-provenance"><SourcesLine message={message} onOpenSource={actions.onOpenSource} /><MemoryUsedPill message={message} onOpenMemory={actions.onOpenMemory} /></div>}
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
-        {visibleNotice(message) && (!queued || message.payload?.parent_turn_id) && (toolPreparing ? <div className="gb-pending" role="status"><Clock /><div className="gb-pending-copy"><strong>Préparation d’un outil</strong><p>Aucune action n’a encore été exécutée.</p></div></div> : <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>)}
+        {visibleNotice(message) && (!queued || message.payload?.parent_turn_id) && <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>}
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
             <MessageMenu message={message} busy={false} text={copyText || ""} expanded={menuOpen} onOpenChange={onMenuOpenChange} onCopy={actions.onCopy} onReact={actions.onReact} onThread={actions.onThread} onResend={actions.onResend} onDelete={actions.onDelete} />
@@ -291,21 +288,30 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
   );
 }
 
-function Typing({ createMascot, botName }) {
+function Thinking({ createMascot, botName, runId, showName }) {
   return (
-    <article className="gb-message gb-assistant gb-typing" aria-label={`${botName} prépare sa réponse`}>
+    <div className="gb-message gb-assistant gb-thinking" role="status" aria-label={`${botName} réfléchit`} data-active-run={runId}>
       <Mascot create={createMascot} />
-      <Dots />
-    </article>
+      <span>{showName && `${botName} · `}Réfléchit</span>
+    </div>
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed, onOpenSource, onOpenMemory, onOpenPage }) {
+function ConversationNote({ message, createMascot }) {
+  return <article className={`gb-message gb-assistant gb-conversation-note gb-conversation-${message.presentation.kind}`} data-message-id={message.id} data-local-state={message.presentation.localState}>
+    <Mascot create={createMascot} />
+    <p className="gb-content" role="status" data-find-body>{message.presentation.text}</p>
+  </article>;
+}
+
+export function Thread({ messages, activity = [], busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed, onOpenSource, onOpenMemory, onOpenPage }) {
   const [openMenuId, setOpenMenuId] = useState(null);
   const onMenuOpenChange = (messageId, open) => setOpenMenuId((current) => messageMenuOpenId(current, messageId, open));
   const appearance = useAppearance();
   const overlay = useRef(null);
   const threadRoot = useRef(null);
+  const interventionsRoot = useRef(null);
+  const interventionFocus = useRef(null);
   const portal = useRef(() => overlay.current).current;
   const mermaid = useMemo(() => mermaidPlugin(appearance), [appearance]);
   // A new math plugin once chat-math.js arrives makes Streamdown typeset the formulas.
@@ -313,8 +319,18 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThr
   const plugins = useMemo(() => ({ code, mermaid, math: createMathPlugin() }), [mermaid, arrived]);
   const threadAction = isGroup || isTask ? undefined : onThread;
   const actions = useMemo(() => ({ onCopy, onReact, onThread: threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource, onOpenMemory }), [onCopy, onReact, threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource, onOpenMemory]);
-  const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);
-  const last = ordered[ordered.length - 1];
+  const presentation = useMemo(() => presentThread(collapseMemoryReceipts(orderThread(messages), isGroup)), [messages, isGroup]);
+  const ordered = presentation.messages;
+  const localCount = presentation.interventions.filter((item) => item.kind === "local").length;
+  useLayoutEffect(() => {
+    const previous = interventionFocus.current;
+    if (!previous || previous.isConnected) return;
+    interventionFocus.current = null;
+    if (document.activeElement && document.activeElement !== document.body) return;
+    const target = interventionsRoot.current?.querySelector("button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled)")
+      || document.querySelector('#composer-input [contenteditable="true"]');
+    target?.focus({ preventScroll: true });
+  }, [presentation]);
   const findAnchor = useRef(null);
   useLayoutEffect(() => {
     const root = threadRoot.current;
@@ -347,15 +363,17 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThr
     reveal();
     onLayout?.();
     return () => { cancelAnimationFrame(frame); clearFindMarks(root); };
-  }, [ordered, onLayout, find, onFindMatches]);
+  }, [ordered, activity, onLayout, find, onFindMatches]);
   return (
     <Tooltip.Provider delayDuration={350}>
+      <div className="gb-conversation">
       <div className="gb-thread" ref={threadRoot}>
         {ordered.map((message) => {
           const delegated = message.payload?.source === "delegation";
           const author = bots.find((bot) => bot.id === (delegated ? message.payload.from_bot : message.payload?.bot_id));
           const authorName = author?.name || (delegated ? "bot parent" : botName);
           const authorMascot = author && createBotMascot ? createBotMascot(author) : createMascot;
+          if (message.presentation) return <ConversationNote key={message.id} message={message} createMascot={authorMascot} />;
           if (message.kind === "turn-heading") return (
             <div className="gb-message gb-assistant gb-turn-heading" key={message.id}>
               <Mascot create={authorMascot} />
@@ -385,8 +403,24 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThr
             ? <UserMessage key={message.id} message={message} memoSpeed={memoSpeed} busy={busy} onCopy={onCopy} onRetry={onRetry} onReact={onReact} onThread={threadAction} onResend={onResend} onDelete={onDelete} onOpenPage={onOpenPage} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} />
             : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} onRateGood={onRateGood} onRateBad={onRateBad} />;
         })}
-        {busy && last?.role === "user" && chatKinds.has(last.kind) && <Typing createMascot={createMascot} botName={botName} />}
+        {activity.map((run) => {
+          const author = bots.find((bot) => bot.id === run.bot_id);
+          return <Thinking key={run.run_id} runId={run.run_id} botName={author?.name || botName} createMascot={author && createBotMascot ? createBotMascot(author) : createMascot} showName={isGroup || activity.length > 1} />;
+        })}
         <div className="gb-overlay" ref={overlay} />
+      </div>
+      {presentation.interventions.length > 0 && <section className="gb-interventions" aria-label="Demandes et contrôles" ref={interventionsRoot} onFocusCapture={(event) => { interventionFocus.current = event.target; }}>
+        {presentation.interventions.map((intervention, index) => {
+          const { message } = intervention;
+          const onAction = (action, detail) => onCardAction?.(message, action, detail);
+          const Approval = cards.get("approval");
+          return <div className="gb-card-slot" key={message.id} data-notification-card={message.id} data-run-id={message.payload?.run_id}>
+            {intervention.kind === "approval"
+              ? <Approval message={message} busy={busy || !engineConnected} onAction={onAction} />
+              : <LocalIntervention intervention={intervention} busy={busy} connected={engineConnected} index={presentation.interventions.slice(0, index).filter((item) => item.kind === "local").length} count={localCount} onAction={onAction} />}
+          </div>;
+        })}
+      </section>}
       </div>
     </Tooltip.Provider>
   );

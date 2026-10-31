@@ -260,6 +260,8 @@ impl App {
             .arg("--data-dir")
             .arg(home.join("state"))
             .env("DISPLAY", &screen.name)
+            .env("GDK_BACKEND", "x11")
+            .env_remove("WAYLAND_DISPLAY")
             .env("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
             .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", home.join("config"))

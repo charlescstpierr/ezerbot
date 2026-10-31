@@ -5,7 +5,7 @@ const { spawn } = require("node:child_process");
 const { mkdtempSync, readFileSync, rmSync, existsSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
-const { chromeBinary } = require("../chrome-binary.cjs");
+const { chromeBinary, pageTarget } = require("../chrome-binary.cjs");
 const { connectCdp } = require("../local-api-client.cjs");
 
 const pause = () => new Promise(done => setTimeout(done, 20));
@@ -97,7 +97,7 @@ async function fixture(t) {
     if (chrome && chrome.exitCode === null) { chrome.kill("SIGTERM"); await new Promise(done => chrome.once("exit", done)); }
     server.closeAllConnections();
     await new Promise(done => server.close(done));
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10 });
     t.diagnostic(JSON.stringify(calls.map(({ url, reader }) => ({ url, reader }))));
   });
   await new Promise(done => server.listen(0, "127.0.0.1", done));
@@ -108,8 +108,7 @@ async function fixture(t) {
     if (!port) await pause();
   }
   assert.ok(port, "Chrome ouvre son propre port CDP");
-  const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then(response => response.json());
-  cdp = await connectCdp(targets.find(target => target.type === "page").webSocketDebuggerUrl);
+  cdp = await connectCdp((await pageTarget(port)).webSocketDebuggerUrl);
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1140, height: 780, deviceScaleFactor: 1, mobile: false });
   const run = async source => {
     const result = await cdp.send("Runtime.evaluate", { expression: `(${source})()`, awaitPromise: true, returnByValue: true });

@@ -10,7 +10,7 @@ const { createServer } = require("node:http");
 const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
-const { chromeBinary } = require("./chrome-binary.cjs");
+const { chromeBinary, pageTarget } = require("./chrome-binary.cjs");
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -136,17 +136,6 @@ function debuggingPort(directory, chrome) {
   })();
 }
 
-async function pageTarget(port) {
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
-    const found = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
-    if (found) return found;
-    await sleep(20);
-  }
-  throw new Error("chrome did not open a page target");
-}
-
 // First line of the child's stdout. Rejects, with the exit status, if the child ends first.
 function readLine(child, details = () => "") {
   const stream = child.stdout;
@@ -223,7 +212,7 @@ async function launchFixture(t, { documents, viewport, binary = join(__dirname, 
     }));
     fake.server?.closeAllConnections();
     if (fake.server) await new Promise(resolve => fake.server.close(resolve));
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10 });
   });
   const whileRunning = (work) => Promise.race([work, ...watches.map((watch) => watch.failed)]);
 

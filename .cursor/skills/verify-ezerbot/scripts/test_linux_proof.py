@@ -33,19 +33,21 @@ def png(width: int = 4, height: int = 3) -> bytes:
 
 
 class VerdictTests(unittest.TestCase):
-    def evidence(self, *, error: str | None = None, failing: str | None = None, manifest: bool = True) -> Path:
+    def evidence(self, *, error: str | None = None, failing: str | None = None, manifest: bool = True, omit: str | None = None) -> Path:
         root = Path(tempfile.mkdtemp(prefix="linux-verdict-"))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(root)], check=True))
         captures = root / "captures"
         captures.mkdir()
         features = []
         views = []
-        for feature, view in (("accueil", "home-dark"), ("reponse-fil", "conversation-dark"), ("reponse-fil", "thread-open"), ("parametres-connecteurs", "settings-connectors")):
+        for feature, view in linux_verdict.EXPECTED:
             status = "fail" if view == failing else "pass"
             if status == "pass":
                 (captures / f"{view}.png").write_bytes(png())
                 views.append({"id": view, "file": f"{view}.png", "sha256": hashlib.sha256(png()).hexdigest()})
             features.append({"feature": feature, "view": view, "file": f"{view}.png", "status": status})
+        features = [item for item in features if item["view"] != omit]
+        views = [item for item in views if item["id"] != omit]
         (captures / "result.json").write_text(json.dumps({"sha": SHA, "error": error, "features": features}))
         if manifest:
             (captures / "manifest.json").write_text(json.dumps({"sha": SHA, "renderer": "r", "chrome_version": "c", "views": views}))
@@ -76,6 +78,20 @@ class VerdictTests(unittest.TestCase):
         status, lines = linux_verdict.verdict(evidence, SHA, drive_status=1)
         self.assertEqual(status, "FIX")
         self.assertIn("## Erreur d’outil", lines)
+
+    def test_each_omitted_view_is_fix(self) -> None:
+        for _, view in linux_verdict.EXPECTED:
+            with self.subTest(view=view):
+                status, lines = linux_verdict.verdict(self.evidence(omit=view), SHA)
+                self.assertEqual(status, "FIX")
+                self.assertTrue(any(line.endswith(f"`captures/{view}.png` | ÉCHEC |") for line in lines))
+
+    def test_registry_matches_the_driver(self) -> None:
+        listed = subprocess.run(
+            ["node", "-e", "const m=require(process.argv[1]); console.log(JSON.stringify(m.selectedViews().map(v => [v.feature, v.id])))", str(SCRIPTS / "linux_drive.cjs")],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual([tuple(item) for item in json.loads(listed.stdout)], list(linux_verdict.EXPECTED))
 
     def test_tampered_capture_is_fix(self) -> None:
         evidence = self.evidence()
@@ -143,6 +159,28 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         self.assertTrue(run.name.startswith("ezv."))
         self.assertFalse(run.exists())
         self.assertIn(f"nettoyage: {run} supprimé", result.stdout)
+
+    def test_detached_run_process_is_killed_after_the_step(self) -> None:
+        scratch = Path(tempfile.mkdtemp(prefix="linux-lib-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(scratch)], check=True))
+        spawn = ("import subprocess,sys; p=subprocess.Popen(['sleep','300'], start_new_session=True); "
+                 "open(sys.argv[1],'w').write(str(p.pid))")
+        script = (f'set -euo pipefail\nsource {SCRIPTS / "linux_run_lib.sh"}\necho "$run" > {scratch}/run\n'
+                  f'step . env TMPDIR="$run/tmp" python3 -c "{spawn}" {scratch}/pid\n'
+                  f'cat /proc/$(cat {scratch}/pid)/stat > {scratch}/after-step 2>/dev/null || true\n')
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pid = int((scratch / "pid").read_text())
+        self.assert_dead(pid)
+        after = (scratch / "after-step").read_text()
+        self.assertTrue(after == "" or after.split(") ")[-1][0] == "Z", "le processus détaché a survécu à l'étape")
+
+    def test_unrelated_process_is_left_alone(self) -> None:
+        other = subprocess.Popen(["sleep", "300"], start_new_session=True)
+        self.addCleanup(lambda: (other.kill(), other.wait()))
+        script = f'set -euo pipefail\nsource {SCRIPTS / "linux_run_lib.sh"}\nstep . true\n'
+        subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60, check=True)
+        self.assertIsNone(other.poll())
 
     def test_interrupted_step_is_killed_by_the_trap(self) -> None:
         scratch = Path(tempfile.mkdtemp(prefix="linux-lib-"))

@@ -43,17 +43,17 @@ target="$root/target/verify-linux"
 export PATH="$(dirname -- "$cargo"):$PATH"
 iso=(env -i PATH="$PATH" HOME="$run/home" XDG_CONFIG_HOME="$run/config" XDG_CACHE_HOME="$run/cache"
   XDG_DATA_HOME="$run/data" XDG_RUNTIME_DIR="$run/runtime" TMPDIR="$run/tmp" LANG=C.UTF-8 TZ=UTC)
-step "$root/app/web" "${iso[@]}" npm_config_cache="$run/cache/npm" nice -n 10 npm ci --no-audit --no-fund --loglevel=error
-step "$root/app/web" "${iso[@]}" nice -n 10 npm run build --silent
 mkdir -p "$target"
-# Un seul build Cargo à la fois pour cet outil ; toolchain et registre du compte, cible dédiée.
+# Un seul run à la fois par checkout : npm, Cargo et le pilote lisent les mêmes assets générés.
+# Le verrou reste tenu jusqu'à la fin du run (fermé par la sortie du script).
 exec 8>"$target/.verify-build.lock"
 flock 8
+step "$root/app/web" "${iso[@]}" npm_config_cache="$run/cache/npm" nice -n 10 npm ci --no-audit --no-fund --loglevel=error
+step "$root/app/web" "${iso[@]}" nice -n 10 npm run build --silent
 rm -f -- "$target/debug/grokbot-wrapper"
 step "$root" env CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" PATH="$PATH" \
   TMPDIR="$run/tmp" CARGO_TARGET_DIR="$target" CARGO_BUILD_JOBS=3 EZERBOT_GIT_COMMIT="$sha" EZERBOT_GIT_COMMIT_UNIX="$unix" \
   nice -n 10 "$cargo" build -p grokbot-wrapper --locked
-exec 8>&-
 binary="$target/debug/grokbot-wrapper"
 [[ -x $binary ]] || fail 'le build n’a pas produit grokbot-wrapper.'
 

@@ -14,6 +14,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from verify_lib import commit_exists, png_size, repo_root
 
 FEATURES_DIR = Path(__file__).resolve().parent.parent / "features"
+# Same registry as FEATURES in linux_drive.cjs (a test keeps both equal): every view is required.
+EXPECTED: tuple[tuple[str, str], ...] = (
+    ("accueil", "home-dark"),
+    ("reponse-fil", "conversation-dark"),
+    ("reponse-fil", "thread-menu"),
+    ("reponse-fil", "thread-open"),
+    ("reponse-fil", "thread-reply"),
+    ("reponse-fil", "thread-main"),
+    ("parametres-connecteurs", "settings-dark"),
+    ("parametres-connecteurs", "settings-connectors"),
+)
 
 
 def verdict(evidence: Path, sha: str, drive_status: int = 0) -> tuple[str, list[str]]:
@@ -38,19 +49,26 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0) -> tuple[str, list[
     ok = drive_status == 0 and result is not None and result.get("error") is None
     ok = ok and manifest is not None and manifest.get("sha") == sha
     entries: dict[str, bool] = {}
-    for item in (result or {}).get("features", []):
-        shot = captures / item["file"]
-        passed = item["status"] == "pass" and shot.is_file() and (FEATURES_DIR / f"{item['feature']}.md").is_file()
+    reported = {(item.get("feature"), item.get("view")): item for item in (result or {}).get("features", [])}
+    if result is not None and set(reported) != set(EXPECTED):
+        ok = False
+        lines_extra = sorted(f"{feature}/{view}" for feature, view in set(reported) ^ set(EXPECTED))
+    else:
+        lines_extra = []
+    for feature, view in EXPECTED:
+        item = reported.get((feature, view), {"feature": feature, "view": view, "file": f"{view}.png", "status": "absent"})
+        shot = captures / f"{view}.png"
+        passed = item["status"] == "pass" and item.get("file") == f"{view}.png" and shot.is_file() and (FEATURES_DIR / f"{feature}.md").is_file()
         if passed:
             png_size(shot)
             digest = hashlib.sha256(shot.read_bytes()).hexdigest()
             # Sans manifeste (vue suivante en échec), l'empreinte n'est pas comparée ; le verdict reste FIX.
-            passed = manifest is None or hashes.get(item["file"]) == digest
-        entries[item["feature"]] = entries.get(item["feature"], True) and passed
+            passed = manifest is None or hashes.get(f"{view}.png") == digest
+        entries[feature] = entries.get(feature, True) and passed
         ok = ok and passed
-        lines.append(f"| `{item['feature']}` | `{item['view']}` | `captures/{item['file']}` | {'ok' if passed else 'ÉCHEC'} |")
-    if not entries:
-        ok = False
+        lines.append(f"| `{feature}` | `{view}` | `captures/{view}.png` | {'ok' if passed else 'ÉCHEC'} |")
+    if lines_extra:
+        lines += ["", "Vues inattendues ou manquantes dans result.json : " + ", ".join(f"`{name}`" for name in lines_extra)]
     lines += ["", "Entrées : " + (", ".join(f"`{name}` {'ok' if good else 'ÉCHEC'}" for name, good in entries.items()) or "aucune")]
     if result is None:
         lines += ["", "## Erreur d’outil", "", f"Le pilote n’a écrit aucun résultat (code {drive_status})."]

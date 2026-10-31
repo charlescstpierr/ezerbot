@@ -140,8 +140,14 @@ async function fixture(t, phone) {
   }
   if (startupError) throw startupError;
   assert.ok(port, "Chrome ouvre un port CDP dans son profil isolé");
-  const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then(response => response.json());
-  cdp = await connectCdp(targets.find(target => target.type === "page").webSocketDebuggerUrl);
+  let target;
+  for (let n = 0; n < 500 && !target; n += 1) {
+    const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then(response => response.json());
+    target = targets.find(item => item.type === "page");
+    if (!target) await pause();
+  }
+  assert.ok(target, "Chrome ouvre sa page");
+  cdp = await connectCdp(target.webSocketDebuggerUrl);
   const browserErrors = [];
   cdp.on("Runtime.exceptionThrown", ({ exceptionDetails }) => browserErrors.push(exceptionDetails.exception?.description || exceptionDetails.text));
   await cdp.send("Runtime.enable");

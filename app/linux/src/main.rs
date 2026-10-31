@@ -29,6 +29,7 @@ mod linux {
         ffi::OsString,
         io::Cursor,
         path::PathBuf,
+        process::{Command, Stdio},
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
@@ -49,6 +50,22 @@ mod linux {
 
     enum ShellEvent {
         Quit,
+        LinkFailed(url::Url),
+    }
+
+    fn open_in_browser(url: url::Url, proxy: EventLoopProxy<ShellEvent>) {
+        // xdg-open can last as long as the browser it starts.
+        std::thread::spawn(move || {
+            let status = Command::new("xdg-open")
+                .arg(url.as_str())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if !status.is_ok_and(|status| status.success()) {
+                let _ = proxy.send_event(ShellEvent::LinkFailed(url));
+            }
+        });
     }
 
     struct Shell {
@@ -190,6 +207,8 @@ mod linux {
         let api = Arc::clone(&backend.api);
         let navigation = api.origin.clone();
         let downloads = api.origin.clone();
+        let links = api.origin.clone();
+        let link_proxy = event_loop.create_proxy();
         let resource_api = Arc::clone(&api);
         let webview = WebViewBuilder::new()
             .with_initialization_script_for_main_only(api.initialization_script(), true)
@@ -199,7 +218,12 @@ mod linux {
             )
             .with_navigation_handler(move |url| navigation.allows_navigation(&url))
             .with_download_started_handler(move |url, _| downloads.allows_navigation(&url))
-            .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
+            .with_new_window_req_handler(move |url, _| {
+                if let Some(url) = links.external_link(&url) {
+                    open_in_browser(url, link_proxy.clone());
+                }
+                NewWindowResponse::Deny
+            })
             .with_permission_handler(|_| PermissionResponse::Deny)
             .with_incognito(true)
             .with_devtools(false)
@@ -224,7 +248,18 @@ mod linux {
                     }
                     | Event::LoopDestroyed
             );
-            if stopping {
+            if let Event::UserEvent(ShellEvent::LinkFailed(url)) = &event {
+                let dialog = gtk::MessageDialog::new(
+                    Some(window.gtk_window()),
+                    gtk::DialogFlags::DESTROY_WITH_PARENT,
+                    gtk::MessageType::Error,
+                    gtk::ButtonsType::Close,
+                    "Le navigateur par défaut n'a pas pu ouvrir ce lien.",
+                );
+                dialog.set_secondary_text(Some(url.as_str()));
+                dialog.connect_response(|dialog, _| dialog.close());
+                dialog.show_all();
+            } else if stopping {
                 if let Some(dialog) = failure_dialog.take() {
                     dialog.close();
                 }

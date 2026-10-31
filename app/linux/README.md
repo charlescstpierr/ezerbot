@@ -3,7 +3,7 @@
 Installez Rust avec rustup. Sur Debian ou Ubuntu, installez les bibliothèques système.
 
 ```sh
-sudo apt install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+sudo apt install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev xdg-utils
 tools/build-app-linux.sh
 "app/build/linux/Ouvrir Ezerbot.sh"
 ```
@@ -17,6 +17,8 @@ Le script respecte `CARGO` et le dossier de compilation effectif de Cargo.
 Les conversations et les notations restent dans le dossier de données XDG d’Ezerbot.
 L’option `--data-dir /chemin/isolé` permet un lancement avec des données séparées.
 Le menu **Quitter Ezerbot**, Ctrl+Q et la fermeture de la fenêtre arrêtent aussi le wrapper.
+Les liens qui demandent une nouvelle fenêtre s’ouvrent dans le navigateur par défaut avec `xdg-open`.
+Seules les pages web hors du wrapper sortent de la coque. Un échec du navigateur s’affiche dans une boîte de dialogue.
 
 ## Fonctions natives non portées
 
@@ -47,6 +49,6 @@ Les preuves de la coque doivent utiliser sa vraie fenêtre sous Xvfb.
 Sous Xvfb, utilisez `WEBKIT_DISABLE_DMABUF_RENDERER=1` pour permettre le rendu
 de WebKit sans export de buffers graphiques. Le lanceur ne force pas cette option.
 
-La CI de #595 doit installer `libgtk-3-dev` et `libwebkit2gtk-4.1-dev`
-avant de compiler le workspace qui comprend maintenant cette coque.
-Le contrôle **Coque Linux** installe ces dépendances et vérifie la coque séparément.
+`cargo test -p ezerbot-linux` construit le wrapper puis ouvre la vraie fenêtre dans son propre Xvfb.
+`tests/window.rs` constate l’affichage, fait un échange avec le faux fournisseur et clique des liens.
+Le test échoue si `Xvfb` manque et il ne couvre que les builds de développement.

@@ -69,6 +69,14 @@ impl BackendOrigin {
             && !url.path().starts_with("/api/")
     }
 
+    /// The page the default browser may open for a new-window request.
+    pub fn external_link(&self, raw: &str) -> Option<Url> {
+        let url = Url::parse(raw).ok()?;
+        let backend =
+            url.host_str() == Some("127.0.0.1") && url.port_or_known_default() == Some(self.port);
+        (matches!(url.scheme(), "http" | "https") && !backend).then_some(url)
+    }
+
     fn resource_target(&self, raw: &str, method: &Method) -> Option<String> {
         if method != Method::GET && method != Method::HEAD {
             return None;
@@ -269,6 +277,25 @@ mod tests {
                 BackendOrigin::parse(raw).is_none(),
                 "accepted untrusted origin"
             );
+        }
+    }
+
+    #[test]
+    fn only_web_pages_outside_the_backend_leave_for_the_browser() {
+        let origin = BackendOrigin::parse("http://127.0.0.1:32123").unwrap();
+        let oauth = "https://accounts.example/authorize?client_id=x&state=y";
+        assert_eq!(origin.external_link(oauth).unwrap().as_str(), oauth);
+        assert!(origin.external_link("http://127.0.0.1:9/fake").is_some());
+        for raw in [
+            "http://127.0.0.1:32123/floating",
+            "http://127.0.0.1:32123/api/secret",
+            "file:///etc/passwd",
+            "ezerbot-resource://127.0.0.1:32123/api/file",
+            "javascript:alert(1)",
+            "ezerbot://oauth",
+            "not a url",
+        ] {
+            assert!(origin.external_link(raw).is_none(), "{raw}");
         }
     }
 

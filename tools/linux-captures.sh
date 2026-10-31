@@ -14,7 +14,7 @@ mkdir -p "$output" "$cache"
 exec 9>"$output/.lock"
 flock -n 9 || fail 'Another Linux capture run owns the capture cache and output lock.'
 
-scratch=$(mktemp -d "$cache/run.XXXXXX")
+scratch=$(mktemp -d /tmp/ezcap.XXXXXX)
 worktree="$scratch/source"
 staging=''
 backup=''

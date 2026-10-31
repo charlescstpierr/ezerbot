@@ -6,11 +6,13 @@ Le rendu utilise le vrai wrapper, son interface compilée et un fournisseur fact
 
 ## Prérequis
 
-La commande exige Linux, Git, Bash, Node avec WebSocket, npm, Rust, Chrome ou Chromium, Xvfb et xauth. Elle utilise aussi `flock` et `setsid`. Sur la box, Node 20 active WebSocket avec `--experimental-websocket`.
+La commande exige Linux, Git, Bash, Node avec WebSocket, npm, Rust, Chrome ou Chromium, Xvfb et xauth. Elle utilise aussi `flock` et `setsid`. Sur la box, Node 20 active WebSocket avec `--experimental-websocket`. Rust doit respecter `rust-toolchain.toml`. Sur la box, placez `/home/box/.cargo/bin` avant `/usr/bin` dans `PATH` pour utiliser rustup et Rust 1.99.1.
 
 Le commit demandé doit contenir le pilote de capture et la fixture attendue. Un ancien commit incompatible provoque un refus avant le build. Le checkout qui lance la commande peut avoir des modifications locales. Le worktree détaché ne les reprend pas.
 
 Le verrou propre aux captures sérialise les exécutions de ce checkout. Le cache Cargo dédié est `target/linux-captures/`. Il reste réutilisable après le nettoyage des ressources temporaires.
+
+Le worktree et le profil temporaire utilisent un chemin court sous `/tmp/ezcap.*`. Chrome crée un socket Unix dont le chemin doit rester court.
 
 ## Produire les preuves d'une PR
 

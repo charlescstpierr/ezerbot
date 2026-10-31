@@ -2311,6 +2311,18 @@ mod tests {
                     path.display()
                 );
             }
+            let keyring = root.join("runtime-reel/keyring");
+            for (name, path) in [
+                ("read_file", keyring.join("note.txt")),
+                ("list_directory", keyring.clone()),
+                ("write_file", keyring.join("intrus.txt")),
+            ] {
+                assert!(
+                    touches_app_data_at(&ctx, &call(name, &path), Some(&home)).unwrap(),
+                    "{name} {}",
+                    path.display()
+                );
+            }
             assert!(!touches_app_data_at(
                 &ctx,
                 &call("read_file", &root.join("ordinaire.txt")),
@@ -2331,6 +2343,9 @@ mod tests {
         for view in ["vue-trousseau", "vue-donnees"] {
             fs::create_dir(root.join(view)).unwrap();
         }
+        fs::create_dir_all(root.join("runtime-reel/keyring")).unwrap();
+        fs::write(root.join("runtime-reel/keyring/note.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(root.join("runtime-reel"), root.join("lien-runtime")).unwrap();
         let out = std::process::Command::new("/usr/bin/unshare")
             .args(["--user", "--map-root-user", "--mount"])
             .arg(std::env::current_exe().unwrap())
@@ -2340,6 +2355,7 @@ mod tests {
                 "--nocapture",
             ])
             .env(INSIDE, &root)
+            .env("XDG_RUNTIME_DIR", root.join("lien-runtime"))
             .output()
             .unwrap();
         assert!(

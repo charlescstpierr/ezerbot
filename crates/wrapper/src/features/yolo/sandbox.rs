@@ -769,6 +769,22 @@ Num       RefCount Protocol Flags    Type St Inode Path
     }
 
     #[test]
+    fn a_protected_root_behind_an_unreadable_folder_stops_the_launch() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TestDir::new("ezerbot-bwrap");
+        let parent = dir.join("share");
+        let root = parent.join("keyrings");
+        std::fs::create_dir_all(&root).unwrap();
+        let mode = |bits| std::fs::Permissions::from_mode(bits);
+        std::fs::set_permissions(&parent, mode(0o000)).unwrap();
+        let hidden = masks(std::slice::from_ref(&root));
+        std::fs::set_permissions(&parent, mode(0o700)).unwrap();
+        let error = hidden.expect_err("un chmod rendrait la racine lisible, sans masque");
+        assert_eq!(error.status, 403);
+        assert!(masks(std::slice::from_ref(&root)).is_ok());
+    }
+
+    #[test]
     fn a_socket_with_a_line_break_in_its_path_is_masked() {
         let dir = TestDir::new("ezerbot-bwrap");
         let socket = dir.join("session\nbus.sock");

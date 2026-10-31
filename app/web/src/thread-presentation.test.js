@@ -168,6 +168,17 @@ test("un connecteur à rétablir le dit sans bouton ni nom d’outil", () => {
   assert.equal(note, "Le connecteur GitHub ne répond plus. Ouvrez Paramètres › Connecteurs pour le rétablir.");
 });
 
+test("un geste d’écran refusé par le système garde sa consigne de permission", () => {
+  const native = readFileSync(new URL("../../native/screen.h", import.meta.url), "utf8");
+  const reasons = [...native.matchAll(/@"(Permission [^"]+)"/g)].map(([, reason]) => reason);
+  assert.equal(reasons.length, 3);
+  for (const reason of [...reasons, "Permissions Accessibilité et Enregistrement de l’écran manquantes. Ouvrez Réglages Système pour autoriser Ezerbot."]) {
+    const gesture = tool({ outcome: { status: "failed", reason } });
+    gesture.payload.call = { call_id: "call", name: "computer_click", arguments: { x: 1, y: 2 } };
+    assert.deepEqual(notes([gesture]), [reason]);
+  }
+});
+
 test("un programme de fond terminé le dit, car rien ne réveille le modèle", () => {
   const finished = (description) => {
     const program = tool({ outcome: { status: "done", output: { background: true, status: "terminé", stdout: "trace", exit_code: 0 } } });

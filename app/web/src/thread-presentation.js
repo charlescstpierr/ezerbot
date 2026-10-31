@@ -40,6 +40,7 @@ export function conversationReplyError(message) {
 }
 
 // Settings and card actions run without a model: their result is the only narrator.
+// Screen reasons name the system permission, which the model cannot see.
 const hostRun = (runId) => typeof runId === "string" && runId.startsWith("mcp-host-");
 
 function toolProblem(payload, settledApprovals) {
@@ -54,7 +55,7 @@ function toolProblem(payload, settledApprovals) {
   if (outcome?.output?.status === "délai dépassé") return "La commande a pris trop de temps et s’est arrêtée.";
   if (call?.name === "generate_image" && outcome?.reason === "La génération de cette image a été refusée pour des raisons de sécurité.") return outcome.reason;
   const label = failureLabels[call?.name] || "L’action n’a pas abouti.";
-  if (hostRun(runId)) return humanSentence(outcome?.reason, label);
+  if (hostRun(runId) || call?.name?.startsWith("computer_")) return humanSentence(outcome?.reason, label);
   return connector?.recoverable === true ? `Le connecteur ${connector.server} ne répond plus. Ouvrez Paramètres › Connecteurs pour le rétablir.` : label;
 }
 

@@ -104,7 +104,6 @@ async function fixture(t) {
       if (chrome.exitCode === null && chrome.signalCode === null) { chrome.kill("SIGKILL"); await exited; }
     }
     server.closeAllConnections();
-    server.closeAllConnections();
     await new Promise(done => server.close(done));
     await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
     t.diagnostic(JSON.stringify(calls.map(({ url, reader }) => ({ url, reader }))));
@@ -117,8 +116,14 @@ async function fixture(t) {
     if (!port) await pause();
   }
   assert.ok(port, "Chrome ouvre son propre port CDP");
-  const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then(response => response.json());
-  cdp = await connectCdp(targets.find(target => target.type === "page").webSocketDebuggerUrl);
+  let target;
+  for (let n = 0; n < 500 && !target; n++) {
+    const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then(response => response.json());
+    target = targets.find(item => item.type === "page");
+    if (!target) await pause();
+  }
+  assert.ok(target, "Chrome ouvre sa page");
+  cdp = await connectCdp(target.webSocketDebuggerUrl);
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1140, height: 780, deviceScaleFactor: 1, mobile: false });
   const run = async source => {
     const result = await cdp.send("Runtime.evaluate", { expression: `(${source})()`, awaitPromise: true, returnByValue: true });

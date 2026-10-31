@@ -49,7 +49,7 @@ function pngInfo(bytes) {
   return { width, height, sha256: createHash("sha256").update(bytes).digest("hex") };
 }
 
-async function capture(sha, binary, output, signal) {
+async function capture(sha, binary, output, signal, views = VIEWS) {
   const source = resolve(__dirname, "..");
   if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error("Expected a full lowercase commit SHA.");
   const actual = execFileSync("git", ["-C", source, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -114,8 +114,8 @@ async function capture(sha, binary, output, signal) {
     })()`), stage, cancelled.signal);
     await evaluate(`document.documentElement.dataset.theme='dark';
       const style=document.createElement('style'); style.textContent='*,*::before,*::after { animation:none!important; transition:none!important; caret-color:transparent!important; }'; document.head.append(style);`);
-    const views = [];
-    for (const view of VIEWS) {
+    const captured = [];
+    for (const view of views) {
       stage = `${view.id} readiness`;
       await bounded(evaluate(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); ${view.action}`), stage, cancelled.signal);
       await waitFor(() => check(view.ready), stage, cancelled.signal);
@@ -133,11 +133,11 @@ async function capture(sha, binary, output, signal) {
       const { data } = await send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false });
       const file = `${view.id}.png`;
       writeFileSync(join(output, file), Buffer.from(data, "base64"), { flag: "wx" });
-      views.push({ id: view.id, label: view.label, file, ...pngInfo(readFileSync(join(output, file))) });
+      captured.push({ id: view.id, label: view.label, file, ...pngInfo(readFileSync(join(output, file))) });
     }
     stage = "manifest";
     const version = await send("Browser.getVersion");
-    const manifest = { schema_version: 1, sha, captured_at: new Date().toISOString(), platform: "linux", renderer: "chromium-web-fallback", chrome_version: version.product, viewport: VIEWPORT, views };
+    const manifest = { schema_version: 1, sha, captured_at: new Date().toISOString(), platform: "linux", renderer: "chromium-web-fallback", chrome_version: version.product, viewport: VIEWPORT, views: captured };
     writeFileSync(join(output, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
     return manifest;
   } catch (error) {

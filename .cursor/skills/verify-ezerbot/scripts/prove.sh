@@ -3,6 +3,10 @@
 set -euo pipefail
 DIR=$(cd "$(dirname "$0")" && pwd)
 export EZERBOT_VERIFY_LOGIN_HOME="${EZERBOT_VERIFY_LOGIN_HOME:-$HOME}"
+# Linux (plateforme principale) : sans choix explicite de navigateur, preuve sous Xvfb privé.
+if [[ "$(uname -s)" == "Linux" && -z "${EZERBOT_VERIFY_BROWSER:-}" ]]; then
+  exec bash "$DIR/prove-linux.sh" "$@"
+fi
 if [[ "$(uname -s)" != "Darwin" && -z "${EZERBOT_VERIFY_BROWSER:-}" ]]; then
   export EZERBOT_VERIFY_BROWSER=chrome-headless
 fi

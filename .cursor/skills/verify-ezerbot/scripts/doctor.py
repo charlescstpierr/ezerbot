@@ -32,7 +32,16 @@ def check(name: str, passed: bool, detail: str) -> str | None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Contrôle en lecture seule de l'instance")
     parser.add_argument("--evidence", type=Path)
+    parser.add_argument(
+        "--prerequisites",
+        action="store_true",
+        help="Linux : vérifie Xvfb, Chrome, Node, cargo, disque, sans lancer d'instance",
+    )
     args = parser.parse_args()
+    if args.prerequisites:
+        failed = [item for item in linux_prerequisites() if item]
+        print("doctor: echec" if failed else "doctor: ok")
+        raise SystemExit(1 if failed else 0)
     evidence = args.evidence or Path(os_evidence())
     run = load_run(evidence)
     failures: list[str] = []
@@ -96,6 +105,44 @@ def main() -> None:
         print("doctor: echec")
         raise SystemExit(1)
     print("doctor: ok")
+
+
+MIN_FREE_BYTES = 25 * 1024**3
+
+
+def linux_prerequisites(repo: Path | None = None) -> list[str]:
+    """Read-only checks for the Xvfb path; each failing check returns its name."""
+    import os
+    import platform
+    import shutil
+    import subprocess
+
+    repo = repo or repo_root()
+    results: list[str | None] = []
+    results.append(check("plateforme", sys.platform.startswith("linux"), platform.system()))
+    for tool in ("git", "xvfb-run", "Xvfb", "xauth", "flock", "setsid", "nice", "node", "npm"):
+        found = shutil.which(tool)
+        results.append(check(tool, bool(found), found or "absent du PATH"))
+    chrome = next(
+        (found for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser") if (found := shutil.which(name))),
+        None,
+    )
+    results.append(check("chrome", bool(chrome), os.path.realpath(chrome) if chrome else "google-chrome ou chromium absent"))
+    node_ok, node_detail = False, "node absent"
+    if shutil.which("node"):
+        probe = subprocess.run(
+            ["node", "--experimental-websocket", "-e", "process.exit(typeof WebSocket === 'function' ? 0 : 1)"],
+            capture_output=True,
+            text=True,
+        )
+        version = subprocess.run(["node", "--version"], capture_output=True, text=True).stdout.strip()
+        node_ok, node_detail = probe.returncode == 0, f"{version} WebSocket {'présent' if probe.returncode == 0 else 'absent'}"
+    results.append(check("node-websocket", node_ok, node_detail))
+    cargo = Path(os.environ.get("EZERBOT_VERIFY_CARGO", Path.home() / ".cargo/bin/cargo")).expanduser()
+    results.append(check("cargo", cargo.is_file() and os.access(cargo, os.X_OK), str(cargo)))
+    free = shutil.disk_usage(repo).free
+    results.append(check("disque", free >= MIN_FREE_BYTES, f"{free // 1024**3} Gio libres sous {repo} (minimum 25)"))
+    return [item for item in results if item]
 
 
 def os_evidence() -> str:

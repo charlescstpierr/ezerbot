@@ -4,7 +4,7 @@ Le workflow [CI Linux](../.github/workflows/linux-pr.yml) lance le job `linux-bu
 
 Après le premier run, Charles marque `linux-build-test` comme contrôle requis dans la protection de `main`. Ce réglage est hors PR. Le job `compile` de [Coque macOS](../.github/workflows/macos-shell.yml) reste inchangé. Le choix de rendre ce contrôle macOS requis appartient aussi au réglage de protection, hors PR.
 
-Le job utilise Ubuntu 24.04, Node 24 et le toolchain de `rust-toolchain.toml`. Il installe `lsof` pour les tests de webhooks et vérifie le Chrome fourni par l'image Ubuntu avec `app/ui/chrome-binary.cjs`. Le cache contient les téléchargements Cargo et les dépendances compilées, avec une clé liée au système, à l'architecture, au toolchain, à `Cargo.lock` et au commit. Il ne contient ni journal ni données d'Ezerbot.
+Le job utilise Ubuntu 24.04, Node 24 et le toolchain de `rust-toolchain.toml`. Il installe `lsof` pour les tests de webhooks, ainsi que `pkg-config`, `libgtk-3-dev` et `libwebkit2gtk-4.1-dev` pour compiler la coque Linux du workspace. Il vérifie le Chrome fourni par l'image Ubuntu avec `app/ui/chrome-binary.cjs`. Le cache contient les téléchargements Cargo et les dépendances compilées, avec une clé liée au système, à l'architecture, au toolchain, à `Cargo.lock` et au commit. Il ne contient ni journal ni données d'Ezerbot.
 
 La restauration et la sauvegarde du cache sont séparées. Une compilation réussie permet la sauvegarde même si les tests échouent, sauf annulation. Une clé déjà restaurée à l'identique n'est pas sauvegardée à nouveau.
 

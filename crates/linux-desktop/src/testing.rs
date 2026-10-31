@@ -273,7 +273,13 @@ pub struct Notification {
     pub expire_timeout: i32,
 }
 
-struct Server(Arc<Mutex<Vec<Notification>>>);
+#[derive(Default)]
+struct Sent {
+    calls: Mutex<Vec<Notification>>,
+    closed: Mutex<Vec<u32>>,
+}
+
+struct Server(Arc<Sent>);
 
 #[zbus::interface(name = "org.freedesktop.Notifications")]
 impl Server {
@@ -289,7 +295,7 @@ impl Server {
         hints: HashMap<String, OwnedValue>,
         expire_timeout: i32,
     ) -> u32 {
-        let mut calls = self.0.lock().unwrap();
+        let mut calls = self.0.calls.lock().unwrap();
         calls.push(Notification {
             app_name,
             summary,
@@ -303,6 +309,10 @@ impl Server {
         calls.len() as u32
     }
 
+    fn close_notification(&self, id: u32) {
+        self.0.closed.lock().unwrap().push(id);
+    }
+
     fn get_capabilities(&self) -> Vec<String> {
         vec!["actions".into(), "body".into()]
     }
@@ -313,26 +323,31 @@ impl Server {
 }
 pub struct FakeNotifications {
     connection: Connection,
-    calls: Arc<Mutex<Vec<Notification>>>,
+    sent: Arc<Sent>,
 }
 
 impl FakeNotifications {
     pub fn new(bus: &PrivateBus) -> Self {
-        let calls = Arc::default();
+        let sent = Arc::default();
         let connection = Builder::address(bus.address())
             .unwrap()
             .name(NOTIFICATIONS)
             .unwrap()
-            .serve_at(NOTIFICATIONS_PATH, Server(Arc::clone(&calls)))
+            .serve_at(NOTIFICATIONS_PATH, Server(Arc::clone(&sent)))
             .unwrap()
             .build()
             .unwrap();
-        Self { connection, calls }
+        Self { connection, sent }
     }
 
     pub fn calls(&self) -> Vec<Notification> {
-        self.calls.lock().unwrap().clone()
+        self.sent.calls.lock().unwrap().clone()
     }
+
+    pub fn closed(&self) -> Vec<u32> {
+        self.sent.closed.lock().unwrap().clone()
+    }
+
     pub fn click(&self, id: u32) {
         self.invoke(id, "default");
     }

@@ -51,6 +51,9 @@ au relevé initial. #387 est fermé. Tout autre échec rend la suite rouge.
 demandé. Il distingue les attributs de fichier, de module, de test et de bloc,
 en ignorant les commentaires et les littéraux. Une forme conditionnelle non
 prise en charge provoque une erreur plutôt qu'un inventaire incomplet.
+Les modules `#[path]` suivent leur chemin explicite et transmettent les conditions
+de plateforme à leurs descendants. Le chemin est relatif au fichier déclarant,
+ou au répertoire du module inline qui porte la déclaration.
 
 ```sh
 python3 tools/suite-platform-inventory.py --ref 884d8cd
@@ -97,6 +100,9 @@ Le seul artefact publié contient `result.json`. Son nom est
 Les journaux bruts restent privés au runner et ne sont jamais publiés.
 Les noms d'échecs sont des identifiants Rust validés ou des emplacements de tests
 Node relatifs au dépôt. Le résultat ne copie ni diagnostic ni titre Node dynamique.
+Une erreur de préparation ajoute `failure_detail` et écrit le même type et message
+sur stderr. Seuls les messages contrôlés du runner et de l'inventaire sont admis.
+Les autres détails restent masqués, notamment les commandes et diagnostics externes.
 
 Les champs du JSON version 1 sont les suivants.
 
@@ -110,6 +116,7 @@ Les champs du JSON version 1 sont les suivants.
 | `status` | `vert` ou `rouge`. |
 | `counts` | Entiers `passed`, `failed`, `ignored`, `absent_linux`, `partial_linux`, `runtime_branches_linux`, `excluded`. |
 | `failures` | Tableau des identifiants d'échecs et des erreurs de phases. |
+| `failure_detail` | `null` hors échec de préparation, sinon objet `type`, `message` avec un diagnostic contrôlé sans secret. |
 | `known_exclusions` | Tableau d'objets `{"issue":528,"platform":"linux","test":"a_command_that_reaches_the_data_without_naming_it_reads_nothing"}`. Vide sur Mac. |
 | `platform_inventory` | Tableaux `absent`, `partial`, `runtime_branches`, `ignored`, avec des identifiants `chemin::module::test`. |
 | `inventory_delta` | Objets `absent`, `partial`, `runtime_branches`, chacun avec les tableaux `added` et `removed`. |

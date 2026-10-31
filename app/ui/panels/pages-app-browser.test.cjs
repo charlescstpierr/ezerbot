@@ -6,7 +6,7 @@ const { mkdtempSync, readFileSync, existsSync } = require("node:fs");
 const { rm } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
-const { chromeBinary } = require("../chrome-binary.cjs");
+const { chromeBinary, pageTarget } = require("../chrome-binary.cjs");
 const { connectCdp } = require("../local-api-client.cjs");
 
 const pause = () => new Promise(done => setTimeout(done, 20));
@@ -116,14 +116,7 @@ async function fixture(t) {
     if (!port) await pause();
   }
   assert.ok(port, "Chrome ouvre son propre port CDP");
-  let target;
-  for (let n = 0; n < 500 && !target; n++) {
-    const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then(response => response.json());
-    target = targets.find(item => item.type === "page");
-    if (!target) await pause();
-  }
-  assert.ok(target, "Chrome ouvre sa page");
-  cdp = await connectCdp(target.webSocketDebuggerUrl);
+  cdp = await connectCdp((await pageTarget(port)).webSocketDebuggerUrl);
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1140, height: 780, deviceScaleFactor: 1, mobile: false });
   const run = async source => {
     const result = await cdp.send("Runtime.evaluate", { expression: `(${source})()`, awaitPromise: true, returnByValue: true });

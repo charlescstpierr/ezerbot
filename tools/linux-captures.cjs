@@ -98,6 +98,7 @@ async function capture(sha, binary, output, signal) {
       if (served !== readFileSync(join(source, "app/ui", file), "utf8")) throw new Error("Running wrapper assets differ from the target worktree.");
     }
     stage = "synthetic conversation";
+    await evaluate("EzerbotNotifications.focus(false)");
     await bounded(evaluate(`(async () => {
       const post = async (path, body) => { const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}); if (!r.ok) throw Error('fixture request failed'); return r.json(); };
       const {conversation} = await post('/api/conversations', {title:'Préparer la semaine'});

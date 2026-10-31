@@ -574,9 +574,10 @@ fn the_keychain_is_refused_by_the_kernel_however_the_command_is_spelled() {
         .args(["-c", r#"S=security; "$S" default-keychain"#])
         .output()
         .unwrap();
-    if !plain.status.success() {
-        return; // aucun trousseau lisible ici (ex. session sans trousseau) : rien à comparer
-    }
+    assert!(
+        plain.status.success(),
+        "aucun trousseau n'est lisible ici : ce test ne peut rien prouver sur cette machine ({plain:?})"
+    );
     assert!(String::from_utf8_lossy(&plain.stdout).contains("keychain"));
     for (id, command) in [
         ("var", r#"S=security; "$S" default-keychain"#),
@@ -600,6 +601,201 @@ fn the_keychain_is_refused_by_the_kernel_however_the_command_is_spelled() {
             "{id} a lu le trousseau : {out}"
         );
     }
+}
+
+/// Le texte de chaque commande évite le nom des données et des jetons (`"$D"ta`, `*auth*`) :
+/// le filtre de texte les refuserait avant le shell et le test ne prouverait plus le noyau.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_kernel_refuses_the_data_however_the_command_reaches_it() {
+    let mut f = Fixture::new();
+    let data = f.data();
+    let token = f.path.with_extension("chatgpt-auth.json");
+    let token_before = std::fs::read_to_string(&token).unwrap();
+    let names = |dir: &std::path::Path| -> std::collections::BTreeSet<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+    let pid = std::process::id();
+
+    let witness = f.runs_without_a_card(
+        "temoin",
+        "run_shell",
+        f.shell("echo contenu > temoin.txt && mkdir -p dossier-temoin && mv temoin.txt dossier-temoin/deplace.txt && cat dossier-temoin/deplace.txt"),
+    );
+    assert_eq!(witness["status"], "done", "{witness}");
+    assert!(
+        witness["output"]["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("contenu"),
+        "{witness}"
+    );
+    assert!(f.root().join("dossier-temoin/deplace.txt").exists());
+    // Le coffre naît à la première admission, côté hôte : l'instantané vient après.
+    let names_before = names(&data);
+
+    let attempts = [
+        (
+            "ecrire",
+            r#"D=da; echo x > "$D"ta/intrus.txt; echo rc=$?"#.to_owned(),
+        ),
+        (
+            "sous-dossier",
+            r#"D=da; mkdir "$D"ta/sous; echo rc=$?"#.to_owned(),
+        ),
+        (
+            "supprimer",
+            r#"D=da; rm -f "$D"ta/*auth*; echo rc=$?"#.to_owned(),
+        ),
+        (
+            "lister",
+            r#"D=da; ls -a "$D"ta; echo rc=$?"#.to_owned(),
+        ),
+        (
+            "hote-racine",
+            format!(r#"D=da; cat /proc/{pid}/root"$PWD"/"$D"ta/*auth*; ls /proc/{pid}/root"$PWD"/"$D"ta"#),
+        ),
+        (
+            "hote-cwd",
+            format!(r#"D=da; cat /proc/{pid}/cwd/Cargo.toml; ls /proc/{pid}/cwd/; cat /proc/{pid}/cwd/"$D"ta/*auth*"#),
+        ),
+        (
+            "hote-fd",
+            format!(r#"for n in /proc/{pid}/fd/*; do readlink "$n"; done"#),
+        ),
+        (
+            "espace-imbrique-umount",
+            r#"D=da; unshare -Urm sh -c 'umount -l "$1"; grep -r refresh "$1"' sh "$PWD"/"$D"ta"#.to_owned(),
+        ),
+        (
+            "espace-imbrique-bind",
+            r#"mkdir -p pt; unshare -Urm sh -c 'mount --bind "$1" "$2" && grep -r refresh "$2"' sh "$PWD" "$PWD"/pt"#.to_owned(),
+        ),
+    ];
+    let mut seen = String::new();
+    for (id, command) in attempts {
+        let out = f.runs_without_a_card(id, "run_shell", f.shell(&command));
+        assert_eq!(out["status"], "done", "{id} n'a pas tourné : {out}");
+        let stdout = out["output"]["stdout"].as_str().unwrap_or("");
+        assert!(!stdout.contains("rc=0"), "{id} a réussi : {out}");
+        if id == "hote-cwd" {
+            assert!(!stdout.contains("[package]"), "{id} lit l'hôte : {out}");
+        }
+        if id == "hote-fd" {
+            assert_eq!(stdout, "", "{id} lit les descripteurs de l'hôte : {out}");
+        }
+        seen.push_str(&out.to_string());
+    }
+    assert!(!seen.contains("fake-refresh"), "un jeton a fuité : {seen}");
+
+    assert_eq!(std::fs::read_to_string(&token).unwrap(), token_before);
+    for forged in ["intrus.txt", "sous"] {
+        assert!(
+            !data.join(forged).exists(),
+            "{forged} existe dans les données"
+        );
+    }
+    let created: Vec<String> = names(&data)
+        .difference(&names_before)
+        .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
+        .cloned()
+        .collect();
+    assert!(created.is_empty(), "rien de neuf attendu : {created:?}");
+}
+
+/// Un vrai refus du noyau, sans point d'injection en production : le test se relance
+/// dans un espace de noms où la limite d'espaces utilisateur est à zéro.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_kernel_without_namespaces_keeps_the_yolo_mode_off() {
+    if std::env::var_os("EZERBOT_YOLO_SANS_ESPACES").is_none() {
+        let out = std::process::Command::new("/usr/bin/unshare")
+            .args([
+                "-Ur",
+                "/bin/sh",
+                "-c",
+                r#"echo 0 > /proc/sys/user/max_user_namespaces && exec "$@""#,
+                "sh",
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_kernel_without_namespaces_keeps_the_yolo_mode_off",
+                "--nocapture",
+            ])
+            .env("EZERBOT_YOLO_SANS_ESPACES", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "le test relancé a échoué\nstdout : {stdout}\nstderr : {stderr}"
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "le test relancé n'a rien exécuté\nstdout : {stdout}\nstderr : {stderr}"
+        );
+        return;
+    }
+    let refused = std::process::Command::new("/usr/bin/bwrap")
+        .args([
+            "--unshare-user",
+            "--dev-bind",
+            "/",
+            "/",
+            "/bin/sh",
+            "-c",
+            ":",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "le noyau devrait refuser les espaces de noms ici : {refused:?}"
+    );
+    let mut f = Fixture::new();
+    let yolo = f.yolo();
+    assert_eq!(yolo["mode"], "ask", "{yolo}");
+    assert!(
+        yolo["unavailable"]
+            .as_str()
+            .unwrap_or("")
+            .contains("bubblewrap"),
+        "{yolo}"
+    );
+    assert_eq!(yolo["saved"], "yolo", "{yolo}");
+    for bot in yolo["bots"].as_array().unwrap() {
+        assert_eq!(bot["effective"], "ask", "{bot}");
+    }
+    for (path, body) in [
+        ("/api/yolo/mode", json!({"mode":"yolo"})),
+        ("/api/yolo/bot", json!({"bot_id":"grokbot","mode":"yolo"})),
+    ] {
+        let error = f
+            .app
+            .api("POST", path, body.to_string().as_bytes())
+            .expect_err(path);
+        assert_eq!(error.status, 409, "{path} : {}", error.message);
+    }
+    let stored = || {
+        f.db()
+            .query_row("SELECT mode FROM wrapper_yolo_settings", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(stored(), "yolo", "le réglage enregistré ne change pas");
+    f.local("grokbot", true, true);
+    f.send("lance", "run_shell", f.shell("touch lance.txt"));
+    let request = f.request("lance");
+    assert_eq!(request.status, requests::RequestStatus::Pending);
+    assert!(!f.root().join("lance.txt").exists());
+    f.mode("ask");
+    assert_eq!(f.yolo()["saved"], "ask");
 }
 
 /// Un auditeur local qui compte les connexions reçues.

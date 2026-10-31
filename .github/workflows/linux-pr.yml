@@ -62,10 +62,10 @@ jobs:
           cargo build --workspace --locked
       - name: Tester le workspace Rust
         if: ${{ !cancelled() }}
-        # Le bac à sable Linux manque encore, suivi dans https://github.com/charlescstpierr/ezerbot/issues/528.
         run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           df -BG "$GITHUB_WORKSPACE"
-          cargo test --workspace --locked --no-fail-fast -- --skip a_command_that_reaches_the_data_without_naming_it_reads_nothing --exact
+          cargo test --workspace --locked --no-fail-fast
       - name: Tester app/web
         if: ${{ !cancelled() }}
         run: node --test --test-reporter=tap app/web/src/*.test.js

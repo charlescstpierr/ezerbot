@@ -22,46 +22,19 @@ unix=$(git -C "$root" show -s --format=%ct "$sha")
 [[ -n $evidence ]] || evidence="${TMPDIR:-/tmp}/verify-ezerbot-evidence-${sha:0:12}-$(date +%Y%m%dT%H%M%S)-$$"
 evidence=$(realpath -m -- "$evidence")
 case $evidence/ in "$root"/*) fail "les preuves doivent rester hors du dépôt : $evidence" ;; esac
-[[ ! -e $evidence/report.md ]] || fail "dossier de preuves déjà utilisé : $evidence"
+# Un dossier neuf (absent ou vide) garantit que le verdict ne lit que les preuves de ce run.
+if [[ -e $evidence ]] && [[ ! -d $evidence || -n $(ls -A -- "$evidence") ]]; then fail "dossier de preuves déjà utilisé : $evidence"; fi
 mkdir -p "$evidence/captures"
 
-# Dossier du run : chemin court (socket Chrome), TMPDIR dedans, supprimé à la sortie quoi qu'il arrive.
-run=$(mktemp -d /tmp/ezv.XXXXXX)
-mkdir -p "$run/home" "$run/config" "$run/cache" "$run/data" "$run/runtime" "$run/tmp"
-child=''
-cleanup() {
-  local status=$?
-  trap - EXIT INT TERM
-  if [[ -n $child ]]; then
-    kill -TERM -- "-$child" 2>/dev/null || true
-    for ((i = 0; i < 100; i++)); do kill -0 -- "-$child" 2>/dev/null || break; sleep 0.05; done
-    kill -KILL -- "-$child" 2>/dev/null || true
-    wait "$child" 2>/dev/null || true
-  fi
-  rm -rf -- "$run"
-  [[ ! -e $run ]] && printf 'nettoyage: %s supprimé\n' "$run"
-  exit "$status"
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-# Lance une étape dans son propre groupe pour que le nettoyage tue aussi Xvfb, Chrome et le wrapper.
-step() {
-  local directory=$1; shift
-  (cd "$directory" && exec setsid "$@") &
-  child=$!
-  local status=0
-  wait "$child" || status=$?
-  child=''
-  return "$status"
-}
+# shellcheck source=linux_run_lib.sh
+source "$DIR/linux_run_lib.sh"
 
 printf 'verify-ezerbot: commit %s\nverify-ezerbot: preuves %s\n' "$sha" "$evidence"
 if ! python3 "$DIR/doctor.py" --prerequisites >"$evidence/doctor.txt"; then
   cat "$evidence/doctor.txt"; fail 'prérequis Linux manquants (voir doctor.txt).'
 fi
 tail -n 1 "$evidence/doctor.txt"
-dirty=$(git -C "$root" status --porcelain -- crates app/ui app/web Cargo.toml Cargo.lock vendor tools/linux-captures.cjs)
+dirty=$(git -C "$root" status --porcelain -- crates app/ui app/web Cargo.toml Cargo.lock vendor tools/linux-captures.cjs .cursor/skills/verify-ezerbot/scripts)
 [[ -z $dirty ]] || fail "sources compilées modifiées depuis $sha ; committer avant la preuve :
 $dirty"
 
@@ -92,5 +65,4 @@ drive=0
 step "$root" "${iso[@]}" CHROME_BIN="$(realpath "$chrome")" \
   xvfb-run -a -s '-screen 0 1440x900x24 -nolisten tcp' \
   node --experimental-websocket "$DIR/linux_drive.cjs" "$sha" "$binary" "$evidence/captures" || drive=$?
-[[ -f $evidence/captures/result.json ]] || fail "le pilote n’a écrit aucun résultat (code $drive)."
-python3 "$DIR/linux_verdict.py" --evidence "$evidence" --sha "$sha"
+python3 "$DIR/linux_verdict.py" --evidence "$evidence" --sha "$sha" --drive-status "$drive"

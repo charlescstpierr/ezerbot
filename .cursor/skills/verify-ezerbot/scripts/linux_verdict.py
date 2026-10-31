@@ -16,10 +16,12 @@ from verify_lib import commit_exists, png_size, repo_root
 FEATURES_DIR = Path(__file__).resolve().parent.parent / "features"
 
 
-def verdict(evidence: Path, sha: str) -> tuple[str, list[str]]:
+def verdict(evidence: Path, sha: str, drive_status: int = 0) -> tuple[str, list[str]]:
+    """PASS only when this run's driver exited 0 and every mapped view has its PNG in the manifest."""
     captures = evidence / "captures"
-    result = json.loads((captures / "result.json").read_text())
-    if result.get("sha") != sha:
+    result_path = captures / "result.json"
+    result = json.loads(result_path.read_text()) if result_path.is_file() else None
+    if result is not None and result.get("sha") != sha:
         raise SystemExit("result.json ne correspond pas au commit demandé")
     manifest_path = captures / "manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else None
@@ -33,19 +35,29 @@ def verdict(evidence: Path, sha: str) -> tuple[str, list[str]]:
         "| Entrée de la carte | Vue | Capture | Résultat |",
         "|---|---|---|---|",
     ]
-    ok = result.get("error") is None and manifest is not None and manifest.get("sha") == sha
-    for item in result["features"]:
+    ok = drive_status == 0 and result is not None and result.get("error") is None
+    ok = ok and manifest is not None and manifest.get("sha") == sha
+    entries: dict[str, bool] = {}
+    for item in (result or {}).get("features", []):
         shot = captures / item["file"]
-        passed = item["status"] == "pass" and (FEATURES_DIR / f"{item['feature']}.md").is_file()
+        passed = item["status"] == "pass" and shot.is_file() and (FEATURES_DIR / f"{item['feature']}.md").is_file()
         if passed:
             png_size(shot)
             digest = hashlib.sha256(shot.read_bytes()).hexdigest()
             # Sans manifeste (vue suivante en échec), l'empreinte n'est pas comparée ; le verdict reste FIX.
             passed = manifest is None or hashes.get(item["file"]) == digest
+        entries[item["feature"]] = entries.get(item["feature"], True) and passed
         ok = ok and passed
         lines.append(f"| `{item['feature']}` | `{item['view']}` | `captures/{item['file']}` | {'ok' if passed else 'ÉCHEC'} |")
-    if result.get("error"):
+    if not entries:
+        ok = False
+    lines += ["", "Entrées : " + (", ".join(f"`{name}` {'ok' if good else 'ÉCHEC'}" for name, good in entries.items()) or "aucune")]
+    if result is None:
+        lines += ["", "## Erreur d’outil", "", f"Le pilote n’a écrit aucun résultat (code {drive_status})."]
+    elif result.get("error"):
         lines += ["", "## Échec", "", f"`{result['error']}`"]
+    elif drive_status:
+        lines += ["", "## Erreur d’outil", "", f"Le pilote a quitté avec le code {drive_status}."]
     status = "PASS" if ok else "FIX"
     lines += ["", f"{status} {sha}"]
     return status, lines
@@ -55,10 +67,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Verdict de la preuve Linux")
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--sha", required=True)
+    parser.add_argument("--drive-status", type=int, default=1)
     args = parser.parse_args()
     if not commit_exists(repo_root(), args.sha):
         raise SystemExit(f"commit introuvable : {args.sha}")
-    status, lines = verdict(args.evidence, args.sha)
+    status, lines = verdict(args.evidence, args.sha, args.drive_status)
     (args.evidence / "report.md").write_text("\n".join(lines) + "\n")
     print(f"preuves: {args.evidence}")
     print("\n".join(lines))

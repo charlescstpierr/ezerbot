@@ -40,7 +40,7 @@ class VerdictTests(unittest.TestCase):
         captures.mkdir()
         features = []
         views = []
-        for feature, view in (("accueil", "home-dark"), ("reponse-fil", "conversation-dark"), ("parametres-connecteurs", "settings-dark")):
+        for feature, view in (("accueil", "home-dark"), ("reponse-fil", "conversation-dark"), ("reponse-fil", "thread-open"), ("parametres-connecteurs", "settings-connectors")):
             status = "fail" if view == failing else "pass"
             if status == "pass":
                 (captures / f"{view}.png").write_bytes(png())
@@ -57,12 +57,25 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(lines[-1], f"PASS {SHA}")
 
     def test_broken_feature_is_fix_and_keeps_earlier_captures(self) -> None:
-        evidence = self.evidence(error="settings-dark readiness failed.", failing="settings-dark", manifest=False)
+        evidence = self.evidence(error="settings-connectors readiness failed.", failing="settings-connectors", manifest=False)
         status, lines = linux_verdict.verdict(evidence, SHA)
         self.assertEqual(status, "FIX")
         self.assertEqual(lines[-1], f"FIX {SHA}")
         self.assertIn("| `accueil` | `home-dark` | `captures/home-dark.png` | ok |", lines)
-        self.assertIn("| `parametres-connecteurs` | `settings-dark` | `captures/settings-dark.png` | ÉCHEC |", lines)
+        self.assertIn("| `parametres-connecteurs` | `settings-connectors` | `captures/settings-connectors.png` | ÉCHEC |", lines)
+        self.assertIn("Entrées : `accueil` ok, `reponse-fil` ok, `parametres-connecteurs` ÉCHEC", lines)
+
+    def test_failed_driver_exit_is_fix_even_with_complete_captures(self) -> None:
+        status, lines = linux_verdict.verdict(self.evidence(), SHA, drive_status=134)
+        self.assertEqual(status, "FIX")
+        self.assertIn("Le pilote a quitté avec le code 134.", lines)
+
+    def test_missing_result_is_a_tool_error_fix(self) -> None:
+        evidence = self.evidence()
+        (evidence / "captures" / "result.json").unlink()
+        status, lines = linux_verdict.verdict(evidence, SHA, drive_status=1)
+        self.assertEqual(status, "FIX")
+        self.assertIn("## Erreur d’outil", lines)
 
     def test_tampered_capture_is_fix(self) -> None:
         evidence = self.evidence()
@@ -99,12 +112,47 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         ).stdout.splitlines() if ":" in line}
         self.assertTrue({"xvfb-run", "Xvfb", "xauth", "chrome", "node-websocket", "cargo", "disque"} <= names)
 
-    def test_refused_run_still_removes_its_run_folder(self) -> None:
-        before = set(Path("/tmp").glob("ezv.*"))
+    def test_evidence_inside_repo_is_refused(self) -> None:
         result = subprocess.run(["bash", str(SCRIPTS / "prove-linux.sh"), "--evidence", str(SCRIPTS.parents[3] / "inside")], capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn("hors du dépôt", result.stderr)
-        self.assertEqual(set(Path("/tmp").glob("ezv.*")), before)
+
+    def test_used_evidence_folder_is_refused(self) -> None:
+        used = Path(tempfile.mkdtemp(prefix="linux-used-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(used)], check=True))
+        (used / "captures").mkdir()
+        (used / "captures" / "result.json").write_text("{}")
+        result = subprocess.run(["bash", str(SCRIPTS / "prove-linux.sh"), "--evidence", str(used)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("déjà utilisé", result.stderr)
+
+    def assert_dead(self, pid: int) -> None:
+        state = Path(f"/proc/{pid}/stat")
+        alive = state.exists() and state.read_text().split(") ")[-1][0] != "Z"
+        self.assertFalse(alive, f"pid {pid} vivant")
+
+    def test_failed_step_kills_its_descendants_and_removes_the_run_folder(self) -> None:
+        scratch = Path(tempfile.mkdtemp(prefix="linux-lib-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(scratch)], check=True))
+        script = (f'set -euo pipefail\nsource {SCRIPTS / "linux_run_lib.sh"}\necho "$run" > {scratch}/run\n'
+                  f"step . bash -c 'sleep 300 & echo $! > {scratch}/pid; exit 7'\n")
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 7)
+        self.assert_dead(int((scratch / "pid").read_text()))
+        run = Path((scratch / "run").read_text().strip())
+        self.assertTrue(run.name.startswith("ezv."))
+        self.assertFalse(run.exists())
+        self.assertIn(f"nettoyage: {run} supprimé", result.stdout)
+
+    def test_interrupted_step_is_killed_by_the_trap(self) -> None:
+        scratch = Path(tempfile.mkdtemp(prefix="linux-lib-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(scratch)], check=True))
+        script = (f'set -euo pipefail\nsource {SCRIPTS / "linux_run_lib.sh"}\necho "$run" > {scratch}/run\n'
+                  f"(sleep 1; kill -TERM $$) &\nstep . bash -c 'sleep 300 & echo $! > {scratch}/pid; wait'\n")
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 143)
+        self.assert_dead(int((scratch / "pid").read_text()))
+        self.assertFalse(Path((scratch / "run").read_text().strip()).exists())
 
 
 if __name__ == "__main__":

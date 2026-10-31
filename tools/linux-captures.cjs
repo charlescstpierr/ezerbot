@@ -124,7 +124,7 @@ async function capture(sha, binary, output, signal, views = VIEWS) {
         await document.fonts.ready;
         await Promise.all([...document.images].filter(image => image.getClientRects().length).map(async image => { await image.decode(); if (!image.naturalWidth) throw Error('Image did not decode'); }));
         document.activeElement?.blur();
-        window.scrollTo(0,0); document.querySelectorAll('dialog[open],#chat-scroll,#conversation-list').forEach(element => element.scrollTop=0);
+        ${view.keepScroll ? "" : "window.scrollTo(0,0); document.querySelectorAll('dialog[open],#chat-scroll,#conversation-list').forEach(element => element.scrollTop=0);"}
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       })()`), stage, cancelled.signal);
       await waitFor(() => check(view.ready), `${view.id} after paint`, cancelled.signal);

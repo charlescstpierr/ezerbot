@@ -2320,6 +2320,14 @@ mod tests {
                 .unwrap(),
                 "un lien vers le trousseau reste protégé"
             );
+            let alias = root.join("portefeuille-copie");
+            fs::hard_link(home.join(".local/share/kwalletd/login"), &alias).unwrap();
+            for name in ["read_file", "write_file"] {
+                assert!(
+                    touches_app_data_at(&ctx, &call(name, &alias), Some(&home)).unwrap(),
+                    "{name} : un lien dur vers le trousseau reste protégé"
+                );
+            }
         }
         // Un fichier ordinaire, lui, reste lisible.
         assert!(!touches_app_data_at(

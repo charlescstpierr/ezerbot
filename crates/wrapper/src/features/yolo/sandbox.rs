@@ -322,6 +322,24 @@ mod tests {
         spawn(&mut command).unwrap().wait_with_output().unwrap()
     }
 
+    /// Relance un test dans un espace de montage où il peut lier des dossiers, et vérifie
+    /// qu'il y a tourné jusqu'au bout.
+    fn in_a_mount_namespace(test: &str, inside: &str, dir: &Path) {
+        let out = Command::new("/usr/bin/unshare")
+            .args(["--user", "--map-root-user", "--mount"])
+            .arg(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(format!("features::yolo::sandbox::tests::{test}"))
+            .arg("--nocapture")
+            .env(inside, dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() && stdout(&out).contains("refus-vu"),
+            "{out:?}"
+        );
+    }
+
     fn host(cwd: &Path, script: &str) -> Output {
         Command::new("/bin/sh")
             .args(["-c", script])
@@ -617,5 +635,91 @@ Num       RefCount Protocol Flags    Type St Inode Path
         assert!(!masks(&[])
             .unwrap()
             .contains(&dir.canonicalize().unwrap().join("ferme")));
+    }
+
+    #[test]
+    fn one_entry_seen_through_two_roots_stays_one_name() {
+        const INSIDE: &str = "EZERBOT_TEST_DEUX_RACINES";
+        if let Some(dir) = std::env::var_os(INSIDE) {
+            let dir = PathBuf::from(dir);
+            let (data, support) = (dir.join("data"), dir.join("support"));
+            let bound = host(&dir, "mount --bind data support");
+            assert!(bound.status.success(), "{bound:?}");
+            let roots = [data.clone(), support.clone()];
+            assert!(
+                masks(&roots).is_err(),
+                "dossier lié : le lien externe passe"
+            );
+            let unbound = host(&dir, "umount support && touch support/fichier");
+            assert!(unbound.status.success(), "{unbound:?}");
+            let bound = host(&dir, "mount --bind data/secret.txt support/fichier");
+            assert!(bound.status.success(), "{bound:?}");
+            assert!(
+                masks(&roots).is_err(),
+                "fichier lié : le lien externe passe"
+            );
+            println!("refus-vu");
+            return;
+        }
+        let dir = TestDir::new("ezerbot-bwrap");
+        for sub in ["data", "support"] {
+            std::fs::create_dir(dir.join(sub)).unwrap();
+        }
+        std::fs::write(dir.join("data/secret.txt"), "jeton").unwrap();
+        std::fs::hard_link(dir.join("data/secret.txt"), dir.join("dehors.txt")).unwrap();
+        in_a_mount_namespace(
+            "one_entry_seen_through_two_roots_stays_one_name",
+            INSIDE,
+            &dir,
+        );
+    }
+
+    #[test]
+    fn the_source_of_a_mount_inside_a_root_is_masked_too() {
+        const INSIDE: &str = "EZERBOT_TEST_MONTAGE_INTERIEUR";
+        if let Some(dir) = std::env::var_os(INSIDE) {
+            let dir = PathBuf::from(dir);
+            let bound = host(
+                &dir,
+                "mount --bind stockage/jeton.txt data/jeton && mount --bind stockage/coffre data/coffre",
+            );
+            assert!(bound.status.success(), "{bound:?}");
+            let data = dir.join("data");
+            let out = run(
+                std::slice::from_ref(&data),
+                &dir,
+                "cat stockage/jeton.txt stockage/coffre/cle.txt; cat stockage/voisin.txt",
+            );
+            let shown = stdout(&out);
+            assert!(!shown.contains("jeton-monte"), "{shown}");
+            assert!(!shown.contains("cle-montee"), "{shown}");
+            assert!(shown.contains("utile"), "{shown}");
+            println!("refus-vu");
+            return;
+        }
+        let dir = TestDir::new("ezerbot-bwrap");
+        std::fs::create_dir_all(dir.join("stockage/coffre")).unwrap();
+        std::fs::create_dir_all(dir.join("data/coffre")).unwrap();
+        std::fs::write(dir.join("data/jeton"), "").unwrap();
+        std::fs::write(dir.join("stockage/jeton.txt"), "jeton-monte").unwrap();
+        std::fs::write(dir.join("stockage/coffre/cle.txt"), "cle-montee").unwrap();
+        std::fs::write(dir.join("stockage/voisin.txt"), "utile").unwrap();
+        in_a_mount_namespace(
+            "the_source_of_a_mount_inside_a_root_is_masked_too",
+            INSIDE,
+            &dir,
+        );
+    }
+
+    #[test]
+    fn a_socket_with_a_line_break_in_its_path_is_masked() {
+        let dir = TestDir::new("ezerbot-bwrap");
+        let socket = dir.join("session\nbus.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let masked = masks(&[]).unwrap();
+        assert!(
+            masked.contains(&socket.canonicalize().unwrap()),
+            "{masked:?}"
+        );
     }
 }

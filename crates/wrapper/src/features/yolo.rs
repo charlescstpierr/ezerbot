@@ -29,6 +29,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+#[cfg(target_os = "linux")]
+pub(super) mod sandbox;
+
 empty_hooks!(
     tick,
     tools,
@@ -137,9 +140,25 @@ fn bot_override(conn: &Connection, bot: &str) -> Option<&'static str> {
     .map(|mode| if mode == YOLO { YOLO } else { ASK })
 }
 
+/// Le message qui garde le mode éteint tant que le bac à sable du shell ne démarre
+/// pas. Le réglage enregistré n'est pas touché : le mode revient de lui-même.
+fn unavailable() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        (!sandbox::available()).then_some(sandbox::UNAVAILABLE)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// `Some("bot" | "global")` quand ce bot agit sans demander, d'après le réglage
 /// qui s'applique ; `None` quand il demande.
 pub fn source(conn: &Connection, bot: &str) -> Option<&'static str> {
+    if unavailable().is_some() {
+        return None;
+    }
     match bot_override(conn, bot) {
         Some(YOLO) => Some("bot"),
         Some(_) => None,
@@ -387,6 +406,9 @@ pub fn routes(
             if !matches!(input.mode.as_str(), YOLO | ASK) {
                 return Err(ApiError::new(400, "Choisissez « yolo » ou « ask »."));
             }
+            if let (YOLO, Some(message)) = (input.mode.as_str(), unavailable()) {
+                return Err(ApiError::new(409, message));
+            }
             tx.execute(
                 "UPDATE wrapper_yolo_settings SET mode=?1, changed_at=?2 WHERE singleton=1",
                 params![input.mode, now],
@@ -400,6 +422,9 @@ pub fn routes(
             )?;
             if !live {
                 return Err(ApiError::new(404, "Bot introuvable."));
+            }
+            if let (YOLO, Some(message)) = (input.mode.as_str(), unavailable()) {
+                return Err(ApiError::new(409, message));
             }
             match input.mode.as_str() {
                 INHERIT => {
@@ -462,12 +487,16 @@ pub fn state(ctx: &Context<'_>) -> Value {
                 }))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(json!({
-            "mode": global_mode(conn),
+        let mut state = json!({
+            "mode": if unavailable().is_some() { ASK } else { global_mode(conn) },
             "bots": bots,
             "log": log,
             "home": std::env::var("HOME").ok(),
-        }))
+        });
+        if let Some(message) = unavailable() {
+            state["error"] = json!(message);
+        }
+        Ok(state)
     };
     load().unwrap_or_else(|_| json!({"error": "Mode YOLO indisponible.", "mode": ASK}))
 }

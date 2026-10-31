@@ -428,7 +428,7 @@ fn protected_identity(ctx: &Context<'_>, metadata: &fs::Metadata) -> Result<bool
 /// Le Mode YOLO n'ouvre jamais les données d'Ezerbot (dossier de la base, coffre,
 /// jetons, trousseau). Un fichier est jugé par son chemin réel et son inode ; une
 /// commande, par ce qu'elle nomme ; ce qu'elle atteint sans le nommer, le
-/// sandbox du shell YOLO le refuse.
+/// sandbox du shell YOLO le refuse (`sandbox-exec` sous macOS, bubblewrap sous Linux).
 pub(super) fn touches_app_data(ctx: &Context<'_>, call: &ToolCall) -> Result<bool, ApiError> {
     touches_app_data_at(
         ctx,
@@ -439,13 +439,34 @@ pub(super) fn touches_app_data(ctx: &Context<'_>, call: &ToolCall) -> Result<boo
 
 /// Les racines que le Mode YOLO refuse aux outils, shell comme fichiers : le dossier de
 /// la base, l'installation habituelle (`~/Library/Application Support/Grokbot`, où
-/// vivent les jetons même quand la base courante est ailleurs) et les trousseaux.
+/// vivent les jetons même quand la base courante est ailleurs) et les trousseaux. Sous
+/// Linux, le trousseau est le Secret Service : ses fichiers et le bus de session qui y mène.
+/// La même liste sert aux outils fichiers et, sous Linux, au bac à sable du shell.
 fn protected_roots(ctx: &Context<'_>, home: Option<&Path>) -> Result<Vec<PathBuf>, ApiError> {
     let mut roots = vec![data_dir(ctx)?, PathBuf::from("/Library/Keychains")];
     if let Some(home) = home {
         for sub in ["Library/Application Support/Grokbot", "Library/Keychains"] {
             let root = home.join(sub);
             roots.push(root.canonicalize().unwrap_or(root));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(home) = home {
+            for sub in [".local/share/keyrings", ".local/share/kwalletd"] {
+                roots.push(home.join(sub));
+            }
+        }
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(format!(
+                    "/run/user/{}",
+                    nix::unistd::Uid::current().as_raw()
+                ))
+            });
+        for sub in ["bus", "keyring"] {
+            roots.push(runtime.join(sub));
         }
     }
     Ok(roots)
@@ -1500,6 +1521,11 @@ fn shell(
             ))
             .arg("/bin/sh");
     }
+    #[cfg(target_os = "linux")]
+    if yolo {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        command = super::yolo::sandbox::command(&protected_roots(ctx, home.as_deref())?, &cwd)?;
+    }
     command
         .arg("-c")
         .arg(&a.command)
@@ -2250,6 +2276,18 @@ mod tests {
                 touches_app_data_at(&ctx, &call(name, &path), Some(&home)).unwrap(),
                 "{name} {}",
                 path.display()
+            );
+        }
+        #[cfg(target_os = "linux")]
+        for wallet in [".local/share/keyrings", ".local/share/kwalletd"] {
+            let wallet = home.join(wallet);
+            fs::create_dir_all(&wallet).unwrap();
+            fs::write(wallet.join("login"), "trousseau").unwrap();
+            assert!(
+                touches_app_data_at(&ctx, &call("read_file", &wallet.join("login")), Some(&home))
+                    .unwrap(),
+                "{}",
+                wallet.display()
             );
         }
         // Un fichier ordinaire, lui, reste lisible.

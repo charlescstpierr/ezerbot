@@ -76,12 +76,13 @@ function mount() {
   };
 }
 
-test("two captures show Avant then Après with their legend, outside the collapsed result", () => {
+test("two captures show Avant then Après with their legend, after the visible result", () => {
   setEdge([BEFORE, AFTER]);
   const out = html();
   const row = out.slice(out.indexOf('class="gb-captures"'), out.lastIndexOf("</figure>"));
-  assert.ok(out.indexOf("</details>") < out.indexOf('class="gb-captures"'), "the row sits after the result, not inside it");
-  assert.doesNotMatch(out.slice(0, out.indexOf("</details>")), /<details[^>]*open/);
+  const result = out.indexOf('class="gb-delegation-result"');
+  assert.ok(result >= 0 && result < out.indexOf('class="gb-captures"'), "the row sits after the visible result");
+  assert.doesNotMatch(out, /<details|<summary|<pre/, "the result is prose without a technical disclosure");
   assert.ok(row.indexOf("<strong>Avant</strong>") !== -1 && row.indexOf("<strong>Avant</strong>") < row.indexOf("<strong>Après</strong>"));
   assert.ok(row.indexOf("Page d’accueil avant") < row.indexOf("Page d’accueil après"));
   assert.match(row, /<strong>Avant<\/strong><span>Page d’accueil avant<\/span>/);
@@ -142,8 +143,8 @@ test("closing the viewer returns the focus to the thumbnail that opened it, not 
   assert.deepEqual(focused, ["après", "avant"], "re-rendering alone does not steal the focus");
 });
 
-test("without captures the card renders exactly the same DOM as before", () => {
-  const expected = '<article class="gb-message rounded-xl border border-border bg-card p-4 text-foreground" data-message-id="m1" data-card-kind="delegation" data-delegation-status="done"><header class="gb-meta"><strong>Sous-tâche · Bot Test</strong></header><p class="mt-2 text-sm whitespace-pre-wrap break-words">Refaire la page</p><p class="my-2 text-sm" role="status" aria-live="polite">Terminée</p><details class="mb-3 text-sm"><summary>Résultat de la sous-tâche</summary><pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words font-sans text-sm">Page modifiée.</pre></details><button type="button" class="gb-retry">Ouvrir le fil de tâche</button></article>';
+test("missing, empty and invalid captures keep the same prose and navigation", () => {
+  const expected = '<article class="gb-message gb-delegation-followup" data-message-id="m1" data-card-kind="delegation" data-delegation-status="done"><header class="gb-meta"><strong>Sous-tâche · Bot Test</strong></header><p class="mt-2 text-sm whitespace-pre-wrap break-words">Refaire la page</p><p class="my-2 text-sm" role="status" aria-live="polite">Terminée</p><p class="gb-delegation-result" data-find-body="true">Page modifiée.</p><button type="button" class="gb-retry">Ouvrir le fil de tâche</button></article>';
   setEdge(undefined);
   assert.equal(html(), expected);
   setEdge([]);
@@ -170,7 +171,8 @@ test("a thumbnail whose image fails to load shows a placeholder and leaves the c
   assert.ok(page.all("span").some((node) => page.text(node) === "Image non disponible"));
   assert.ok(page.find("button", "Avant : Page d’accueil avant"), "the button stays and still opens the viewer");
   assert.ok(page.find("button", "Après : Page d’accueil après"));
-  assert.ok(page.all("summary").some((node) => page.text(node) === "Résultat de la sous-tâche"));
+  assert.ok(page.all("p").some((node) => node.props.className === "gb-delegation-result" && page.text(node) === "Page modifiée."));
+  assert.equal(page.all("details").length, 0);
   assert.ok(page.all("button").some((node) => page.text(node) === "Ouvrir le fil de tâche"));
 });
 

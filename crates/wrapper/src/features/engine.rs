@@ -3027,6 +3027,7 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         )
         .unwrap_or_else(|_| run.bot_id.clone());
     let mut outcome = result.as_ref().map(|e| e.payload["outcome"].clone());
+    let mut code = result.as_ref().map(|e| e.payload["code"].clone());
     // A cancellation settles the engine call immediately, but the process owner
     // may finish draining its bounded output a few milliseconds later.
     if event.payload["name"]
@@ -3045,6 +3046,11 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
             .flatten();
         if let Some((stored, authority)) = stored {
             if let Some(value) = stored.and_then(|s| serde_json::from_str(&s).ok()) {
+                // The engine also journals its own "unknown" result: only a different
+                // outcome settles the call.
+                if outcome.as_ref() != Some(&value) {
+                    code = None;
+                }
                 outcome = Some(value);
             }
             if let Some(value) = authority.and_then(|s| serde_json::from_str(&s).ok()) {
@@ -3066,7 +3072,7 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         "tool",
         String::new(),
         json!({"run_id":run_id,"run_status":run.status,"call":display_call,"outcome":outcome.clone(),
-            "authorized_by":admission,"requesting_bot":requester,
+            "code":code,"authorized_by":admission,"requesting_bot":requester,
             "approval_status":super::forms::tool_approval_status(ctx,run_id,&call),
             "screen_image":screen_image,
             "connector":super::mcp::call_display(ctx,&call.name,&call.arguments)}),
@@ -4154,6 +4160,53 @@ mod projection_tests {
         assert_eq!(reply.body, "[...]");
         assert_eq!(reply.payload["parts"].as_array().unwrap().len(), 1);
         assert_eq!(reply.payload["parts"][0]["body"], "[...]");
+    }
+
+    #[test]
+    fn an_unknown_tool_result_is_projected_until_a_definitive_outcome_replaces_it() {
+        let mut f = Fixture::new(Trigger::Occurrence {
+            occurrence_id: "routine".into(),
+        });
+        let call = f.event(
+            RunEventKind::ToolCall,
+            json!({"call_id":"call","name":"run_shell","arguments":{}}),
+        );
+        f.event(
+            RunEventKind::ToolResult,
+            json!({"call_id":"call","code":"uncertain",
+                "outcome":{"status":"failed","reason":"Appel externe interrompu."}}),
+        );
+        f.app
+            .connection
+            .execute(
+                "INSERT INTO engine_external_tools(run_id,call_id) VALUES ('projection','call')",
+                [],
+            )
+            .unwrap();
+        let id = format!("projection:{call}");
+        let mut ctx = f.app.feature_context();
+        ctx.conversation_id = Some("cards");
+        let card = entry(&ctx, "engine_tool", &id).unwrap();
+        assert_eq!(card.payload["code"], "uncertain");
+
+        ctx.connection
+            .execute(
+                "UPDATE engine_external_tools SET outcome=?1 WHERE call_id='call'",
+                [r#"{"status":"failed","reason":"Appel externe interrompu."}"#],
+            )
+            .unwrap();
+        let card = entry(&ctx, "engine_tool", &id).unwrap();
+        assert_eq!(card.payload["code"], "uncertain");
+
+        ctx.connection
+            .execute(
+                "UPDATE engine_external_tools SET outcome=?1 WHERE call_id='call'",
+                [r#"{"status":"failed","reason":"Fin confirmée."}"#],
+            )
+            .unwrap();
+        let card = entry(&ctx, "engine_tool", &id).unwrap();
+        assert_eq!(card.payload["outcome"]["reason"], "Fin confirmée.");
+        assert!(card.payload["code"].is_null());
     }
 
     #[test]

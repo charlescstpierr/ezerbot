@@ -374,6 +374,7 @@
   function botName(id) { const bot = botById(id); return bot ? `${bot.name}${bot.deleted ? " (supprimé)" : ""}` : "Bot inconnu"; }
   function provider() { return state.provider || { connected: false, signin: "idle", models: [] }; }
   function streamingMessage(conversation = currentConversation()) { return conversation?.messages.find((message) => window.GrokbotChat.isPendingReply(message, conversation.kind === "group")); }
+  function runningRun(conversation = currentConversation()) { return state.engine?.runs?.find((run) => run.conversation_id === conversation?.id && run.status === "running"); }
 
   function icon(name, className = "icon") {
     const element = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -604,7 +605,7 @@
     const blockedReason = blockingPanel && panelCall(blockingPanel, blockingPanel.composer?.blockedReason);
     // The task banner is the single cancellation control. The composer only sends follow-ups.
     const control = window.GrokbotChat.composerConnectionState({ offline: connectionStatus === "offline", busy, group,
-      live: !task && Boolean(streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments)) });
+      live: !task && Boolean(runningRun() || streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments)) });
     const live = control.live;
     const noMembers = group && !currentConversation().member_ids?.length;
     ui.send.disabled = control.offline || taskFinished || (live ? ((group || task) && (control.busy || !connected)) : control.busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
@@ -1134,7 +1135,7 @@
     // Les correspondances d’un autre fil ou d’une recherche fermée ne survivent pas ; le fil validé les recalcule.
     if (!searching || findState.conversationId !== (conversation?.id || null)) findState.matches = [];
     findState.conversationId = conversation?.id || null;
-    window.GrokbotChat.renderThread(ui.messages, { messages: visibleMessages, busy: busy && connected, engineConnected: connected, providerConnected: Boolean(provider().connected), botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, find: searching ? { query, index: findState.index } : null, onFindMatches, onRateGood: rateGood, onRateBad: rateBad, memoSpeed: state.voice?.bots?.[conversation?.bot_id]?.speed, ...thread });
+    window.GrokbotChat.renderThread(ui.messages, { messages: visibleMessages, runs: state.engine?.runs, conversationId: conversation?.id, busy: busy && connected, engineConnected: connected, providerConnected: Boolean(provider().connected), botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, find: searching ? { query, index: findState.index } : null, onFindMatches, onRateGood: rateGood, onRateBad: rateBad, memoSpeed: state.voice?.bots?.[conversation?.bot_id]?.speed, ...thread });
     paintFind();
     renderThreadBanner(conversation);
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
@@ -1412,7 +1413,8 @@
   async function sendMessage(event) {
     event.preventDefault();
     const live = streamingMessage();
-    if (live && ui.send.dataset.mode === "stop") { await generation("/api/stop", currentConversation()?.kind === "group" ? "groupe" : live.id.replace(/^reply-/, "")); return; }
+    const run = runningRun();
+    if ((run || live) && ui.send.dataset.mode === "stop") { await generation("/api/stop", currentConversation()?.kind === "group" ? "groupe" : run?.run_id || live.id.replace(/^reply-/, "")); return; }
     if (ui.send.disabled) return;
     const submittedScrollGeneration = scrollGeneration;
     const submittedDraft = ui.input.value;

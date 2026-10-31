@@ -18,15 +18,12 @@ const failureLabels = {
 const TECHNICAL = /[{}[\]<>`]|\/\w/u;
 const COMPACTED = "J’ai résumé le début de notre échange pour garder le fil. Vos messages restent ici.";
 
-export function threadActivity({ runs = [], conversationId, engineConnected = false } = {}) {
+export function threadActivity({ runs = [], requests = [], conversationId, engineConnected = false } = {}) {
   if (!conversationId || !engineConnected) return [];
-  return runs.filter((run) => run.conversation_id === conversationId && ["running", "awaiting_approval", "awaiting_human_input"].includes(run.status))
+  const waitingElsewhere = new Set(requests.filter((request) => request.status?.status === "pending" && request.route?.target_conversation_id !== conversationId)
+    .map((request) => request.run_id));
+  return runs.filter((run) => run.conversation_id === conversationId && (run.status === "running" || waitingElsewhere.has(run.run_id)))
     .map(({ run_id, bot_id, status }) => ({ run_id, bot_id, status }));
-}
-
-// A waiting run speaks only when its request lives in the principal conversation.
-export function visibleActivity(activity, { requestRuns }) {
-  return activity.filter((run) => run.status === "running" || !requestRuns.has(run.run_id));
 }
 
 // The engine writes sentences; only a provider's appended detail can be a machine payload.
@@ -83,13 +80,12 @@ function notice(message, text) {
 
 export function presentThread(orderedMessages) {
   const messages = [], interventions = [];
-  const latestTasks = new Map(), spoken = new Map(), settledApprovals = new Set(), requestRuns = new Set();
+  const latestTasks = new Map(), spoken = new Map(), settledApprovals = new Set();
   for (const message of orderedMessages) {
     const runId = message.payload?.run_id;
     if (message.kind === "task" && runId
       && (!latestTasks.has(runId) || message.payload.event_kind === "task_changed")) latestTasks.set(runId, message.id);
     if (chatKinds.has(message.kind) && runId) spoken.set(runId, `${spoken.get(runId) || ""}${message.body || ""}`);
-    if (["approval", "form", "secret"].includes(message.kind)) requestRuns.add(runId);
     if (message.kind === "approval" && approvalProblems[message.payload?.status?.status]) settledApprovals.add(`${runId} ${message.payload.kind?.tool}`);
   }
   const failedReplies = new Set(orderedMessages.filter((message) => chatKinds.has(message.kind) && message.state === "failed")
@@ -157,6 +153,5 @@ export function presentThread(orderedMessages) {
     messages: visible.map((message) => chatKinds.has(message.kind) && message.continuation && firstByRun.get(message.payload?.run_id) === message && !headings.has(message.payload?.run_id)
       ? { ...message, continuation: false } : message),
     interventions,
-    requestRuns,
   };
 }

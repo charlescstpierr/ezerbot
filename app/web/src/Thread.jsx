@@ -24,7 +24,7 @@ import { PageQuote } from "./page-quote.jsx";
 import { SourcesContext, SourcesLine, citeComponents, citeTags } from "./sources.jsx";
 import { MemoryUsedPill } from "./memory-used.jsx";
 import { signInCardState, replyProblemState, visibleNotice } from "./connection-view.js";
-import { presentThread, conversationReplyError, visibleActivity } from "./thread-presentation.js";
+import { presentThread, conversationReplyError } from "./thread-presentation.js";
 import { LocalIntervention } from "./local-intervention.jsx";
 
 // A capability adds only cards/<name>.jsx exporting `kind` and `Card`.
@@ -322,7 +322,6 @@ export function Thread({ messages, activity = [], busy = false, onCopy, onRetry,
   const actions = useMemo(() => ({ onCopy, onReact, onThread: threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource, onOpenMemory }), [onCopy, onReact, threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected, onOpenSource, onOpenMemory]);
   const presentation = useMemo(() => presentThread(collapseMemoryReceipts(orderThread(messages), isGroup)), [messages, isGroup]);
   const ordered = presentation.messages;
-  const shownActivity = useMemo(() => visibleActivity(activity, presentation), [activity, presentation]);
   const localCount = presentation.interventions.filter((item) => item.kind === "local").length;
   useLayoutEffect(() => {
     const previous = interventionFocus.current;
@@ -365,7 +364,7 @@ export function Thread({ messages, activity = [], busy = false, onCopy, onRetry,
     reveal();
     onLayout?.();
     return () => { cancelAnimationFrame(frame); clearFindMarks(root); };
-  }, [ordered, shownActivity, onLayout, find, onFindMatches]);
+  }, [ordered, activity, onLayout, find, onFindMatches]);
   return (
     <Tooltip.Provider delayDuration={350}>
       <div className="gb-conversation">
@@ -405,9 +404,9 @@ export function Thread({ messages, activity = [], busy = false, onCopy, onRetry,
             ? <UserMessage key={message.id} message={message} memoSpeed={memoSpeed} busy={busy} onCopy={onCopy} onRetry={onRetry} onReact={onReact} onThread={threadAction} onResend={onResend} onDelete={onDelete} onOpenPage={onOpenPage} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} />
             : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} onRateGood={onRateGood} onRateBad={onRateBad} />;
         })}
-        {shownActivity.map((run) => {
+        {activity.map((run) => {
           const author = bots.find((bot) => bot.id === run.bot_id);
-          return <Thinking key={run.run_id} runId={run.run_id} botName={author?.name || botName} createMascot={author && createBotMascot ? createBotMascot(author) : createMascot} showName={isGroup || shownActivity.length > 1} waiting={run.status !== "running"} />;
+          return <Thinking key={run.run_id} runId={run.run_id} botName={author?.name || botName} createMascot={author && createBotMascot ? createBotMascot(author) : createMascot} showName={isGroup || activity.length > 1} waiting={run.status !== "running"} />;
         })}
         <div className="gb-overlay" ref={overlay} />
       </div>

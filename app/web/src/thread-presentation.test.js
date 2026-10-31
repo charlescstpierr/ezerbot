@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { conversationReplyError, presentThread, threadActivity, visibleActivity } from "./thread-presentation.js";
+import { conversationReplyError, presentThread, threadActivity } from "./thread-presentation.js";
 import { replyProblemState } from "./connection-view.js";
 
 const engineReasons = [
@@ -186,15 +186,14 @@ test("une entrée inconnue reste visible plutôt que disparaître", () => {
   assert.deepEqual(presentThread([entry]).messages, [entry]);
 });
 
-test("une attente dans la conversation principale se dit, une demande présente suffit", () => {
+test("une attente se dit seulement quand la demande en cours vise une autre conversation", () => {
   const runs = [{ run_id: "child", bot_id: "helper", conversation_id: "c", status: "awaiting_approval" }, { run_id: "work", bot_id: "grokbot", conversation_id: "c", status: "running" }, { run_id: "kids", conversation_id: "c", status: "awaiting_children" }];
-  const activity = threadActivity({ runs, conversationId: "c", engineConnected: true });
-  assert.deepEqual(activity.map((run) => [run.run_id, run.status]), [["child", "awaiting_approval"], ["work", "running"]]);
-  assert.deepEqual(visibleActivity(activity, presentThread([])).map((run) => run.run_id), ["child", "work"]);
-  const pending = { id: "ask", kind: "approval", payload: { run_id: "child", status: { status: "pending" } } };
-  assert.deepEqual(visibleActivity(activity, presentThread([pending])).map((run) => run.run_id), ["work"]);
-  const form = { id: "form", kind: "form", payload: { run_id: "child", status: { status: "pending" } } };
-  assert.deepEqual(visibleActivity(activity, presentThread([form])).map((run) => run.run_id), ["work"]);
-  const decided = { ...pending, payload: { run_id: "child", status: { status: "resolved" } } };
-  assert.deepEqual(visibleActivity(activity, presentThread([decided])).map((run) => run.run_id), ["work"], "une décision prise ici n’envoie pas ailleurs");
+  const shown = (requests) => threadActivity({ runs, requests, conversationId: "c", engineConnected: true }).map((run) => [run.run_id, run.status]);
+  const request = (target, status) => ({ run_id: "child", status: { status }, route: { target_conversation_id: target } });
+  const running = [["work", "running"]];
+  assert.deepEqual(shown([request("principal", "pending")]), [["child", "awaiting_approval"], ...running]);
+  assert.deepEqual(shown([request("c", "pending")]), running, "la demande est dans ce fil");
+  assert.deepEqual(shown([request("principal", "resolved")]), running, "une décision prise n’envoie nulle part");
+  assert.deepEqual(shown([request("c", "resolved"), request("principal", "pending")]), [["child", "awaiting_approval"], ...running], "un ancien formulaire ne cache pas la nouvelle attente");
+  assert.deepEqual(shown(undefined), running);
 });

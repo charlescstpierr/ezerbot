@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the complete checked-out suite and emit a diagnostics-free JSON report."""
+"""Run the checked-out suite and report only controlled public failure details."""
 
 import argparse
 import datetime
@@ -22,6 +22,13 @@ LINUX_SKIPS = {
 }
 SUMMARY = re.compile(r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; \d+ measured; (\d+) filtered out;", re.M)
 SYMBOL = r"[A-Za-z_][A-Za-z0-9_:]*"
+INVENTORY_FAILURES = {
+    "unterminated block comment", "unterminated raw string", "unrecognized Rust token",
+    "unterminated string", "cfg not requires one argument", "unbalanced Rust delimiters",
+    "unsupported platform or ignore cfg_attr", "platform cfg has no following item",
+    "unsupported #[path] literal", "unsupported #[path] attribute", "unsupported test attribute",
+    "unsupported test item", "unreachable platform module graph",
+}
 
 
 def now():
@@ -41,6 +48,34 @@ def git(*args):
     if result.returncode:
         raise RuntimeError("git")
     return result.stdout.strip()
+
+
+def preflight_failure_detail(error):
+    public_types = (
+        RuntimeError, ValueError, KeyboardInterrupt, OSError, FileNotFoundError,
+        PermissionError, IsADirectoryError, NotADirectoryError, subprocess.SubprocessError,
+        subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
+    )
+    error_type = type(error)
+    detail = {"type": error_type.__name__ if error_type in public_types else "Exception",
+              "message": "preflight check failed"}
+    if error_type not in (RuntimeError, ValueError) or len(error.args) != 1 or type(error.args[0]) is not str:
+        return detail
+    message = error.args[0]
+    if error_type is RuntimeError:
+        if message in {"git", "sha", "expected-sha", "platform"}:
+            detail["message"] = message
+        return detail
+    location = re.fullmatch(r"(crates/(?:[A-Za-z0-9_-]+/)+[A-Za-z0-9_-]+\.rs): (.*)", message)
+    reason = location[2] if location else message
+    prefix = location[1] + ": " if location else ""
+    if reason in INVENTORY_FAILURES or re.fullmatch(
+        r"cannot resolve gated module [A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*", reason
+    ):
+        detail["message"] = prefix + reason
+    elif reason.startswith("unsupported platform cfg: "):
+        detail["message"] = prefix + "unsupported platform cfg"
+    return detail
 
 
 def rust_results(raw):
@@ -98,7 +133,8 @@ def main():
         "sha": "", "started_at": now(), "finished_at": None, "status": "rouge",
         **{key: value if re.fullmatch(r"[0-9]*", value) else "" for key, value in metadata.items()},
         "counts": dict.fromkeys(("passed", "failed", "ignored", "absent_linux", "partial_linux", "runtime_branches_linux", "excluded"), 0),
-        "failures": ["runner:invalid-run-metadata"] if invalid_metadata else [], "platform_inventory": {}, "inventory_delta": {}, "phases": {},
+        "failures": ["runner:invalid-run-metadata"] if invalid_metadata else [], "failure_detail": None,
+        "platform_inventory": {}, "inventory_delta": {}, "phases": {},
         "known_exclusions": [] if args.macos else [{"issue": 528, "platform": "linux", "test": EXCLUDED}],
     }
     report["counts"]["excluded"] = len(report["known_exclusions"])
@@ -174,8 +210,12 @@ def main():
             except Exception:
                 report["failures"].append(phase + ":runner-error")
             save(output, report)
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as error:
         report["failures"].append("runner:preflight-failed")
+        if not report["phases"]:
+            detail = preflight_failure_detail(error)
+            report["failure_detail"] = detail
+            print("suite runner:preflight-failed " + detail["type"] + ": " + detail["message"], file=sys.stderr)
     finally:
         if set(report["phases"]) != {"npm", "rust", "web", "ui"} or any(phase["exit_code"] != 0 for phase in report["phases"].values()):
             report["failures"].append("runner:incomplete")

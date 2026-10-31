@@ -97,6 +97,10 @@ class CompleteSuiteTests(unittest.TestCase):
             ("crates/sample/src/ordinary/mod.rs", '#[cfg(target_os="macos")] #[path="support/shared.rs"] mod helper;', "crates/sample/src/ordinary/support/shared.rs"),
             ("crates/sample/src/lib.rs", '#[cfg(target_os="macos")] mod outer { #[path="../support/shared.rs"] mod helper; }', "crates/sample/src/support/shared.rs"),
             ("crates/sample/src/ordinary.rs", '#[cfg(target_os="macos")] mod outer { #[path="../../support/shared.rs"] mod helper; }', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/ordinary.rs", '#[cfg(target_os="macos")] #[path="renamed"] mod outer { #[path="../support/shared.rs"] mod helper; }', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/lib.rs", '#[cfg(target_os="macos")] #[path="support/shared.rs"] pub(crate) mod helper;', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/lib.rs", '#[cfg(target_os="macos")] #[path=r#"support/shared.rs"#] mod helper;', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/lib.rs", r'#[cfg(target_os="macos")] #[path="supp\u{6f}rt/shared.rs"] mod helper;', "crates/sample/src/support/shared.rs"),
         ]
         for entry, source, child in fixtures:
             with self.subTest(entry=entry, source=source):
@@ -117,6 +121,17 @@ class CompleteSuiteTests(unittest.TestCase):
                 sources[entry] = source.replace('#![cfg(target_os="macos")]', '').replace('#[cfg(target_os="macos")]', '')
                 with patch.object(module.subprocess, "check_output", side_effect=read):
                     self.assertEqual(module.inventory()["partial"], [child + "::partial"])
+                del sources[child]
+                with patch.object(module.subprocess, "check_output", side_effect=read), self.assertRaises(ValueError):
+                    module.inventory()
+        sources = {
+            "crates/sample/src/lib.rs": '#[cfg(target_os="macos")] mod shared; #[path="shared.rs"] mod explicit;',
+            "crates/sample/src/shared.rs": 'mod leaf; #[test] fn shared() {}',
+            "crates/sample/src/shared/leaf.rs": '#[test] fn conventional() {}',
+            "crates/sample/src/leaf.rs": '#[test] fn explicit() {}',
+        }
+        with patch.object(module.subprocess, "check_output", side_effect=read):
+            self.assertEqual(module.inventory()["absent"], ["crates/sample/src/shared/leaf.rs::conventional"])
 
     def test_cli_reports_failures_and_continues_without_publishing_diagnostics(self):
         LOGS.mkdir(parents=True, exist_ok=True)
@@ -144,7 +159,7 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
             (root / "Cargo.lock").write_text("fixture")
             for name in ("app/web/src/sample.test.js", "app/ui/sample.test.cjs"):
                 (root / name).write_text("fixture\n")
-            (root / "crates/sample/src/lib.rs").write_text('#[cfg(target_os = "macos")] mod platform;\n#[cfg(not(target_os = "macos"))] mod outer;\n#[test] fn sample() {}')
+            (root / "crates/sample/src/lib.rs").write_text('#[cfg(target_os = "macos")] #[path = "platform.rs"] mod platform;\n#[cfg(not(target_os = "macos"))] mod outer;\n#[test] fn sample() {}')
             (root / "crates/sample/src/platform.rs").write_text("#[test] fn covered() {}")
             (root / "crates/sample/src/outer.rs").write_text('#[cfg(target_os = "macos")] mod child;')
             (root / "crates/sample/src/outer").mkdir()
@@ -201,10 +216,13 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
         self.assertEqual(result["partial"], ["fixture.rs::partial"])
         self.assertEqual(result["runtime_branches"], ["fixture.rs::runtime"])
         unreachable, children = module.source_inventory("outer.rs", '#[cfg(target_os = "macos")] mod child;', (True, False))
-        self.assertEqual(children, [(["child"], (False, False))])
+        self.assertEqual(children, [([("child", None)], (False, False))])
         self.assertEqual(unreachable["absent"], [])
         with self.assertRaises(ValueError):
             module.source_inventory("macro.rs", '#[cfg(target_os = "macos")] #[tokio::test] async fn hidden() {}')
+        for source in ('#[cfg_attr(test, path="hidden.rs")] mod hidden;', '#[path="hidden.rs"] mod r#hidden;', '#[path=b"hidden.rs"] mod hidden;'):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                module.source_inventory("path.rs", source)
 
     def test_inventory_follows_transitive_module_platforms(self):
         spec = importlib.util.spec_from_file_location("inventory", TOOLS / "suite-platform-inventory.py")

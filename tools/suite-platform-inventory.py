@@ -2,6 +2,7 @@
 import argparse
 import json
 from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import subprocess
 
@@ -80,6 +81,47 @@ def platform_cfg(expression):
     return any(word in ("windows", "unix") or word.startswith("target_") for word in expression)
 
 
+def path_literal(value):
+    raw = re.fullmatch(r'r(#{0,255})"(.*)"\1', value, re.S)
+    if raw:
+        result = raw[2].replace("\r\n", "\n")
+        if "\r" not in result:
+            return result
+    elif value.startswith('"') and value.endswith('"'):
+        source, result, at = value[1:-1].replace("\r\n", "\n"), [], 0
+        escapes = {"n": "\n", "r": "\r", "t": "\t", "0": "\0", "\\": "\\", '"': '"', "'": "'"}
+        while at < len(source):
+            character, at = source[at], at + 1
+            if character == "\r":
+                break
+            if character != "\\":
+                result.append(character)
+                continue
+            if at == len(source):
+                break
+            character, at = source[at], at + 1
+            if character in escapes:
+                result.append(escapes[character])
+            elif character == "\n":
+                while at < len(source) and source[at] in " \t\n\r":
+                    at += 1
+            elif character == "x" and re.fullmatch(r"[0-7][0-9a-fA-F]", source[at:at + 2]):
+                result.append(chr(int(source[at:at + 2], 16)))
+                at += 2
+            elif character == "u" and (escape := re.match(r"\{([0-9a-fA-F][0-9a-fA-F_]*)\}", source[at:])):
+                digits = escape[1].replace("_", "")
+                scalar = int(digits, 16)
+                if len(digits) > 6 or scalar > 0x10ffff or 0xd800 <= scalar <= 0xdfff:
+                    break
+                result.append(chr(scalar))
+                at += len(escape[0])
+            else:
+                break
+        else:
+            return "".join(result)
+    raise ValueError("unsupported #[path] literal")
+
+
 def source_inventory(path, source, inherited=None):
     values = tokens(source)
     pairs, stack, attributes = {}, [], []
@@ -102,7 +144,20 @@ def source_inventory(path, source, inherited=None):
         end, target = pairs[opening], pairs[opening] + 1
         while target + 1 < len(values) and values[target] == "#":
             target = pairs[target + (2 if values[target + 1] == "!" else 1)] + 1
+        if target < len(values) and values[target] == "pub":
+            target += 1
+            if target < len(values) and values[target] == "(":
+                target = pairs[target] + 1
         attributes.append((index, values[opening + 1:end], target, inner))
+    paths = {}
+    for _, attribute, target, inner in attributes:
+        if attribute[:1] == ["cfg_attr"] and "path" in attribute:
+            raise ValueError("unsupported #[path] attribute")
+        if attribute[:1] != ["path"]:
+            continue
+        if inner or len(attribute) != 3 or attribute[1] != "=" or target in paths or target + 2 >= len(values) or values[target] != "mod" or values[target + 2] not in ("{", ";"):
+            raise ValueError("unsupported #[path] attribute")
+        paths[target] = path_literal(attribute[2])
     spans = [(0, len(values), *inherited)] if inherited else []
     for index, attribute, target, inner in attributes:
         if attribute[0] == "cfg_attr" and (platform_cfg(attribute) or "ignore" in attribute):
@@ -127,14 +182,10 @@ def source_inventory(path, source, inherited=None):
     for index, value in enumerate(values[:-2]):
         if value == "mod" and values[index + 2] in ("{", ";"):
             if values[index + 2] == "{":
-                modules.append((index, pairs[index + 2], values[index + 1]))
+                modules.append((index, pairs[index + 2], values[index + 1], paths.get(index)))
             else:
-                if any(body[0] == "path" and destination <= index <= destination + 5 for _, body, destination, _ in attributes):
-                    if state(index) != (True, True):
-                        raise ValueError("unsupported #[path] on platform-gated module")
-                    continue
-                names = [name for begin, finish, name in modules if begin < index < finish]
-                external.append((names + [values[index + 1]], state(index)))
+                route = [(name, override) for begin, finish, name, override in modules if begin < index < finish]
+                external.append((route + [(values[index + 1], paths.get(index))], state(index)))
     result = {key: [] for key in ("absent", "partial", "runtime_branches", "ignored", "linux_present")}
     for _, attribute, target, _ in attributes:
         head = attribute[:attribute.index("(")] if "(" in attribute else attribute
@@ -148,7 +199,7 @@ def source_inventory(path, source, inherited=None):
         while values[opening] != "{":
             opening += 1
         end = pairs[opening]
-        name = "::".join([name for begin, finish, name in modules if begin < target < finish] + [values[target + 1]])
+        name = "::".join([name for begin, finish, name, _ in modules if begin < target < finish] + [values[target + 1]])
         identity = path + "::" + name
         if state(target)[0]:
             result["linux_present"].append(identity)
@@ -172,53 +223,80 @@ def source_inventory(path, source, inherited=None):
 
 def inventory(ref="HEAD"):
     root = Path(__file__).resolve().parents[1]
-    paths = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", ref], text=True, cwd=root).splitlines()
+    paths = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", ref], text=True, cwd=root, stderr=subprocess.DEVNULL).splitlines()
     sources, reports, inherited = {}, {}, {}
     for path in paths:
         if not path.startswith("crates/") or not path.endswith(".rs"):
             continue
-        sources[path] = subprocess.check_output(["git", "show", f"{ref}:{path}"], text=True, cwd=root)
-    def read(path, gate=None):
+        sources[path] = subprocess.check_output(["git", "show", f"{ref}:{path}"], text=True, cwd=root, stderr=subprocess.DEVNULL)
+    def root_context(path):
+        file = PurePosixPath(path)
+        return path, str(file.parent if file.stem in ("lib", "main", "mod") or file.parent.name == "tests" else file.with_suffix(""))
+    def read(context, gate=None, discover=False):
+        path, directory = context
         source = sources[path]
         try:
             report, external = source_inventory(path, source, gate)
         except ValueError as error:
             raise ValueError(f"{path}: {error}") from error
         children = []
-        for names, child_gate in external:
+        for route, child_gate in external:
             file = PurePosixPath(path)
-            root = gate is None and (file.stem in ("lib", "main") or file.parent.name == "tests")
-            base = file.parent if file.stem == "mod" or root else file.with_suffix("")
-            module = base.joinpath(*names)
-            candidates = [str(module.with_suffix(".rs")), str(module / "mod.rs")]
+            module = PurePosixPath(directory)
+            for index, (name, override) in enumerate(route):
+                if override is None:
+                    module /= name
+                else:
+                    module = (file.parent if index == 0 else module) / override
+            module = PurePosixPath(posixpath.normpath(str(module)))
+            explicit = route[-1][1] is not None
+            candidates = [str(module)] if explicit else [str(module) + ".rs", str(module / "mod.rs")]
             found = [candidate for candidate in candidates if candidate in sources]
-            if not found and child_gate == (True, True):
+            if discover:
+                children.extend(((child, str(PurePosixPath(child).parent) if explicit else str(module)), child_gate) for child in found)
+                continue
+            if not found and child_gate == (True, True) and all(override is None for _, override in route):
                 continue
             if len(found) != 1:
-                raise ValueError(f"{path}: cannot resolve gated module {'::'.join(names)}")
-            children.append((found[0], child_gate))
+                raise ValueError(f"{path}: cannot resolve gated module {'::'.join(name for name, _ in route)}")
+            children.append(((found[0], str(PurePosixPath(found[0]).parent) if explicit else str(module)), child_gate))
         return report, children
-    initial = {path: read(path) for path in sources}
-    descendants = {child for _, children in initial.values() for child, _ in children}
-    modules = set()
-    while shared := {path for path in descendants - modules if PurePosixPath(path).parent.name == "tests"}:
-        for path in shared:
-            modules.add(path)
-            _, children = read(path, (True, True))
-            descendants.update(child for child, _ in children)
-    pending = [(path, None) for path in sources if path not in descendants or PurePosixPath(path).parent.name == "tests"]
+    graph, pending = {}, [root_context(path) for path in sources]
     while pending:
-        path, gate = pending.pop()
-        context = path, gate is None
+        context = pending.pop()
+        if context in graph:
+            continue
+        _, children = read(context, discover=True)
+        graph[context] = [child for child, _ in children]
+        pending.extend(graph[context])
+    descendants = {child[0] for children in graph.values() for child in children}
+    roots = {root_context(path) for path in sources if path not in descendants or PurePosixPath(path).parent.name == "tests"}
+    reached, pending = set(), list(roots)
+    while True:
+        while pending:
+            context = pending.pop()
+            if context not in reached:
+                reached.add(context)
+                pending.extend(graph[context])
+        remaining = sources.keys() - {path for path, _ in reached}
+        if not remaining:
+            break
+        descendants = {child[0] for context, children in graph.items() if context[0] in remaining for child in children}
+        extra = {root_context(path) for path in remaining - descendants}
+        if not extra:
+            raise ValueError("unreachable platform module graph")
+        roots.update(extra)
+        pending.extend(extra)
+    pending = [(context, (True, True)) for context in roots]
+    while pending:
+        context, gate = pending.pop()
         previous = inherited.get(context, (False, False))
-        combined = tuple(before or after for before, after in zip(previous, gate or (True, True)))
+        combined = tuple(before or after for before, after in zip(previous, gate))
         if context in inherited and previous == combined:
             continue
         inherited[context] = combined
-        reports[context], children = read(path, None if gate is None else combined)
+        reports[context], children = read(context, combined)
         pending.extend(children)
-    if descendants - {path for path, _ in inherited}:
-        raise ValueError("unreachable platform module graph")
     keys = ("absent", "partial", "runtime_branches", "ignored")
     result = {key: {entry for report in reports.values() for entry in report.get(key, [])} for key in keys}
     result["absent"] -= {entry for report in reports.values() for entry in report.get("linux_present", [])}

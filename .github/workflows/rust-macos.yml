@@ -1,0 +1,64 @@
+name: Rust macOS
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-macos-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rust-macos:
+    name: rust-macos
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Prepare the receipt and isolated Cargo home
+        id: prepare
+        run: python3 tools/run-rust-ci.py --prepare --output "$RUNNER_TEMP/rust-macos/result.json"
+      - name: Verify the receipt producer without Cargo
+        env:
+          RUST_CI_TEST_ROOT: ${{ runner.temp }}/rust-ci-python-tests
+        run: |
+          mkdir -p "$RUST_CI_TEST_ROOT"
+          python3 -m unittest discover -s tools -p test_rust_ci.py
+      - name: Restore only registry archives
+        id: cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ steps.prepare.outputs.cargo_home }}/registry/cache
+          key: ${{ steps.prepare.outputs.cache_key }}
+      - name: Run every required Rust phase
+        id: rust
+        if: ${{ always() && !cancelled() }}
+        env:
+          CACHE_OUTCOME: ${{ steps.cache.outcome }}
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+          CACHE_MATCHED_KEY: ${{ steps.cache.outputs.cache-matched-key }}
+        run: python3 tools/run-rust-ci.py --output "$RUNNER_TEMP/rust-macos/result.json" --cache-outcome "$CACHE_OUTCOME" --cache-hit "$CACHE_HIT" --cache-matched-key "$CACHE_MATCHED_KEY"
+      - name: Save only registry archives after a green observation
+        if: ${{ success() && steps.rust.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ steps.prepare.outputs.cargo_home }}/registry/cache
+          key: ${{ steps.prepare.outputs.cache_key }}
+      - name: Upload only the JSON receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rust-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rust-macos/result.json
+          if-no-files-found: error
+          retention-days: 14

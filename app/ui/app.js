@@ -72,7 +72,12 @@
   const pendingSends = new Map();
   const approvalFollow = window.GrokbotChat.createApprovalFollow();
   async function openRatings() {
-    const bridge = window.webkit?.messageHandlers?.ezerbotRatings;
+    const bridge = window.webkit?.messageHandlers?.ezerbotRatings || (window.EzerbotShell?.platform === "linux" ? {
+      // Le port change à chaque lancement : le stockage du navigateur ne survivrait pas.
+      postMessage: ({ command, value }) => command === "read"
+        ? api("/api/ratings").then((data) => data.value)
+        : api("/api/ratings", { value }),
+    } : null);
     if (bridge) return window.GrokbotChat.createNativeRatingTable(bridge);
     try { return window.GrokbotChat.createRatingTable?.(localStorage) || null; }
     catch { return null; }

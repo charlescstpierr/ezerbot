@@ -21,6 +21,9 @@ pub fn routes(
     path: &str,
     body: &[u8],
 ) -> Option<Result<ApiResponse, ApiError>> {
+    if path == "/api/ratings" && matches!(method, "GET" | "POST") {
+        return Some(ratings(app, method, body).map(ApiResponse::Json));
+    }
     if !matches!(
         (method, path),
         ("GET", "/api/state" | "/api/ping")
@@ -38,6 +41,38 @@ pub fn routes(
         return None;
     }
     Some(route(app, path, body).map(ApiResponse::Json))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RatingsDocument {
+    value: String,
+}
+
+// The Linux shell's origin changes with its port on every launch, so browser
+// storage cannot keep these. The document stays opaque, as in the macOS bridge.
+fn ratings(app: &App, method: &str, body: &[u8]) -> Result<Value, ApiError> {
+    if method == "GET" {
+        let value: Option<Option<String>> = app
+            .connection
+            .query_row(
+                "SELECT ratings FROM wrapper_preferences WHERE account_id = ?1",
+                [ACCOUNT],
+                |row| row.get(0),
+            )
+            .optional()?;
+        return Ok(json!({"value": value.flatten()}));
+    }
+    let input: RatingsDocument = parse(body)?;
+    if !serde_json::from_str::<Value>(&input.value).is_ok_and(|value| value.is_array()) {
+        return Err(ApiError::new(400, "Notation invalide."));
+    }
+    let (theme, accent) = app.preferences()?;
+    app.connection.execute(
+        "INSERT INTO wrapper_preferences (account_id, theme, accent, ratings) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(account_id) DO UPDATE SET ratings = excluded.ratings",
+        params![ACCOUNT, theme, accent, input.value],
+    )?;
+    Ok(json!({"ok": true}))
 }
 
 // Detect writes from both this connection and background engine connections.

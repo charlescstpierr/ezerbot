@@ -898,6 +898,38 @@ fn cross_origin_and_rebinding_requests_are_rejected() {
 }
 
 #[test]
+fn ratings_survive_restart_and_only_a_json_array_is_stored() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    assert!(app.api("GET", "/api/ratings", b"").unwrap()["value"].is_null());
+    let rows = r#"[{"id":"note-1","vote":"bon"}]"#;
+    let body = json!({"value": rows}).to_string();
+    app.api("POST", "/api/ratings", body.as_bytes()).unwrap();
+    drop(app);
+    let mut app = App::open(&db.0).unwrap();
+    assert_eq!(app.api("GET", "/api/ratings", b"").unwrap()["value"], rows);
+    assert_eq!(
+        app.api("GET", "/api/state", b"").unwrap()["preferences"]["theme"],
+        "dark"
+    );
+    for invalid in [r#"{"notations":[]}"#, "pas du json"] {
+        let body = json!({"value": invalid}).to_string();
+        assert_eq!(
+            app.api("POST", "/api/ratings", body.as_bytes())
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+    assert_eq!(app.api("GET", "/api/ratings", b"").unwrap()["value"], rows);
+    let many = serde_json::to_string(&vec!["note"; 20_000]).unwrap();
+    assert!(many.len() > crate::BODY_LIMIT);
+    let body = json!({"value": many}).to_string();
+    app.api("POST", "/api/ratings", body.as_bytes()).unwrap();
+    assert_eq!(app.api("GET", "/api/ratings", b"").unwrap()["value"], many);
+}
+
+#[test]
 fn theme_preference_is_account_scoped_and_survives_restart() {
     let db = Database::new();
     let mut app = App::open(&db.0).unwrap();

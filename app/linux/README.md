@@ -14,7 +14,7 @@ Après avoir déplacé le dépôt, relancez le script pour actualiser les chemin
 Le script respecte `CARGO` et le dossier de compilation effectif de Cargo.
 `EZERBOT_BUILD_DEBUG=1` produit une version de développement.
 
-Les conversations restent dans le dossier de données XDG d’Ezerbot.
+Les conversations et les notations restent dans le dossier de données XDG d’Ezerbot.
 L’option `--data-dir /chemin/isolé` permet un lancement avec des données séparées.
 Le menu **Quitter Ezerbot**, Ctrl+Q et la fermeture de la fenêtre arrêtent aussi le wrapper.
 

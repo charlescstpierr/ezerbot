@@ -136,6 +136,8 @@ pub fn body_limit(path: &str) -> usize {
         // 2 × 20 rules × 1,000 Unicode characters, including JSON escapes.
         "/api/approvals/reviewer" => 256 * 1024,
         "/api/templates/create" | "/api/templates/decode" => TEMPLATE_BODY_LIMIT,
+        // Every write resends the whole document, which grows with each rating.
+        "/api/ratings" => 8 * 1024 * 1024,
         _ => BODY_LIMIT,
     }
 }
@@ -248,7 +250,8 @@ CREATE TABLE IF NOT EXISTS wrapper_preferences (
     accent TEXT NOT NULL DEFAULT 'citron',
     model TEXT,
     effort TEXT,
-    fast INTEGER NOT NULL DEFAULT 0
+    fast INTEGER NOT NULL DEFAULT 0,
+    ratings TEXT
 );
 CREATE TABLE IF NOT EXISTS wrapper_generation (
     account_id TEXT NOT NULL,
@@ -704,6 +707,7 @@ impl App {
             ("wrapper_preferences", "model", "TEXT"),
             ("wrapper_preferences", "effort", "TEXT"),
             ("wrapper_preferences", "fast", "INTEGER NOT NULL DEFAULT 0"),
+            ("wrapper_preferences", "ratings", "TEXT"),
             (
                 "wrapper_messages",
                 "kind",

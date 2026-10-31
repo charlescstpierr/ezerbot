@@ -1395,6 +1395,65 @@ fn absorb_output(
     changed
 }
 
+/// How long a killed program has to be seen dead. SIGKILL cannot be caught,
+/// so its end is near; past this bound the failure is said, not waited forever.
+#[cfg(unix)]
+const END_WAIT: Duration = Duration::from_secs(2);
+
+/// Kills a program's group, and the program itself by its pid: a program that
+/// left its group (`setpgid`) is out of reach of the group's kill. Returns its
+/// status once its end is seen, at most `limit` later. `exited`: its end, seen
+/// already; the group still dies, so no descendant outlives it.
+#[cfg(unix)]
+fn end_program(
+    child: &mut std::process::Child,
+    pgid: u32,
+    exited: Option<std::process::ExitStatus>,
+    limit: Duration,
+) -> Option<std::process::ExitStatus> {
+    if let Err(error) = super::shell_tasks::kill_group(pgid) {
+        eprintln!("Le groupe d'une commande locale n'a pas pu être tué : {error}");
+    }
+    if exited.is_some() {
+        return exited;
+    }
+    if let Err(error) = child.kill() {
+        eprintln!("Une commande locale n'a pas pu être tuée : {error}");
+    }
+    reap_within(child, limit)
+}
+
+#[cfg(unix)]
+fn reap_within(
+    child: &mut std::process::Child,
+    limit: Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The input of a program whose end was not seen is never closed: an end of
+/// file would let it go on. It stays open, and refuses every line, for good.
+#[cfg(unix)]
+fn close_input_once_ended<T>(input: T, ended: bool) {
+    if ended {
+        drop(input);
+    } else {
+        eprintln!(
+            "Une commande locale n'est pas morte {END_WAIT:?} après son kill : son entrée reste ouverte."
+        );
+        std::mem::forget(input);
+    }
+}
+
 #[cfg(unix)]
 fn shell(
     ctx: &Context<'_>,
@@ -1435,11 +1494,8 @@ fn shell(
     struct Group(std::process::Child, Arc<AtomicBool>);
     impl Drop for Group {
         fn drop(&mut self) {
-            let _ = Command::new("/bin/kill")
-                .args(["-KILL", "--", &format!("-{}", self.0.id())])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            // Waiting closes the watchdog's input: it ends even if this kill fails.
+            let _ = super::shell_tasks::kill_group(self.0.id());
             let _ = self.0.wait();
             self.1.store(true, Ordering::SeqCst);
         }
@@ -1447,17 +1503,31 @@ fn shell(
     // $0 is the leader token. Restart kills this group only while that
     // argument and the recorded start time still belong to this pid.
     let leader = super::shell_tasks::leader_token();
+    // Only a background task has a line to read: it can wait on a prompt. The
+    // watchdog holds a copy of the writer of that input, so the host dying
+    // closes the host's copy only: the program reads no end of file before the
+    // watchdog has killed its group, itself included.
+    let (program_input, host_input) = if a.background {
+        let (reader, writer) = std::io::pipe().map_err(io_error)?;
+        (Some(reader), Some(writer))
+    } else {
+        (None, None)
+    };
     let watchdog = Command::new("/bin/sh")
         .arg("-c")
         // The parent alone owns the pipe writer (CLOEXEC). EOF also works
-        // after SIGKILL, without PID polling or a sleep/fork loop.
-        .arg("read -r _; /bin/kill -KILL -- -$$")
+        // after SIGKILL, without PID polling or a sleep/fork loop. `kill` is
+        // the shell's own: a full process table cannot refuse it.
+        .arg("read -r _; kill -s KILL -- -$$")
         .arg(&leader)
         .current_dir(&cwd)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(match &host_input {
+            Some(writer) => Stdio::from(writer.try_clone().map_err(io_error)?),
+            None => Stdio::null(),
+        })
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()
@@ -1510,12 +1580,7 @@ fn shell(
             "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
         )
         .env("LANG", "fr_CA.UTF-8")
-        // Only a background task has a line to read: it can wait on a prompt.
-        .stdin(if a.background {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(program_input.map_or_else(Stdio::null, Stdio::from))
         .stdout(Stdio::from(OwnedFd::from(out_writer)))
         .stderr(Stdio::from(OwnedFd::from(err_writer)))
         .process_group(group.0.id() as i32);
@@ -1529,7 +1594,7 @@ fn shell(
                    // The host's end of the pipe never blocks: a program that stopped reading
                    // refuses the line instead of freezing the app. (The program's end is a
                    // separate open file description, so it keeps blocking reads.)
-    let stdin = match child.stdin.take() {
+    let stdin = match host_input {
         Some(stdin) => {
             rustix::fs::fcntl_setfl(&stdin, rustix::fs::OFlags::NONBLOCK)
                 .map_err(|error| io_error(error.into()))?;
@@ -1653,9 +1718,10 @@ fn shell(
     if a.background {
         let run_id = ctx.run_id.unwrap_or("").to_string();
         if run_id.is_empty() {
+            let ended = end_program(&mut child, group.0.id(), None, END_WAIT);
+            close_input_once_ended(stdin, ended.is_some());
             finished.store(true, Ordering::SeqCst);
             drop(group);
-            let _ = child.wait();
             let _ = out.join();
             let _ = err.join();
             return Err(ApiError::new(
@@ -1669,9 +1735,10 @@ fn shell(
         if let Err(error) =
             super::shell_tasks::insert(ctx.connection, &run_id, &call_id, pgid, &leader, &started)
         {
+            let ended = end_program(&mut child, pgid, None, END_WAIT);
+            close_input_once_ended(stdin, ended.is_some());
             finished.store(true, Ordering::SeqCst);
             drop(group);
-            let _ = child.wait();
             let _ = out.join();
             let _ = err.join();
             return Err(error);
@@ -1713,12 +1780,16 @@ fn shell(
                         signal: None,
                     }
                 };
+                let mut exited = None;
                 loop {
                     if stop.load(Ordering::SeqCst) {
                         break;
                     }
                     match child.try_wait() {
-                        Ok(Some(_)) => break,
+                        Ok(Some(status)) => {
+                            exited = Some(status);
+                            break;
+                        }
                         Ok(None) => {}
                         Err(_) => break,
                     }
@@ -1735,7 +1806,6 @@ fn shell(
                                 if !stop.load(Ordering::SeqCst) =>
                             {
                                 stop.store(true, Ordering::SeqCst);
-                                super::shell_tasks::kill_group(pgid);
                                 break;
                             }
                             _ => {}
@@ -1743,18 +1813,21 @@ fn shell(
                     }
                     std::thread::sleep(Duration::from_millis(150));
                 }
-                // Closed under the input lock before anything else: from here the
-                // task takes no more lines, and the reader sees its last echo.
-                drop(
+                // The task dies before its input closes: an end of file first
+                // would let `read` return and the rest of the command run. Whoever
+                // raised `stop` may not have killed the group yet, and a program
+                // that left its group is only reached by its own pid.
+                let status = end_program(&mut child, pgid, exited, END_WAIT);
+                // Closed under the input lock: from here the task takes no more
+                // lines, and the reader sees its last echo. A program whose end
+                // was not seen keeps its input open, and `stop` refuses every line.
+                close_input_once_ended(
                     wire.lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .take(),
+                    status.is_some(),
                 );
                 finished.store(true, Ordering::SeqCst);
-                if stop.load(Ordering::SeqCst) {
-                    super::shell_tasks::kill_group(pgid);
-                }
-                let status = child.wait().ok();
                 drop(group);
                 let (stdout, t1, i1) = out.join().unwrap_or_else(|_| (String::new(), false, true));
                 let (stderr, t2, i2) = err.join().unwrap_or_else(|_| (String::new(), false, true));
@@ -1824,8 +1897,10 @@ fn shell(
             None => std::thread::sleep(Duration::from_millis(20)),
         }
     };
-    drop(group); // Also stop background descendants when their parent exits.
-    let status = status.or_else(|| child.wait().ok());
+    // Also stop background descendants when their parent exits, and the
+    // program itself when it left its group.
+    let status = end_program(&mut child, group.0.id(), status, END_WAIT);
+    drop(group);
     use std::os::unix::process::ExitStatusExt;
     let signal = status.as_ref().and_then(|s| s.signal());
     let (stdout, t1, i1) = out.join().unwrap_or_else(|_| (String::new(), false, true));
@@ -2260,5 +2335,116 @@ mod tests {
         )
         .unwrap());
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// The reader feeds the program's output to the prompt detector in
+    /// whatever pieces the pipe returns. Every cut of a prompt, into two or
+    /// three pieces, must ask the same as the prompt in one piece.
+    #[test]
+    fn a_password_prompt_cut_at_any_byte_still_asks_for_the_password() {
+        fn asks(pieces: &[&[u8]]) -> bool {
+            let mut line = super::super::shell_tasks::PromptLine::default();
+            for piece in pieces {
+                line.push(piece);
+            }
+            line.asks_password()
+        }
+        let cases: [(&str, bool); 7] = [
+            ("Password:\n", true),
+            ("bob\nPassword: ", true),
+            ("Bienvenue\nMot de passe :\n\n", true),
+            ("Phrase secrète :\n", true),
+            ("Enter passphrase for key '/Users/x/.ssh/id': ", true),
+            ("Password: ok\nNom du projet : ", false),
+            ("Password:\nContinuer ? [y/N] ", false),
+        ];
+        for (output, expected) in cases {
+            let bytes = output.as_bytes();
+            assert_eq!(asks(&[bytes]), expected, "{output:?}");
+            for i in 0..=bytes.len() {
+                let (head, tail) = bytes.split_at(i);
+                assert_eq!(asks(&[head, tail]), expected, "{output:?} coupé à {i}");
+                for j in i..=bytes.len() {
+                    let pieces = [&bytes[..i], &bytes[i..j], &bytes[j..]];
+                    assert_eq!(asks(&pieces), expected, "{output:?} coupé à {i} et {j}");
+                }
+            }
+            let bytewise: Vec<&[u8]> = bytes.chunks(1).collect();
+            assert_eq!(asks(&bytewise), expected, "{output:?} octet par octet");
+        }
+    }
+
+    /// A program that left its group is out of reach of the group's kill: it is
+    /// killed by its own pid, and its end is seen.
+    #[test]
+    fn a_program_that_left_its_group_is_killed_by_its_own_pid() {
+        use std::os::unix::process::CommandExt;
+        let guard = grokbot_test_support::TestDir::new("ezerbot-end-program");
+        let leader = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut child = Command::new("/usr/bin/perl")
+            .args([
+                "-e",
+                "setpgrp(0, 0); <STDIN>; open(my $f, '>', $ARGV[0]); print $f 'fin'",
+            ])
+            .arg(guard.join("apres.txt"))
+            .stdin(Stdio::piped())
+            .process_group(leader.id() as i32)
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        // The program has left the group once its pgid is its own pid.
+        let pid = rustix::process::Pid::from_child(&child);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while rustix::process::getpgid(Some(pid)).ok() != Some(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "le programme n'a pas quitté son groupe"
+            );
+            std::thread::yield_now();
+        }
+        let mut leader = leader;
+        let status = end_program(&mut child, leader.id(), None, END_WAIT);
+        assert!(
+            status.is_some(),
+            "la fin du programme n'a pas été constatée"
+        );
+        close_input_once_ended(input, status.is_some());
+        leader.wait().unwrap();
+        assert!(!guard.join("apres.txt").exists());
+    }
+
+    /// Without its end seen, a program never gets an end of file: it keeps
+    /// waiting on its input. Closing it would let the command go on.
+    #[test]
+    fn a_program_whose_end_is_not_seen_keeps_its_input_open() {
+        let guard = grokbot_test_support::TestDir::new("ezerbot-end-program");
+        let spawn = |name: &str| {
+            Command::new("/bin/sh")
+                .args(["-c", "read -r ligne; printf fin > \"$0\""])
+                .arg(guard.join(name))
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let mut kept = spawn("garde.txt");
+        let input = kept.stdin.take().unwrap();
+        close_input_once_ended(input, false);
+        assert!(
+            reap_within(&mut kept, Duration::from_millis(500)).is_none(),
+            "le programme a reçu une fin de fichier"
+        );
+        kept.kill().unwrap();
+        kept.wait().unwrap();
+        assert!(!guard.join("garde.txt").exists());
+        // Counter-proof: the same program whose input closes goes on.
+        let mut closed = spawn("ferme.txt");
+        let input = closed.stdin.take().unwrap();
+        close_input_once_ended(input, true);
+        closed.wait().unwrap();
+        assert!(guard.join("ferme.txt").exists());
     }
 }

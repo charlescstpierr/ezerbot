@@ -60,6 +60,8 @@ grokbot-test-support = { workspace = true }
 # Les intégrations compilent la bibliothèque sans cfg(test), même en release.
 grokbot-wrapper = { path = ".", features = ["test-support"] }
 nix = { version = "0.29.0", default-features = false, features = ["fs", "user"] }
+# RLIMIT_NPROC : un arrêt de tâche tient quand plus aucun processus ne peut démarrer.
+rustix = { version = "1", features = ["fs", "process"] }
 # Relit le QR servi au Mac, comme le ferait l'appareil photo de l'iPhone.
 rqrr = { version = "0.11", default-features = false }
 

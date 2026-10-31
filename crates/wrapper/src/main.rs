@@ -925,7 +925,7 @@ fn register_url_handler() -> Option<Result<(), String>> {
             .ok_or("--register-url-handler attend le chemin de l’exécutable.")?;
         let icon = args.next().map(PathBuf::from);
         let desktop = grokbot_linux_desktop::scheme::register(exec.as_ref(), icon.as_deref())
-            .map_err(|_| "Le gestionnaire ezerbot:// n’a pas pu être enregistré (xdg-mime est-il installé ?).")?;
+            .map_err(|_| "Le gestionnaire ezerbot:// n’a pas pu être enregistré (xdg-mime est-il installé ? le dossier de données est-il sans espace ni caractère spécial ?).")?;
         println!("{}", desktop.display());
         Ok(())
     })())

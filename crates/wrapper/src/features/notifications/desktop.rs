@@ -10,57 +10,52 @@ use serde::de::IgnoredAny;
 use std::{
     collections::VecDeque,
     ffi::OsStr,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{Mutex, MutexGuard, PoisonError},
 };
 
 const BODY: &str = "Ouvrez Ezerbot pour consulter cet événement.";
+/// How many of our notifications stay on the desktop: past it the oldest is closed, so that
+/// every notification still shown has a destination.
 const REMEMBERED: usize = 64;
 
-type Targets = Arc<Mutex<VecDeque<(u32, String)>>>;
-struct Live {
-    notifier: Notifier,
-    targets: Targets,
-}
-static LIVE: Mutex<Option<Live>> = Mutex::new(None);
+static LIVE: Mutex<Option<Notifier>> = Mutex::new(None);
+/// Outlives the connection: notifications stay on the desktop after a failed delivery.
+static TARGETS: Mutex<VecDeque<(u32, String)>> = Mutex::new(VecDeque::new());
 
-fn live() -> MutexGuard<'static, Option<Live>> {
+fn live() -> MutexGuard<'static, Option<Notifier>> {
     LIVE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-impl Live {
-    fn connect(bus: &Bus) -> Result<Self, Unavailable> {
-        let notifier = Notifier::connect(bus)?;
-        let targets = Targets::default();
-        let clicked = Arc::clone(&targets);
-        notifier.on_click(move |id| {
-            let conversation = clicked
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .iter()
-                // A restarted server counts from 1 again: the newest use of an id is the live one.
-                .rev()
-                .find_map(|(known, conversation)| (*known == id).then(|| conversation.clone()));
-            if let Some(conversation) = conversation {
-                let link = format!(
-                    "ezerbot://app/v1/thread?id={}",
-                    crate::deep_links::encode(&conversation)
-                );
-                let _ = open::launch(OsStr::new(&link));
-            }
-        })?;
-        Ok(Self { notifier, targets })
-    }
+fn targets() -> MutexGuard<'static, VecDeque<(u32, String)>> {
+    TARGETS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn connect(bus: &Bus) -> Result<Notifier, Unavailable> {
+    let notifier = Notifier::connect(bus)?;
+    notifier.on_click(|id| {
+        let conversation = targets()
+            .iter()
+            .find_map(|(known, conversation)| (*known == id).then(|| conversation.clone()));
+        if let Some(conversation) = conversation {
+            let link = format!(
+                "ezerbot://app/v1/thread?id={}",
+                crate::deep_links::encode(&conversation)
+            );
+            let _ = open::launch(OsStr::new(&link));
+        }
+    })?;
+    Ok(notifier)
 }
 
 /// Runs `action` on the one process-wide notifier, connecting on first use. A failure drops
 /// the connection so that the next delivery reconnects.
 fn with_live<T>(
     bus: &Bus,
-    action: impl FnOnce(&Live) -> Result<T, Unavailable>,
+    action: impl FnOnce(&Notifier) -> Result<T, Unavailable>,
 ) -> Result<T, Unavailable> {
     let mut slot = live();
     if slot.is_none() {
-        *slot = Some(Live::connect(bus)?);
+        *slot = Some(connect(bus)?);
     }
     let result = action(slot.as_ref().expect("connected above"));
     if result.is_err() {
@@ -70,12 +65,19 @@ fn with_live<T>(
 }
 
 fn deliver(bus: &Bus, title: &str, conversation: &str) -> Result<(), Unavailable> {
-    with_live(bus, |live| {
-        let id = live.notifier.send(&Alert { title, body: BODY })?;
-        let mut targets = live.targets.lock().unwrap_or_else(PoisonError::into_inner);
-        targets.push_back((id, conversation.to_owned()));
-        if targets.len() > REMEMBERED {
-            targets.pop_front();
+    with_live(bus, |notifier| {
+        let id = notifier.send(&Alert { title, body: BODY })?;
+        let evicted = {
+            let mut targets = targets();
+            // A restarted server counts from 1 again: the id now means this notification alone.
+            targets.retain(|(known, _)| *known != id);
+            targets.push_back((id, conversation.to_owned()));
+            (targets.len() > REMEMBERED)
+                .then(|| targets.pop_front())
+                .flatten()
+        };
+        if let Some((id, _)) = evicted {
+            let _ = notifier.close(id);
         }
         Ok(())
     })
@@ -134,8 +136,8 @@ pub(super) fn route(conn: &Connection, method: &str, body: &[u8]) -> Result<ApiR
     match request.command {
         Command::Presence => status("ok"),
         Command::Status | Command::Authorize => {
-            let ready = with_live(&bus, |live| {
-                live.notifier.is_ready().then_some(()).ok_or(Unavailable)
+            let ready = with_live(&bus, |notifier| {
+                notifier.is_ready().then_some(()).ok_or(Unavailable)
             });
             status(if ready.is_ok() { "granted" } else { "error" })
         }

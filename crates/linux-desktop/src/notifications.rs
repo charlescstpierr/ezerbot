@@ -31,6 +31,8 @@ trait Desktop {
         expire_timeout: i32,
     ) -> zbus::Result<u32>;
 
+    fn close_notification(&self, id: u32) -> zbus::Result<()>;
+
     fn get_capabilities(&self) -> zbus::Result<Vec<String>>;
 
     #[zbus(signal)]
@@ -70,6 +72,13 @@ impl Notifier {
                 hints,
                 -1,
             )
+            .map_err(|_| Unavailable)
+    }
+
+    /// Removes a notification from the desktop. One that is already gone may be an error.
+    pub fn close(&self, id: u32) -> Result<(), Unavailable> {
+        self.proxy()?
+            .close_notification(id)
             .map_err(|_| Unavailable)
     }
 

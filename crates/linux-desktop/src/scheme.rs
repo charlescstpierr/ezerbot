@@ -1,6 +1,7 @@
 //! Registration of `ezerbot://` through a desktop entry and `xdg-mime`.
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -9,27 +10,27 @@ use crate::{Unavailable, APPLICATION_ID};
 
 const SCHEME_MIME: &str = "x-scheme-handler/ezerbot";
 
-/// The Exec path is quoted only when it holds a reserved character: the generic path of
-/// `xdg-open` (no desktop environment) does not unquote Exec, so a plain path keeps working
-/// there. Quoting escapes `"`, `` ` ``, `$` and `\` with a backslash, and the file format then
-/// doubles every backslash. `%` is doubled to stay literal.
+/// Whether a path can stand as the first word of `Exec` exactly as written. The specification
+/// wants a reserved character quoted and `%` doubled, but the generic path of `xdg-open` undoes
+/// neither: no spelling suits both, so any other path goes through a launcher.
+fn plain(path: &Path) -> bool {
+    path.to_str().is_some_and(|text| {
+        !text
+            .chars()
+            .any(|c| c.is_control() || " \"'\\><~|&;$*?#()`%".contains(c))
+    })
+}
+
+fn launcher(exec: &Path) -> String {
+    let quoted = exec.to_string_lossy().replace('\'', "'\\''");
+    format!("#!/bin/sh\nexec '{quoted}' \"$@\"\n")
+}
+
+/// `exec` must be [`plain`], which is why it needs no escaping here.
 pub fn desktop_entry(exec: &Path, icon: Option<&Path>) -> String {
-    let exec = exec.to_string_lossy();
-    let reserved = exec.chars().any(|c| " \t\n\"'\\><~|&;$*?#()`".contains(c));
-    let mut value = String::new();
-    for c in exec.chars() {
-        match c {
-            '"' | '`' | '$' => value.push_str(&format!("\\\\{c}")),
-            '\\' => value.push_str("\\\\\\\\"),
-            '%' => value.push_str("%%"),
-            _ => value.push_str(&escape_value(c)),
-        }
-    }
-    if reserved {
-        value = format!("\"{value}\"");
-    }
     let mut entry = format!(
-        "[Desktop Entry]\nType=Application\nName=Ezerbot\nExec={value} %u\nTerminal=false\nMimeType={SCHEME_MIME};\nStartupWMClass=Ezerbot\n"
+        "[Desktop Entry]\nType=Application\nName=Ezerbot\nExec={} %u\nTerminal=false\nMimeType={SCHEME_MIME};\nStartupWMClass=Ezerbot\n",
+        exec.display()
     );
     if let Some(icon) = icon {
         let value: String = icon.to_string_lossy().chars().map(escape_value).collect();
@@ -58,8 +59,21 @@ fn data_home() -> Option<PathBuf> {
     set("XDG_DATA_HOME").or_else(|| set("HOME").map(|home| home.join(".local/share")))
 }
 
+fn install(target: &Path, content: &str, mode: u32) -> Result<(), Unavailable> {
+    let name = target.file_name().ok_or(Unavailable)?.to_string_lossy();
+    let temporary = target.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    fs::write(&temporary, content)
+        .and_then(|()| fs::set_permissions(&temporary, fs::Permissions::from_mode(mode)))
+        .and_then(|()| fs::rename(&temporary, target))
+        .map_err(|_| {
+            let _ = fs::remove_file(&temporary);
+            Unavailable
+        })
+}
+
 /// Writes the desktop entry and makes it the default handler of `ezerbot://`, then asks
-/// `xdg-mime` whether it took. Safe to run again.
+/// `xdg-mime` whether it took. An `exec` that is not [`plain`] gets a launcher next to the entry;
+/// it is refused when that folder is not plain either. Safe to run again.
 pub fn register(exec: &Path, icon: Option<&Path>) -> Result<PathBuf, Unavailable> {
     let controls = |path: &Path| {
         path.to_str()
@@ -71,14 +85,17 @@ pub fn register(exec: &Path, icon: Option<&Path>) -> Result<PathBuf, Unavailable
     let directory = data_home().ok_or(Unavailable)?.join("applications");
     fs::create_dir_all(&directory).map_err(|_| Unavailable)?;
     let name = format!("{APPLICATION_ID}.desktop");
+    let script = directory.join(APPLICATION_ID);
+    let program = if plain(exec) {
+        exec
+    } else if plain(&script) {
+        install(&script, &launcher(exec), 0o755)?;
+        &script
+    } else {
+        return Err(Unavailable);
+    };
     let target = directory.join(&name);
-    let temporary = directory.join(format!(".{name}.{}.tmp", std::process::id()));
-    fs::write(&temporary, desktop_entry(exec, icon))
-        .and_then(|()| fs::rename(&temporary, &target))
-        .map_err(|_| {
-            let _ = fs::remove_file(&temporary);
-            Unavailable
-        })?;
+    install(&target, &desktop_entry(program, icon), 0o644)?;
     // Only refreshes the MIME cache: the default below does not depend on it.
     let _ = tool("update-desktop-database")
         .arg(&directory)

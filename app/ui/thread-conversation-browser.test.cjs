@@ -303,6 +303,15 @@ for (const phone of [false, true]) test(`conversation réelle ${phone ? "iPhone 
     app.setMessages([user("question", "Explique les échecs."), ...failures]);
     await app.refresh(); await app.cleanThread();
     assert.equal(await app.run(() => document.querySelectorAll(".gb-conversation-problem").length), failures.length, "chaque chemin d’exécution en échec garde une phrase humaine");
+    const interrupted = tool("unknown", "run_shell", { status: "failed", reason: "Résultat inconnu après interruption. Action non relancée ; vérifiez son effet avant de réessayer." });
+    interrupted.payload.code = "uncertain";
+    const exhausted = { id: "task-budget", role: "assistant", kind: "task", created_at: created, payload: { run_id: "run-main", event_kind: "turn_ended", status: "finished", turn_end: "budget_exhausted", routine: true, task_status: { status: "working" } } };
+    app.setMessages([user("question", "Range le dossier."), interrupted, exhausted]);
+    await app.refresh(); await app.cleanThread();
+    const warnings = await app.run(() => [...document.querySelectorAll(".gb-conversation-problem")].map(note => note.textContent));
+    assert.equal(warnings.length, 2);
+    assert.match(warnings[0], /son résultat est inconnu\. Vérifiez son effet avant de réessayer\./, "le fil n’affirme pas un échec qu’il ignore");
+    assert.match(warnings[1], /Le budget de ce tour est épuisé/, "une routine arrêtée par le budget ne laisse pas un fil muet");
     app.setMessages(saved);
     delete saved[1].error;
     app.state.engine.runs = [run()]; saved[1].state = "streaming"; await app.refresh(); await app.thinking(true);

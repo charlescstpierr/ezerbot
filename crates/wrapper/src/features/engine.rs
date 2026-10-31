@@ -4157,6 +4157,44 @@ mod projection_tests {
     }
 
     #[test]
+    fn an_unknown_tool_result_is_projected_until_a_definitive_outcome_replaces_it() {
+        let mut f = Fixture::new(Trigger::Occurrence {
+            occurrence_id: "routine".into(),
+        });
+        let call = f.event(
+            RunEventKind::ToolCall,
+            json!({"call_id":"call","name":"run_shell","arguments":{}}),
+        );
+        f.event(
+            RunEventKind::ToolResult,
+            json!({"call_id":"call","code":"uncertain",
+                "outcome":{"status":"failed","reason":"Appel externe interrompu."}}),
+        );
+        f.app
+            .connection
+            .execute(
+                "INSERT INTO engine_external_tools(run_id,call_id) VALUES ('projection','call')",
+                [],
+            )
+            .unwrap();
+        let id = format!("projection:{call}");
+        let mut ctx = f.app.feature_context();
+        ctx.conversation_id = Some("cards");
+        let card = entry(&ctx, "engine_tool", &id).unwrap();
+        assert_eq!(card.payload["code"], "uncertain");
+
+        ctx.connection
+            .execute(
+                "UPDATE engine_external_tools SET outcome=?1 WHERE call_id='call'",
+                [r#"{"status":"failed","reason":"Fin confirmée."}"#],
+            )
+            .unwrap();
+        let card = entry(&ctx, "engine_tool", &id).unwrap();
+        assert_eq!(card.payload["outcome"]["reason"], "Fin confirmée.");
+        assert!(card.payload["code"].is_null());
+    }
+
+    #[test]
     fn routine_snapshot_is_identified_without_claiming_task_success() {
         let mut f = Fixture::new(Trigger::Occurrence {
             occurrence_id: "routine".into(),

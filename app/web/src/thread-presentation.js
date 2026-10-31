@@ -30,7 +30,7 @@ export function visibleActivity(activity, { requestRuns }) {
 }
 
 // The engine writes sentences; only a provider's appended detail can be a machine payload.
-function humanSentence(text, fallback) {
+export function humanSentence(text, fallback) {
   const whole = typeof text === "string" ? text.trim() : "";
   if (whole && !TECHNICAL.test(whole)) return whole;
   const head = whole.split(/ (?:Détail )?: /u, 1)[0].trim();

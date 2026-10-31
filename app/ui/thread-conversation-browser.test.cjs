@@ -396,6 +396,17 @@ for (const phone of [false, true]) test(`conversation réelle ${phone ? "iPhone 
     stop.release(); await app.until(() => !document.querySelector(".gb-local-stop, .gb-local-input"));
     await app.until(() => document.activeElement !== document.body && !document.activeElement.matches(":disabled"));
     await app.cleanThread();
+    const programs = ["Compiler le projet", "Compiler le projet"].map((description, index) => {
+      const program = tool(`program-${index}`, "run_shell", { status: "done", output: { background: true, status: "en cours" } }, `run-program-${index}`);
+      program.payload.call.arguments.description = description;
+      return program;
+    });
+    programs[1].payload.call.arguments.description = "Surveiller le journal";
+    app.setMessages([user("question", "Lance les deux programmes."), ...programs]);
+    await app.refresh();
+    await app.until(() => document.querySelectorAll(".gb-interventions .gb-local-stop").length === 2);
+    assert.deepEqual(await app.run(() => [...document.querySelectorAll(".gb-interventions .gb-local-name")].map(name => name.textContent)), ["Tâche 1 · Compiler le projet", "Tâche 2 · Surveiller le journal"], "chaque contrôle nomme son programme");
+    await app.cleanThread();
     const foreground = tool("foreground", "run_shell", undefined, "run-shell-live");
     delete foreground.payload.outcome;
     const foregroundReply = { ...reply("Je lis le dossier."), id: "reply-run-shell-live", payload: { run_id: "run-shell-live", parts: [{ body: "Je lis le dossier." }] } };

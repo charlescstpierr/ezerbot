@@ -174,7 +174,8 @@
 .gb-interventions { --gb-avatar-width: 30px; width: min(760px, calc(100% - 54px)); margin: 0 auto; padding: 0 0 22px; display: flex; flex-direction: column; gap: 16px; }
 .gb-interventions .lucide { width: 14px; height: 14px; }
 .gb-local-intervention { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.gb-local-intervention .gb-local-input, .gb-local-intervention .gb-local-failure { flex-basis: 100%; }
+.gb-local-intervention .gb-local-input, .gb-local-intervention .gb-local-failure, .gb-local-name { flex-basis: 100%; }
+.gb-local-name { margin: 0; font-size: 14px; line-height: 1.75; }
 .gb-conversation-note > p { margin: 0; font-size: 14px; line-height: 1.75; }
 .gb-delegation-result { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.75; }
 .gb-thread .lucide, .gb-composer .lucide { width: 14px; height: 14px; flex: 0 0 auto; stroke-width: 1.8; }

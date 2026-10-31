@@ -46,7 +46,7 @@ Le registre du pilote fournit ces vues, dans cet ordre. Le viewport est de 1440 
 | `conversation-dark` | Conversation synthétique avec sa réponse terminée. |
 | `settings-dark` | Dialogue des réglages ouvert. |
 | `routines-dark` | Dialogue des routines ouvert. |
-| `notifications-dark` | Dialogue des notifications ouvert. |
+| `notifications-dark` | Dialogue ouvert avec la notification de la réponse synthétique. |
 
 ## Format du manifeste
 

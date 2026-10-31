@@ -10,7 +10,7 @@ const VIEWS = Object.freeze([
   { id: "conversation-dark", label: "Conversation factice", action: "GrokbotPanels.openConversation(window.captureConversationId)", ready: "document.getElementById('conversation-title')?.textContent === 'Préparer la semaine' && document.getElementById('chat-scroll')?.textContent.includes('Voici votre document.')" },
   { id: "settings-dark", label: "Réglages", action: "document.getElementById('settings-button').click()", ready: "document.getElementById('settings-dialog')?.open && document.querySelector('#settings-dialog .setting-section')" },
   { id: "routines-dark", label: "Routines", action: "document.querySelector('[data-sidebar-destination=routines]').click()", ready: "document.querySelector('.routines-dialog')?.open && document.querySelector('.routines-content')?.textContent.includes('Aucune routine pour ce bot.')" },
-  { id: "notifications-dark", label: "Notifications", action: "document.querySelector('[data-sidebar-destination=notifications]').click(); document.querySelector('.notifications-dialog .dialog-footer button').click()", ready: "document.querySelector('.notifications-dialog')?.open && document.querySelector('.notification-empty')" },
+  { id: "notifications-dark", label: "Notifications", action: "document.querySelector('[data-sidebar-destination=notifications]').click()", ready: "document.querySelector('.notifications-dialog')?.open && document.querySelector('.notifications-dialog .notification-item')?.textContent.includes('Préparer la semaine')" },
 ]);
 
 async function bounded(work, description, signal, timeoutMs = 20000) {
@@ -126,6 +126,7 @@ async function capture(sha, binary, output, signal) {
         window.scrollTo(0,0); document.querySelectorAll('dialog[open],#chat-scroll,#conversation-list').forEach(element => element.scrollTop=0);
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       })()`), stage, cancelled.signal);
+      await waitFor(() => check(view.ready), `${view.id} after paint`, cancelled.signal);
       if (browserFailure) throw new Error(browserFailure);
       stage = `${view.id} screenshot`;
       const { data } = await send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false });

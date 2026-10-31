@@ -15,7 +15,7 @@ const DRIVEN = Object.freeze([
   { id: "thread-menu", label: "Menu du message", action: `${question}.querySelector('button[aria-label="Actions du message"]').click()`,
     ready: `[...document.querySelectorAll('[role=menu][aria-label="Actions du message"] [role=menuitem]')].some(item => item.textContent === 'Répondre en fil' && !item.disabled)` },
   { id: "thread-open", label: "Sous-fil ouvert", action: `[...document.querySelectorAll('[role=menu][aria-label="Actions du message"] [role=menuitem]')].find(item => item.textContent === 'Répondre en fil').click()`,
-    ready: `!document.getElementById('thread-banner')?.hidden && document.getElementById('thread-banner-quote')?.textContent.includes(${JSON.stringify(QUESTION.slice(0, 20))}) && document.getElementById('conversation-title')?.textContent.startsWith('Fil') && !document.getElementById('chat-scroll')?.textContent.includes('Voici votre document.')` },
+    ready: `!document.getElementById('thread-banner')?.hidden && document.getElementById('thread-banner-quote')?.textContent.includes(${JSON.stringify(QUESTION.slice(0, 20))}) && document.getElementById('conversation-title')?.textContent.startsWith('Fil') && document.querySelectorAll('#chat-scroll .gb-message').length === 0` },
   { id: "thread-reply", label: "Réponse dans le sous-fil", action: `fetch('/api/send', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({conversation_id:${threadId}, message_id:'linux-verify-thread', body:${JSON.stringify(FOLLOW_UP)}})}).then(r => { if (!r.ok) throw Error('thread send failed'); return GrokbotPanels.refresh(); })`,
     ready: `!document.getElementById('thread-banner')?.hidden && document.getElementById('chat-scroll')?.textContent.includes(${JSON.stringify(FOLLOW_UP)}) && document.getElementById('chat-scroll')?.textContent.includes('Voici votre document.') && !GrokbotPanels.state.conversations.find(item => item.id === ${threadId})?.messages?.some(message => GrokbotChat.isPendingReply(message, false))` },
   { id: "thread-main", label: "Retour au fil principal", action: "document.getElementById('thread-banner-open').click()",
@@ -23,13 +23,16 @@ const DRIVEN = Object.freeze([
   { id: "settings-connectors", label: "Paramètres, section Connecteurs", keepScroll: true,
     action: "document.getElementById('settings-button').click(); document.querySelector('#settings-dialog [data-panel=mcp]')?.scrollIntoView({block:'start'})",
     ready: "(() => { const panel = document.querySelector('#settings-dialog[open] [data-panel=mcp]'); if (!panel) return false; const box = panel.getBoundingClientRect(); return panel.querySelector('h3')?.textContent === 'Connecteurs' && [...panel.querySelectorAll('summary')].some(item => item.textContent.includes('Ajouter un serveur MCP')) && box.top >= 0 && box.top < innerHeight; })()" },
+  { id: "settings-connectors-add", label: "Connecteurs, ajouter un serveur MCP", keepScroll: true,
+    action: "document.getElementById('settings-button').click(); [...document.querySelectorAll('#settings-dialog [data-panel=mcp] summary')].find(item => item.textContent.includes('Ajouter un serveur MCP'))?.scrollIntoView({block:'center'})",
+    ready: "(() => { const summary = [...document.querySelectorAll('#settings-dialog[open] [data-panel=mcp] summary')].find(item => item.textContent.includes('Ajouter un serveur MCP')); if (!summary) return false; const box = summary.getBoundingClientRect(); const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2); return box.height > 0 && box.top >= 0 && box.bottom <= innerHeight && summary.contains(hit) && !document.querySelector('#settings-dialog [data-panel=mcp] .mcp-list article'); })()" },
 ]);
 
 // Entry of features/ -> views that must all be captured for the entry to pass.
 const FEATURES = Object.freeze([
   { feature: "accueil", views: ["home-dark"] },
   { feature: "reponse-fil", views: ["conversation-dark", "thread-menu", "thread-open", "thread-reply", "thread-main"] },
-  { feature: "parametres-connecteurs", views: ["settings-dark", "settings-connectors"] },
+  { feature: "parametres-connecteurs", views: ["settings-dark", "settings-connectors", "settings-connectors-add"] },
 ]);
 
 function selectedViews() {

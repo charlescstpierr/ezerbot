@@ -13,6 +13,8 @@ evidence=${EZERBOT_VERIFY_EVIDENCE_DIR:-}
 while (($#)); do
   case $1 in
     --evidence) [[ $# -ge 2 ]] || fail '--evidence exige un dossier.'; evidence=$2; shift 2 ;;
+    # Les trois entrées sont toujours jouées ensemble ; une autre sphère passe par le substitut headless.
+    --sphere) [[ $# -ge 2 && $2 =~ ^(all|accueil|reponse-fil|parametres-connecteurs)$ ]] || fail "--sphere : accueil, reponse-fil, parametres-connecteurs ou all ; sinon EZERBOT_VERIFY_BROWSER=chrome-headless."; shift 2 ;;
     *) fail "argument inconnu : $1" ;;
   esac
 done

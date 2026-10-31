@@ -133,6 +133,19 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("hors du dépôt", result.stderr)
 
+    def test_prove_sh_keeps_sphere_and_dispatches_covered_spheres_to_xvfb(self) -> None:
+        env = {key: value for key, value in os.environ.items() if key != "EZERBOT_VERIFY_BROWSER"}
+        for sphere in ("accueil", "reponse-fil", "parametres-connecteurs", "all"):
+            with self.subTest(sphere=sphere):
+                result = subprocess.run(["bash", str(SCRIPTS / "prove.sh"), "--sphere", sphere, "--evidence", str(SCRIPTS.parents[3] / "inside")], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("hors du dépôt", result.stderr)
+
+    def test_uncovered_sphere_is_refused_by_the_xvfb_path(self) -> None:
+        result = subprocess.run(["bash", str(SCRIPTS / "prove-linux.sh"), "--sphere", "modeles"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("chrome-headless", result.stderr)
+
     def test_used_evidence_folder_is_refused(self) -> None:
         used = Path(tempfile.mkdtemp(prefix="linux-used-"))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(used)], check=True))

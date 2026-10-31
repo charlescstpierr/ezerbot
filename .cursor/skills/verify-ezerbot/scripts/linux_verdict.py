@@ -24,6 +24,7 @@ EXPECTED: tuple[tuple[str, str], ...] = (
     ("reponse-fil", "thread-main"),
     ("parametres-connecteurs", "settings-dark"),
     ("parametres-connecteurs", "settings-connectors"),
+    ("parametres-connecteurs", "settings-connectors-add"),
 )
 
 

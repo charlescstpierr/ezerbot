@@ -11,7 +11,7 @@ Deux instances peuvent tourner ensemble si chacune a son port, son `HOME`, sa ba
 
 ## Preuve sous Linux (plateforme principale)
 
-Une seule commande, depuis la racine d’un checkout propre (sources compilées commitées) :
+Une seule commande, depuis la racine d’un checkout propre (sources compilées commitées) ; `--sphere accueil|reponse-fil|parametres-connecteurs|all` est accepté et joue les trois entrées, une autre sphère ou `--patch` garde le substitut headless :
 
 ```bash
 bash .cursor/skills/verify-ezerbot/scripts/prove.sh --evidence <dossier-neuf-hors-dépôt>
@@ -24,10 +24,10 @@ Sous Linux, `prove.sh` passe la main à `scripts/prove-linux.sh`, qui réutilise
 3. Dossier de run court `/tmp/ezv.*` (`scripts/linux_run_lib.sh`) : `HOME`, `XDG_*` et `TMPDIR` dedans, environnement vidé (`env -i`). Le wrapper, le faux fournisseur local et un profil Chrome neuf y vivent. `trap` le supprime et tue le groupe de processus du run, en réussite comme en échec.
 4. `xvfb-run -a` (écran privé) lance `scripts/linux_drive.cjs`, qui pilote trois entrées de la carte, une capture par étape :
    - `accueil` : `home-dark` ;
-   - `reponse-fil` : `conversation-dark` (conversation factice et sa réponse terminée), `thread-menu` (menu « Actions du message » avec « Répondre en fil »), `thread-open` (sous-fil, bandeau qui cite la question, titre « Fil : … », fil vide), `thread-reply` (« Et en un mot ? » et la réponse du faux bot dans le sous-fil), `thread-main` (« Voir dans le fil principal » : bandeau caché, question présente, question du sous-fil absente) ;
-   - `parametres-connecteurs` : `settings-dark` (dialogue ouvert), `settings-connectors` (section Connecteurs défilée à l’écran, « Ajouter un serveur MCP » présent).
+   - `reponse-fil` : `conversation-dark` (conversation factice et sa réponse terminée), `thread-menu` (menu « Actions du message » avec « Répondre en fil »), `thread-open` (sous-fil, bandeau qui cite la question, titre « Fil : … », aucun message), `thread-reply` (« Et en un mot ? » et la réponse du faux bot dans le sous-fil), `thread-main` (« Voir dans le fil principal » : bandeau caché, question présente, question du sous-fil absente) ;
+   - `parametres-connecteurs` : `settings-dark` (dialogue ouvert), `settings-connectors` (section Connecteurs défilée à l’écran), `settings-connectors-add` (« Ajouter un serveur MCP » visible et non masqué, aucun serveur personnel).
    Le pilote refuse un wrapper dont le commit ou les assets servis diffèrent du checkout. Le faux fournisseur de la fixture ne cite pas le message parent : la citation du parent par le bot reste prouvée par le test Rust de `reponse-fil.md`, pas par cette commande.
-5. `scripts/linux_verdict.py` écrit `report.md` : une ligne par entrée, puis `PASS <sha40>` ou `FIX <sha40>`. `PASS` exige un pilote sorti avec 0, un `result.json` et un manifeste de ce run, les huit vues attendues (registre `EXPECTED`, égal à celui du pilote) et chaque PNG présent avec son empreinte. Un pilote planté ou sans résultat donne `FIX` avec « Erreur d’outil ». Code de sortie 0 pour PASS, 1 pour FIX, 2 pour un refus avant le run (prérequis, dossier de preuves déjà utilisé ou dans le dépôt, sources compilées ou scripts de la skill non commités).
+5. `scripts/linux_verdict.py` écrit `report.md` : une ligne par entrée, puis `PASS <sha40>` ou `FIX <sha40>`. `PASS` exige un pilote sorti avec 0, un `result.json` et un manifeste de ce run, les neuf vues attendues (registre `EXPECTED`, égal à celui du pilote) et chaque PNG présent avec son empreinte. Un pilote planté ou sans résultat donne `FIX` avec « Erreur d’outil ». Code de sortie 0 pour PASS, 1 pour FIX, 2 pour un refus avant le run (prérequis, dossier de preuves déjà utilisé ou dans le dépôt, sources compilées ou scripts de la skill non commités).
 
 Preuves : `<dossier>/doctor.txt`, `<dossier>/report.md`, `<dossier>/captures/{manifest.json,result.json,*.png}`. Sans `--evidence`, le dossier est créé sous `$TMPDIR`. Le dossier doit être absent ou vide, et hors du dépôt. Aucun chemin `/Users` ni `/Applications` n’intervient. Jamais de vrai compte ChatGPT ni du vrai `HOME`, ni de trousseau. Pour l’ancien substitut headless, poser `EZERBOT_VERIFY_BROWSER=chrome-headless`.
 

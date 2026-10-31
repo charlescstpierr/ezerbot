@@ -18,6 +18,8 @@ members = [
   "crates/attachments",
   "crates/test-support",
 ]
+# Copie corrigée de tiny_http : dépendance, pas membre (ni Clippy ni rustfmt du dépôt).
+exclude = ["vendor/tiny_http"]
 
 [workspace.package]
 edition = "2021"
@@ -79,3 +81,8 @@ opt-level = 3
 
 [profile.release.package.alloc-no-stdlib]
 opt-level = 3
+
+# tiny_http 0.12.0 (dernière version) laisse une connexion sans fil pour la lire quand
+# plusieurs arrivent ensemble : voir vendor/tiny_http/EZERBOT.md.
+[patch.crates-io]
+tiny_http = { path = "vendor/tiny_http" }

@@ -1396,3 +1396,49 @@ fn known_vault_values_are_excluded_even_without_secret_keywords() {
     assert!(f.calls().is_empty());
     assert!(f.facts("grokbot").is_empty());
 }
+
+/// The vault backend and the bus are per process, so the scenario runs in its own, on a real
+/// keyring: the secret lives there and no longer in the file that sits next to the database.
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[test]
+fn a_secret_kept_in_secret_service_still_stops_automatic_memory() {
+    const NAME: &str = "a_secret_kept_in_secret_service_still_stops_automatic_memory";
+    if std::env::var_os("GROKBOT_TEST_SESSION_BUS").is_none() {
+        let keyring = grokbot_linux_desktop::testing::Keyring::start();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        keyring
+            .home()
+            .env(&mut command)
+            .env("GROKBOT_TEST_SESSION_BUS", keyring.address())
+            .args(["--exact", NAME, "--nocapture"]);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    grokbot_forms::vault::enable_os_vault(true);
+    let mut f = Fixture::new();
+    let file = f.path.with_extension("secrets.json");
+    let vault = grokbot_forms::vault::Vault::open_app(&file).unwrap();
+    assert_eq!(vault.storage_status().backend, "keychain");
+    vault
+        .set("PORCELAINE", "Piège synthétique", "porcelaine ambrée")
+        .unwrap();
+    assert!(!std::fs::read_to_string(&file)
+        .unwrap()
+        .contains("porcelaine"));
+    let c = f.conv("grokbot");
+    f.script(json!([fact("Je préfère la porcelaine ambrée.", None)]));
+    f.send(&c, "m", "Je préfère la porcelaine ambrée.");
+    f.settle();
+    assert_eq!(
+        f.calls().len(),
+        0,
+        "the secret reached the extraction model"
+    );
+    assert!(f.facts("grokbot").is_empty());
+}

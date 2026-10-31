@@ -49,6 +49,7 @@ Le registre du pilote fournit ces vues, dans cet ordre. Le viewport est de 1440 
 | `settings-dark` | Dialogue des réglages ouvert. |
 | `routines-dark` | Dialogue des routines ouvert. |
 | `notifications-dark` | Dialogue ouvert avec la notification de la réponse synthétique. |
+| `conversation-tools-dark` | Tour actif après un vrai outil local : seulement la phrase du bot et « Réfléchit », sans aucune trace d'outil. |
 
 ## Format du manifeste
 

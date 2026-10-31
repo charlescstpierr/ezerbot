@@ -2,7 +2,8 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { createServer } = require("node:http");
 const { spawn } = require("node:child_process");
-const { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } = require("node:fs");
+const { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } = require("node:fs");
+const { rm } = require("node:fs/promises");
 const { join, resolve, extname, isAbsolute } = require("node:path");
 const { chromeBinary } = require("./chrome-binary.cjs");
 const { connectCdp } = require("./local-api-client.cjs");
@@ -127,7 +128,7 @@ async function fixture(t, phone) {
     }
     server.closeAllConnections();
     if (server.listening) await new Promise(done => server.close(done));
-    rmSync(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
   });
   await new Promise(done => server.listen(0, "127.0.0.1", done));
   chrome = spawn(chromeBinary(), ["--headless=new", "--no-sandbox", "--disable-gpu", "--disable-background-networking", "--disable-sync", "--no-first-run", "--use-mock-keychain", "--password-store=basic", "--no-proxy-server", "--host-resolver-rules=MAP thread-fixture.ts.net 127.0.0.1", `--unsafely-treat-insecure-origin-as-secure=http://thread-fixture.ts.net:${server.address().port}`, "--remote-debugging-port=0", `--user-data-dir=${root}`, "about:blank"], { stdio: "ignore" });

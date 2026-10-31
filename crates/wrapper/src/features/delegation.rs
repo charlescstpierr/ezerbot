@@ -978,7 +978,6 @@ fn delivery_for(conn: &Connection, edge: &Delegation) -> Result<Delivery> {
         }
         let inherited = graph::get(conn, id)?.filter(|delegation| {
             delegation.conversation_id.as_deref() == Some(&parent.conversation_id)
-                && delegation.depth < edge.depth
         });
         if let Some(inherited) = inherited {
             let nested = delivery_for(conn, &inherited)?;

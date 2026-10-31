@@ -172,17 +172,14 @@ impl Fixture {
         self.app.tick(ms);
     }
     fn wait_parent(&mut self, c: &str, m: &str, status: RunStatus) {
-        let mut delivered = false;
         wait("parent state", || {
             // A background launch pauses on its own card. Existing engine tests
-            // that wait for the child (or for the parent to finish) allow it once.
+            // that wait for the child (or for the parent to finish) allow it.
             if self.run(c, m).status == RunStatus::AwaitingApproval {
-                if self.allow_pending_background() || !delivered {
-                    self.tick_suspended();
-                    delivered = true;
-                }
-            } else {
-                delivered = false;
+                self.allow_pending_background();
+                // Tick like the host loop: a tick that races the suspended worker's
+                // ownership release delivers nothing, and only a later one resumes the run.
+                self.tick_suspended();
             }
             self.run(c, m).status == status && self.provider.status()["titling"] == false
         });
@@ -311,8 +308,17 @@ impl Fixture {
             json!({"type":"response.output_text.delta","delta":"Parent acknowledged"}),
             completed(),
         ]);
-        self.tick();
-        self.wait_parent(c, m, RunStatus::Finished);
+        wait("parent state", || {
+            if self.run(c, m).status == RunStatus::AwaitingChildren {
+                self.tick();
+            }
+            if self.run(c, m).status == RunStatus::AwaitingApproval {
+                self.allow_pending_background();
+                self.tick_suspended();
+            }
+            self.run(c, m).status == RunStatus::Finished
+                && self.provider.status()["titling"] == false
+        });
     }
 }
 fn completed() -> Value {
@@ -506,16 +512,10 @@ fn tool_budget_cannot_skip_the_final_batch_wait() {
     }
     tx.commit().unwrap();
     f.tick();
-    let mut budget_delivered = false;
     wait("budget batch waits", || {
-        if store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingApproval
-            && (f.allow_pending_background() || !budget_delivered)
-        {
+        if store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingApproval {
+            f.allow_pending_background();
             f.tick_suspended();
-            budget_delivered = true;
-        }
-        if store::required(&f.db(), &root.run_id).unwrap().status != RunStatus::AwaitingApproval {
-            budget_delivered = false;
         }
         store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingChildren
     });
@@ -843,8 +843,8 @@ fn rejected_last_delegate_still_waits_for_approved_sibling(expired: bool) {
             && f.provider.status()["titling"] == false
     });
     assert!(f.allow_pending_background());
-    f.tick_suspended();
     wait("second approval", || {
+        f.tick_suspended();
         f.run(&c, "mixed").status == RunStatus::AwaitingApproval
             && f.children(&f.run(&c, "mixed")).len() == 1
             && f.provider.status()["titling"] == false
@@ -880,9 +880,10 @@ fn rejected_last_delegate_still_waits_for_approved_sibling(expired: bool) {
         );
     }
     f.events(vec![completed()]);
-    f.tick_suspended();
     wait("approval settled", || {
-        f.provider.status()["titling"] == false
+        f.tick_suspended();
+        f.run(&c, "mixed").status != RunStatus::AwaitingApproval
+            && f.provider.status()["titling"] == false
     });
     let parent = f.run(&c, "mixed");
     assert_eq!(parent.status, RunStatus::AwaitingChildren);
@@ -1221,6 +1222,7 @@ fn revoking_one_selected_fact_keeps_other_context_and_reports_revocation() {
     f.post("/api/forms/submit",json!({"entry_id":entry,"submission_id":"after-forget","conversation_id":c,"values":{"answer":"continue"}}));
     f.tick();
     wait("child finished", || {
+        f.tick_suspended();
         matches!(
             graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
             DelegationStatus::Done { .. }
@@ -2164,6 +2166,10 @@ fn selected_image_reaches_the_child_request_and_not_another_thread() {
                 .as_str()
                 .unwrap_or("")
                 .contains("executing a delegated Task")
+                && body["instructions"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Tu t'appelles child.")
                 && body.to_string().contains("Décris cette photo")
         })
         .expect("requête de l'enfant")
@@ -2259,6 +2265,10 @@ fn selected_image_reaches_the_child_request_and_not_another_thread() {
                 .as_str()
                 .unwrap_or("")
                 .contains("executing a delegated Task")
+                && body["instructions"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Tu t'appelles child.")
                 && body.to_string().contains("Décris photo.png")
         })
         .expect("requête du fil qui n'a sélectionné que le nom")
@@ -2289,6 +2299,10 @@ fn selected_image_reaches_the_child_request_and_not_another_thread() {
                 .as_str()
                 .unwrap_or("")
                 .contains("executing a delegated Task")
+                && body["instructions"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Tu t'appelles child.")
                 && body.to_string().contains("Décris ce fil vide")
         })
         .expect("requête de l'autre fil")
@@ -2316,128 +2330,152 @@ fn selected_image_reaches_the_child_request_and_not_another_thread() {
 
 #[test]
 fn selected_image_follows_when_the_task_input_is_forwarded() {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
-    let png = STANDARD.decode(PNG).unwrap();
-    let mut f = Fixture::new(true);
-    let c = f.conversation();
-    let image = f.app.api("POST", "/api/attachments", &png).unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let mut targeted = args("child");
-    targeted["objective"] = json!("Décris cette photo");
-    targeted["selected_context"]["selected_images"] = json!([image.clone()]);
-    f.events(vec![
-        json!({"type":"response.output_text.delta","delta":"Légende prête."}),
-        completed(),
-    ]);
-    let caption = json!({
-        "conversation_id": c,
-        "attachment_id": image,
-        "draft": "Transmets cette photo."
-    });
-    f.post("/api/attachments/precaption", caption.clone());
-    wait("caption ready", || {
-        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
-    });
-    f.events(vec![
-        call("delegate-photo", "delegate", targeted),
-        completed(),
-    ]);
-    f.post(
-        "/api/send",
-        json!({
+    for continue_without_waiting in [true, false] {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+        let png = STANDARD.decode(PNG).unwrap();
+        let mut f = Fixture::new(true);
+        f.post(
+            "/api/approvals/waiting",
+            json!({"task":continue_without_waiting,"chat":false,"validity":"24h","reminder":"1h"}),
+        );
+        let c = f.conversation();
+        let image = f.app.api("POST", "/api/attachments", &png).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let document_text = "DOCUMENT_TRANSMIS_AU_PETIT_ENFANT";
+        let document = f.post(
+            "/api/documents",
+            json!({"name":"forwarded.txt", "data":STANDARD.encode(document_text)}),
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut targeted = args("child");
+        targeted["objective"] = json!("Décris cette photo");
+        targeted["selected_context"]["selected_images"] = json!([image.clone()]);
+        targeted["selected_context"]["entry_ids"] = json!(["forward-photo"]);
+        f.events(vec![
+            json!({"type":"response.output_text.delta","delta":"Légende prête."}),
+            completed(),
+        ]);
+        let caption = json!({
             "conversation_id": c,
-            "message_id": "forward-photo",
-            "body": "Transmets cette photo.",
-            "attachments": [image]
-        }),
-    );
-    f.wait_parent(&c, "forward-photo", RunStatus::AwaitingChildren);
-    let edge = f.children(&f.run(&c, "forward-photo")).remove(0);
-    let mut forwarded = args("grandchild");
-    forwarded["objective"] = json!("Décris la photo un niveau plus bas");
-    forwarded["selected_context"]["entry_ids"] = json!([edge.id]);
-    f.events(vec![
-        call("forward-task", "delegate", forwarded),
-        completed(),
-        call(
-            "finish-grandchild",
-            "complete_task",
-            json!({"summary":"Photo reçue"}),
-        ),
-        completed(),
-        call(
-            "finish-child",
-            "complete_task",
-            json!({"summary":"Transmise"}),
-        ),
-        completed(),
-    ]);
-    wait("grandchild request", || {
-        f.allow_pending_background();
-        f.tick();
-        f.server.seen.lock().unwrap().bodies.iter().any(|body| {
-            body["instructions"]
-                .as_str()
-                .unwrap_or("")
-                .contains("executing a delegated Task")
-                && body
-                    .to_string()
-                    .contains("Décris la photo un niveau plus bas")
-        })
-    });
-    let seen = f.server.seen.lock().unwrap();
-    let grandchild = seen
-        .bodies
-        .iter()
-        .rev()
-        .find(|body| {
-            body["instructions"]
-                .as_str()
-                .unwrap_or("")
-                .contains("executing a delegated Task")
-                && body
-                    .to_string()
-                    .contains("Décris la photo un niveau plus bas")
-        })
-        .expect("requête du petit-enfant")
-        .clone();
-    drop(seen);
-    let grandchild_json = grandchild.to_string();
-    assert!(
-        grandchild_json.contains(&format!("data:image/png;base64,{PNG}")),
-        "la requête du petit-enfant ne contient pas les octets de l'image transmise avec l'entrée"
-    );
-    let instructions = grandchild["instructions"]
-        .as_str()
-        .unwrap_or("")
-        .replace("\\\"", "\"");
-    let marker = "\"kind\":\"selected_images\"";
-    let at = instructions
-        .find(marker)
-        .expect("selected_images absent de la requête du petit-enfant");
-    let start = instructions[..at]
-        .rfind('{')
-        .expect("objet selected_images introuvable");
-    let end = instructions[at..]
-        .find('}')
-        .expect("objet selected_images non fermé")
-        + at
-        + 1;
-    let selected = &instructions[start..end];
-    let path_key = "\"path\":\"";
-    let path_at = selected
-        .find(path_key)
-        .expect("selected_images n'a pas le chemin local");
-    let path = &selected[path_at + path_key.len()..];
-    let path = &path[..path.find('"').unwrap()];
-    assert_eq!(
-        std::fs::read(path).unwrap(),
-        png,
-        "le chemin transmis au petit-enfant ne pointe pas vers les octets"
-    );
+            "attachment_id": image,
+            "draft": "Transmets cette photo."
+        });
+        f.post("/api/attachments/precaption", caption.clone());
+        wait("caption ready", || {
+            f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+        });
+        f.events(vec![
+            call("delegate-photo", "delegate", targeted),
+            completed(),
+        ]);
+        f.post(
+            "/api/send",
+            json!({
+                "conversation_id": c,
+                "message_id": "forward-photo",
+                "body": "Transmets cette photo.",
+                "attachments": [image, document]
+            }),
+        );
+        f.wait_parent(&c, "forward-photo", RunStatus::AwaitingChildren);
+        let edge = f.children(&f.run(&c, "forward-photo")).remove(0);
+        let mut forwarded = args("grandchild");
+        forwarded["objective"] = json!("Décris la photo un niveau plus bas");
+        forwarded["selected_context"]["entry_ids"] = json!([edge.id]);
+        f.events(vec![
+            call("forward-task", "delegate", forwarded),
+            completed(),
+        ]);
+        wait("grandchild request", || {
+            f.allow_pending_background();
+            f.tick();
+            f.server.seen.lock().unwrap().bodies.iter().any(|body| {
+                body["instructions"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("executing a delegated Task")
+                    && body["instructions"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("Tu t'appelles grandchild.")
+                    && body
+                        .to_string()
+                        .contains("Décris la photo un niveau plus bas")
+            })
+        });
+        let seen = f.server.seen.lock().unwrap();
+        let grandchild = seen
+            .bodies
+            .iter()
+            .rev()
+            .find(|body| {
+                body["instructions"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("executing a delegated Task")
+                    && body["instructions"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("Tu t'appelles grandchild.")
+                    && body
+                        .to_string()
+                        .contains("Décris la photo un niveau plus bas")
+            })
+            .expect("requête du petit-enfant")
+            .clone();
+        drop(seen);
+        let late_parent: bool = f
+            .db()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM delegation_graph d JOIN wrapper_late_approvals l ON l.run_id=d.parent_run_id WHERE d.child_bot='grandchild')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(late_parent, continue_without_waiting);
+        let grandchild_json = grandchild.to_string();
+        assert!(
+            grandchild_json.contains(&format!("data:image/png;base64,{PNG}")),
+            "la requête du petit-enfant ne contient pas les octets de l'image transmise avec l'entrée"
+        );
+        assert!(
+            grandchild_json.contains(document_text),
+            "le document de l'entrée n'a pas été transmis au petit-enfant"
+        );
+        let instructions = grandchild["instructions"]
+            .as_str()
+            .unwrap_or("")
+            .replace("\\\"", "\"");
+        let marker = "\"kind\":\"selected_images\"";
+        let at = instructions
+            .find(marker)
+            .expect("selected_images absent de la requête du petit-enfant");
+        let start = instructions[..at]
+            .rfind('{')
+            .expect("objet selected_images introuvable");
+        let end = instructions[at..]
+            .find('}')
+            .expect("objet selected_images non fermé")
+            + at
+            + 1;
+        let selected = &instructions[start..end];
+        let path_key = "\"path\":\"";
+        let path_at = selected
+            .find(path_key)
+            .expect("selected_images n'a pas le chemin local");
+        let path = &selected[path_at + path_key.len()..];
+        let path = &path[..path.find('"').unwrap()];
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            png,
+            "le chemin transmis au petit-enfant ne pointe pas vers les octets"
+        );
+    }
 }
 
 #[test]
@@ -2727,7 +2765,6 @@ fn group_member_can_delegate_and_receive_a_scoped_child_followup() {
     ]);
     f.post("/api/send",json!({"conversation_id":c,"message_id":"group-root","body":"Analyse en sous-tâche","mentions":[{"id":"grokbot","label":"Ezerbot"}]}));
     f.tick();
-    let mut group_delivered = false;
     wait("group delegates", || {
         let waiting = f
             .db()
@@ -2737,14 +2774,11 @@ fn group_member_can_delegate_and_receive_a_scoped_child_followup() {
                 |r| r.get::<_, bool>(0),
             )
             .unwrap_or(false);
-        if waiting && (f.allow_pending_background() || !group_delivered) {
+        if waiting {
+            f.allow_pending_background();
             // Group turns resume from the multibot driver, which a full tick runs
             // after the engine has already scanned queued children.
             f.tick();
-            group_delivered = true;
-        }
-        if !waiting {
-            group_delivered = false;
         }
         f.db()
             .query_row("SELECT COUNT(*) FROM delegation_graph", [], |r| {

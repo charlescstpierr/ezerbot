@@ -315,8 +315,6 @@ async function launchFixture(t, { documents = [], viewport, headless = true, nav
       return result.result.value;
     };
     watches.push(await identity.authenticateBrowser(cdp, url));
-    await cdp.send("Network.enable");
-    await cdp.send("Network.setExtraHTTPHeaders", { headers: { Connection: "close" } });
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     if (viewport) await cdp.send("Emulation.setDeviceMetricsOverride", { ...viewport, deviceScaleFactor: 1, mobile: false });

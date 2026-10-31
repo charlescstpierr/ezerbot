@@ -19,7 +19,7 @@ const BODY: &str = "Ouvrez Ezerbot pour consulter cet événement.";
 const REMEMBERED: usize = 64;
 
 static LIVE: Mutex<Option<Notifier>> = Mutex::new(None);
-/// Outlives the connection: a server that broadcasts clicks still reaches the next one.
+/// Emptied with the connection: a new bus hands out the same unique names again.
 static TARGETS: Mutex<VecDeque<(Shown, String)>> = Mutex::new(VecDeque::new());
 
 fn live() -> MutexGuard<'static, Option<Notifier>> {
@@ -62,6 +62,7 @@ fn with_live<T>(
     let result = action(notifier);
     if result.is_err() && !notifier.is_connected() {
         *slot = None;
+        targets().clear();
     }
     result
 }

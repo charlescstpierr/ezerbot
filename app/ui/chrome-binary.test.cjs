@@ -1,12 +1,13 @@
 // Which Chrome the UI tests launch (#438): the pinned chrome-headless-shell for the --dump-dom
 // tests when it is installed, an explicit CHROME_BIN first of all, the full browser otherwise.
-// Uses fake binaries; nothing here starts a browser.
+// Uses fake binaries and a fake debugging port; nothing here starts a browser.
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { createServer } = require("node:http");
 const { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
-const { chromeBinary, freezeHint, pinnedShellPath, INSTALL_COMMAND, PIN_FILE, SHELL_ROOT } = require("./chrome-binary.cjs");
+const { chromeBinary, freezeHint, pageTarget, pinnedShellPath, INSTALL_COMMAND, PIN_FILE, SHELL_ROOT } = require("./chrome-binary.cjs");
 
 const PIN = JSON.parse(readFileSync(PIN_FILE, "utf8"));
 
@@ -113,4 +114,18 @@ test("a freeze says how to install the shell unless the shell is what froze", ()
   const hint = freezeHint("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", options);
   assert.ok(hint.includes(INSTALL_COMMAND), hint);
   assert.equal(freezeHint("google-chrome", { platform: "linux", arch: "x64", root: "/r" }), "");
+});
+
+test("the page target is awaited through a reset port and an empty target list", async (t) => {
+  const page = { type: "page", webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/1" };
+  const answers = [null, [], [{ type: "browser", webSocketDebuggerUrl: "ws://127.0.0.1/devtools/browser" }], [page]];
+  const server = createServer((request, response) => {
+    const answer = answers.shift();
+    if (answer === null) request.socket.destroy();
+    else response.end(JSON.stringify(answer));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  assert.deepEqual(await pageTarget(server.address().port), page);
+  assert.equal(answers.length, 0);
 });

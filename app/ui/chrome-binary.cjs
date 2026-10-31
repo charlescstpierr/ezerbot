@@ -65,4 +65,16 @@ function freezeHint(binary, options = {}) {
   return `\nChrome complet gèle parfois après son démarrage sous macOS (#438) ; installez le shell épinglé : ${INSTALL_COMMAND}`;
 }
 
-module.exports = { chromeBinary, chromeOnPath, pinnedShellPath, freezeHint, INSTALL_COMMAND, PIN_FILE, SHELL_ROOT };
+// Chrome announces its port before it serves it and before its first page exists.
+async function pageTarget(port) {
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json()).catch(() => []);
+    const found = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("chrome did not open a page target");
+}
+
+module.exports = { chromeBinary, chromeOnPath, pinnedShellPath, freezeHint, pageTarget, INSTALL_COMMAND, PIN_FILE, SHELL_ROOT };

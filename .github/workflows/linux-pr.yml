@@ -1,0 +1,85 @@
+name: CI Linux
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-build-test:
+    name: linux-build-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '3'
+      CARGO_INCREMENTAL: '0'
+      CARGO_TARGET_DIR: target
+      CARGO_TERM_COLOR: never
+      RUSTC_WRAPPER: ''
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Installer le toolchain du dépôt
+        run: rustup show active-toolchain
+      - name: Libérer les SDK inutilisés de la VM éphémère
+        run: sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - name: Installer lsof et les bibliothèques de la coque Linux
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y lsof pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev dbus gnome-keyring xdg-utils
+      - name: Vérifier Chrome fourni par Ubuntu
+        run: node -e "console.log(require('./app/ui/chrome-binary.cjs').chromeBinary())"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+          key: linux-pr-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            linux-pr-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
+      - name: Installer les dépendances web
+        run: npm ci --prefix app/web --no-audit --no-fund
+      - name: Compiler le workspace Rust
+        id: build
+        run: |
+          df -BG "$GITHUB_WORKSPACE"
+          cargo build --workspace --locked
+      - name: Tester le workspace Rust
+        if: ${{ !cancelled() }}
+        # Le bac à sable Linux manque encore, suivi dans https://github.com/charlescstpierr/ezerbot/issues/528.
+        run: |
+          df -BG "$GITHUB_WORKSPACE"
+          cargo test --workspace --locked --no-fail-fast -- --skip a_command_that_reaches_the_data_without_naming_it_reads_nothing --exact
+      - name: Tester app/web
+        if: ${{ !cancelled() }}
+        run: node --test --test-reporter=tap app/web/src/*.test.js
+      - name: Tester app/ui
+        if: ${{ !cancelled() }}
+        run: node --test --test-reporter=tap app/ui/*.test.cjs app/ui/panels/*.test.cjs
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}

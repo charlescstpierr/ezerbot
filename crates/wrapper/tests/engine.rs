@@ -1268,7 +1268,7 @@ fn pending_wake_is_delivered_by_tick_only_after_committed_resume() {
     tx.commit().unwrap();
     f.app.tick(1000);
     assert_eq!(f.run("wake").status, RunStatus::AwaitingHumanInput);
-    let tx = db.unchecked_transaction().unwrap();
+    let tx = grokbot_wrapper::features::write_transaction(&db).unwrap();
     let receipt = requests::submit(
         &tx,
         "form-entry",
@@ -1289,6 +1289,10 @@ fn pending_wake_is_delivered_by_tick_only_after_committed_resume() {
     // A crash between submit and delivery does not create a new run.
     f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
     f.app.tick(1001);
+    // A live run commits Resumed and its receipt on its own thread, after tick returns.
+    wait("wake receipt committed", || {
+        store::wake_status(&db, &wake.wake_id).unwrap() != WakeStatus::Pending
+    });
     let WakeStatus::Delivered {
         run_id,
         first_event_seq,

@@ -20,13 +20,12 @@ pub const UNAVAILABLE: &str = "Mode YOLO indisponible : le terminal ne peut pas 
 /// Une ligne de `/proc/self/mountinfo` : `device` est `maj:min`, `root` le chemin du
 /// montage dans son système de fichiers, `point` l'endroit où il apparaît.
 struct Mount {
-    device: String,
+    device: Vec<u8>,
     root: PathBuf,
     point: PathBuf,
 }
 
-fn unescape(field: &str) -> PathBuf {
-    let bytes = field.as_bytes();
+fn unescape(bytes: &[u8]) -> PathBuf {
     let mut raw = Vec::with_capacity(bytes.len());
     let mut at = 0;
     while at < bytes.len() {
@@ -48,17 +47,20 @@ fn unescape(field: &str) -> PathBuf {
     PathBuf::from(std::ffi::OsString::from_vec(raw))
 }
 
-fn mounts(table: &str) -> Vec<Mount> {
-    table
-        .lines()
+fn lines(table: &[u8]) -> impl Iterator<Item = &[u8]> {
+    table.split(|byte| *byte == b'\n')
+}
+
+fn mounts(table: &[u8]) -> Vec<Mount> {
+    lines(table)
         .filter_map(|line| {
-            let mut fields = line.split(' ');
+            let mut fields = line.split(|byte| *byte == b' ');
             let device = fields.nth(2)?;
             let root = fields.next()?;
             let point = fields.next()?;
             // Un montage dont le dossier source a été supprimé ne montre plus rien.
-            (!root.ends_with("//deleted")).then(|| Mount {
-                device: device.to_owned(),
+            (!root.ends_with(b"//deleted")).then(|| Mount {
+                device: device.to_vec(),
                 root: unescape(root),
                 point: unescape(point),
             })
@@ -106,29 +108,27 @@ fn views(path: &Path, mounts: &[Mount]) -> Vec<(PathBuf, PathBuf)> {
 
 /// Les chemins liés à un socket Unix qui écoute (`SO_ACCEPTCON`, drapeau `00010000`).
 /// Les sockets abstraits (`@…`) n'ont pas de fichier : Landlock s'en charge.
-fn listening_sockets(table: &str) -> Vec<PathBuf> {
-    table
-        .lines()
+fn listening_sockets(table: &[u8]) -> Vec<PathBuf> {
+    lines(table)
         .filter_map(|line| {
             let mut rest = line;
-            let mut fields = [""; 7];
+            let mut fields: [&[u8]; 7] = [b""; 7];
             for field in &mut fields {
-                rest = rest.trim_start();
-                let end = rest.find(char::is_whitespace)?;
+                rest = rest.trim_ascii_start();
+                let end = rest.iter().position(u8::is_ascii_whitespace)?;
                 (*field, rest) = rest.split_at(end);
             }
-            let path = rest.strip_prefix(' ')?;
-            (fields[3] == "00010000" && path.starts_with('/')).then(|| PathBuf::from(path))
+            let path = rest.strip_prefix(b" ")?;
+            (fields[3] == b"00010000" && path.starts_with(b"/"))
+                .then(|| PathBuf::from(std::ffi::OsString::from_vec(path.to_vec())))
         })
         .collect()
 }
 
-/// Une table du noyau illisible ou qui n'est pas de l'UTF-8 ne se lit pas à moitié : le mode reste éteint.
-fn read_table(path: &str) -> Result<String, ApiError> {
-    fs::read(path)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .ok_or_else(|| ApiError::new(503, UNAVAILABLE))
+/// Des octets, pas du texte : un chemin peut ne pas être de l'UTF-8, et `/proc/net/unix`
+/// liste aussi les sockets des autres utilisateurs. Une table illisible éteint le mode.
+fn read_table(path: &str) -> Result<Vec<u8>, ApiError> {
+    fs::read(path).map_err(|_| ApiError::new(503, UNAVAILABLE))
 }
 
 fn refused(path: &Path, error: &io::Error) -> ApiError {
@@ -451,12 +451,12 @@ mod tests {
 41 36 8:1 /disparu//deleted /x rw - ext4 /dev/sda1 rw\n\
 42 36 8:1 /tab\\011nl\\012bs\\134 /y rw - ext4 /dev/sda1 rw\n\
 43 36 8:1 /plein\\9 /z rw - ext4 /dev/sda1 rw\n";
-        let found = mounts(table);
+        let found = mounts(table.as_bytes());
         let rows: Vec<(&str, String, String)> = found
             .iter()
             .map(|m| {
                 (
-                    m.device.as_str(),
+                    std::str::from_utf8(&m.device).unwrap(),
                     m.root.display().to_string(),
                     m.point.display().to_string(),
                 )
@@ -479,7 +479,8 @@ mod tests {
             "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n\
 2 1 8:1 / /mnt/copie rw - ext4 /dev/sda1 rw\n\
 3 1 8:2 / /autre rw - ext4 /dev/sdb1 rw\n\
-4 1 8:1 /a/data2 /elsewhere rw - ext4 /dev/sda1 rw\n",
+4 1 8:1 /a/data2 /elsewhere rw - ext4 /dev/sda1 rw\n"
+                .as_bytes(),
         );
         assert_eq!(
             shown(views(Path::new("/a/data"), &table)),
@@ -494,7 +495,8 @@ mod tests {
 2 1 8:1 /a/data /vue rw - ext4 /dev/sda1 rw\n\
 3 1 8:1 /a/data/sous /sous rw - ext4 /dev/sda1 rw\n\
 4 1 8:1 /a/data/sous/profond /profond rw - ext4 /dev/sda1 rw\n\
-5 1 8:1 /a /parent rw - ext4 /dev/sda1 rw\n",
+5 1 8:1 /a /parent rw - ext4 /dev/sda1 rw\n"
+                .as_bytes(),
         );
         assert_eq!(
             shown(views(Path::new("/a/data"), &table)),
@@ -512,7 +514,8 @@ mod tests {
         let table = mounts(
             "1 0 0:30 /@home /home rw - btrfs /dev/sda2 rw\n\
 2 1 0:30 / /mnt/racine rw - btrfs /dev/sda2 rw\n\
-3 1 0:30 /@home /mnt/maison rw - btrfs /dev/sda2 rw\n",
+3 1 0:30 /@home /mnt/maison rw - btrfs /dev/sda2 rw\n"
+                .as_bytes(),
         );
         assert_eq!(
             shown(views(Path::new("/home/u/data"), &table)),
@@ -531,7 +534,8 @@ mod tests {
 2 1 8:3 / /a rw - ext4 /dev/sda3 rw\n\
 3 1 8:3 / /copie rw - ext4 /dev/sda3 rw\n\
 4 1 8:4 / /a rw - ext4 /dev/sda4 rw\n\
-5 1 8:4 / /dernier rw - ext4 /dev/sda4 rw\n",
+5 1 8:4 / /dernier rw - ext4 /dev/sda4 rw\n"
+                .as_bytes(),
         );
         assert_eq!(
             shown(views(Path::new("/a/data"), &table)),
@@ -550,7 +554,7 @@ Num       RefCount Protocol Flags    Type St Inode Path
 0000000000000000: 00000002 00000000 00010000 0001 01  4245 relatif/sock
 0000000000000000: 00000002 00000000 00010000 0001 01  4246
 ";
-        let found: Vec<String> = listening_sockets(table)
+        let found: Vec<String> = listening_sockets(table.as_bytes())
             .iter()
             .map(|path| path.display().to_string())
             .collect();
@@ -558,6 +562,16 @@ Num       RefCount Protocol Flags    Type St Inode Path
             found,
             ["/run/user/1000/bus", "/tmp/un dossier/sock et.sock"]
         );
+    }
+
+    #[test]
+    fn a_path_that_is_not_utf8_stays_a_path_in_both_tables() {
+        use std::os::unix::ffi::OsStrExt;
+        let socket =
+            listening_sockets(b"0: 00000002 00000000 00010000 0001 01 7 /tmp/caf\xe9.sock\n");
+        assert_eq!(socket[0].as_os_str().as_bytes(), b"/tmp/caf\xe9.sock");
+        let mount = mounts(b"1 0 8:1 / /caf\xe9 rw - ext4 /dev/sda1 rw\n");
+        assert_eq!(mount[0].point.as_os_str().as_bytes(), b"/caf\xe9");
     }
 
     #[test]

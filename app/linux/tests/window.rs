@@ -42,6 +42,11 @@ unsafe extern "C" fn ignore_x_error(_: *mut xlib::Display, _: *mut xlib::XErrorE
     0
 }
 
+fn brightness(pixel: u32) -> u32 {
+    let [blue, green, red, _] = pixel.to_le_bytes();
+    (u32::from(red) + u32::from(green) + u32::from(blue)) / 3
+}
+
 #[derive(Clone, Copy)]
 struct Rectangle {
     x: i32,
@@ -172,6 +177,18 @@ impl Screen {
 
     fn colours(&self) -> HashSet<u32> {
         self.pixels(self.web_area()).into_iter().collect()
+    }
+
+    /// The sender's bubble sits right of this column: only a reply fills its
+    /// author, text and action lines.
+    fn text_lines(&self, area: Rectangle) -> usize {
+        let pixels = self.pixels(area);
+        let inked: Vec<bool> = pixels
+            .chunks_exact(area.width as usize)
+            .map(|row| row.iter().any(|pixel| brightness(*pixel) > 100))
+            .collect();
+        let starts = inked.windows(2).filter(|pair| !pair[0] && pair[1]).count();
+        starts + usize::from(inked.first() == Some(&true))
     }
 
     fn focus(&self) {
@@ -333,8 +350,16 @@ fn the_real_window_shows_the_app_and_completes_an_exchange() {
     wait_for("the message and the OK reply were not persisted", || {
         exchange_persisted(&home.join("state/ezerbot.sqlite"), text).then_some(())
     });
-    wait_for("the exchange never reached the screen", || {
-        (screen.pixels(area) != before).then_some(())
+    let reply_column = Rectangle {
+        x: area.x + 355,
+        y: area.y + 60,
+        width: 300,
+        height: area.height - 230,
+    };
+    wait_for("the reply never reached the screen", || {
+        let after = screen.pixels(area);
+        let changed = before.iter().zip(&after).filter(|(a, b)| a != b).count();
+        (changed * 20 > before.len() && screen.text_lines(reply_column) >= 3).then_some(())
     });
     app.quit();
 }

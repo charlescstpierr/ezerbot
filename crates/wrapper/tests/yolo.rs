@@ -706,6 +706,190 @@ fn the_kernel_refuses_the_data_however_the_command_reaches_it() {
     assert!(created.is_empty(), "rien de neuf attendu : {created:?}");
 }
 
+/// Un nom de plus pour le même inode contourne un masque posé sur le chemin : le lancement
+/// est refusé tant que le lien existe, et la commande indirecte (`cat co*`) ne sort rien.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_hard_link_to_the_data_outside_the_data_refuses_the_launch() {
+    let mut f = Fixture::new();
+    let token = f.path.with_extension("chatgpt-auth.json");
+    let alias = f.root().join("copie.txt");
+    std::fs::hard_link(&token, &alias).unwrap();
+    std::fs::write(f.root().join("voisin.txt"), "utile").unwrap();
+
+    let refused = f.runs_without_a_card("lien", "run_shell", f.shell("cat co*"));
+    assert!(
+        !refused.to_string().contains("fake-refresh"),
+        "un jeton a fuité par le lien dur : {refused}"
+    );
+    assert_eq!(refused["status"], "failed", "{refused}");
+    let reason = refused["reason"].as_str().unwrap_or("");
+    assert!(reason.contains("lien dur"), "{refused}");
+    assert!(reason.contains("find / -samefile"), "{refused}");
+    assert!(reason.contains("chatgpt-auth.json"), "{refused}");
+    assert!(!reason.contains("fake-"), "{refused}");
+
+    std::fs::remove_file(&alias).unwrap();
+    let after = f.runs_without_a_card("apres", "run_shell", f.shell("cat co*"));
+    assert_eq!(after["status"], "done", "{after}");
+    assert!(!after.to_string().contains("fake-refresh"), "{after}");
+    let witness = f.runs_without_a_card("temoin", "run_shell", f.shell("cat vo*"));
+    assert_eq!(witness["output"]["stdout"], "utile", "{witness}");
+}
+
+/// Un second montage du même système de fichiers montre les mêmes inodes sous un autre
+/// chemin. Le test se relance dans un espace de noms de montage jetable pour en créer.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_second_mount_of_the_data_shows_nothing_and_stays_narrow() {
+    const CHILD: &str = "EZERBOT_YOLO_MONTAGES";
+    if std::env::var_os(CHILD).is_none() {
+        let out = std::process::Command::new("/usr/bin/unshare")
+            .args(["--user", "--map-root-user", "--mount"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_second_mount_of_the_data_shows_nothing_and_stays_narrow",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "le test relancé a échoué\nstdout : {stdout}\nstderr : {stderr}"
+        );
+        assert!(
+            stdout.contains("1 passed") && stdout.contains("montages-verifies"),
+            "le test relancé n'a rien prouvé\nstdout : {stdout}\nstderr : {stderr}"
+        );
+        return;
+    }
+    let mut f = Fixture::new();
+    let data = f.data();
+    std::fs::create_dir(data.join("sous")).unwrap();
+    std::fs::write(data.join("sous/jeton.txt"), "jeton-factice-sous").unwrap();
+    std::fs::write(f.root().join("voisin.txt"), "utile-voisin").unwrap();
+    let views = grokbot_test_support::TestDir::new("ezerbot-vues");
+    for (name, source) in [
+        ("parent", f.root()),
+        ("donnees", data.clone()),
+        ("sous", data.join("sous")),
+    ] {
+        let point = views.join(name);
+        std::fs::create_dir(&point).unwrap();
+        let mounted = std::process::Command::new("/usr/bin/mount")
+            .arg("--bind")
+            .arg(&source)
+            .arg(&point)
+            .output()
+            .unwrap();
+        assert!(mounted.status.success(), "{name} : {mounted:?}");
+    }
+    let command = format!(
+        r#"V='{}'; for f in "$V"/parent/da*/*auth* "$V"/donnees/*auth* "$V"/sous/*; do echo "lu:$(cat "$f" 2>&1)"; done; echo "voisin:$(cat "$V"/parent/voisin.txt 2>&1)""#,
+        views.display()
+    );
+    let reference = std::process::Command::new("/bin/sh")
+        .args(["-c", &command])
+        .output()
+        .unwrap();
+    let plain = String::from_utf8_lossy(&reference.stdout);
+    assert!(
+        plain.contains("fake-refresh") && plain.contains("jeton-factice-sous"),
+        "hors bac les vues doivent lire les jetons : {plain}"
+    );
+    let out = f.runs_without_a_card("montages", "run_shell", f.shell(&command));
+    assert_eq!(out["status"], "done", "{out}");
+    let shown = out["output"]["stdout"].as_str().unwrap_or("");
+    assert!(
+        !shown.contains("fake-") && !shown.contains("jeton-factice-sous"),
+        "un jeton a fuité par une vue : {out}"
+    );
+    assert!(shown.contains("voisin:utile-voisin"), "{out}");
+    println!("montages-verifies");
+}
+
+/// Un bus de session peut vivre n'importe où : sur un chemin quelconque ou dans l'espace
+/// abstrait. Aucun n'est joignable du shell YOLO, mais un serveur lancé par la même
+/// commande l'est.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_session_bus_on_any_path_or_in_the_abstract_space_is_unreachable_from_the_shell() {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
+    let mut f = Fixture::new();
+    let path = f.root().join("dbus-test");
+    let name = format!("ezerbot-dbus-test-{}", std::process::id());
+    let _on_path = UnixListener::bind(&path).unwrap();
+    let abstract_address = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+    let _abstract = UnixListener::bind_addr(&abstract_address).unwrap();
+    UnixStream::connect(&path).expect("la référence atteint le socket sur chemin");
+    UnixStream::connect_addr(&abstract_address).expect("la référence atteint le socket abstrait");
+    std::fs::write(
+        f.root().join("joindre.py"),
+        concat!(
+            "import socket, sys\n",
+            "addr = sys.argv[1]\n",
+            "if addr.startswith('@'):\n",
+            "    addr = '\\0' + addr[1:]\n",
+            "s = socket.socket(socket.AF_UNIX)\n",
+            "try:\n",
+            "    s.connect(addr)\n",
+            "    print('connecte')\n",
+            "except OSError as e:\n",
+            "    print('refuse', e)\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        f.root().join("serveur.py"),
+        concat!(
+            "import socket, sys\n",
+            "for addr in (sys.argv[1], '\\0' + sys.argv[2]):\n",
+            "    server = socket.socket(socket.AF_UNIX)\n",
+            "    server.bind(addr)\n",
+            "    server.listen(1)\n",
+            "    client = socket.socket(socket.AF_UNIX)\n",
+            "    client.connect(addr)\n",
+            "    print('interne-ok')\n",
+        ),
+    )
+    .unwrap();
+    let from_shell = |f: &mut Fixture, id: &str, target: &str| {
+        let out = f.runs_without_a_card(
+            id,
+            "run_shell",
+            f.shell(&format!("python3 joindre.py '{target}'")),
+        );
+        assert_eq!(out["status"], "done", "{id} : {out}");
+        out["output"]["stdout"].as_str().unwrap_or("").to_owned()
+    };
+    let on_path = from_shell(&mut f, "chemin", &path.display().to_string());
+    assert!(
+        on_path.contains("refuse"),
+        "le bus sur chemin est joignable : {on_path}"
+    );
+    let in_space = from_shell(&mut f, "abstrait", &format!("@{name}"));
+    assert!(
+        in_space.contains("refuse"),
+        "le bus abstrait est joignable : {in_space}"
+    );
+
+    let inside = f.runs_without_a_card(
+        "interne",
+        "run_shell",
+        f.shell(&format!(
+            "python3 serveur.py '{}' '{name}-interne'",
+            f.root().join("interne.sock").display()
+        )),
+    );
+    let shown = inside["output"]["stdout"].as_str().unwrap_or("");
+    assert_eq!(shown.matches("interne-ok").count(), 2, "{inside}");
+}
+
 /// Un vrai refus du noyau, sans point d'injection en production : le test se relance
 /// dans un espace de noms où la limite d'espaces utilisateur est à zéro.
 #[cfg(target_os = "linux")]

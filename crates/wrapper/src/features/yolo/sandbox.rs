@@ -152,6 +152,20 @@ mod tests {
     }
 
     #[test]
+    fn no_host_block_device_is_visible_and_the_usual_nodes_work() {
+        let dir = TestDir::new("ezerbot-bwrap");
+        let out = run(
+            &[],
+            &dir,
+            "echo \"blocs=$(find /dev -type b | wc -l)\"; echo \"nul=$(echo x > /dev/null; echo $?)\"; echo \"octets=$(head -c 4 /dev/urandom | wc -c)\"",
+        );
+        let shown = stdout(&out);
+        assert!(shown.contains("blocs=0"), "{shown}");
+        assert!(shown.contains("nul=0"), "{shown}");
+        assert!(shown.contains("octets=4"), "{shown}");
+    }
+
+    #[test]
     fn the_launcher_probe_tells_a_missing_bwrap_from_the_real_one() {
         assert!(!probe(Path::new("/nonexistent/bwrap")));
         assert!(probe(Path::new(BWRAP)));

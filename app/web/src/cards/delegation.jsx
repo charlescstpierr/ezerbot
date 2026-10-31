@@ -63,7 +63,7 @@ export function Card({ message, busy = false, onAction }) {
   const hasThread = typeof edge.conversation_id === "string" && Boolean(edge.conversation_id);
   const available = hasThread && (view()?.hasConversation(edge.conversation_id) ?? true);
   const captures = status === "done" && Array.isArray(edge.status.captures) ? edge.status.captures : [];
-  const result = status === "done" ? edge.status.result : null;
+  const result = status === "done" ? edge.status.result : ["failed", "refused"].includes(status) ? edge.status.reason : null;
   return (
     <article className="gb-message gb-delegation-followup" data-message-id={message.id} data-card-kind={kind} data-delegation-status={known ? status : "unknown"}>
       <header className="gb-meta"><strong>Sous-tâche · {child}</strong></header>
@@ -71,8 +71,6 @@ export function Card({ message, busy = false, onAction }) {
       <p className="my-2 text-sm" role="status" aria-live="polite">{known ? labels[status] : "État indisponible"}</p>
       {status === "queued" && <p className="mb-2 text-xs text-muted-foreground">La sous-tâche attend une place disponible.</p>}
       {typeof result === "string" && result && <p className="gb-delegation-result" data-find-body>{result}</p>}
-      {status === "failed" && <p role="status">La sous-tâche n’a pas abouti.</p>}
-      {status === "refused" && <p role="status">La sous-tâche a été refusée.</p>}
       {captures.length > 0 && <Captures captures={captures} />}
       {hasThread ? <>
         <button type="button" className="gb-retry" disabled={busy || !available || !onAction} onClick={() => onAction?.("delegation.open")}>Ouvrir le fil de tâche</button>

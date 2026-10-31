@@ -72,15 +72,15 @@ const source = (path) => readFileSync(new URL(`../../../crates/wrapper/src/${pat
 const sentences = (text) => [...text.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(([, literal]) => literal.replace(/\{[^}]*\}/g, ""))
   .filter((literal) => /^[A-ZÉ].* .*[.…]$/u.test(literal));
 const provider = source("provider.rs");
-const engine = source("features/engine.rs").split("\n").filter((line) => /^const |let group_error|SET error=\?2/.test(line)).join("\n");
+const engine = source("features/engine.rs").split("\n").filter((line) => /^const (INTERRUPTED|CONTEXT_TOO_LARGE)|let group_error|SET error=\?2/.test(line)).join("\n");
 const emitted = [...new Set([
   ...sentences(provider.slice(provider.indexOf("pub(crate) fn failure("), provider.indexOf("fn text("))),
-  ...sentences(source("provider/reliable.rs").split("#[cfg(test)]")[0]),
+  ...sentences(source("provider/reliable.rs").split("mod tests")[0]),
   ...sentences(engine),
 ])];
 
 test("chaque diagnostic rédigé par le moteur reste tel quel dans le fil", () => {
-  assert.ok(emitted.length >= 15, `${emitted.length} phrases lues dans le moteur`);
+  assert.ok(emitted.length >= 20, `${emitted.length} phrases lues dans le moteur`);
   for (const error of emitted) assert.equal(conversationReplyError({ error }), error);
 });
 
@@ -146,6 +146,11 @@ test("une action refusée se dit une seule fois quand sa demande est dans le fil
   assert.deepEqual(notes([refused]), ["L’action a été refusée et n’a pas été exécutée."]);
 });
 
+test("un autre appel du même outil garde son propre échec à côté d’un refus", () => {
+  const other = tool({ outcome: { status: "failed", reason: "Commande introuvable." } });
+  assert.deepEqual(notes([resolved("run", "run_shell", "denied"), other]), ["L’action a été refusée. Elle n’a pas été exécutée.", "La commande n’a pas abouti."]);
+});
+
 test("un refus automatique garde le motif du relecteur", () => {
   const review = { answer: { decision: "deny", reason: "Cette commande efface des fichiers hors du projet." } };
   assert.deepEqual(notes([resolved("run", "run_shell", "denied", { review })]), ["L’action a été refusée automatiquement : Cette commande efface des fichiers hors du projet."]);
@@ -185,9 +190,11 @@ test("une attente dans la conversation principale se dit, une demande présente 
   const runs = [{ run_id: "child", bot_id: "helper", conversation_id: "c", status: "awaiting_approval" }, { run_id: "work", bot_id: "grokbot", conversation_id: "c", status: "running" }, { run_id: "kids", conversation_id: "c", status: "awaiting_children" }];
   const activity = threadActivity({ runs, conversationId: "c", engineConnected: true });
   assert.deepEqual(activity.map((run) => [run.run_id, run.status]), [["child", "awaiting_approval"], ["work", "running"]]);
-  assert.deepEqual(visibleActivity(activity, { messages: [], interventions: [] }).map((run) => run.run_id), ["child", "work"]);
+  assert.deepEqual(visibleActivity(activity, presentThread([])).map((run) => run.run_id), ["child", "work"]);
   const pending = { id: "ask", kind: "approval", payload: { run_id: "child", status: { status: "pending" } } };
   assert.deepEqual(visibleActivity(activity, presentThread([pending])).map((run) => run.run_id), ["work"]);
   const form = { id: "form", kind: "form", payload: { run_id: "child", status: { status: "pending" } } };
   assert.deepEqual(visibleActivity(activity, presentThread([form])).map((run) => run.run_id), ["work"]);
+  const decided = { ...pending, payload: { run_id: "child", status: { status: "resolved" } } };
+  assert.deepEqual(visibleActivity(activity, presentThread([decided])).map((run) => run.run_id), ["work"], "une décision prise ici n’envoie pas ailleurs");
 });

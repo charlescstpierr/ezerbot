@@ -283,7 +283,7 @@ for (const phone of [false, true]) test(`conversation réelle ${phone ? "iPhone 
       else delete saved[1].error;
       await app.refresh(); await app.thinking(false); await app.cleanThread();
       assert.match(await app.run(() => document.querySelector(".gb-thread").textContent), /Voici le résultat demandé\./, status);
-      if (status === "failed") assert.match(await app.run(() => document.querySelector(".gb-thread").textContent), /La réponse n’a pas abouti\. Réessayez\./);
+      if (status === "failed") assert.match(await app.run(() => document.querySelector(".gb-thread").textContent), /Je n’ai pas pu terminer cette lecture\./, "un diagnostic déjà rédigé reste tel quel");
       if (status === "cancelled") assert.match(await app.run(() => document.querySelector(".gb-thread").textContent), /Réponse arrêtée/);
     }
     saved[1].state = "failed";
@@ -293,13 +293,16 @@ for (const phone of [false, true]) test(`conversation réelle ${phone ? "iPhone 
     assert.match(await app.run(() => document.querySelector(".gb-thread").textContent), /La réponse n’a pas abouti\. Réessayez\./, "l’erreur technique devient un problème lisible");
     assert.equal(await app.run(() => GrokbotPanels.state.conversations[0].messages.find(item => item.id === "reply-main").error), saved[1].error, "le diagnostic brut reste dans les données internes");
     await app.capture("failed");
+    const technical = saved[1].error;
     for (const error_kind of ["signin", "signin_expired", "limit", "local_connection", "context_budget"]) {
       saved[1].error_kind = error_kind;
+      if (error_kind === "context_budget") saved[1].error = "Le texte et les pièces jointes dépassent ce que le modèle peut lire en un message. Raccourcissez le texte ou joignez moins de documents dans un nouveau message.";
       await app.refresh(); await app.cleanThread();
       if (error_kind === "limit") assert.equal(await app.run(() => document.querySelector('.gb-thread a[href="https://chatgpt.com/codex/settings/usage"]').textContent), "Gérer l’utilisation");
       if (error_kind === "context_budget") assert.match(await app.run(() => document.querySelector(".gb-thread").textContent), /Raccourcissez le texte ou joignez moins de documents/);
     }
     delete saved[1].error_kind;
+    saved[1].error = technical;
     const failures = ["run_shell", "trace-tool-565", ...internalTools].map((name, index) => tool(`failure-${index}`, name, { status: "failed", reason: saved[1].error }));
     app.setMessages([user("question", "Explique les échecs."), ...failures]);
     await app.refresh(); await app.cleanThread();
@@ -313,6 +316,13 @@ for (const phone of [false, true]) test(`conversation réelle ${phone ? "iPhone 
     assert.equal(warnings.length, 2);
     assert.match(warnings[0], /son résultat est inconnu\. Vérifiez son effet avant de réessayer\./, "le fil n’affirme pas un échec qu’il ignore");
     assert.match(warnings[1], /Le budget de ce tour est épuisé/, "une routine arrêtée par le budget ne laisse pas un fil muet");
+    const saving = tool("mcp-host-565:2", "document_action", { status: "done", output: { message: "Copie enregistrée.", path: "/fixture/cwd-565/copie.pdf" } });
+    saving.payload.run_id = "mcp-host-565";
+    const decided = { ...approval("approval-save", "resolved", "mcp-host-565") };
+    decided.payload.kind.tool = "document_action";
+    app.setMessages([user("question", "Enregistre une copie."), decided, saving]);
+    await app.refresh(); await app.cleanThread();
+    assert.deepEqual(await app.run(() => [...document.querySelectorAll(".gb-conversation-notice p")].map(note => note.textContent)), ["Copie enregistrée."], "l’enregistrement sans modèle laisse un accusé en phrase");
     app.setMessages(saved);
     delete saved[1].error;
     app.state.engine.runs = [run()]; saved[1].state = "streaming"; await app.refresh(); await app.thinking(true);
@@ -414,6 +424,10 @@ for (const phone of [false, true]) test(`conversation réelle ${phone ? "iPhone 
         await app.refresh();
         await app.until(() => document.querySelector('[data-message-id="form-child"]'));
         assert.match(await app.run(() => document.querySelector('[data-message-id="form-child"]').textContent), /Demande de Clément/);
+        await app.run(() => GrokbotPanels.openConversation("child"));
+        await app.until(() => /Attend votre réponse dans la conversation principale/.test(document.querySelector(".gb-thread").textContent));
+        await app.run(() => GrokbotPanels.openConversation("parent"));
+        await app.until(() => document.querySelector('[data-message-id="form-child"]'));
       }
       assert.match(await app.run(() => document.querySelector(".gb-delegation-bar").textContent), /En attente de 1 sous-tâche/);
       assert.match(await app.run(() => document.querySelector('.gb-thread [data-card-kind="delegation"]').textContent), /Sous-tâche · Clément/, "la carte conserve l’identité du bot enfant");

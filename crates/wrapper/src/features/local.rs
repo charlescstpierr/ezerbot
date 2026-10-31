@@ -452,9 +452,14 @@ fn protected_roots(ctx: &Context<'_>, home: Option<&Path>) -> Result<Vec<PathBuf
     }
     #[cfg(target_os = "linux")]
     {
-        if let Some(home) = home {
-            for sub in [".local/share/keyrings", ".local/share/kwalletd"] {
-                roots.push(home.join(sub));
+        let shares = home
+            .map(|home| home.join(".local/share"))
+            .into_iter()
+            .chain(std::env::var_os("XDG_DATA_HOME").map(PathBuf::from));
+        for share in shares {
+            for sub in ["keyrings", "kwalletd"] {
+                let root = share.join(sub);
+                roots.push(root.canonicalize().unwrap_or(root));
             }
         }
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")
@@ -2288,6 +2293,24 @@ mod tests {
                     .unwrap(),
                 "{}",
                 wallet.display()
+            );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let moved = root.join("coffre-ailleurs");
+            fs::create_dir_all(&moved).unwrap();
+            fs::write(moved.join("login"), "trousseau").unwrap();
+            let keyrings = home.join(".local/share/keyrings");
+            fs::remove_dir_all(&keyrings).unwrap();
+            std::os::unix::fs::symlink(&moved, &keyrings).unwrap();
+            assert!(
+                touches_app_data_at(
+                    &ctx,
+                    &call("read_file", &keyrings.join("login")),
+                    Some(&home)
+                )
+                .unwrap(),
+                "un lien vers le trousseau reste protégé"
             );
         }
         // Un fichier ordinaire, lui, reste lisible.

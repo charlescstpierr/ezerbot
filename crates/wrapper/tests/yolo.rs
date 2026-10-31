@@ -777,12 +777,20 @@ fn a_kernel_without_namespaces_keeps_the_yolo_mode_off() {
             .expect_err(path);
         assert_eq!(error.status, 409, "{path} : {}", error.message);
     }
-    f.mode("ask");
+    let stored = || {
+        f.db()
+            .query_row("SELECT mode FROM wrapper_yolo_settings", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(stored(), "yolo", "le réglage enregistré ne change pas");
     f.local("grokbot", true, true);
     f.send("lance", "run_shell", f.shell("touch lance.txt"));
     let request = f.request("lance");
     assert_eq!(request.status, requests::RequestStatus::Pending);
     assert!(!f.root().join("lance.txt").exists());
+    f.mode("ask");
 }
 
 /// Un auditeur local qui compte les connexions reçues.

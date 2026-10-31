@@ -163,12 +163,12 @@ mod tests {
         let data = dir.join("data");
         std::fs::create_dir(&data).unwrap();
         let witness = dir.join("temoin.txt");
-        let out = run(
-            std::slice::from_ref(&data),
-            &data,
-            &format!("touch '{}'", witness.display()),
-        );
+        let touch = format!("touch '{}'", witness.display());
+        let out = run(std::slice::from_ref(&data), &data, &touch);
         assert!(!out.status.success(), "{out:?}");
         assert!(!witness.exists());
+        let beside = run(std::slice::from_ref(&data), &dir, &touch);
+        assert!(beside.status.success(), "{beside:?}");
+        assert!(witness.exists());
     }
 }

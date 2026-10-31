@@ -29,7 +29,8 @@ L’inventaire de #598 renvoie vers les mêmes tickets.
 | Microphone et mémos vocaux | Sélection et capture audio | #606, #607 |
 | Appels et mode voix | Capture et lecture audio natives | #607 |
 | Enregistrement local de réunion | Capture audio locale | #606, #607 |
-| Capture et contrôle de l’écran | Permissions et services du bureau | #608 |
+| Capture de l’écran | Permissions et services du bureau | #608 |
+| Contrôle de l’écran | Actions d’entrée par le portail RemoteDesktop | Optionnel dans #608, à cadrer |
 | Démonstrations | Capture des gestes et de l’écran | Dépend de #608 |
 | Fenêtre flottante | Fenêtre et raccourci global Linux | #609 |
 

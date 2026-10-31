@@ -2,7 +2,8 @@
 use crate::ApiError;
 use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus, Scope};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    ffi::OsString,
     fs, io,
     os::unix::{
         ffi::OsStringExt,
@@ -109,9 +110,27 @@ fn views(path: &Path, mounts: &[Mount]) -> Vec<(PathBuf, PathBuf)> {
 /// Les chemins liés à un socket Unix qui écoute (`SO_ACCEPTCON`, drapeau `00010000`).
 /// Les sockets abstraits (`@…`) n'ont pas de fichier : Landlock s'en charge.
 fn listening_sockets(table: &[u8]) -> Vec<PathBuf> {
-    lines(table)
-        .filter_map(|line| {
-            let mut rest = line;
+    // Le noyau imprime le chemin brut : une ligne qui n'ouvre pas une entrée (`<hex>: …`)
+    // continue le chemin de la précédente.
+    let mut entries: Vec<Vec<u8>> = Vec::new();
+    for line in lines(table.strip_suffix(b"\n").unwrap_or(table)) {
+        let opens = line
+            .iter()
+            .position(|byte| *byte == b':')
+            .is_some_and(|colon| colon >= 8 && line[..colon].iter().all(u8::is_ascii_hexdigit));
+        match entries.last_mut() {
+            Some(entry) if !opens => {
+                entry.push(b'\n');
+                entry.extend_from_slice(line);
+            }
+            _ if opens => entries.push(line.to_vec()),
+            _ => {}
+        }
+    }
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let mut rest = entry.as_slice();
             let mut fields: [&[u8]; 7] = [b""; 7];
             for field in &mut fields {
                 rest = rest.trim_ascii_start();
@@ -142,9 +161,12 @@ fn refused(path: &Path, error: &io::Error) -> ApiError {
 }
 
 /// Un lien dur est un second nom du même contenu : le masque d'un chemin ne le couvre pas.
-/// Chaque nom d'un objet à plusieurs liens doit se trouver dans une racine protégée.
-fn refuse_outside_links(roots: &[PathBuf]) -> Result<(), ApiError> {
-    let mut seen: HashMap<(u64, u64), (u64, u64, PathBuf)> = HashMap::new();
+/// Chaque nom d'un objet à plusieurs liens doit se trouver dans une racine protégée. Un nom
+/// est une entrée de dossier réelle : deux vues d'un même dossier n'en font pas deux, et un
+/// fichier monté sur un autre n'en fait aucun.
+fn refuse_outside_links(roots: &[PathBuf], mounts: &[Mount]) -> Result<(), ApiError> {
+    type Entry = ((u64, u64), OsString);
+    let mut seen: HashMap<(u64, u64), (u64, HashSet<Entry>, PathBuf)> = HashMap::new();
     let mut pending = roots.to_vec();
     while let Some(path) = pending.pop() {
         let meta = match fs::symlink_metadata(&path) {
@@ -166,14 +188,20 @@ fn refuse_outside_links(roots: &[PathBuf]) -> Result<(), ApiError> {
                 }
             }
         } else if !meta.file_type().is_symlink() && meta.nlink() > 1 {
-            seen.entry((meta.dev(), meta.ino()))
-                .or_insert((meta.nlink(), 0, path))
-                .1 += 1;
+            let entry = path.parent().and_then(identity).zip(path.file_name());
+            let entry = entry
+                .filter(|_| !mounts.iter().any(|mount| mount.point == path))
+                .map(|(folder, name)| (folder, name.to_owned()));
+            let names = &mut seen
+                .entry((meta.dev(), meta.ino()))
+                .or_insert_with(|| (meta.nlink(), HashSet::new(), path.clone()))
+                .1;
+            names.extend(entry);
         }
     }
     let outside = seen
         .into_values()
-        .filter(|(links, names, _)| names < links)
+        .filter(|(links, names, _)| (names.len() as u64) < *links)
         .map(|(_, _, path)| path)
         .min();
     match outside {
@@ -212,10 +240,15 @@ fn masks(protected: &[PathBuf]) -> Result<Vec<PathBuf>, ApiError> {
     }
     roots.sort();
     roots.dedup_by(|inner, outer| inner.starts_with(&*outer));
-    refuse_outside_links(&roots)?;
     let mounts = mounts(&table);
+    refuse_outside_links(&roots, &mounts)?;
     let mut masks = roots.clone();
-    for root in &roots {
+    // Ce qui est monté dans une racine y vit aussi : sa source est une autre vue à recouvrir.
+    let inner = mounts
+        .iter()
+        .filter(|mount| roots.iter().any(|root| mount.point.starts_with(root)))
+        .map(|mount| &mount.point);
+    for root in roots.iter().chain(inner) {
         for (view, original) in views(root, &mounts) {
             let shown = identity(&view);
             if shown.is_some() && shown == identity(&original) {
@@ -585,8 +618,9 @@ Num       RefCount Protocol Flags    Type St Inode Path
     #[test]
     fn a_path_that_is_not_utf8_stays_a_path_in_both_tables() {
         use std::os::unix::ffi::OsStrExt;
-        let socket =
-            listening_sockets(b"0: 00000002 00000000 00010000 0001 01 7 /tmp/caf\xe9.sock\n");
+        let socket = listening_sockets(
+            b"0000000000000000: 00000002 00000000 00010000 0001 01 7 /tmp/caf\xe9.sock\n",
+        );
         assert_eq!(socket[0].as_os_str().as_bytes(), b"/tmp/caf\xe9.sock");
         let mount = mounts(b"1 0 8:1 / /caf\xe9 rw - ext4 /dev/sda1 rw\n");
         assert_eq!(mount[0].point.as_os_str().as_bytes(), b"/caf\xe9");

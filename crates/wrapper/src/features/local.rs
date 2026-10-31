@@ -387,6 +387,10 @@ fn is_app_data(ctx: &Context<'_>, path: &Path) -> Result<bool, ApiError> {
 // Only multiply-linked ordinary files need the walk. An incomplete/oversized
 // walk fails closed to a human card rather than granting uncertain authority.
 fn protected_identity(ctx: &Context<'_>, metadata: &fs::Metadata) -> Result<bool, ApiError> {
+    linked_into(&[data_dir(ctx)?], metadata)
+}
+
+fn linked_into(folders: &[PathBuf], metadata: &fs::Metadata) -> Result<bool, ApiError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -394,7 +398,8 @@ fn protected_identity(ctx: &Context<'_>, metadata: &fs::Metadata) -> Result<bool
             return Ok(false);
         }
         let identity = (metadata.dev(), metadata.ino());
-        let mut directories = vec![(data_dir(ctx)?, 0)];
+        let mut directories: Vec<(PathBuf, usize)> =
+            folders.iter().map(|folder| (folder.clone(), 0)).collect();
         let mut visited = 0;
         while let Some((directory, depth)) = directories.pop() {
             let Ok(entries) = fs::read_dir(directory) else {
@@ -483,8 +488,16 @@ fn yolo_protected(ctx: &Context<'_>, path: &Path, home: Option<&Path>) -> Result
     if is_app_data(ctx, path)? {
         return Ok(true);
     }
+    let roots = protected_roots(ctx, home)?;
+    #[cfg(target_os = "linux")]
+    if let Ok(metadata) = fs::metadata(path) {
+        let folders: Vec<PathBuf> = roots.iter().filter(|r| r.is_dir()).cloned().collect();
+        if linked_into(&folders, &metadata)? {
+            return Ok(true);
+        }
+    }
     let shown = path.to_string_lossy().to_lowercase();
-    Ok(protected_roots(ctx, home)?.iter().any(|root| {
+    Ok(roots.iter().any(|root| {
         let root = root.to_string_lossy().to_lowercase();
         shown == root || shown.starts_with(&format!("{}/", root.trim_end_matches('/')))
     }))

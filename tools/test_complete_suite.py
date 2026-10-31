@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -51,6 +53,71 @@ sys.exit(failed)
 
 
 class CompleteSuiteTests(unittest.TestCase):
+    def test_preflight_failure_detail_is_visible_without_private_diagnostics(self):
+        spec = importlib.util.spec_from_file_location("runner", TOOLS / "run-complete-suite.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        cases = [
+            (ValueError("crates/sample/src/lib.rs: cannot resolve gated module missing"),
+             "crates/sample/src/lib.rs: cannot resolve gated module missing"),
+            (RuntimeError("expected-sha"), "expected-sha"),
+            (RuntimeError("PRIVATE_SENTINEL /Users/private/runtime"), None),
+            (ValueError('unsupported platform cfg: target_os="PRIVATE_SENTINEL"'), None),
+            (subprocess.CalledProcessError(1, ["git", "PRIVATE_SENTINEL"]), None),
+        ]
+        for error, message in cases:
+            with self.subTest(error=type(error).__name__, message=message), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "result.json"
+                stderr = io.StringIO()
+                stdout = io.StringIO()
+                with patch.object(sys, "argv", ["runner", "--output", str(output)]), \
+                     patch.object(runner, "git", side_effect=error), \
+                     contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
+                    self.assertEqual(runner.main(), 1)
+                report = json.loads(output.read_text())
+                self.assertEqual(report["failure_detail"]["type"], type(error).__name__)
+                self.assertTrue(report["failure_detail"]["message"])
+                if message is not None:
+                    self.assertEqual(report["failure_detail"]["message"], message)
+                self.assertIn(report["failure_detail"]["type"], stderr.getvalue())
+                self.assertIn(report["failure_detail"]["message"], stderr.getvalue())
+                self.assertNotIn("PRIVATE_SENTINEL", output.read_text() + stdout.getvalue() + stderr.getvalue())
+                self.assertNotIn("/Users/private", output.read_text() + stderr.getvalue())
+                self.assertIn("runner:preflight-failed", report["failures"])
+                self.assertIn("runner:incomplete", report["failures"])
+
+    def test_inventory_resolves_explicit_paths_and_inherits_platforms(self):
+        spec = importlib.util.spec_from_file_location("inventory", TOOLS / "suite-platform-inventory.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        fixtures = [
+            ("crates/sample/tests/keychain.rs", '#![cfg(target_os="macos")]\n#[path="support/shared.rs"] mod helper;', "crates/sample/tests/support/shared.rs"),
+            ("crates/sample/src/lib.rs", '#[cfg(target_os="macos")] #[path="support/shared.rs"] mod helper;', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/ordinary.rs", '#[cfg(target_os="macos")] #[path="support/shared.rs"] mod helper;', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/ordinary/mod.rs", '#[cfg(target_os="macos")] #[path="support/shared.rs"] mod helper;', "crates/sample/src/ordinary/support/shared.rs"),
+            ("crates/sample/src/lib.rs", '#[cfg(target_os="macos")] mod outer { #[path="../support/shared.rs"] mod helper; }', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/ordinary.rs", '#[cfg(target_os="macos")] mod outer { #[path="../../support/shared.rs"] mod helper; }', "crates/sample/src/support/shared.rs"),
+        ]
+        for entry, source, child in fixtures:
+            with self.subTest(entry=entry, source=source):
+                leaf = str(Path(child).parent / "leaf.rs")
+                sources = {
+                    entry: source,
+                    child: 'mod leaf; #[test] fn absent() {}',
+                    leaf: '#[test] fn transitive() {}',
+                }
+                def read(command, **kwargs):
+                    return "\n".join(sources) if command[1] == "ls-tree" else sources[command[-1].split(":", 1)[1]]
+                with patch.object(module.subprocess, "check_output", side_effect=read):
+                    self.assertEqual(module.inventory()["absent"], sorted([child + "::absent", leaf + "::transitive"]))
+                sources[entry] = source.replace('target_os="macos"', 'not(target_os="macos")')
+                sources[child] = 'mod leaf; #[test] fn partial() { #[cfg(target_os="macos")] { check(); } }'
+                with patch.object(module.subprocess, "check_output", side_effect=read):
+                    self.assertEqual(module.inventory()["absent"], [])
+                sources[entry] = source.replace('#![cfg(target_os="macos")]', '').replace('#[cfg(target_os="macos")]', '')
+                with patch.object(module.subprocess, "check_output", side_effect=read):
+                    self.assertEqual(module.inventory()["partial"], [child + "::partial"])
+
     def test_cli_reports_failures_and_continues_without_publishing_diagnostics(self):
         LOGS.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=LOGS) as directory:

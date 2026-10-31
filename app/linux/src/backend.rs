@@ -226,8 +226,16 @@ mod tests {
     impl Fixture {
         fn new(body: &str) -> Self {
             let directory = TestDir::new("ezerbot-linux-test");
+            let source = directory.join("wrapper.source");
+            fs::write(&source, format!("#!/usr/bin/python3\nimport os,sys,time,signal\nroot=os.path.dirname(__file__)\nopen(root+'/pid','w').write(str(os.getpid()))\n{}\n", body)).unwrap();
             let wrapper = directory.join("wrapper");
-            fs::write(&wrapper, format!("#!/usr/bin/python3\nimport os,sys,time,signal\nroot=os.path.dirname(__file__)\nopen(root+'/pid','w').write(str(os.getpid()))\n{}\n", body)).unwrap();
+            // A concurrent test's fork inherits every descriptor this process
+            // holds for writing, and exec then fails with ETXTBSY.
+            assert!(Command::new("cp")
+                .args([&source, &wrapper])
+                .status()
+                .unwrap()
+                .success());
             fs::set_permissions(wrapper, fs::Permissions::from_mode(0o700)).unwrap();
             Self(directory)
         }

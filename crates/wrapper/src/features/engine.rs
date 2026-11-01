@@ -17,7 +17,10 @@ use grokbot_engine::{
     run_loop::{self, RunServices},
     store,
 };
-use grokbot_forms::{redact, requests, vault::Vault};
+use grokbot_forms::{
+    redact, requests,
+    vault::{Vault, KEYRING_LOCKED},
+};
 use grokbot_session::{
     LookupOutcome, ReconciliationRequest, SendOutcome, SendRequest, SubmissionTransport,
 };
@@ -1057,6 +1060,9 @@ pub(crate) fn queue_approved_action(
     name: &str,
     arguments: Value,
 ) -> Result<Value, ApiError> {
+    if keyring_locked(ctx.connection) {
+        return Err(ApiError::new(423, KEYRING_LOCKED));
+    }
     if name == super::routines_background::ACTION || name == super::routine_webhooks::ACTION {
         let existing: Option<(String, String, String)> = ctx.connection.query_row(
             "SELECT r.conversation_id,r.run_id,e.payload FROM engine_runs r JOIN engine_run_events e ON e.run_id=r.run_id WHERE r.run_id LIKE 'mcp-host-%' AND r.status IN ('queued','running','interrupted','awaiting_approval') AND e.kind='tool_call' AND json_extract(e.payload,'$.name')=?1 AND NOT EXISTS(SELECT 1 FROM forms_requests f WHERE f.run_id=r.run_id AND f.status<>'pending') ORDER BY r.rowid DESC LIMIT 1",
@@ -1277,6 +1283,10 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
         [&run.run_id],
         |r| r.get(0),
     )?;
+    if keyring_locked(ctx.connection) {
+        refuse_for_keyring(ctx.connection, &mut Services::new(ctx)?, &run.run_id)?;
+        return Ok(());
+    }
     // Missing credentials are a durable thread card, never a queued spinner or
     // a simulated success. Legacy simulated jobs cannot run in production.
     if (live && !ctx.provider.connected())
@@ -1420,7 +1430,11 @@ fn drive_owned(
         if result.is_err() {
             let retries:i64=conn.query_row("UPDATE wrapper_engine_runs SET retries=retries+1 WHERE run_id=?1 RETURNING retries",[id],|r|r.get(0))?;
             if retries >= 3 {
-                return fail_host(conn, services, id);
+                return if keyring_locked(conn) {
+                    refuse_for_keyring(conn, services, id)
+                } else {
+                    fail_host(conn, services, id)
+                };
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -1428,6 +1442,29 @@ fn drive_owned(
     Err(Error::InvalidInput(
         "run owner could not make progress".into(),
     ))
+}
+/// Whether masking would refuse this turn because the keyring holds secrets and refuses access.
+/// A corrupt vault is not that case: masking refuses it on its own.
+fn keyring_locked(conn: &Connection) -> bool {
+    conn.path().is_some_and(|path| {
+        Vault::open_app(&Path::new(path).with_extension("secrets.json"))
+            .is_ok_and(|vault| vault.is_partial())
+    })
+}
+/// A durable thread card like a missing sign-in: the question stays and can be retried.
+fn refuse_for_keyring(
+    conn: &Connection,
+    services: &mut dyn RunServices,
+    id: &str,
+) -> grokbot_engine::contracts::Result<()> {
+    conn.execute(
+        "UPDATE wrapper_engine_runs SET error=?2,error_kind='keyring' WHERE run_id=?1",
+        params![
+            id,
+            format!("{KEYRING_LOCKED} Votre message est conservé : relancez la réponse ensuite.")
+        ],
+    )?;
+    fail_host(conn, services, id)
 }
 struct RunOwner {
     provider: Provider,

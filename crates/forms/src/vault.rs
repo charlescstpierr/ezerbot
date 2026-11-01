@@ -27,6 +27,8 @@ pub const MAX_SECRET_VALUE_BYTES: usize = 4096;
 pub const MAX_MCP_ENV_BYTES: usize = 16_384;
 /// Opaque envelope used by the local connector host; never a public projection.
 pub const MCP_ENV_PURPOSE: &str = "Variables privées d’un connecteur MCP";
+/// Why nothing leaves or is kept while the keyring refuses access.
+pub const KEYRING_LOCKED: &str = "Déverrouillez votre trousseau pour continuer.";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretMetadata {
@@ -185,11 +187,13 @@ impl Vault {
     /// The empty legacy file remains a recovery container. ChatGPT credentials
     /// are never opened by this code.
     pub fn open_app(path: &Path) -> Result<Self> {
-        Ok(Self::open_app_known(path)?.0)
+        let vault = Self::app_store(path)?;
+        vault.readable_values()?; // Keychain migration.
+        Ok(vault)
     }
-    /// `open_app` and what its one read found, keychain migration included: redaction masks with
-    /// it instead of reading the vault again (`redact::app_patterns`, #328).
-    pub(crate) fn open_app_known(path: &Path) -> Result<(Self, Vec<String>)> {
+    /// `open_app` before its read: redaction masks with its own read instead of a second one
+    /// (`redact::app_patterns`, #328).
+    pub(crate) fn app_store(path: &Path) -> Result<Self> {
         let vault = Self::create(path)?;
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         let mut vault = vault;
@@ -204,8 +208,7 @@ impl Vault {
         if OS_MODE.load(std::sync::atomic::Ordering::Relaxed) != 0 {
             vault.keychain = keychain::Target::for_app();
         }
-        let values = vault.known_values()?;
-        Ok((vault, values))
+        Ok(vault)
     }
     /// Simulates keychain refusal without falling back to plaintext storage.
     #[cfg(any(test, debug_assertions))]
@@ -226,6 +229,15 @@ impl Vault {
             notice: self.signature_notice,
             notice_kind: self.signature_notice.map(|_| "info"),
         }
+    }
+    /// Whether secrets may be missing from what can be read: the keyring holds some and refuses
+    /// access. Nothing can then be masked for certain, whatever the reads return.
+    pub fn is_partial(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.keychain.is_some() {
+            return keychain::is_partial(&self.path);
+        }
+        false
     }
     pub fn path(&self) -> &Path {
         &self.path
@@ -364,12 +376,26 @@ impl Vault {
     pub fn values_for_redaction(&self) -> Result<Vec<String>> {
         self.known_values()
     }
-    /// Restricted to redaction, not model context construction.
+    /// Restricted to redaction, not model context construction. Refuses a partial read: a secret
+    /// it leaves out would go out unmasked.
     pub(crate) fn known_values(&self) -> Result<Vec<String>> {
         let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
+        let secrets = self.read()?;
+        if self.is_partial() {
+            return Err(invalid(KEYRING_LOCKED));
+        }
+        Ok(Self::values_of(secrets))
+    }
+    /// What can be read now, for a rendering shown on this machine only (`redact::rendering`).
+    pub(crate) fn readable_values(&self) -> Result<Vec<String>> {
+        let _guard = access(&self.path);
+        let _file_guard = self.lock_file(true)?;
+        Ok(Self::values_of(self.read()?))
+    }
+    fn values_of(secrets: Secrets) -> Vec<String> {
         let mut values = Vec::new();
-        for (name, secret) in self.read()? {
+        for (name, secret) in secrets {
             // Connector envelopes preserve short/whitespace-sensitive values.
             // Long values also belong to the GLOBAL redaction boundary: another
             // connector or the provider must not echo a different server's key.
@@ -410,7 +436,7 @@ impl Vault {
             }
             values.push(secret.value);
         }
-        Ok(values)
+        values
     }
 
     // Call only while holding this vault's VAULT_ACCESS entry and its companion-file lock. Parse

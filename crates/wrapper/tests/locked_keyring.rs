@@ -153,6 +153,43 @@ fn a_turn_waits_for_the_keyring_and_never_leaves_unmasked() {
 }
 
 #[test]
+fn a_keyring_that_holds_nothing_of_this_vault_stops_no_turn() {
+    let Some(phase) = support::keyring_phases(
+        "a_keyring_that_holds_nothing_of_this_vault_stops_no_turn",
+        2,
+        |phase, keyring| match phase {
+            0 => {
+                let file = keyring.home().path().join("workspace.secrets.json");
+                Vault::open(&file)
+                    .unwrap()
+                    .set("PORCELAINE", "Piège synthétique", SECRET)
+                    .unwrap();
+                keyring.lock();
+            }
+            _ => keyring.stop(),
+        },
+    ) else {
+        return;
+    };
+    let mut f = Fixture::new();
+    assert_eq!(f.state()["forms"]["storage"]["backend"], "file_fallback");
+    let chat = f.chat();
+    let id = format!("m{phase}");
+    f.post(
+        "/api/send",
+        json!({"conversation_id":chat,"message_id":id,"body":format!("Voici la clé : {SECRET}")}),
+    );
+    wait("réponse", || {
+        f.messages(&chat)
+            .iter()
+            .any(|m| m["id"] == format!("reply-{id}") && m["state"] == "echoed")
+    });
+    let sent = f.sent();
+    assert!(sent.contains("Voici la clé"), "{sent}");
+    assert!(!sent.contains(SECRET), "the file secret was not masked");
+}
+
+#[test]
 fn a_tool_output_is_not_kept_or_sent_while_the_keyring_is_locked() {
     let Some(phase) = support::keyring_phases(
         "a_tool_output_is_not_kept_or_sent_while_the_keyring_is_locked",

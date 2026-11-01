@@ -105,8 +105,8 @@ pub fn app_patterns(path: &Path) -> Result<Patterns> {
     if let Some(patterns) = kept {
         return Ok(Patterns(patterns));
     }
-    let (vault, values) = Vault::open_app_known(path)?;
-    let mut patterns = patterns_of(values)?;
+    let vault = Vault::app_store(path)?;
+    let mut patterns = read_patterns(&vault)?;
     HELD.with_borrow_mut(|held| {
         if let Some(read) = held
             .as_mut()
@@ -125,8 +125,25 @@ pub fn app_patterns(path: &Path) -> Result<Patterns> {
     Ok(Patterns(patterns))
 }
 
+/// A rendering for this machine's own interface masks with what can be read, so that a locked
+/// keyring still leaves the app readable and able to say so. Everything else refuses a partial
+/// vault. While a `Rendering` lives, this thread only renders: no model call, nothing stored.
+pub fn rendering() -> Rendering {
+    Rendering(RENDERING.replace(true))
+}
+
+/// See `rendering`.
+pub struct Rendering(bool);
+
+impl Drop for Rendering {
+    fn drop(&mut self) {
+        RENDERING.set(self.0);
+    }
+}
+
 thread_local! {
     static HELD: std::cell::RefCell<Option<Vec<Held>>> = const { std::cell::RefCell::new(None) };
+    static RENDERING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 /// Redact a cumulative live snapshot and withhold enough trailing characters
 /// to cover a secret split across reads, including its JSON-escaped form.
@@ -201,7 +218,11 @@ fn known_patterns(vault: &Vault) -> Result<Vec<String>> {
 }
 
 fn read_patterns(vault: &Vault) -> Result<Vec<String>> {
-    patterns_of(vault.known_values()?)
+    patterns_of(if RENDERING.get() {
+        vault.readable_values()?
+    } else {
+        vault.known_values()?
+    })
 }
 
 fn patterns_of(values: Vec<String>) -> Result<Vec<String>> {

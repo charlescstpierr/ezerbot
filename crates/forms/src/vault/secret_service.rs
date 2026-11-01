@@ -51,13 +51,28 @@ pub(super) fn status(path: &Path) -> StorageStatus {
         }
     }
 }
+/// Written before the first secret reaches the service. Without it the keyring holds nothing of
+/// this vault, so a keyring locked or absent hides nothing and the file is the whole vault.
+fn holds_secrets(vault_path: &Path) -> PathBuf {
+    vault_path.with_extension("keyring")
+}
+fn note_secrets_in_service(vault: &Vault) -> Result<()> {
+    let marker = holds_secrets(&vault.path);
+    if !marker.exists() {
+        fs::write(marker, "")?;
+    }
+    Ok(())
+}
+pub(super) fn is_partial(path: &Path) -> bool {
+    states().get(path).is_some_and(|s| s.failed) && holds_secrets(path).exists()
+}
 impl Vault {
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn open_test_keychain(path: &Path, bus_address: &str) -> Result<Self> {
         let mut vault = Self::create(path)?;
         vault.keychain = Some(Target(Bus::private(bus_address)));
-        vault.known_values()?; // First-start migration, as `open_app` does.
+        vault.readable_values()?; // First-start migration, as `open_app` does.
         Ok(vault)
     }
 }
@@ -94,6 +109,9 @@ fn migrate(vault: &Vault, backend: &impl Backend, state: &mut State) -> Result<S
     let mut file = vault.read_file()?;
     let mut merged = backend.read_all()?;
     merged.extend(file.clone());
+    if !merged.is_empty() {
+        note_secrets_in_service(vault)?;
+    }
     state.cached = merged.clone();
     for (name, secret) in &merged {
         if !file.contains_key(name) {
@@ -130,7 +148,10 @@ pub(super) fn set(vault: &Vault, target: &Target, name: &str, secret: &StoredSec
     let mut file = vault.read_file()?;
     if target
         .connect(&vault.path)
-        .and_then(|backend| backend.put_verified(name, secret))
+        .and_then(|backend| {
+            note_secrets_in_service(vault)?;
+            backend.put_verified(name, secret)
+        })
         .is_err()
     {
         state.failed = true;

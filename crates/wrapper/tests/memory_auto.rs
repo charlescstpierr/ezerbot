@@ -1465,7 +1465,15 @@ fn a_secret_migrated_then_locked_across_a_restart_still_stops_automatic_memory()
     assert_eq!(vault.storage_status().backend, "file_fallback");
     let c = f.conv("grokbot");
     f.script(json!([fact("Je préfère la porcelaine ambrée.", None)]));
-    f.send(&c, "m", "Je préfère la porcelaine ambrée.");
+    f.post(
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"m","body":"Je préfère la porcelaine ambrée."}),
+    );
+    wait("refus du tour", || {
+        f.messages(&c)
+            .iter()
+            .any(|m| m["id"] == "reply-m" && m["error_kind"] == "keyring")
+    });
     f.settle();
     assert_eq!(
         f.calls().len(),

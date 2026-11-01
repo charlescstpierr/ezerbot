@@ -61,6 +61,16 @@ impl Fixture {
     }
 }
 
+fn refused_until_unlocked(host: &Host, path: &str, id: &str) {
+    let Err(error) = host.try_post(path, json!({"id":id})) else {
+        panic!("{path} accepted with a locked keyring");
+    };
+    let ureq::Error::Status(423, response) = *error else {
+        panic!("{path} failed otherwise: {error}");
+    };
+    assert!(response.into_string().unwrap().contains("Déverrouillez"));
+}
+
 #[test]
 fn real_secret_service_migration_persistence_rotation_and_deletion() {
     let f = Fixture::new();
@@ -211,27 +221,8 @@ fn mcp_after_locked_restart_explains_unavailable_store_instead_of_missing_variab
     f.keyring.lock();
     let host = f.launch(Some(&f.bus())); // No in-memory copy of the migrated value.
     assert_eq!(host.state()["forms"]["storage"]["backend"], "file_fallback");
-    host.post("/api/mcp/restart", json!({"id":id}));
-    let tool = format!("mcp_start_{id}");
-    let state = host.wait_state(|state| {
-        state["forms"]["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["kind"]["tool"] == tool && r["status"]["status"] == "pending")
-    });
-    let request = state["forms"]["requests"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["kind"]["tool"] == tool)
-        .unwrap();
-    host.post("/api/approvals/resolve", json!({"entry_id":request["entry_id"],"conversation_id":request["route"]["target_conversation_id"],"submission_id":"test-unlock-message","decision":"allow_once"}));
-    let state = host.wait_state(|state| {
-        state
-            .to_string()
-            .contains("impossible de récupérer les variables privées de ce connecteur")
-    });
+    refused_until_unlocked(&host, "/api/mcp/restart", &id);
+    let state = host.state();
     let public = state.to_string();
     assert!(public.contains("Vérifier le stockage"));
     assert!(public.contains("service de secrets du bureau"));
@@ -242,7 +233,7 @@ fn mcp_after_locked_restart_explains_unavailable_store_instead_of_missing_variab
 }
 
 #[test]
-fn denied_deletion_rolls_back_the_mcp_connector_removal() {
+fn a_locked_keyring_keeps_the_mcp_connector_and_its_secret() {
     let mut f = Fixture::new();
     let id = {
         let host = f.launch(None);
@@ -255,23 +246,8 @@ fn denied_deletion_rolls_back_the_mcp_connector_removal() {
     f.keyring.lock();
     {
         let host = f.launch(Some(&f.bus()));
-        host.post("/api/mcp/remove", json!({"id":id}));
-        let tool = format!("mcp_remove_{id}");
-        let state = host.wait_state(|s| {
-            s["forms"]["requests"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|r| r["kind"]["tool"] == tool && r["status"]["status"] == "pending")
-        });
-        let request = state["forms"]["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["kind"]["tool"] == tool)
-            .unwrap();
-        host.post("/api/approvals/resolve", json!({"entry_id":request["entry_id"],"conversation_id":request["route"]["target_conversation_id"],"submission_id":"test-denied-delete","decision":"allow_once"}));
-        let state = host.wait_state(|s| s.to_string().contains("Suppression non confirmée"));
+        refused_until_unlocked(&host, "/api/mcp/remove", &id);
+        let state = host.state();
         assert_eq!(state["mcp"]["servers"].as_array().unwrap().len(), 1);
     }
     f.keyring.unlock();

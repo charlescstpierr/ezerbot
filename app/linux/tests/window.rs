@@ -32,6 +32,7 @@ const SHELL: &str = env!("CARGO_BIN_EXE_ezerbot-linux");
 const MENU_HEIGHT: i32 = 40;
 const WAIT: Duration = Duration::from_secs(120);
 const RELAUNCH_LIMIT: Duration = Duration::from_secs(5);
+const CLOSE_LIMIT: Duration = Duration::from_secs(10);
 
 fn wait_for<T>(what: &str, mut ready: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + WAIT;
@@ -224,6 +225,35 @@ impl Screen {
                 xlib::False,
                 xlib::GrabModeAsync,
                 xlib::GrabModeAsync,
+            );
+            (self.xlib.XSync)(self.display, xlib::False);
+        }
+    }
+
+    /// The message a window manager sends when the user closes a window.
+    fn request_close(&self, window: xlib::Window) {
+        unsafe {
+            let mut data = xlib::ClientMessageData::new();
+            data.set_long(0, self.atom("WM_DELETE_WINDOW") as std::os::raw::c_long);
+            data.set_long(1, xlib::CurrentTime as std::os::raw::c_long);
+            let mut event = xlib::XEvent {
+                client_message: xlib::XClientMessageEvent {
+                    type_: xlib::ClientMessage,
+                    serial: 0,
+                    send_event: xlib::True,
+                    display: self.display,
+                    window,
+                    message_type: self.atom("WM_PROTOCOLS"),
+                    format: 32,
+                    data,
+                },
+            };
+            (self.xlib.XSendEvent)(
+                self.display,
+                window,
+                xlib::False,
+                xlib::NoEventMask,
+                &mut event,
             );
             (self.xlib.XSync)(self.display, xlib::False);
         }
@@ -901,6 +931,14 @@ impl Scripted {
             .any(|(_, area)| area.width == 420 && area.height == 560)
     }
 
+    fn panel_window(&self) -> Option<xlib::Window> {
+        self.screen
+            .windows()
+            .into_iter()
+            .find(|(_, area)| area.width == 420 && area.height == 560)
+            .map(|(window, _)| window)
+    }
+
     fn wait_panel(&self, open: bool, what: &str) {
         wait_for(what, || (self.panel_open() == open).then_some(()));
     }
@@ -1465,6 +1503,41 @@ fn a_shortcut_another_client_holds_is_a_conflict_and_the_old_one_stays_in_force(
     shell.screen.press(&SUPER_ALT_J);
     shell.wait_panel(true, "the old shortcut stopped working after the conflict");
     shell.app.quit();
+}
+
+#[test]
+fn a_close_request_hides_the_panel_and_quits_from_the_main_window() {
+    let mut shell = Scripted::start("", &[]);
+    assert_eq!(
+        status(&shell.run("main", &configure("cmd+option+j"))),
+        "registered"
+    );
+    shell.screen.press(&SUPER_ALT_J);
+    shell.wait_panel(true, "the shortcut did not open the panel");
+
+    shell.screen.request_close(shell.panel_window().unwrap());
+    shell.wait_panel(false, "the panel's close request did not hide it");
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        shell.app.exited().is_none(),
+        "closing the panel quit the app"
+    );
+
+    shell.screen.press(&SUPER_ALT_J);
+    shell.wait_panel(true, "the hidden panel did not reopen");
+    shell.screen.request_close(shell.screen.app_window().0);
+    let deadline = Instant::now() + CLOSE_LIMIT;
+    let status = loop {
+        if let Some(status) = shell.app.exited() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "closing the main window did not quit the app"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(status.success(), "{status}");
 }
 
 #[test]

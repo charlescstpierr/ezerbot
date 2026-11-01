@@ -440,6 +440,14 @@ mod linux {
                 } => *window_id == window.id(),
                 _ => false,
             };
+            let panel_closing = matches!(
+                &event,
+                Event::WindowEvent { window_id, event: WindowEvent::CloseRequested, .. }
+                    if shell
+                        .as_ref()
+                        .and_then(|shell| shell.panel.as_ref())
+                        .is_some_and(|panel| panel.window.id() == *window_id)
+            );
             if let Event::UserEvent(ShellEvent::LinkFailed(url)) = &event {
                 let dialog = gtk::MessageDialog::new(
                     Some(window.gtk_window()),
@@ -470,15 +478,9 @@ mod linux {
                 if let Some(shell) = shell.as_mut() {
                     let _ = shell.show_panel(target);
                 }
-            } else if let Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } = &event
-            {
-                if !stopping {
-                    if let Some(panel) = shell.as_ref().and_then(|shell| shell.panel.as_ref()) {
-                        panel.hide();
-                    }
+            } else if panel_closing {
+                if let Some(panel) = shell.as_ref().and_then(|shell| shell.panel.as_ref()) {
+                    panel.hide();
                 }
             } else if stopping {
                 if let Some(dialog) = failure_dialog.take() {

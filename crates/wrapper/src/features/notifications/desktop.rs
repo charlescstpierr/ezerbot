@@ -33,13 +33,13 @@ fn targets() -> MutexGuard<'static, VecDeque<(Shown, String)>> {
 fn connect(bus: &Bus) -> Result<Notifier, Unavailable> {
     let notifier = Notifier::connect(bus)?;
     notifier.on_click(|clicked| {
-        let conversation = targets()
+        let event = targets()
             .iter()
-            .find_map(|(shown, conversation)| (*shown == clicked).then(|| conversation.clone()));
-        if let Some(conversation) = conversation {
+            .find_map(|(shown, event)| (*shown == clicked).then(|| event.clone()));
+        if let Some(event) = event {
             let link = format!(
-                "ezerbot://app/v1/thread?id={}",
-                crate::deep_links::encode(&conversation)
+                "ezerbot://app/v1/notification?id={}",
+                crate::deep_links::encode(&event)
             );
             let _ = open::launch(OsStr::new(&link));
         }
@@ -61,12 +61,12 @@ fn with_live<T>(
     action(slot.as_ref().expect("connected above"))
 }
 
-fn deliver(bus: &Bus, title: &str, conversation: &str) -> Result<(), Unavailable> {
+fn deliver(bus: &Bus, title: &str, event: &str) -> Result<(), Unavailable> {
     with_live(bus, |notifier| {
         let shown = notifier.send(&Alert { title, body: BODY })?;
         let evicted = {
             let mut targets = targets();
-            targets.push_back((shown, conversation.to_owned()));
+            targets.push_back((shown, event.to_owned()));
             (targets.len() > REMEMBERED)
                 .then(|| targets.pop_front())
                 .flatten()
@@ -79,10 +79,10 @@ fn deliver(bus: &Bus, title: &str, conversation: &str) -> Result<(), Unavailable
 }
 
 #[cfg(not(debug_assertions))]
-pub(super) fn background(title: &str, conversation: &str) -> Result<(), ApiError> {
+pub(super) fn background(title: &str, event: &str) -> Result<(), ApiError> {
     let bus = Bus::for_app()
         .ok_or_else(|| ApiError::new(500, "Service de notifications Ezerbot introuvable."))?;
-    deliver(&bus, title, conversation).map_err(|_| {
+    deliver(&bus, title, event).map_err(|_| {
         ApiError::new(
             500,
             "L’alerte n’a pas pu être envoyée. L’événement reste dans Notifications.",
@@ -141,15 +141,15 @@ pub(super) fn route(conn: &Connection, method: &str, body: &[u8]) -> Result<ApiR
                 .event
                 .ok_or_else(|| ApiError::new(400, "Événement de notification manquant."))?
                 .id;
-            let (title, conversation): (String, String) = conn
+            let title: String = conn
                 .query_row(
-                    "SELECT title,conversation_id FROM wrapper_notifications WHERE account_id=?1 AND id=?2",
+                    "SELECT title FROM wrapper_notifications WHERE account_id=?1 AND id=?2",
                     params![ACCOUNT, id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| r.get(0),
                 )
                 .optional()?
                 .ok_or_else(|| ApiError::new(404, "Cette notification n’existe plus."))?;
-            status(if deliver(&bus, &title, &conversation).is_ok() {
+            status(if deliver(&bus, &title, &id).is_ok() {
                 "delivered"
             } else {
                 "error"

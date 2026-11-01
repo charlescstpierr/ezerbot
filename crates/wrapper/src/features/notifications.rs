@@ -397,7 +397,7 @@ pub(crate) fn background(app: &mut App) -> Result<(), ApiError> {
         #[cfg(all(not(debug_assertions), target_os = "linux"))]
         desktop::background(
             event["title"].as_str().unwrap_or_default(),
-            event["conversation_id"].as_str().unwrap_or_default(),
+            event["id"].as_str().unwrap_or_default(),
         )?;
         #[cfg(all(not(debug_assertions), target_os = "macos"))]
         {

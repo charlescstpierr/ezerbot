@@ -309,6 +309,8 @@
     if (kind === "conversation") {
       if (!state.conversations.some((item) => item.id === id)) throw new Error("Cette conversation est introuvable ou inaccessible sur ce Mac.");
       selectConversation(id, true);
+    } else if (kind === "notification") {
+      await window.EzerbotNotifications.activate(id);
     } else if (kind === "bot") {
       const bot = botById(id);
       if (!bot || bot.deleted) throw new Error("Ce bot est introuvable ou inaccessible sur ce Mac.");

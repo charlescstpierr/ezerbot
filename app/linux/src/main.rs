@@ -6,7 +6,7 @@ mod floating;
 mod hotkey;
 #[cfg(target_os = "linux")]
 mod local_api;
-#[cfg(target_os = "linux")]
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("ezerbot-linux est disponible uniquement sous Linux.");

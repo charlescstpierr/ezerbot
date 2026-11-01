@@ -10,15 +10,17 @@ const { createServer } = require("node:http");
 const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
-const { chromeBinary } = require("./chrome-binary.cjs");
+const { chromeBinary, pageTarget } = require("./chrome-binary.cjs");
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// The scripted model. A user message "create_document:{json}" makes it call that tool with the
+// The scripted model. A user message "create_document:{json}" or "write_page:{json}" calls that tool with the
 // JSON as arguments; once the tool output is back (or for anything else: titles, memory) it
-// answers with one short text. The tool call and the catalogue follow the shapes the real
+// answers with one short text. A user message "Regarde le dossier <path>" says one
+// sentence, lists that path with the real local tool, then leaves the run open: the follow-up
+// request never gets an answer. The tool call and the catalogue follow the shapes the real
 // provider parses, as in crates/wrapper/tests/support and .cursor/skills/verify-ezerbot.
 const MODELS = {
   models: [{
@@ -49,16 +51,27 @@ function scriptedReply(raw) {
   const input = Array.isArray(payload.input) ? payload.input : [];
   const answered = input.some((item) => item?.type === "function_call_output");
   const lastUser = [...input].reverse().find((item) => item?.role === "user");
-  const request = strings(lastUser).find((text) => text.startsWith("create_document:"));
-  const offered = (payload.tools || []).some((tool) => tool?.name === "create_document");
+  const toolName = ["create_document", "write_page"].find((name) => strings(lastUser).some((text) => text.startsWith(`${name}:`)));
+  const request = strings(lastUser).find((text) => toolName && text.startsWith(`${toolName}:`));
+  const held = strings(lastUser).map((text) => /^Regarde le dossier (\S+)$/.exec(text)?.[1]).find(Boolean);
+  if (held && answered) return null;
+  if (held) {
+    return sse([
+      { type: "response.created" },
+      { type: "response.output_text.delta", delta: "Je regarde ce qu’il y a dans le dossier." },
+      { type: "response.output_item.done", item: { id: "fc-held", type: "function_call", status: "completed", call_id: "fixture-held", name: "list_directory", arguments: JSON.stringify({ path: held }) } },
+      { type: "response.completed" },
+    ]);
+  }
+  const offered = (payload.tools || []).some((tool) => tool?.name === toolName);
   if (request && offered && !answered) {
     const call = {
       id: "fc-fixture",
       type: "function_call",
       status: "completed",
       call_id: `fixture-${Buffer.from(request).toString("base64url").slice(-24)}`,
-      name: "create_document",
-      arguments: request.slice("create_document:".length),
+      name: toolName,
+      arguments: request.slice(toolName.length + 1),
     };
     return sse([{ type: "response.output_item.done", item: call }, { type: "response.completed" }]);
   }
@@ -82,7 +95,10 @@ function startFakeOpenAi() {
       if (request.method === "GET" && (path === "/v1/models" || path === "/backend-api/codex/models")) send(200, "application/json", JSON.stringify(MODELS));
       else if (request.method === "GET" && path === "/jwks") send(200, "application/json", '{"keys":[]}');
       else if (request.method === "GET") send(200, "application/json", "{}");
-      else if (path === "/v1/responses" || path === "/backend-api/codex/responses") send(200, "text/event-stream", scriptedReply(Buffer.concat(chunks).toString("utf8")));
+      else if (path === "/v1/responses" || path === "/backend-api/codex/responses") {
+        const reply = scriptedReply(Buffer.concat(chunks).toString("utf8"));
+        if (reply !== null) send(200, "text/event-stream", reply);
+      }
       else if (path === "/token") send(200, "application/json", JSON.stringify({ access_token: "fake-access", refresh_token: "fake-refresh", token_type: "Bearer", expires_in: 3600 }));
       else send(200, "application/json", "{}");
     });
@@ -133,17 +149,6 @@ function debuggingPort(directory, chrome) {
     }
     throw new Error("chrome did not open a debugging port");
   })();
-}
-
-async function pageTarget(port) {
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
-    const found = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
-    if (found) return found;
-    await sleep(20);
-  }
-  throw new Error("chrome did not open a page target");
 }
 
 // First line of the child's stdout. Rejects, with the exit status, if the child ends first.
@@ -200,28 +205,47 @@ async function untilTrue(read, message, ms = 20000) {
 // `documents` ({ title, name, format, content }) through /api/conversations and /api/send and
 // waits for each create_document result; opens the app in Chrome. Resolves with the app's URL
 // and `evaluate(source)`, which runs `source` (an expression, usually a function) in the page.
-async function launchFixture(t, { documents, binary = join(__dirname, "../../target/debug/grokbot-wrapper") }) {
+async function launchFixture(t, { documents = [], viewport, headless = true, navigate = true, binary = join(__dirname, "../../target/debug/grokbot-wrapper") }) {
   const root = mkdtempSync(join(tmpdir(), "grokbot-fixture-"));
   const dbDir = join(root, "db");
   mkdirSync(dbDir);
+  const privateEnv = { PATH: process.env.PATH, LANG: "C.UTF-8", TZ: "UTC" };
+  for (const [key, directory] of Object.entries({ HOME: "home", XDG_CONFIG_HOME: "config", XDG_CACHE_HOME: "cache", XDG_DATA_HOME: "data", XDG_RUNTIME_DIR: "runtime", TMPDIR: "tmp" })) {
+    privateEnv[key] = join(root, directory);
+    mkdirSync(privateEnv[key], { mode: 0o700 });
+  }
   const fake = { server: null };
   const processes = { wrapper: null, chrome: null };
   const watches = [];
   let cdp;
+  let disposed = false;
   // Registered before anything can fail, and run by node:test when the test ends for any reason,
   // including the test timeout, where the awaited body never reaches a `finally`.
-  t.after(() => {
+  t.after(async () => {
+    disposed = true;
     watches.forEach((watch) => watch.settle());
     cdp?.close();
-    if (alive(processes.wrapper)) processes.wrapper.kill("SIGKILL");
-    if (alive(processes.chrome)) processes.chrome.kill("SIGKILL");
+    await Promise.all(Object.values(processes).map(child => {
+      if (!alive(child)) return;
+      return new Promise(resolve => {
+        child.once("close", resolve);
+        if (process.platform === "linux") {
+          try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+        } else child.kill("SIGKILL");
+      });
+    }));
     fake.server?.closeAllConnections();
-    fake.server?.close();
-    rmSync(root, { recursive: true, force: true });
+    if (fake.server) await new Promise(resolve => fake.server.close(resolve));
+    rmSync(root, { recursive: true, force: true, maxRetries: 10 });
   });
   const whileRunning = (work) => Promise.race([work, ...watches.map((watch) => watch.failed)]);
 
   const openai = await startFakeOpenAi();
+  if (disposed) {
+    openai.server.closeAllConnections();
+    await new Promise(resolve => openai.server.close(resolve));
+    throw new Error("fixture closed during startup");
+  }
   fake.server = openai.server;
   writeFakeSession(dbDir);
 
@@ -229,13 +253,11 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
   const identity = new LaunchIdentity();
   const wrapper = identity.spawn(binary, ["--port", "0", "--db", join(dbDir, "app.sqlite")], {
     env: {
-      PATH: process.env.PATH,
-      HOME: dbDir,
+      ...privateEnv,
       CFFIXED_USER_HOME: dbDir,
-      TMPDIR: tmpdir(),
-      LANG: process.env.LANG || "C.UTF-8",
       GROKBOT_FAKE_OPENAI: openai.base,
     },
+    detached: process.platform === "linux",
     stdio: ["ignore", "pipe", "pipe"],
   });
   processes.wrapper = wrapper;
@@ -246,8 +268,11 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
   const chromeDir = join(root, "chrome");
   mkdirSync(chromeDir);
   const chrome = spawn(chromeBinary(), [
-    "--headless=new",
+    ...(headless ? ["--headless=new"] : []),
     "--no-sandbox",
+    "--no-first-run",
+    "--disable-background-networking",
+    "--disable-sync",
     "--disable-gpu",
     "--disable-dev-shm-usage",
     "--incognito",
@@ -260,7 +285,11 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
     `--user-data-dir=${join(chromeDir, "profile")}`,
     "--window-size=1280,900",
     "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
+  ], {
+    env: { ...privateEnv, ...(process.env.DISPLAY ? { DISPLAY: process.env.DISPLAY } : {}), ...(process.env.XAUTHORITY ? { XAUTHORITY: process.env.XAUTHORITY } : {}) },
+    detached: process.platform === "linux",
+    stdio: ["ignore", "ignore", "pipe"],
+  });
   processes.chrome = chrome;
   watches.push(watchChild("chrome", chrome));
 
@@ -291,6 +320,7 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
     const port = await debuggingPort(chromeDir, chrome);
     const target = await pageTarget(port);
     cdp = await connectCdp(target.webSocketDebuggerUrl);
+    if (disposed) { cdp.close(); throw new Error("fixture closed during startup"); }
     const evaluate = async (expression) => {
       const result = await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
       if (result.exceptionDetails) {
@@ -302,8 +332,9 @@ async function launchFixture(t, { documents, binary = join(__dirname, "../../tar
     watches.push(await identity.authenticateBrowser(cdp, url));
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
-    await cdp.send("Page.navigate", { url });
-    return { url, evaluate: (source) => whileRunning(evaluate(source)), details };
+    if (viewport) await cdp.send("Emulation.setDeviceMetricsOverride", { ...viewport, deviceScaleFactor: 1, mobile: false });
+    if (navigate) await cdp.send("Page.navigate", { url });
+    return { url, cdp, evaluate: (source) => whileRunning(evaluate(source)), details, database: join(dbDir, "app.sqlite") };
   })());
 }
 

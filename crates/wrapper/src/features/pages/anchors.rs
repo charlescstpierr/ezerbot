@@ -196,6 +196,11 @@ pub fn list(conn: &Connection, page_id: &str) -> Result<Vec<Value>, ApiError> {
 /// `source_version` permet au client de rejouer le même envoi après un redémarrage.
 /// Une Page qui n'existe plus ne laisse pas de puce : elle n'aurait rien à ouvrir.
 pub fn for_message(conn: &Connection, conversation: &str, message: &str) -> Value {
+    match crate::projection_hints::page_anchor(conversation, message) {
+        crate::projection_hints::Known::Row(anchor) => return anchor,
+        crate::projection_hints::Known::Absent => return Value::Null,
+        crate::projection_hints::Known::Unknown => {}
+    }
     conn.query_row(
         "SELECT a.page_id, a.passage, p.title, a.source_version FROM wrapper_page_anchors a
          JOIN bot_pages p ON p.id = a.page_id
@@ -303,6 +308,86 @@ fn source_lines(source: &str, passage: &str) -> Vec<(usize, String)> {
 mod tests {
     use super::{collapsed, for_message, migrate, source_lines};
     use rusqlite::Connection;
+
+    #[test]
+    fn page_anchors_keep_their_projection_and_fallback_behavior() {
+        use crate::projection_hints::{hold, page_anchor, Known};
+        use serde_json::{json, Value};
+
+        let directory = grokbot_test_support::TestDir::new("projection-page-anchors");
+        let mut app = crate::App::open(&directory.join("app.sqlite")).unwrap();
+        let mut conversation = || {
+            app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let visible = conversation();
+        let hidden = conversation();
+        let conn = &app.connection;
+        conn.execute(
+            "UPDATE wrapper_conversations SET deleted=1 WHERE id=?1",
+            [&hidden],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bot_pages
+             (id,bot_id,conversation_id,title,filename,source,status,preview,created_at,updated_at)
+             VALUES ('page','grokbot',?1,'Titre','page.page.tsx','','ready','Passage',1,1)",
+            [&visible],
+        )
+        .unwrap();
+        for conversation in [&visible, &hidden] {
+            conn.execute(
+                "INSERT INTO wrapper_page_anchors VALUES (?1,'anchored','page','Passage','version','open',1)",
+                [conversation],
+            )
+            .unwrap();
+        }
+        let mut expected = json!({
+            "page_id":"page","passage":"Passage","title":"Titre","source_version":"version"
+        });
+        assert!(matches!(page_anchor(&visible, "anchored"), Known::Unknown));
+        assert_eq!(for_message(conn, &visible, "anchored"), expected);
+        {
+            let _held = hold(conn);
+            assert!(
+                matches!(page_anchor(&visible, "anchored"), Known::Row(value) if value == expected)
+            );
+            assert!(matches!(page_anchor(&visible, "missing"), Known::Absent));
+            assert_eq!(for_message(conn, &visible, "anchored"), expected);
+            assert_eq!(for_message(conn, &visible, "missing"), Value::Null);
+            assert!(matches!(page_anchor(&hidden, "anchored"), Known::Unknown));
+            assert_eq!(for_message(conn, &hidden, "anchored"), expected);
+        }
+        conn.execute(
+            "UPDATE bot_pages SET title='Titre actuel' WHERE id='page'",
+            [],
+        )
+        .unwrap();
+        expected["title"] = json!("Titre actuel");
+        {
+            let _held = hold(conn);
+            assert_eq!(for_message(conn, &visible, "anchored"), expected);
+        }
+        conn.execute_batch("ALTER TABLE wrapper_page_anchors RENAME TO saved_anchors")
+            .unwrap();
+        {
+            let _held = hold(conn);
+            conn.execute_batch("ALTER TABLE saved_anchors RENAME TO wrapper_page_anchors")
+                .unwrap();
+            assert!(matches!(page_anchor(&visible, "anchored"), Known::Unknown));
+            assert_eq!(for_message(conn, &visible, "anchored"), expected);
+        }
+        conn.execute("DELETE FROM bot_pages WHERE id='page'", [])
+            .unwrap();
+        {
+            let _held = hold(conn);
+            assert!(matches!(page_anchor(&visible, "anchored"), Known::Absent));
+            assert_eq!(for_message(conn, &visible, "anchored"), Value::Null);
+        }
+        assert_eq!(for_message(conn, &visible, "anchored"), Value::Null);
+    }
 
     fn bench() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

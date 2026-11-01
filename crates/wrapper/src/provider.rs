@@ -315,6 +315,36 @@ struct IdClaims {
     nonce: Option<String>,
 }
 
+/// `xdg-open` peut durer autant que le navigateur : passé ce délai, il a démarré.
+const BROWSER_GRACE: Duration = Duration::from_millis(1500);
+#[cfg(target_os = "linux")]
+const BROWSER_OPENER: &str = "xdg-open";
+#[cfg(not(target_os = "linux"))]
+const BROWSER_OPENER: &str = "/usr/bin/open";
+
+/// L'adresse peut contenir `id_token_hint` : elle va au navigateur, jamais dans un journal.
+fn open_in_browser(url: &str) -> bool {
+    let spawned = std::process::Command::new(BROWSER_OPENER)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let Ok(mut child) = spawned else {
+        return false;
+    };
+    let deadline = Instant::now() + BROWSER_GRACE;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => return false,
+        }
+    }
+    thread::spawn(move || child.wait());
+    true
+}
+
 enum Phase {
     Idle,
     Pending,
@@ -1341,11 +1371,11 @@ impl Session {
         self.spawn_background_stoppable(stop, move || {
             provider.await_callback(server, attempt, cancel)
         });
-        if self.inner.open_browser {
-            // L'adresse peut contenir `id_token_hint` : elle va au navigateur, jamais dans un journal.
-            let _ = std::process::Command::new("/usr/bin/open")
-                .arg(&url)
-                .spawn();
+        if self.inner.open_browser && !open_in_browser(&url) {
+            self.cancel_signin();
+            return Err(Failure::other(
+                "Ezerbot n’a pas pu ouvrir votre navigateur. Vérifiez votre navigateur par défaut, puis recommencez.",
+            ));
         }
         Ok(url)
     }

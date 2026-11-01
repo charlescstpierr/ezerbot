@@ -12,12 +12,14 @@ kill_group() {
 # Le wrapper et Chrome de la fixture sont détachés (leur propre groupe). Ils se reconnaissent à leur
 # environnement : HOME ou TMPDIR sous le dossier de ce run. Aucun processus n'est visé par son nom.
 run_pids() {
-  local dir pid
+  local dir pid env
   for dir in /proc/[0-9]*; do
     pid=${dir#/proc/}
     [[ $pid != "$$" && $pid != "$BASHPID" ]] || continue
-    if tr '\0' '\n' <"$dir/environ" 2>/dev/null | grep -q -F -x -e "HOME=$run" -e "TMPDIR=$run/tmp" \
-      || tr '\0' '\n' <"$dir/environ" 2>/dev/null | grep -q -F -e "HOME=$run/" -e "TMPDIR=$run/"; then
+    # Whole environment read into a variable first: no pipe, so no SIGPIPE under pipefail.
+    env=$(tr '\0' '\n' <"$dir/environ" 2>/dev/null) || continue
+    if grep -F -x -e "HOME=$run" -e "TMPDIR=$run/tmp" <<<"$env" >/dev/null \
+      || grep -F -e "HOME=$run/" -e "TMPDIR=$run/" <<<"$env" >/dev/null; then
       printf '%s\n' "$pid"
     fi
   done

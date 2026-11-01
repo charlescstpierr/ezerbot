@@ -3,7 +3,7 @@
 // Usage: node --experimental-websocket linux_drive.cjs <sha40> <binary> <captures-directory>
 const { readdirSync, writeFileSync } = require("node:fs");
 const { join, resolve } = require("node:path");
-const { VIEWS, capture } = require(resolve(__dirname, "../../../../tools/linux-captures.cjs"));
+const { VIEWS, capture, pointerTarget } = require(resolve(__dirname, "../../../../tools/linux-captures.cjs"));
 
 const QUESTION = "Bonjour, prépare une courte liste pour organiser ma semaine.";
 const FOLLOW_UP = "Et en un mot ?";
@@ -12,9 +12,9 @@ const threadId = "GrokbotPanels.state.conversations.find(item => item.title?.sta
 
 // Views driven for each entry of features/, in order. The first two come from tools/linux-captures.cjs.
 const DRIVEN = Object.freeze([
-  { id: "thread-menu", label: "Menu du message", action: `${question}.querySelector('button[aria-label="Actions du message"]').click()`,
-    ready: `[...document.querySelectorAll('[role=menu][aria-label="Actions du message"] [role=menuitem]')].some(item => item.textContent === 'Répondre en fil' && !item.disabled)` },
-  { id: "thread-open", label: "Sous-fil ouvert", action: `[...document.querySelectorAll('[role=menu][aria-label="Actions du message"] [role=menuitem]')].find(item => item.textContent === 'Répondre en fil').click()`,
+  { id: "thread-menu", label: "Menu du message", click: `${question}?.querySelector('button[aria-label="Actions du message"]')`,
+    ready: `[...document.querySelectorAll('[role=menu][aria-label="Actions du message"] [role=menuitem]')].some(item => item.textContent === 'Répondre en fil' && (${pointerTarget})(item))` },
+  { id: "thread-open", label: "Sous-fil ouvert", click: `[...document.querySelectorAll('[role=menu][aria-label="Actions du message"] [role=menuitem]')].find(item => item.textContent === 'Répondre en fil')`,
     ready: `!document.getElementById('thread-banner')?.hidden && document.getElementById('thread-banner-quote')?.textContent.includes(${JSON.stringify(QUESTION.slice(0, 20))}) && document.getElementById('conversation-title')?.textContent.startsWith('Fil') && document.querySelectorAll('#chat-scroll .gb-message').length === 0` },
   { id: "thread-reply", label: "Réponse dans le sous-fil", action: `fetch('/api/send', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({conversation_id:${threadId}, message_id:'linux-verify-thread', body:${JSON.stringify(FOLLOW_UP)}})}).then(r => { if (!r.ok) throw Error('thread send failed'); return GrokbotPanels.refresh(); })`,
     ready: `!document.getElementById('thread-banner')?.hidden && document.getElementById('chat-scroll')?.textContent.includes(${JSON.stringify(FOLLOW_UP)}) && document.getElementById('chat-scroll')?.textContent.includes('Voici votre document.') && !GrokbotPanels.state.conversations.find(item => item.id === ${threadId})?.messages?.some(message => GrokbotChat.isPendingReply(message, false))` },

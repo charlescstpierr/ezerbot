@@ -50,6 +50,16 @@ function pngInfo(bytes) {
   return { width, height, sha256: createHash("sha256").update(bytes).digest("hex") };
 }
 
+// Evaluated in the page: centre of `element` only if it is really clickable, otherwise null.
+function pointerTarget(element) {
+  if (!element || element.disabled || !element.checkVisibility?.({ visibilityProperty: true, opacityProperty: true })) return null;
+  const box = element.getBoundingClientRect();
+  if (!(box.width > 0 && box.height > 0 && box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight)) return null;
+  const x = box.left + box.width / 2;
+  const y = box.top + box.height / 2;
+  return element.contains(document.elementFromPoint(x, y)) ? { x, y } : null;
+}
+
 async function capture(sha, binary, output, signal, views = VIEWS) {
   const source = resolve(__dirname, "..");
   if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error("Expected a full lowercase commit SHA.");
@@ -125,7 +135,15 @@ async function capture(sha, binary, output, signal, views = VIEWS) {
     const captured = [];
     for (const view of views) {
       stage = `${view.id} readiness`;
-      await bounded(evaluate(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); ${view.action}`), stage, cancelled.signal);
+      await bounded(evaluate(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); ${view.action || ""}`), stage, cancelled.signal);
+      if (view.click) {
+        // Real pointer click on a target proven visible: rendered, non-zero box, inside the viewport, hit-testable.
+        await waitFor(() => evaluate(`Boolean((${pointerTarget})(${view.click}))`), `${view.id} visible target`, cancelled.signal, 5000)
+          .catch(() => { throw new Error(`${view.id} target not visible.`); });
+        const point = await evaluate(`(${pointerTarget})(${view.click})`);
+        if (!point) throw new Error(`${view.id} target not visible.`);
+        for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: type === "mouseMoved" ? "none" : "left", buttons: type === "mousePressed" ? 1 : 0, clickCount: type === "mouseMoved" ? 0 : 1 });
+      }
       await waitFor(() => check(view.ready), stage, cancelled.signal);
       stage = `${view.id} fonts, images and paint`;
       await bounded(evaluate(`(async () => {
@@ -140,8 +158,11 @@ async function capture(sha, binary, output, signal, views = VIEWS) {
       stage = `${view.id} screenshot`;
       const { data } = await send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false });
       const file = `${view.id}.png`;
-      writeFileSync(join(output, file), Buffer.from(data, "base64"), { flag: "wx" });
-      captured.push({ id: view.id, label: view.label, file, ...pngInfo(readFileSync(join(output, file))) });
+      const bytes = Buffer.from(data, "base64");
+      // The capture step owns the integrity record: hash and size of the exact bytes it writes.
+      const info = { ...pngInfo(bytes), size: bytes.length };
+      writeFileSync(join(output, file), bytes, { flag: "wx" });
+      captured.push({ id: view.id, label: view.label, file, ...info });
     }
     stage = "manifest";
     const version = await send("Browser.getVersion");
@@ -169,4 +190,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { VIEWS, VIEWPORT, bounded, waitFor, pngInfo, capture };
+module.exports = { VIEWS, VIEWPORT, bounded, waitFor, pngInfo, pointerTarget, capture };

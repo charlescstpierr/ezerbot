@@ -45,7 +45,7 @@ class VerdictTests(unittest.TestCase):
             status = "fail" if view == failing else "pass"
             if status == "pass":
                 (captures / f"{view}.png").write_bytes(png())
-                views.append({"id": view, "file": f"{view}.png", "sha256": hashlib.sha256(png()).hexdigest()})
+                views.append({"id": view, "file": f"{view}.png", "sha256": hashlib.sha256(png()).hexdigest(), "size": len(png())})
             features.append({"feature": feature, "view": view, "file": f"{view}.png", "status": status})
         features = [item for item in features if item["view"] != omit]
         views = [item for item in views if item["id"] != omit]
@@ -151,28 +151,6 @@ class VerdictTests(unittest.TestCase):
             self.assertEqual(status, "FIX")
             self.assertIn("`result.json` : `sha` absent ou invalide.", lines)
 
-    def test_invalid_png_is_a_tool_error_fix(self) -> None:
-        evidence = self.evidence()
-        (evidence / "captures" / "home-dark.png").write_bytes(b"pas un png")
-        status, lines = linux_verdict.verdict(evidence, SHA)
-        self.assertEqual(status, "FIX")
-        self.assertIn("`captures/home-dark.png` illisible (ValueError).", lines)
-
-    def test_truncated_png_with_matching_hash_is_fix(self) -> None:
-        evidence = self.evidence()
-        shot = evidence / "captures" / "home-dark.png"
-        truncated = png()[:33]
-        shot.write_bytes(truncated)
-        manifest_path = evidence / "captures" / "manifest.json"
-        manifest = json.loads(manifest_path.read_text())
-        for view in manifest["views"]:
-            if view["file"] == "home-dark.png":
-                view["sha256"] = hashlib.sha256(truncated).hexdigest()
-        manifest_path.write_text(json.dumps(manifest))
-        status, lines = linux_verdict.verdict(evidence, SHA)
-        self.assertEqual(status, "FIX")
-        self.assertTrue(any(line.startswith("`captures/home-dark.png` illisible (") for line in lines), lines)
-
     def test_pathological_json_is_a_tool_error_fix(self) -> None:
         for text in ('{"sha": ' + "9" * 5000 + "}", "[" * 10000 + "]" * 10000):
             evidence = self.evidence()
@@ -192,36 +170,100 @@ class VerdictTests(unittest.TestCase):
         written = linux_verdict.write_report(evidence / "report.md", lines).decode("utf-8")
         self.assertTrue(written.rstrip().endswith(f"FIX {SHA}"))
 
-    def assert_bad_png_is_fix(self, data: bytes) -> None:
+    def assert_mismatch_is_fix(self, data: bytes) -> None:
+        # The capture step recorded sha256 + size of the bytes it wrote; any other bytes are a tool error.
         evidence = self.evidence()
-        shot = evidence / "captures" / "home-dark.png"
-        shot.write_bytes(data)
-        manifest_path = evidence / "captures" / "manifest.json"
-        manifest = json.loads(manifest_path.read_text())
-        for view in manifest["views"]:
-            if view["file"] == "home-dark.png":
-                view["sha256"] = hashlib.sha256(data).hexdigest()
-        manifest_path.write_text(json.dumps(manifest))
+        (evidence / "captures" / "home-dark.png").write_bytes(data)
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertIn("`captures/home-dark.png` ne correspond pas à l’empreinte du manifeste.", lines)
+        self.assertIn("## Erreur d’outil", lines)
+
+    def test_truncated_png_is_fix(self) -> None:
+        self.assert_mismatch_is_fix(png()[:33])
+
+    def test_altered_byte_is_fix(self) -> None:
+        data = bytearray(png())
+        data[-20] ^= 0x01
+        self.assert_mismatch_is_fix(bytes(data))
+
+    def test_png_without_iend_is_fix(self) -> None:
+        data = png()
+        self.assert_mismatch_is_fix(data[: data.rindex(b"IEND") - 4])
+
+    def test_not_a_png_is_fix(self) -> None:
+        self.assert_mismatch_is_fix(b"pas un png")
+
+    def mutate_manifest(self, mutate) -> list[str]:
+        evidence = self.evidence()
+        path = evidence / "captures" / "manifest.json"
+        manifest = json.loads(path.read_text())
+        mutate(manifest["views"])
+        path.write_text(json.dumps(manifest))
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertIn("## Erreur d’outil", lines)
+        return lines
+
+    def test_missing_hash_or_size_is_fix(self) -> None:
+        for key in ("sha256", "size"):
+            with self.subTest(key=key):
+                self.mutate_manifest(lambda views, key=key: views[0].pop(key))
+
+    def test_view_missing_from_manifest_is_fix(self) -> None:
+        lines = self.mutate_manifest(lambda views: views.pop(0))
+        self.assertIn("`captures/home-dark.png` ne correspond pas à l’empreinte du manifeste.", lines)
+
+    def test_matching_hash_but_undecodable_image_is_fix(self) -> None:
+        # Pillow stays a sanity check: bytes the capture step itself recorded must still decode.
+        evidence = self.evidence()
+        data = png(raw=b"")
+        (evidence / "captures" / "home-dark.png").write_bytes(data)
+        path = evidence / "captures" / "manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["views"][0].update(sha256=hashlib.sha256(data).hexdigest(), size=len(data))
+        path.write_text(json.dumps(manifest))
         status, lines = linux_verdict.verdict(evidence, SHA)
         self.assertEqual(status, "FIX")
         self.assertTrue(any(line.startswith("`captures/home-dark.png` illisible (") for line in lines), lines)
 
-    def test_png_with_empty_idat_is_fix(self) -> None:
-        self.assert_bad_png_is_fix(png(raw=b""))
+    def test_hidden_or_offscreen_target_is_not_clickable(self) -> None:
+        script = r"""
+const { pointerTarget } = require(process.argv[1]);
+globalThis.innerWidth = 1440; globalThis.innerHeight = 900;
+const make = (box, visible = true, extra = {}) => { const el = { disabled: false, checkVisibility: () => visible, getBoundingClientRect: () => ({ ...box, right: box.left + box.width, bottom: box.top + box.height }), contains: node => node === el, ...extra }; return el; };
+const box = { left: 10, top: 10, width: 100, height: 20 };
+let hit = null;
+globalThis.document = { elementFromPoint: () => hit };
+const visible = make(box); hit = visible;
+const out = { visible: pointerTarget(visible) };
+hit = null;
+out.hidden = pointerTarget(make(box, false));
+out.zero = pointerTarget(make({ ...box, width: 0, height: 0 }));
+out.offscreen = pointerTarget(make({ ...box, top: 2000 }));
+out.covered = pointerTarget(make(box));
+out.disabled = pointerTarget(make(box, true, { disabled: true }));
+out.absent = pointerTarget(null);
+console.log(JSON.stringify(out));
+"""
+        result = subprocess.run(["node", "-e", script, str(SCRIPTS.parents[3] / "tools" / "linux-captures.cjs")], capture_output=True, text=True, check=True)
+        out = json.loads(result.stdout)
+        self.assertEqual(out.pop("visible"), {"x": 60, "y": 20})
+        self.assertEqual(out, dict.fromkeys(out))
 
-    def test_png_with_bad_row_filter_is_fix(self) -> None:
-        self.assert_bad_png_is_fix(png(raw=b"".join(b"\x09" + b"\x00" * 4 * 3 for _ in range(3))))
+    def test_driver_clicks_reply_in_thread_with_the_pointer(self) -> None:
+        text = (SCRIPTS / "linux_drive.cjs").read_text()
+        self.assertNotIn("'Répondre en fil').click()", text)
+        result = subprocess.run(["node", "-e", "const m=require(process.argv[1]); console.log(JSON.stringify(m.DRIVEN.filter(v => v.click).map(v => v.id)))", str(SCRIPTS / "linux_drive.cjs")], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), ["thread-menu", "thread-open"])
 
-    def test_png_without_iend_is_fix(self) -> None:
-        data = png()
-        self.assert_bad_png_is_fix(data[: data.rindex(b"IEND") - 4])
-
-    def test_png_with_bad_crc_is_fix(self) -> None:
-        data = bytearray(png())
-        idat = data.index(b"IDAT")
-        length = int.from_bytes(data[idat - 4 : idat], "big")
-        data[idat + 4 + length] ^= 0xFF
-        self.assert_bad_png_is_fix(bytes(data))
+    def test_hidden_reply_target_is_fix(self) -> None:
+        # What the driver writes when the « Répondre en fil » item never becomes visible.
+        evidence = self.evidence(error="thread-open target not visible.", failing="thread-open")
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertIn("| `reponse-fil` | `thread-open` | `captures/thread-open.png` | ÉCHEC |", lines)
+        self.assertIn("`thread-open target not visible.`", lines)
 
     def assert_features_rejected(self, mutate) -> None:
         evidence = self.evidence()
@@ -246,6 +288,11 @@ class VerdictTests(unittest.TestCase):
         evidence = self.evidence()
         (evidence / "captures" / "home-dark.png").write_bytes(png(5, 3))
         self.assertEqual(linux_verdict.verdict(evidence, SHA)[0], "FIX")
+
+    def test_malformed_entries_are_fix(self) -> None:
+        for mutate in (lambda items: items[0].pop("status"), lambda items: items[0].update(feature=["accueil"]), lambda items: items.append("x")):
+            with self.subTest(mutate=mutate):
+                self.assert_features_rejected(mutate)
 
     def test_other_commit_is_refused(self) -> None:
         with self.assertRaises(SystemExit):
@@ -468,6 +515,18 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         self.assert_dead(pid)
         after = (scratch / "after-step").read_text()
         self.assertTrue(after == "" or after.split(") ")[-1][0] == "Z", "le processus détaché a survécu à l'étape")
+
+    def test_detached_process_with_large_environment_is_killed_by_cleanup(self) -> None:
+        # HOME first then ~1 MB of environment: an early-exiting `grep -q` would SIGPIPE `tr` under pipefail.
+        scratch = Path(tempfile.mkdtemp(prefix="linux-lib-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(scratch)], check=True))
+        spawn = ("import subprocess,sys; env={'HOME': sys.argv[2] + '/home', **{f'BIG{i}': 'x' * 100000 for i in range(10)}}; "
+                 "p=subprocess.Popen(['sleep','300'], start_new_session=True, env=env); open(sys.argv[1],'w').write(str(p.pid))")
+        script = (f'set -euo pipefail\nsource {SCRIPTS / "linux_run_lib.sh"}\n'
+                  f'python3 -c "{spawn}" {scratch}/pid "$run"\nexit 0\n')
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_dead(int((scratch / "pid").read_text()))
 
     def test_unrelated_process_is_left_alone(self) -> None:
         other = subprocess.Popen(["sleep", "300"], start_new_session=True)

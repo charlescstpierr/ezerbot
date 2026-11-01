@@ -128,10 +128,30 @@ impl Drop for StreamServer {
     }
 }
 
+/// `Drop` runs during unwinding too, so a failed setup never outlives the server or the directory.
+struct Guarded(Provider);
+
+impl std::ops::Deref for Guarded {
+    type Target = Provider;
+    fn deref(&self) -> &Provider {
+        &self.0
+    }
+}
+
+impl Drop for Guarded {
+    fn drop(&mut self) {
+        match self.0.wait_for_background_work() {
+            Ok(()) => {}
+            Err(message) if thread::panicking() => eprintln!("{message}"),
+            Err(message) => panic!("{message}"),
+        }
+    }
+}
+
 struct Fixture {
     server: StreamServer,
     app: App,
-    provider: Provider,
+    provider: Guarded,
     connection: Connection,
     _dir: grokbot_test_support::TestDir,
 }
@@ -150,7 +170,7 @@ fn ignored_sse_event_clears_silence_before_any_model_event_is_committed() {
         json!({"host_id":"test-host","client_id":CLIENT,"access_token":"access-2","refresh_token":"refresh-2","expires_at":start / 1000 + 3600,"scopes":"chatgpt.tokens.use.direct"}).to_string(),
     )
     .unwrap();
-    let provider = Provider::with_endpoints(&path, server.endpoints(), false);
+    let provider = Guarded(Provider::with_endpoints(&path, server.endpoints(), false));
     provider.watchdog_test_clock(start);
     provider.refresh_models();
     wait("loopback catalogue", || {

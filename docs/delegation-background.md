@@ -70,6 +70,7 @@ Le test vérifie une réponse persistée au second message avant de libérer cet
 | Reçu de livraison après fin du modèle | `a_completed_model_return_is_not_reissued_when_its_delivery_marker_needs_reconciliation` |
 | Réservation commitée avant le premier appel modèle | `a_reserved_return_survives_reopening_before_its_first_model_call` |
 | Invalidation pendant l'appel modèle de retour | `invalidation_during_the_return_model_call_rejects_late_text` |
+| Membre supprimé pendant qu'un enfant du retour est `Queued` | `deleting_a_background_member_stops_a_queued_return_child_before_launch` |
 | Masquage, borne et données non fiables | `return_context_masks_secrets_bounds_child_text_and_marks_it_as_untrusted_data` |
 | Suivi reçu, consommé et complétion périmée | `a_followup_rejects_stale_completion_and_is_consumed_once_by_the_same_background_child` |
 | Imbrication, mode et contexte refusés | `background_refuses_nested_tasks_unknown_modes_and_inaccessible_selected_context_atomically` |

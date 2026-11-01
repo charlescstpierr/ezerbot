@@ -494,19 +494,18 @@ mod tests {
             let runtime = runtime.map(|path| path.display().to_string());
             BusAddress::of_session(listed.map(str::to_owned), runtime).map(|bus| bus.0)
         };
-        let directory = std::env::temp_dir().join(format!("ezbus-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
+        let home = grokbot_test_support::TestDir::new("ezerbot-bus");
+        let directory = home.path();
         assert_eq!(
             found(Some("unix:path=/x"), None).as_deref(),
             Some("unix:path=/x")
         );
-        assert_eq!(found(None, Some(&directory)), None);
+        assert_eq!(found(None, Some(directory)), None);
         assert_eq!(found(Some(""), None), None);
         std::fs::write(directory.join("bus"), "").unwrap();
         let socket = format!("unix:path={}", directory.join("bus").display());
-        assert_eq!(found(None, Some(&directory)), Some(socket.clone()));
-        assert_eq!(found(Some(""), Some(&directory)), Some(socket));
-        std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(found(None, Some(directory)), Some(socket.clone()));
+        assert_eq!(found(Some(""), Some(directory)), Some(socket));
     }
 
     #[test]

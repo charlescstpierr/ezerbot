@@ -35,8 +35,9 @@ pub(super) const REQUEST: &str = "org.freedesktop.portal.Request";
 const SCREENSHOT: &str = "org.freedesktop.portal.Screenshot";
 const PROBE_LIMIT: Duration = Duration::from_secs(1);
 const CALL_LIMIT: Duration = Duration::from_secs(5);
-// Under the 20 s of Client::action: a slow first consent fails one call, not the lease.
-const ANSWER_LIMIT: Duration = Duration::from_secs(18);
+// The whole request, its call and the closing PROBE_LIMIT included, stays under
+// the 20 s of Client::action: a slow first consent fails one call, not the lease.
+const ANSWER_LIMIT: Duration = Duration::from_secs(17);
 const FILE_LIMIT: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -156,6 +157,7 @@ pub struct Portal {
     conn: Connection,
     sender: String,
     next: u64,
+    pub(super) limit: Duration,
 }
 
 impl Portal {
@@ -168,6 +170,7 @@ impl Portal {
             conn,
             sender,
             next: 0,
+            limit: ANSWER_LIMIT,
         })
     }
 
@@ -221,6 +224,7 @@ impl Portal {
         answers: &Receiver<(u32, Option<String>)>,
         give_up: &dyn Fn() -> bool,
     ) -> Result<String, Refusal> {
+        let deadline = Instant::now() + self.limit;
         let mut options = PropMap::new();
         options.insert("handle_token".into(), Variant(Box::new(token.to_owned())));
         options.insert("interactive".into(), Variant(Box::new(false)));
@@ -233,7 +237,6 @@ impl Portal {
         if handle != *path {
             return Err(Refusal::Portal);
         }
-        let deadline = Instant::now() + ANSWER_LIMIT;
         loop {
             match answers.try_recv() {
                 Ok((0, Some(uri))) => return Ok(uri),
@@ -308,17 +311,36 @@ impl X11Root {
         Ok(Self { xlib, display })
     }
 
+    /// Asks the server: this connection's cached size goes stale when the
+    /// resolution changes during a lease.
+    unsafe fn size(&self, root: xlib::Window) -> Result<(i32, i32), Refusal> {
+        let (mut parent, mut x, mut y) = (0, 0, 0);
+        let (mut width, mut height, mut border, mut depth) = (0, 0, 0, 0);
+        let known = (self.xlib.XGetGeometry)(
+            self.display,
+            root,
+            &mut parent,
+            &mut x,
+            &mut y,
+            &mut width,
+            &mut height,
+            &mut border,
+            &mut depth,
+        );
+        if known == 0 {
+            return Err(Refusal::Capture);
+        }
+        Ok((width as i32, height as i32))
+    }
+
     pub fn shot(&mut self) -> Result<Shot, Refusal> {
         let (width, height, rgb) = unsafe {
             let x = &self.xlib;
-            let screen = (x.XDefaultScreen)(self.display);
-            let (width, height) = (
-                (x.XDisplayWidth)(self.display, screen),
-                (x.XDisplayHeight)(self.display, screen),
-            );
+            let root = (x.XDefaultRootWindow)(self.display);
+            let (width, height) = self.size(root)?;
             let image = (x.XGetImage)(
                 self.display,
-                (x.XDefaultRootWindow)(self.display),
+                root,
                 0,
                 0,
                 width as u32,
@@ -391,6 +413,20 @@ mod tests {
             let display = unsafe { (xlib.XOpenDisplay)(address.as_ptr()) };
             assert!(!display.is_null());
             Self { xlib, display }
+        }
+
+        fn shrink_screen(&self, width: i32, height: i32) {
+            let randr = x11_dl::xrandr::Xrandr::open().unwrap();
+            unsafe {
+                let root = (self.xlib.XDefaultRootWindow)(self.display);
+                let resources = (randr.XRRGetScreenResourcesCurrent)(self.display, root);
+                let crtc = *(*resources).crtcs;
+                let none = std::ptr::null_mut();
+                (randr.XRRSetCrtcConfig)(self.display, resources, crtc, 0, 0, 0, 0, 1, none, 0);
+                (randr.XRRSetScreenSize)(self.display, root, width, height, 100, 100);
+                (randr.XRRFreeScreenResources)(resources);
+                (self.xlib.XSync)(self.display, 0);
+            }
         }
 
         /// The server paints a window's background by itself when it is mapped.
@@ -467,6 +503,17 @@ mod tests {
         assert_eq!(shot.bounds.h, 1440.0);
         let image = decoded(&encoded.data_url);
         assert_eq!((image.width(), image.height()), (1280, 720));
+    }
+
+    #[test]
+    fn a_resolution_change_during_a_lease_is_followed() {
+        let server = Xvfb::start("1280x800x24");
+        let mut root = X11Root::open(&XDisplay::private(&server.name)).unwrap();
+        assert_eq!(root.shot().unwrap().bounds.w, 1280.0);
+        Painter::on(&server.name).shrink_screen(640, 480);
+        let shot = root.shot().unwrap();
+        assert_eq!((shot.pixbuf.width(), shot.pixbuf.height()), (640, 480));
+        assert_eq!((shot.bounds.w, shot.bounds.h), (640.0, 480.0));
     }
 
     #[test]

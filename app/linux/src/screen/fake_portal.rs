@@ -116,6 +116,7 @@ struct Script {
     response: u32,
     uri: Option<String>,
     hold: bool,
+    stall: Duration,
     wrong_path: bool,
 }
 
@@ -126,6 +127,7 @@ impl Script {
             response: 0,
             uri: Some(uri),
             hold: false,
+            stall: Duration::ZERO,
             wrong_path: false,
         }
     }
@@ -136,6 +138,7 @@ impl Script {
             response,
             uri: None,
             hold: false,
+            stall: Duration::ZERO,
             wrong_path: false,
         }
     }
@@ -185,6 +188,7 @@ fn answer(message: &Message, conn: &Connection, script: &Script, seen: &Seen) {
             })
             .unwrap();
             let method_return = message.method_return().append1(returned);
+            std::thread::sleep(script.stall);
             if script.order == Order::ReplyFirst || script.hold {
                 conn.channel().send(method_return).unwrap();
                 if !script.hold {
@@ -350,6 +354,21 @@ fn a_revocation_during_a_portal_wait_closes_the_request_and_delivers_no_image() 
     gate.stop(Stop::Revoke);
     worker.join().unwrap();
     assert_eq!(sink.lines(), [serde_json::json!({"event":"revoked"})]);
+    assert!(fake.seen.closed.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_slow_method_call_counts_against_the_time_limit_of_the_request() {
+    let bus = Bus::start();
+    let mut script = Script::refusing(0);
+    script.hold = true;
+    script.stall = Duration::from_millis(600);
+    let fake = FakePortal::serve(&bus, script);
+    let mut portal = portal(&bus);
+    portal.limit = Duration::from_millis(600);
+    let started = Instant::now();
+    assert!(matches!(portal.shot(&|| false), Err(Refusal::Portal)));
+    assert!(started.elapsed() < Duration::from_millis(1100));
     assert!(fake.seen.closed.load(Ordering::SeqCst));
 }
 

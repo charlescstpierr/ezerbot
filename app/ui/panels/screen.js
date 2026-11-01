@@ -4,6 +4,9 @@
   // the same approval cards and may display authenticated transcript captures.
   if (window.EzerbotIPhone?.remote || window.EzerbotShell?.unavailablePanels?.includes("screen")) return;
   const host = window.GrokbotPanels;
+  // Sous Linux, le bot voit l'écran sans jamais agir : aucun geste, aucun réglage système, aucun Échap global.
+  const linux = window.EzerbotShell?.platform === "linux";
+  const screenName = linux ? "Partage d’écran" : "Écran du Mac";
   const node = (tag, text, cls) => { const el = document.createElement(tag); if (text) el.textContent = text; if (cls) el.className = cls; return el; };
   const button = (text, action, cls = "secondary-button") => { const b = node("button", text, cls); b.type = "button"; b.onclick = action; return b; };
   let data = {}, context = {}, section, signature = "", error = "", saving = false, expiryTimer;
@@ -17,12 +20,12 @@
     // Sans conversation ouverte, le menu est désactivé : une session en cours garde son entrée dans l'en-tête.
     entry.classList.toggle("screen-button-kept", Boolean(data.session) && !context.conversation);
   }
-  const entry = button("Écran du Mac", () => { renderDialog(); dialog.showModal(); showOverlay(); }, "tool-pill screen-button");
-  entry.setAttribute("aria-label", "Écran du Mac"); entry.title = "Écran du Mac";
+  const entry = button(screenName, () => { renderDialog(); dialog.showModal(); showOverlay(); }, "tool-pill screen-button");
+  entry.setAttribute("aria-label", screenName); entry.title = screenName;
   document.querySelector(".topbar-actions").prepend(entry);
   // Sous 1100 px l'en-tête n'a plus la place du titre : la même entrée passe dans le menu de la conversation.
   const menuItem = node("button", null, "screen-menu-item"); menuItem.type = "button"; menuItem.hidden = true;
-  menuItem.innerHTML = '<svg class="icon"><use href="#i-monitor"/></svg>'; menuItem.append(node("span", "Écran du Mac"));
+  menuItem.innerHTML = '<svg class="icon"><use href="#i-monitor"/></svg>'; menuItem.append(node("span", screenName));
   menuItem.onclick = () => {
     document.getElementById("conversation-menu").hidden = true;
     document.getElementById("conversation-menu-button").setAttribute("aria-expanded", "false");
@@ -63,7 +66,7 @@
   async function stop() {
     if (!data.session) return;
     const id = data.session.id;
-    try { await host.api("/api/screen/revoke", { id }); await host.refresh(); host.notify("Contrôle de l’écran arrêté."); }
+    try { await host.api("/api/screen/revoke", { id }); await host.refresh(); host.notify(linux ? "Partage de l’écran arrêté." : "Contrôle de l’écran arrêté."); }
     catch (e) { error = e.message; }
     finally { signature = ""; renderSettings(); if (dialog.open) renderDialog(); renderOverlay(); }
   }
@@ -82,25 +85,32 @@
     if (!section) return;
     const key = JSON.stringify([data, host.state.yolo?.bots, host.state.bots?.map(b => [b.id,b.name,b.deleted]), error, saving]);
     if (signature === key) return; signature = key;
-    section.className = "setting-section screen-settings"; section.replaceChildren(node("h3", "Écran du Mac"), node("p", host.state.yolo?.mode === "yolo"
+    section.className = "setting-section screen-settings"; section.replaceChildren(node("h3", screenName), node("p", linux
+      ? host.state.yolo?.mode === "yolo"
+        ? "Le Mode YOLO ouvre l’écran aux bots qui le suivent : vous accordez toujours chaque session (un bot, un fil direct, une durée), puis ses captures partent sans carte. Le bot voit l’écran et n’effectue aucun geste."
+        : "Désactivé par défaut. Chaque session est limitée à un bot, un fil direct et une durée. Chaque capture demande votre confirmation. Le bot voit l’écran et n’effectue aucun geste."
+      : host.state.yolo?.mode === "yolo"
       ? "Le Mode YOLO ouvre l’écran aux bots qui le suivent : vous accordez toujours chaque session (un bot, un fil direct, une durée), puis ses gestes partent sans carte. Échap révoque le contrôle partout."
       : "Désactivé par défaut. Chaque session est limitée à un bot, un fil direct et une durée. Chaque action demande votre confirmation ; aucun achat, envoi ou suppression automatique."));
-    if (data.fake) section.append(node("p", "Version de développement : écran fictif et événements enregistrés. Aucune capture réelle, saisie réelle ou permission macOS.", "screen-test-note"));
+    if (data.fake) section.append(node("p", linux ? "Version de développement : écran fictif. Aucune capture réelle." : "Version de développement : écran fictif et événements enregistrés. Aucune capture réelle, saisie réelle ou permission macOS.", "screen-test-note"));
     for (const bot of host.state.bots?.filter(b => !b.deleted) || []) {
-      const row = node("div", null, "screen-bot-row"), label = node("label", null, "setting-toggle"), input = node("input"); input.type = "checkbox"; input.setAttribute("role", "switch"); input.setAttribute("aria-label", `Contrôle de l’écran pour ${bot.name}`); input.name = `screen-${bot.id}`; input.checked = screenOpen(bot.id); input.disabled = saving || yoloBot(bot.id); if (yoloBot(bot.id)) input.title = "Ouvert par le Mode YOLO";
+      const row = node("div", null, "screen-bot-row"), label = node("label", null, "setting-toggle"), input = node("input"); input.type = "checkbox"; input.setAttribute("role", "switch"); input.setAttribute("aria-label", `${linux ? "Partage" : "Contrôle"} de l’écran pour ${bot.name}`); input.name = `screen-${bot.id}`; input.checked = screenOpen(bot.id); input.disabled = saving || yoloBot(bot.id); if (yoloBot(bot.id)) input.title = "Ouvert par le Mode YOLO";
       input.onchange = () => save("/api/screen/bot", { bot_id: bot.id, enabled: input.checked });
       const track = node("span", null, "toggle-track"); track.setAttribute("aria-hidden", "true");
       label.append(node("span", "Écran"), input, track); row.append(node("strong", bot.name), label); section.append(row);
     }
-    section.append(node("p", "Dans un fil existant, ouvrez « Écran du Mac » en haut pour accorder une session. Une entrée de la souris ou du clavier hors d’une fenêtre d’Ezerbot met le bot en pause. Répondre aux cartes ou écrire dans Ezerbot ne met pas en pause. Échap révoque le contrôle partout."));
+    section.append(node("p", linux
+      ? `Dans un fil existant, ouvrez « ${screenName} » en haut pour accorder une session. Un bandeau reste affiché pendant le partage, avec Pause et Arrêter.`
+      : "Dans un fil existant, ouvrez « Écran du Mac » en haut pour accorder une session. Une entrée de la souris ou du clavier hors d’une fenêtre d’Ezerbot met le bot en pause. Répondre aux cartes ou écrire dans Ezerbot ne met pas en pause. Échap révoque le contrôle partout."));
     if (error) { const alert = node("p", error, "screen-error"); alert.setAttribute("role", "alert"); section.append(alert); }
+    if (linux) return;
     if (/permission|Accessibilité|Enregistrement|Surveillance/i.test(error)) permissionButtons(section);
     else { const settings = node("details"); settings.append(node("summary", "Réglages Système…")); permissionButtons(settings); section.append(settings); }
   }
   function renderOverlay() {
     overlay.replaceChildren();
     if (data.session) {
-      overlay.append(node("strong", data.session.paused ? "Ezerbot en pause — Vous avez repris la main" : "Ezerbot contrôle l’écran — Échap pour arrêter"));
+      overlay.append(node("strong", linux ? (data.session.paused ? "Ezerbot en pause" : "Ezerbot voit l’écran") : data.session.paused ? "Ezerbot en pause — Vous avez repris la main" : "Ezerbot contrôle l’écran — Échap pour arrêter"));
       if (data.session.paused) overlay.append(button("Reprendre", () => save("/api/screen/resume", { id: data.session.id })));
       overlay.append(button("Arrêter", stop));
     }
@@ -110,13 +120,13 @@
   }
   function renderDialog() {
     dialog.replaceChildren();
-    const header = node("div", null, "dialog-header"), title = node("h2", "Écran du Mac"); title.id = "screen-title";
+    const header = node("div", null, "dialog-header"), title = node("h2", screenName); title.id = "screen-title";
     header.append(title, button("Fermer", () => dialog.close())); dialog.append(header);
-    if (data.fake) dialog.append(node("p", "Écran fictif · aucune action sur votre Mac", "screen-test-note"));
+    if (data.fake) dialog.append(node("p", linux ? "Écran fictif · aucune capture réelle" : "Écran fictif · aucune action sur votre Mac", "screen-test-note"));
     if (data.session) {
       const s = data.session, bot = host.state.bots?.find(b => b.id === s.bot_id), chat = host.state.conversations?.find(c => c.id === s.conversation_id);
-      dialog.append(node("h3", s.paused ? "En pause — Vous avez la main" : "Ezerbot contrôle l’écran — Échap pour arrêter"), node("p", `${bot?.name || "Bot"} · ${chat?.title || "Conversation"} · jusqu’à ${new Date(s.expires_at).toLocaleTimeString("fr-CA", { hour: "2-digit", minute: "2-digit" })}`));
-      dialog.append(node("p", yoloBot(s.bot_id) ? "Mode YOLO : les gestes de cette session partent sans carte. Vous pouvez arrêter à tout moment ; les effets déjà livrés ne sont pas annulés." : "L’accord n’autorise aucune action sensible sans sa carte. Vous pouvez arrêter à tout moment, même si des actions attendent. Les effets déjà livrés ne sont pas annulés."));
+      dialog.append(node("h3", linux ? (s.paused ? "En pause" : "Ezerbot voit l’écran") : s.paused ? "En pause — Vous avez la main" : "Ezerbot contrôle l’écran — Échap pour arrêter"), node("p", `${bot?.name || "Bot"} · ${chat?.title || "Conversation"} · jusqu’à ${new Date(s.expires_at).toLocaleTimeString("fr-CA", { hour: "2-digit", minute: "2-digit" })}`));
+      dialog.append(node("p", linux ? "Le bot voit l’écran et n’effectue aucun geste. Vous pouvez arrêter à tout moment, même si des captures attendent. Une capture déjà livrée reste dans le fil." : yoloBot(s.bot_id) ? "Mode YOLO : les gestes de cette session partent sans carte. Vous pouvez arrêter à tout moment ; les effets déjà livrés ne sont pas annulés." : "L’accord n’autorise aucune action sensible sans sa carte. Vous pouvez arrêter à tout moment, même si des actions attendent. Les effets déjà livrés ne sont pas annulés."));
       const actions = node("div", null, "screen-actions");
       if (s.paused) actions.append(button("Reprendre le bot", () => save("/api/screen/resume", { id: s.id }), "primary-button"));
       actions.append(button("Révoquer maintenant", stop, "danger-button"));
@@ -124,9 +134,9 @@
       dialog.append(actions);
     } else {
       const chat = context.conversation, bot = context.bot;
-      dialog.append(node("p", "Le modèle pourra voir des captures de l’écran principal et proposer des gestes. Les captures et actions restent dans le fil et sont envoyées au fournisseur d’IA. Fermez vos fenêtres privées avant de commencer."));
+      dialog.append(node("p", linux ? "Le modèle pourra voir des captures de tout l’écran. Le bot n’effectue aucun geste. Les captures restent dans le fil et sont envoyées au fournisseur d’IA. Fermez vos fenêtres privées avant de commencer." : "Le modèle pourra voir des captures de l’écran principal et proposer des gestes. Les captures et actions restent dans le fil et sont envoyées au fournisseur d’IA. Fermez vos fenêtres privées avant de commencer."));
       const available = chat?.kind === "chat" && screenOpen(bot?.id);
-      if (!available) dialog.append(node("p", "Activez d’abord ce bot dans Paramètres › Écran du Mac, puis ouvrez un fil direct existant (envoyez un message pour créer le fil)."), button("Ouvrir Paramètres", () => { dialog.close(); document.getElementById("settings-button").click(); }));
+      if (!available) dialog.append(node("p", `Activez d’abord ce bot dans Paramètres › ${screenName}, puis ouvrez un fil direct existant (envoyez un message pour créer le fil).`), button("Ouvrir Paramètres", () => { dialog.close(); document.getElementById("settings-button").click(); }));
       else {
         dialog.append(node("h3", `${bot.name} · ${chat.title}`));
         const form = node("form"), label = node("label", "Durée de cet accord", "form-label"), duration = node("select", null, "text-input"); duration.name = "screen-duration";
@@ -135,14 +145,14 @@
         // Le texte de consentement dit si les gestes passent par une carte : il ne vaut que pour ce mode.
         const consentMode = yoloBot(bot.id);
         const consent = node("label", null, "screen-consent"), check = node("input"); check.type = "checkbox"; check.required = true; check.name = "screen-consent";
-        consent.append(check, node("span", yoloBot(bot.id) ? "J’autorise ce bot à voir cet écran et à agir, sans carte (Mode YOLO), dans ce fil et pendant cette durée. Échap arrête tout." : "J’autorise ce bot à voir cet écran et à proposer des gestes, chacun soumis à ma confirmation, dans ce fil et pendant cette durée. Échap arrête tout."));
+        consent.append(check, node("span", linux ? `J’autorise ce bot à voir cet écran${consentMode ? ", sans carte (Mode YOLO)," : ", chaque capture soumise à ma confirmation,"} dans ce fil et pendant cette durée. Le bot voit l’écran et n’effectue aucun geste.` : yoloBot(bot.id) ? "J’autorise ce bot à voir cet écran et à agir, sans carte (Mode YOLO), dans ce fil et pendant cette durée. Échap arrête tout." : "J’autorise ce bot à voir cet écran et à proposer des gestes, chacun soumis à ma confirmation, dans ce fil et pendant cette durée. Échap arrête tout."));
         const allow = node("button", "Accorder cette session", "primary-button"); allow.type = "submit"; allow.disabled = true;
         check.onchange = () => { allow.disabled = saving || !check.checked; };
         form.append(label, consent, allow); form.onsubmit = event => { event.preventDefault(); if (yoloBot(bot.id) !== consentMode) { renderDialog(); return; } if (check.checked) save("/api/screen/grant", { bot_id: bot.id, conversation_id: chat.id, minutes: Number(duration.value) }); }; dialog.append(form);
       }
     }
     if (error) { const alert = node("p", error, "screen-error"); alert.setAttribute("role", "alert"); dialog.append(alert); }
-    if (/permission|Accessibilité|Enregistrement|Surveillance/i.test(error)) permissionButtons(dialog);
+    if (!linux && /permission|Accessibilité|Enregistrement|Surveillance/i.test(error)) permissionButtons(dialog);
   }
   window.addEventListener("keydown", event => { if (event.key === "Escape" && data.session) { stop(); } }, true);
   // All DOM input is inside Ezerbot and is deliberately exempt. Debug cannot

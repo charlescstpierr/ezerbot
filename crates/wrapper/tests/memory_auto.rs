@@ -1400,42 +1400,16 @@ fn known_vault_values_are_excluded_even_without_secret_keywords() {
     assert!(f.facts("grokbot").is_empty());
 }
 
-/// The vault backend and the bus are per process, so a scenario runs in its own, on a real
-/// keyring. Returns true there; the outer process has already checked its result.
-#[cfg(all(target_os = "linux", debug_assertions))]
-fn in_its_own_process_on_a_keyring(
-    name: &str,
-    before: impl FnOnce(&grokbot_linux_desktop::testing::Keyring),
-) -> bool {
-    if std::env::var_os("GROKBOT_TEST_SESSION_BUS").is_some() {
-        grokbot_forms::vault::enable_os_vault(true);
-        return true;
-    }
-    let keyring = grokbot_linux_desktop::testing::Keyring::start();
-    before(&keyring);
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    keyring
-        .home()
-        .env(&mut command)
-        .env("GROKBOT_TEST_SESSION_BUS", keyring.address())
-        .args(["--exact", name, "--nocapture"]);
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
-    false
-}
-
 #[cfg(all(target_os = "linux", debug_assertions))]
 #[test]
 fn a_secret_kept_in_secret_service_still_stops_automatic_memory() {
-    if !in_its_own_process_on_a_keyring(
+    if support::keyring_phases(
         "a_secret_kept_in_secret_service_still_stops_automatic_memory",
-        |_| {},
-    ) {
+        1,
+        |_, _| {},
+    )
+    .is_none()
+    {
         return;
     }
     let mut f = Fixture::new();
@@ -1465,9 +1439,10 @@ fn a_secret_kept_in_secret_service_still_stops_automatic_memory() {
 fn a_secret_migrated_then_locked_across_a_restart_still_stops_automatic_memory() {
     use grokbot_forms::vault::Vault;
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    if !in_its_own_process_on_a_keyring(
+    if support::keyring_phases(
         "a_secret_migrated_then_locked_across_a_restart_still_stops_automatic_memory",
-        |keyring| {
+        1,
+        |_, keyring| {
             let file = keyring.home().path().join("workspace.secrets.json");
             Vault::open(&file)
                 .unwrap()
@@ -1479,7 +1454,9 @@ fn a_secret_migrated_then_locked_across_a_restart_still_stops_automatic_memory()
                 .contains("porcelaine"));
             keyring.lock();
         },
-    ) {
+    )
+    .is_none()
+    {
         return;
     }
     let path = home.unwrap().join("workspace.sqlite");

@@ -660,6 +660,40 @@ pub fn ask_before_acting(app: &mut grokbot_wrapper::App) {
         .expect("retour au mode Demander avant d'agir");
 }
 
+/// The vault backend and the bus are per process, so a scenario runs in processes of its own, on
+/// a real keyring that survives between them. `between` prepares each of the `phases`. In a
+/// child, returns the phase to play. In the parent, returns `None` once every phase has passed.
+#[cfg(all(target_os = "linux", debug_assertions))]
+pub fn keyring_phases(
+    name: &str,
+    phases: usize,
+    mut between: impl FnMut(usize, &mut grokbot_linux_desktop::testing::Keyring),
+) -> Option<usize> {
+    if let Ok(phase) = std::env::var("EZERBOT_TEST_PHASE") {
+        grokbot_forms::vault::enable_os_vault(true);
+        return Some(phase.parse().unwrap());
+    }
+    let mut keyring = grokbot_linux_desktop::testing::Keyring::start();
+    for phase in 0..phases {
+        between(phase, &mut keyring);
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        keyring
+            .home()
+            .env(&mut command)
+            .env("GROKBOT_TEST_SESSION_BUS", keyring.address())
+            .env("EZERBOT_TEST_PHASE", phase.to_string())
+            .args(["--exact", name, "--nocapture"]);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+    None
+}
+
 pub fn wait(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !ready() {

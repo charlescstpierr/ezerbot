@@ -349,3 +349,16 @@ test("native test builds compile out global registration and all event capture",
   assert.match(source, /initWithContentRect:NSMakeRect\(80, 80, 420, 560\)/);
   assert.match(source, /panel.minSize = NSMakeSize\(360, 520\)/);
 });
+
+test("on Linux a shortcut the desktop ended is bound again with the saved choice", async () => {
+  const f = fixture(null, {}, "registered");
+  f.registration.onState({ floating: { shortcut: "cmd+option+j" } }, { connected: true });
+  await flush();
+  assert.equal(f.calls.filter((call) => call.command === "configure").length, 1);
+  f.window.GrokbotPanels.state.floating.shortcut = "cmd+option+j";
+  f.window.EzerbotFloatingMain.shortcutLost();
+  await flush();
+  const configures = f.calls.filter((call) => call.command === "configure");
+  assert.equal(configures.length, 2);
+  assert.equal(configures[1].shortcut, "cmd+option+j");
+});

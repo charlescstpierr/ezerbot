@@ -35,7 +35,18 @@
   const ipc = window.ipc;
   const pending = new Map();
   let sequence = 0;
+  // A same-origin frame reaches this page's objects, this bridge included, and the
+  // handler cannot tell which frame spoke. The bridge refuses while one is open;
+  // a sandboxed frame (opaque origin) cannot reach it and does not block it.
+  const framesOf = window.frames;
+  const sameOriginFrameOpen = () => {
+    for (let index = 0; index < framesOf.length; index++) {
+      try { if (framesOf[index].document) return true; } catch (_) {}
+    }
+    return false;
+  };
   const post = body => new Promise((resolve, reject) => {
+    if (sameOriginFrameOpen()) { reject(new Error('Commande refusée : un cadre de la page est ouvert.')); return; }
     const id = ++sequence;
     pending.set(id, {resolve, reject});
     try { ipc.postMessage(JSON.stringify({launch, id, body})); }

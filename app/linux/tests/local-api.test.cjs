@@ -8,14 +8,14 @@ const vm = require('node:vm');
 const template = fs.readFileSync(path.join(__dirname, '../src/local-api.js'), 'utf8');
 const identity = 'synthetic-test-identity';
 
-function install(origin, originalFetch, location = `${origin}/`) {
+function install(origin, originalFetch, location = `${origin}/`, frames = []) {
   class BrowserRequest extends Request {
     constructor(input, init) {
       super(typeof input === 'string' ? new URL(input, location) : input, init);
     }
   }
   const posted = [];
-  const window = {URL, Headers, Request: BrowserRequest, fetch: originalFetch, location: {href: location}, ipc: {postMessage: raw => posted.push(JSON.parse(raw))}};
+  const window = {URL, Headers, Request: BrowserRequest, fetch: originalFetch, location: {href: location}, frames, ipc: {postMessage: raw => posted.push(JSON.parse(raw))}};
   window.posted = posted;
   vm.runInNewContext(template.replace('__EZERBOT_PARAMETERS__', JSON.stringify([
     origin, origin.replace('http:', 'ezerbot-resource:'), identity,
@@ -138,4 +138,18 @@ test('the main window reports whether the conversation opened', async () => {
   delete window.EzerbotFloatingMain;
   await window.EzerbotShell.openConversation(7, 'x');
   assert.equal(window.posted.at(-1).body.opened, false);
+});
+
+test('the bridge refuses while a same-origin frame is open, not for a sandboxed one', async () => {
+  const sandboxed = {get document() { throw new Error('SecurityError'); }};
+  const frames = [sandboxed];
+  const window = install('http://127.0.0.1:32123', () => {}, undefined, frames);
+  window.EzerbotShell.floating.postMessage({command: 'show'});
+  assert.equal(window.posted.length, 1, 'a sandboxed frame blocked the page');
+  frames.push({document: {}});
+  await assert.rejects(window.EzerbotShell.floating.postMessage({command: 'show'}), /refusée/);
+  assert.equal(window.posted.length, 1, 'a command went out with a same-origin frame open');
+  frames.pop();
+  window.EzerbotShell.floating.postMessage({command: 'show'});
+  assert.equal(window.posted.length, 2);
 });

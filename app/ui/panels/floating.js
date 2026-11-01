@@ -28,6 +28,15 @@
     return granted;
   }
   window.EzerbotFloatingMain = {
+    // The desktop ended the shortcut (portal restarted or session closed): bind the saved choice again.
+    shortcutLost() {
+      const shortcut = P.state.floating?.shortcut;
+      configured = undefined;
+      if (status) status.textContent = "Le bureau a retiré le raccourci. Nouvel enregistrement…";
+      if (!shortcut) return;
+      configured = shortcut;
+      configure(shortcut).catch((error) => { status.textContent = error.message; configured = undefined; });
+    },
     async openConversation(id) {
       try {
         await P.refresh();

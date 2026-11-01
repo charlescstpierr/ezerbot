@@ -849,7 +849,7 @@ fn scripted_page(view: &str, extra: &str) -> String {
 const view = "{view}";
 const record = (key, value) => fetch("/result", {{method: "POST", body: JSON.stringify([key, value])}});
 window.EzerbotFloating = {{open() {{ record("reopened", true); }}}};
-window.EzerbotFloatingMain = {{openConversation: async id => ({{opened: id === "present", reason: "Fil absent."}})}};
+window.EzerbotFloatingMain = {{openConversation: async id => ({{opened: id === "present", reason: "Fil absent."}}), shortcutLost() {{ record("lost-" + Date.now() + Math.random(), true); }}}};
 (async () => {{
   for (;;) {{
     const line = await (await fetch("/next?view=" + view)).text();
@@ -869,6 +869,11 @@ fetch("/result", {method: "POST", body: JSON.stringify(["frame", {
 }])});
 bridge.postMessage(JSON.stringify({launch: "", id: 1, body: {command: "configure", shortcut: "cmd+option+j"}}));
 bridge.postMessage(JSON.stringify({launch: "x", id: 2, body: {command: "show"}}));
+// The page's own bridge, reached from here, must refuse too: it would add the token.
+parent.EzerbotShell.floating.postMessage({command: "configure", shortcut: "cmd+option+j"}).then(
+  () => "accepted", error => String(error.message)).then(outcome =>
+  fetch("/result", {method: "POST", body: JSON.stringify(["frame-via-parent", outcome])}))
+  .then(() => window.frameElement.remove());
 </script>"#;
 
 /// A shell on a scripted page, under a private session bus when given one.
@@ -937,6 +942,18 @@ impl Scripted {
             .into_iter()
             .find(|(_, area)| area.width == 420 && area.height == 560)
             .map(|(window, _)| window)
+    }
+
+    /// Waits until the main page was told `count` times that its shortcut was lost.
+    fn wait_lost(&self, count: usize, what: &str) {
+        wait_for(what, || {
+            let told = self
+                .results()
+                .iter()
+                .filter(|(key, _)| key.starts_with("lost-"))
+                .count();
+            (told >= count).then_some(())
+        });
     }
 
     fn wait_panel(&self, open: bool, what: &str) {
@@ -1403,6 +1420,7 @@ fn a_shortcut_the_portal_ended_is_bound_again_by_the_same_choice() {
     let first = portal.session(0);
 
     portal.end(&first);
+    shell.wait_lost(1, "the page never heard that the portal ended the shortcut");
     // Same sender, so the shell sees this after the `Closed` above.
     portal.activate(&first, "cmd+option+j");
     shell.assert_no_panel_for(
@@ -1423,6 +1441,7 @@ fn a_shortcut_the_portal_ended_is_bound_again_by_the_same_choice() {
 
     portal.vanish();
     portal.reappear();
+    shell.wait_lost(2, "the page never heard that the portal went away");
     // The bus delivered the owner change before this signal, and the shell
     // handles them in that order, which `configure` alone does not promise.
     portal.activate(&second, "cmd+option+j");
@@ -1711,6 +1730,17 @@ fn the_bridge_refuses_a_frame_without_the_token_and_a_command_of_the_other_view(
     assert_eq!(
         frame,
         serde_json::json!({"shell": "undefined", "ipc": "function"})
+    );
+    let via_parent = wait_for("the frame never used the page's bridge", || {
+        shell
+            .results()
+            .into_iter()
+            .find(|(key, _)| key == "frame-via-parent")
+            .map(|(_, value)| value)
+    });
+    assert!(
+        via_parent.as_str().unwrap().contains("refusée"),
+        "a frame used the page's bridge: {via_parent}"
     );
     shell.screen.press(&SUPER_ALT_J);
     shell.assert_no_panel_for(

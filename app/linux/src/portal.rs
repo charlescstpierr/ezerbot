@@ -97,10 +97,14 @@ struct State {
 impl State {
     /// A session the portal ended no longer binds anything, so the same choice
     /// must bind again. A `disabled` choice holds no session and stays.
-    fn forget(&mut self) {
-        if self.held.take().is_some() {
+    /// True when a shortcut in force was lost: the page must hear it, or it keeps
+    /// announcing a shortcut that no longer opens anything.
+    fn forget(&mut self) -> bool {
+        let lost = self.held.take().is_some();
+        if lost {
             self.chosen = None;
         }
+        lost
     }
 }
 
@@ -108,15 +112,18 @@ impl State {
 pub struct Portal {
     state: Rc<RefCell<State>>,
     activated: Rc<dyn Fn(Option<String>)>,
+    lost: Rc<dyn Fn()>,
 }
 
 impl Portal {
     /// `activated` receives the portal's `activation_token`, the only thing that lets
     /// a Wayland compositor hand the keyboard to the panel.
-    pub fn new(activated: impl Fn(Option<String>) + 'static) -> Self {
+    /// `lost` runs when the portal ends the shortcut in force on its own.
+    pub fn new(activated: impl Fn(Option<String>) + 'static, lost: impl Fn() + 'static) -> Self {
         Self {
             state: Rc::default(),
             activated: Rc::new(activated),
+            lost: Rc::new(lost),
         }
     }
 
@@ -204,6 +211,7 @@ impl Portal {
             Rc::clone(&self.state),
         );
         let activated = Rc::clone(&self.activated);
+        let (closed_lost, vanished_lost) = (Rc::clone(&self.lost), Rc::clone(&self.lost));
         connection.signal_subscribe(
             Some(PORTAL),
             Some(SHORTCUTS),
@@ -235,9 +243,12 @@ impl Portal {
             None,
             DBusSignalFlags::NONE,
             move |_, _, path, _, _, _| {
-                let mut state = closed.borrow_mut();
-                if state.held.as_ref().is_some_and(|held| held.session == path) {
-                    state.forget();
+                let lost = {
+                    let mut state = closed.borrow_mut();
+                    state.held.as_ref().is_some_and(|held| held.session == path) && state.forget()
+                };
+                if lost {
+                    closed_lost();
                 }
             },
         );
@@ -248,7 +259,12 @@ impl Portal {
             Some("/org/freedesktop/DBus"),
             Some(PORTAL),
             DBusSignalFlags::NONE,
-            move |_, _, _, _, _, _| vanished.borrow_mut().forget(),
+            move |_, _, _, _, _, _| {
+                let lost = vanished.borrow_mut().forget();
+                if lost {
+                    vanished_lost();
+                }
+            },
         );
         self.state.borrow_mut().connection = Some(connection.clone());
         Ok(connection)

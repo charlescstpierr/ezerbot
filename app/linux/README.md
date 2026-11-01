@@ -30,6 +30,7 @@ Il garde son brouillon tant qu’Ezerbot reste ouvert.
 Sous X11, Ezerbot réserve la touche avec `XGrabKey`, sans surveiller le clavier.
 Un raccourci déjà pris par une autre application est annoncé et l’ancien reste actif.
 Sous Wayland, Ezerbot passe par le portail `org.freedesktop.portal.GlobalShortcuts`.
+Sous Wayland, le bureau décide de la combinaison finale : Ezerbot affiche celle que le portail annonce, qui peut différer de celle demandée.
 Sans portail, le raccourci est annoncé indisponible et le menu reste disponible.
 Le premier plan dépend alors du compositeur : il n’est pas vérifié sous Wayland.
 Fermer la fenêtre principale quitte toujours Ezerbot, donc le raccourci s’arrête avec elle.

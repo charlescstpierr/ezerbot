@@ -65,7 +65,7 @@ mod linux {
         Show,
         OpenPanel,
         Hotkey(u32),
-        Configured(u64, Outcome),
+        Configured(u64, Outcome, Option<String>),
         Command(View, Message),
         LinkFailed(url::Url),
     }
@@ -176,8 +176,8 @@ mod linux {
                 PanelCommand::Show {} => self.show_panel(target).map(|()| json!(true)),
                 PanelCommand::Configure { shortcut } => {
                     let proxy = self.proxy.clone();
-                    self.hotkeys.configure(&shortcut, move |outcome| {
-                        let _ = proxy.send_event(ShellEvent::Configured(id, outcome));
+                    self.hotkeys.configure(&shortcut, move |outcome, trigger| {
+                        let _ = proxy.send_event(ShellEvent::Configured(id, outcome, trigger));
                     });
                     return None;
                 }
@@ -465,9 +465,9 @@ mod linux {
                 if let Some(shell) = shell.as_mut() {
                     shell.command(target, &window, view, message);
                 }
-            } else if let Event::UserEvent(ShellEvent::Configured(id, outcome)) = &event {
+            } else if let Event::UserEvent(ShellEvent::Configured(id, outcome, trigger)) = &event {
                 if let Some(shell) = &shell {
-                    shell.settle(View::Main, *id, Ok(outcome.reply()));
+                    shell.settle(View::Main, *id, Ok(outcome.reply(trigger.as_deref())));
                 }
             } else if let Event::UserEvent(ShellEvent::Hotkey(id)) = &event {
                 // A key pressed after `shell.take()` finds no shell and does nothing.

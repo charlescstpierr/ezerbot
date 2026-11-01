@@ -71,8 +71,12 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    pub fn reply(self) -> serde_json::Value {
-        serde_json::json!({ "status": self })
+    /// `trigger` is what the desktop says it assigned, when it says.
+    pub fn reply(self, trigger: Option<&str>) -> serde_json::Value {
+        match trigger {
+            Some(trigger) => serde_json::json!({ "status": self, "trigger": trigger }),
+            None => serde_json::json!({ "status": self }),
+        }
     }
 }
 
@@ -234,9 +238,10 @@ impl Registrar {
     }
 
     /// `done` runs at once for a grab, and after the portal answered for the portal.
-    pub fn configure(&mut self, name: &str, done: impl FnOnce(Outcome) + 'static) {
+    /// Only the portal can report a combination other than the one asked for.
+    pub fn configure(&mut self, name: &str, done: impl FnOnce(Outcome, Option<String>) + 'static) {
         match self {
-            Self::Slot(slot) => done(slot.configure(name)),
+            Self::Slot(slot) => done(slot.configure(name), None),
             Self::Portal(portal) => portal.configure(name, done),
         }
     }
@@ -371,7 +376,7 @@ mod tests {
             Outcome::Error,
             Outcome::Unavailable,
         ]
-        .map(|outcome| outcome.reply().to_string())
+        .map(|outcome| outcome.reply(None).to_string())
         .into();
         assert_eq!(
             words,
@@ -382,6 +387,14 @@ mod tests {
                 r#"{"status":"error"}"#,
                 r#"{"status":"unavailable"}"#,
             ]
+        );
+    }
+
+    #[test]
+    fn a_trigger_the_desktop_assigned_travels_with_the_status() {
+        assert_eq!(
+            Outcome::Registered.reply(Some("Ctrl Alt K")).to_string(),
+            r#"{"status":"registered","trigger":"Ctrl Alt K"}"#
         );
     }
 

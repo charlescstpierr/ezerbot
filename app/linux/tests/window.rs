@@ -996,6 +996,7 @@ impl Drop for Bus {
 }
 
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+const ASSIGNED: &str = "Ctrl Alt K";
 const SHORTCUTS_INTERFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
 
 const PORTAL_XML: &str = r#"<node><interface name="org.freedesktop.portal.GlobalShortcuts">
@@ -1155,10 +1156,17 @@ impl FakePortal {
                     "BindShortcuts {} {trigger} {session}",
                     shortcuts[0].0
                 ));
+                // The portal may assign another combination than the one asked for.
                 let bound = if state.taken.lock().unwrap().contains(&trigger) {
                     Vec::new()
                 } else {
                     shortcuts
+                        .into_iter()
+                        .map(|(id, mut details)| {
+                            details.insert("trigger_description".into(), ASSIGNED.to_variant());
+                            (id, details)
+                        })
+                        .collect()
                 };
                 results.insert("shortcuts".to_owned(), bound.to_variant());
             }
@@ -1239,12 +1247,22 @@ fn the_portal_opens_the_panel_and_a_replacement_never_loses_the_shortcut() {
         ],
     );
 
-    assert_eq!(
-        status(&shell.run("main", &configure("cmd+option+j"))),
-        "registered"
-    );
+    let registered = shell.run("main", &configure("cmd+option+j"));
+    assert_eq!(status(&registered), "registered");
+    assert_eq!(registered["ok"]["trigger"], ASSIGNED);
     let first = portal.session(0);
     assert!(portal.calls()[1].starts_with("BindShortcuts cmd+option+j LOGO+ALT+j "));
+    let repeated = shell.run(
+        "main",
+        r#"{"command":"configure", "shortcut":"cmd+option+j"}"#,
+    );
+    assert_eq!(status(&repeated), "registered");
+    assert_eq!(repeated["ok"]["trigger"], ASSIGNED);
+    assert_eq!(
+        portal.calls().len(),
+        2,
+        "a repeated name asked the portal again"
+    );
     portal.activate(&first, "cmd+option+j");
     shell.wait_panel(true, "the portal's Activated did not open the panel");
     shell.run("panel", r#"{"command":"close"}"#);

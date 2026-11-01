@@ -22,8 +22,10 @@
     if (result?.status === "conflict") throw new Error("Ce raccourci est déjà utilisé par une autre application. Choisissez-en un autre.");
     if (result?.status === "error") throw new Error("Le raccourci n’a pas pu être activé. L’ouverture par le menu reste disponible.");
     if (result?.status === "unavailable") throw new Error("Le raccourci global n’est pas disponible dans cette session. Ouvrez le panneau depuis le menu Ezerbot.");
-    status.textContent = result?.status === "recording" ? "Mode test : aucun raccourci global enregistré." : result?.status === "disabled" ? "Raccourci global désactivé. Ouvrez le panneau depuis le menu Ezerbot." : result ? `Raccourci enregistré sur ${linux ? "cet ordinateur" : "ce Mac"}, sans ${linux ? "surveillance" : "permission de surveillance"} du clavier.` : "L’ouverture globale est disponible dans l’application Mac. Ici, le panneau s’ouvre dans le navigateur.";
+    const granted = result?.status === "registered" && typeof result.trigger === "string" && result.trigger ? result.trigger : null;
+    status.textContent = granted ? `Raccourci attribué par le bureau : ${granted}.` : result?.status === "recording" ? "Mode test : aucun raccourci global enregistré." : result?.status === "disabled" ? "Raccourci global désactivé. Ouvrez le panneau depuis le menu Ezerbot." : result ? `Raccourci enregistré sur ${linux ? "cet ordinateur" : "ce Mac"}, sans ${linux ? "surveillance" : "permission de surveillance"} du clavier.` : "L’ouverture globale est disponible dans l’application Mac. Ici, le panneau s’ouvre dans le navigateur.";
     configured = shortcut;
+    return granted;
   }
   window.EzerbotFloatingMain = {
     async openConversation(id) {
@@ -53,11 +55,11 @@
         const shortcut = select.value;
         const previous = P.state.floating?.shortcut || "cmd+option+j";
         try {
-          await configure(shortcut);
+          const granted = await configure(shortcut);
           const environment = status.textContent;
           await P.api("/api/floating/settings", { shortcut });
           chosen = null; await P.refresh();
-          status.textContent = `Raccourci enregistré : ${names.find(([value]) => value === shortcut)?.[1] || shortcut}. ${environment}`;
+          status.textContent = `Raccourci enregistré : ${granted || names.find(([value]) => value === shortcut)?.[1] || shortcut}. ${environment}`;
         } catch (error) {
           try { await configure(previous); } catch { /* Keep the actionable error below. */ }
           status.textContent = error.message;

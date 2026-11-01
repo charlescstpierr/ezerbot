@@ -23,7 +23,7 @@ function fixture(status = "recording", hostOverrides = {}, shell = null) {
     async focusConversation(id) { calls.push(id); return id === "visible"; },
     ...hostOverrides,
   };
-  const window = { GrokbotPanels: host, ...(shell ? { EzerbotShell: { platform: "linux", floating: { async postMessage(body) { calls.push(body); return { status: shell }; } } } } : {}), ...(status === null ? {} : { webkit: { messageHandlers: { ezerbotFloating: { async postMessage(body) { calls.push(body); return { status }; } } } } }) };
+  const window = { GrokbotPanels: host, ...(shell ? { EzerbotShell: { platform: "linux", floating: { async postMessage(body) { calls.push(body); return typeof shell === "string" ? { status: shell } : shell; } } } } : {}), ...(status === null ? {} : { webkit: { messageHandlers: { ezerbotFloating: { async postMessage(body) { calls.push(body); return { status }; } } } } }) };
   runInNewContext(readFileSync(new URL("../../ui/panels/floating.js", import.meta.url), "utf8"), { window, document: { createElement: (tag) => new Element(tag) } });
   const nodes = (element) => [element, ...element.children.flatMap(nodes)];
   const all = nodes(root);
@@ -69,6 +69,15 @@ test("on Linux the panel talks to the shell host, with Linux labels and wording"
   assert.match(f.status.textContent, /Raccourci enregistré : Super Alt J/);
   assert.match(f.status.textContent, /cet ordinateur, sans surveillance du clavier/);
   assert.doesNotMatch(f.status.textContent, /Mac|⌘/);
+});
+
+test("on Linux the combination the desktop assigned is shown instead of the one asked for", async () => {
+  const f = fixture(null, {}, { status: "registered", trigger: "Ctrl Alt K" }); f.select.value = "cmd+option+j";
+  await f.save.events.click();
+  assert.equal(f.requests[0].body.shortcut, "cmd+option+j");
+  assert.match(f.status.textContent, /Raccourci enregistré : Ctrl Alt K\./);
+  assert.match(f.status.textContent, /Raccourci attribué par le bureau : Ctrl Alt K\./);
+  assert.doesNotMatch(f.status.textContent, /Super Alt J/);
 });
 
 test("on Linux an unavailable shortcut is announced and never persisted", async () => {

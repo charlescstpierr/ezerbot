@@ -80,6 +80,8 @@ impl<T> Future for Delivery<T> {
 struct Held {
     shortcut: &'static Shortcut,
     session: String,
+    /// The portal's free, localized text for what it assigned. Shown, never parsed.
+    trigger: Option<String>,
 }
 
 #[derive(Default)]
@@ -107,13 +109,24 @@ impl Portal {
 
     /// A replacement is bound in a new session, and the old session closed
     /// only once that succeeded, so no failure loses the shortcut in force.
-    pub fn configure(&self, name: &str, done: impl FnOnce(Outcome) + 'static) {
+    pub fn configure(&self, name: &str, done: impl FnOnce(Outcome, Option<String>) + 'static) {
         let step = {
             let state = self.state.borrow();
             plan(state.chosen, state.held.is_some(), state.binding, name)
         };
         match step {
-            Plan::Answer(outcome) => done(outcome),
+            Plan::Answer(outcome) => {
+                let trigger = match outcome {
+                    Outcome::Registered => self
+                        .state
+                        .borrow()
+                        .held
+                        .as_ref()
+                        .and_then(|held| held.trigger.clone()),
+                    _ => None,
+                };
+                done(outcome, trigger);
+            }
             Plan::Disable => {
                 let (old, connection) = {
                     let mut state = self.state.borrow_mut();
@@ -123,45 +136,46 @@ impl Portal {
                 if let (Some(old), Some(connection)) = (old, connection) {
                     close(&connection, &old.session);
                 }
-                done(Outcome::Disabled);
+                done(Outcome::Disabled, None);
             }
             Plan::Bind(next) => {
                 self.state.borrow_mut().binding = true;
                 let portal = self.clone();
                 glib::spawn_future_local(async move {
-                    let outcome = portal.bind(next).await;
+                    let (outcome, trigger) = match portal.bind(next).await {
+                        Ok(trigger) => (Outcome::Registered, trigger),
+                        Err(outcome) => (outcome, None),
+                    };
                     portal.state.borrow_mut().binding = false;
-                    done(outcome);
+                    done(outcome, trigger);
                 });
             }
         }
     }
 
-    async fn bind(&self, next: &'static Shortcut) -> Outcome {
-        let connection = match self.connection().await {
-            Ok(connection) => connection,
-            Err(outcome) => return outcome,
+    async fn bind(&self, next: &'static Shortcut) -> Result<Option<String>, Outcome> {
+        let connection = self.connection().await?;
+        let session = self.create_session(&connection).await?;
+        let trigger = match self.bind_shortcut(&connection, &session, next).await {
+            Ok(trigger) => trigger,
+            Err(outcome) => {
+                close(&connection, &session);
+                return Err(outcome);
+            }
         };
-        let session = match self.create_session(&connection).await {
-            Ok(session) => session,
-            Err(outcome) => return outcome,
-        };
-        if let Err(outcome) = self.bind_shortcut(&connection, &session, next).await {
-            close(&connection, &session);
-            return outcome;
-        }
         let old = {
             let mut state = self.state.borrow_mut();
             state.chosen = Some(next.name);
             state.held.replace(Held {
                 shortcut: next,
                 session,
+                trigger: trigger.clone(),
             })
         };
         if let Some(old) = old {
             close(&connection, &old.session);
         }
-        Outcome::Registered
+        Ok(trigger)
     }
 
     async fn connection(&self) -> Result<DBusConnection, Outcome> {
@@ -234,7 +248,7 @@ impl Portal {
         connection: &DBusConnection,
         session: &str,
         shortcut: &Shortcut,
-    ) -> Result<(), Outcome> {
+    ) -> Result<Option<String>, Outcome> {
         let token = self.token();
         let session =
             glib::variant::ObjectPath::try_from(session.to_owned()).map_err(|_| Outcome::Error)?;
@@ -257,15 +271,18 @@ impl Portal {
             |_| (session, shortcuts, String::new(), options).to_variant(),
         )
         .await?;
-        let bound = results
+        let list = results
             .get("shortcuts")
             .and_then(|list| list.get::<Vec<(String, HashMap<String, Variant>)>>())
-            .is_some_and(|list| list.iter().any(|(id, _)| id == shortcut.name));
-        if bound {
-            Ok(())
-        } else {
-            Err(Outcome::Conflict)
-        }
+            .unwrap_or_default();
+        let (_, assigned) = list
+            .into_iter()
+            .find(|(id, _)| id == shortcut.name)
+            .ok_or(Outcome::Conflict)?;
+        Ok(assigned
+            .get("trigger_description")
+            .and_then(|text| text.str().map(str::to_owned))
+            .filter(|text| !text.is_empty()))
     }
 }
 

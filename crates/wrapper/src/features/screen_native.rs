@@ -1,5 +1,6 @@
-//! Release-only transport to the bundled Cocoa helper. No executable override,
-//! socket discovery, shell, or test environment switch can reach native input.
+//! Release-only transport to the native helper shipped beside the wrapper. No
+//! executable override, socket discovery, shell, or test environment switch can
+//! reach it.
 use super::*;
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -12,7 +13,11 @@ fn executable() -> Result<PathBuf, ApiError> {
         .map_err(|_| unavailable())?
         .parent()
         .ok_or_else(unavailable)?
-        .join("Ezerbot"))
+        .join(if cfg!(target_os = "linux") {
+            "ezerbot-linux"
+        } else {
+            "Ezerbot"
+        }))
 }
 fn unavailable() -> ApiError {
     ApiError::new(503,"Le helper natif est indisponible. Ouvrez l’application Ezerbot construite, puis réessayez.")
@@ -34,6 +39,9 @@ pub fn permissions() -> Result<(), ApiError> {
         .status()
         .map_err(|_| unavailable())?;
     if !status.success() {
+        #[cfg(target_os = "linux")]
+        return Err(ApiError::new(403,"Aucune capture possible dans cette session. Sous Wayland, installez xdg-desktop-portal et le portail de votre bureau, puis réactivez ce bot."));
+        #[cfg(not(target_os = "linux"))]
         return Err(ApiError::new(403,"Autorisez Accessibilité, Enregistrement de l’écran et Surveillance de l’entrée dans Réglages Système, puis réactivez ce bot."));
     }
     Ok(())

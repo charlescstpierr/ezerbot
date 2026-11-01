@@ -13,7 +13,7 @@ interface publique, et elle est vide hors Linux.
   Une alerte est identifiée par son serveur et son numéro, car un serveur redémarré réutilise les
   numéros. Le wrapper garde l’événement des 64 dernières alertes et ferme les plus anciennes. Un
   clic ouvre `ezerbot://app/v1/notification?id=<événement>`, que l’interface mène à sa carte comme
-  un clic sur macOS. Ce lien arrive dans l’interface par le même chemin que les autres (étape 2).
+  un clic sur macOS. À la sortie propre, les alertes encore affichées sont fermées.
 - `application` : instance unique et boîte de réception des liens sur `org.freedesktop.Application`
   (au plus 16 liens en attente, 2048 octets chacun, comme `app/native/main.m`).
 - `scheme` : entrée `.desktop` et enregistrement de `x-scheme-handler/ezerbot` par `xdg-mime`. La

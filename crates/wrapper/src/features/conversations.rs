@@ -98,7 +98,6 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     match path {
         "/api/ping" => Ok(json!({"revision": state_revision(&app.connection, &app.db_path)?})),
         "/api/state" => {
-            let _rendering = grokbot_forms::redact::rendering();
             // Capture before reading: a concurrent write during serialization
             // must cause another refresh, never be mistaken for observed data.
             let revision = state_revision(&app.connection, &app.db_path)?;

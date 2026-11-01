@@ -568,9 +568,10 @@ fn a_second_launch_shows_the_open_window_and_a_later_launch_starts_again() {
     let started = Instant::now();
     let mut second = App::start(shell_with_wrapper(), &screen, &home, &fake);
     let status = loop {
-        let status = second.exited();
-        if status.is_some() && screen.top_window() == Some(window) {
-            break status.unwrap();
+        if let (Some(status), Some(top)) = (second.exited(), screen.top_window()) {
+            if top == window {
+                break status;
+            }
         }
         assert!(
             started.elapsed() < RELAUNCH_LIMIT,

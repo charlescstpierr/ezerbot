@@ -52,8 +52,9 @@ pub(super) fn status(path: &Path) -> StorageStatus {
         }
     }
 }
-/// Written before the first secret reaches the service. Without it the keyring holds nothing of
-/// this vault, so a keyring locked or absent hides nothing and the file is the whole vault.
+/// Written before the first secret reaches the service, removed once a full read finds none.
+/// Without it the keyring holds nothing of this vault, so a keyring locked or absent hides
+/// nothing and the file is the whole vault.
 fn holds_secrets(vault_path: &Path) -> PathBuf {
     vault_path.with_extension("keyring")
 }
@@ -110,7 +111,12 @@ fn migrate(vault: &Vault, backend: &impl Backend, state: &mut State) -> Result<S
     let mut file = vault.read_file()?;
     let mut merged = backend.read_all()?;
     merged.extend(file.clone());
-    if !merged.is_empty() {
+    if merged.is_empty() {
+        fs::remove_file(holds_secrets(&vault.path)).or_else(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(error),
+        })?;
+    } else {
         note_secrets_in_service(vault)?;
     }
     state.cached = merged.clone();
@@ -187,6 +193,10 @@ pub(super) fn remove(vault: &Vault, target: &Target, name: &str) -> Result<()> {
     file.remove(name);
     vault.write(&file)?;
     state.cached.remove(name);
+    // The last secret gone: a keyring locked from now on hides nothing.
+    let _ = target
+        .connect(&vault.path)
+        .and_then(|backend| migrate(vault, &backend, state));
     Ok(())
 }
 

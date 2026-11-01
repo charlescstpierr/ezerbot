@@ -126,7 +126,8 @@ mod linux {
     /// One request of `shell.fifo` holds one link, as long as the interface accepts.
     fn deep_link(argument: &OsString) -> Option<&str> {
         let link = argument.to_str()?;
-        (link.starts_with("ezerbot://") && link.len() <= 2048 && !link.contains('\n'))
+        let scheme = link.get(.."ezerbot://".len())?;
+        (scheme.eq_ignore_ascii_case("ezerbot://") && link.len() <= 2048 && !link.contains('\n'))
             .then_some(link)
     }
 

@@ -237,6 +237,7 @@
       microphoneNotice.textContent = errors.unavailable; return;
     }
     microphonesLoaded = true;
+    if (microphoneNotice.textContent === errors.unavailable) microphoneNotice.textContent = "";
     try {
       const result = await bridge("microphones");
       renderMicrophones(result.microphones || []);

@@ -85,3 +85,13 @@ test("outside Linux the default row stays the Mac's and the route is never calle
   assert.ok(f.texts().includes("Microphone par défaut du Mac"));
   assert.ok(f.texts().includes("La dictée est disponible dans l’application Mac Ezerbot."));
 });
+
+test("the unavailable notice of a first load made before the state arrived is cleared once the list loads", async () => {
+  const f = fixture({ shell: null, route: async () => ({ microphones: listed, fake: true }) });
+  assert.ok(f.texts().includes("La dictée est disponible dans l’application Mac Ezerbot."));
+  f.ctx.state.voice.debug_fake = true;
+  f.registration.onState(f.ctx.state, f.ctx);
+  await flush();
+  assert.deepEqual(f.options().map(el => el.dataset.id), ["", "systeme", "usb"]);
+  assert.ok(!f.texts().includes("La dictée est disponible dans l’application Mac Ezerbot."));
+});

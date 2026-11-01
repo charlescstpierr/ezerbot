@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import struct
+import zlib
 import sys
 from pathlib import Path
 
@@ -44,18 +45,58 @@ def read_json(path: Path, problems: list[str]) -> dict | None:
     return value
 
 
-def build_failure(sha: str, step: str, code: int, patch: str | None = None) -> tuple[str, list[str]]:
-    """A build step failed before any capture: FIX with a tool error, never a silent exit."""
-    lines = [
-        "# verify-ezerbot (Linux, Xvfb)",
-        "",
-        f"Commit : `{sha}`",
-        "",
-        "## Erreur d’outil",
-        "",
-        f"L’étape `{step}` a échoué (code {code}) ; aucune vue n’a été pilotée.",
-    ]
+def tool_error(sha: str, message: str, patch: str | None = None) -> tuple[str, list[str]]:
+    """No trustworthy capture: FIX with a tool error, never a silent exit or a traceback."""
+    lines = ["# verify-ezerbot (Linux, Xvfb)", "", f"Commit : `{sha}`", "", "## Erreur d’outil", "", message]
     return "FIX", lines + ["", verdict_line("FIX", sha, patch)]
+
+
+def build_failure(sha: str, step: str, code: int, patch: str | None = None) -> tuple[str, list[str]]:
+    """A build step failed before any capture."""
+    return tool_error(sha, f"L’étape `{step}` a échoué (code {code}) ; aucune vue n’a été pilotée.", patch)
+
+
+def safe_verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None = None) -> tuple[str, list[str]]:
+    """Any unexpected failure while reading this run's evidence is a tool error, not a crash.
+
+    SystemExit stays: it is the deliberate refusal of evidence produced for another commit.
+    """
+    try:
+        return verdict(evidence, sha, drive_status, patch)
+    except SystemExit:
+        raise
+    except Exception as error:  # noqa: BLE001 - every unreadable artifact must end in FIX
+        return tool_error(sha, f"Preuves illisibles ({type(error).__name__}) ; verdict impossible.", patch)
+
+
+def png_complete(path: Path) -> None:
+    """Raise ValueError unless the file is a whole PNG: valid chunks and CRCs, IDAT that inflates, IEND."""
+    data = path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("signature PNG absente")
+    offset, idat, ended = 8, b"", False
+    while offset + 12 <= len(data):
+        length, kind = struct.unpack(">I4s", data[offset:offset + 8])
+        body = data[offset + 8:offset + 8 + length]
+        crc = data[offset + 8 + length:offset + 12 + length]
+        if len(body) != length or len(crc) != 4 or zlib.crc32(kind + body) != struct.unpack(">I", crc)[0]:
+            raise ValueError("bloc PNG tronqué ou corrompu")
+        if kind == b"IDAT":
+            idat += body
+        offset += 12 + length
+        if kind == b"IEND":
+            ended = True
+            break
+    if not ended or not idat:
+        raise ValueError("PNG sans données d’image ou sans fin")
+    zlib.decompress(idat)
+
+
+def write_report(path: Path, lines: list[str]) -> bytes:
+    """UTF-8 bytes; characters that cannot be encoded (lone surrogates) are escaped, not fatal."""
+    data = ("\n".join(lines) + "\n").encode("utf-8", "backslashreplace")
+    path.write_bytes(data)
+    return data
 
 
 def verdict_line(status: str, sha: str, patch: str | None) -> str:
@@ -106,7 +147,8 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
         if passed:
             try:
                 png_size(shot)
-            except (OSError, ValueError, struct.error) as error:
+                png_complete(shot)
+            except (OSError, ValueError, struct.error, zlib.error) as error:
                 problems.append(f"`captures/{view}.png` illisible ({type(error).__name__}).")
                 passed = False
         if passed:
@@ -148,10 +190,11 @@ def main() -> None:
     if args.build_failed:
         status, lines = build_failure(args.sha, args.build_failed, args.build_status, args.patch)
     else:
-        status, lines = verdict(args.evidence, args.sha, args.drive_status, args.patch)
-    (args.evidence / "report.md").write_text("\n".join(lines) + "\n")
-    print(f"preuves: {args.evidence}")
-    print("\n".join(lines))
+        status, lines = safe_verdict(args.evidence, args.sha, args.drive_status, args.patch)
+    data = write_report(args.evidence / "report.md", lines)
+    print(f"preuves: {args.evidence}", flush=True)
+    sys.stdout.buffer.write(data)
+    sys.stdout.flush()
     raise SystemExit(0 if status == "PASS" else 1)
 
 

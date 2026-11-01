@@ -157,6 +157,40 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(status, "FIX")
         self.assertIn("`captures/home-dark.png` illisible (ValueError).", lines)
 
+    def test_truncated_png_with_matching_hash_is_fix(self) -> None:
+        evidence = self.evidence()
+        shot = evidence / "captures" / "home-dark.png"
+        truncated = png()[:33]
+        shot.write_bytes(truncated)
+        manifest_path = evidence / "captures" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        for view in manifest["views"]:
+            if view["file"] == "home-dark.png":
+                view["sha256"] = hashlib.sha256(truncated).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertIn("`captures/home-dark.png` illisible (ValueError).", lines)
+
+    def test_pathological_json_is_a_tool_error_fix(self) -> None:
+        for text in ('{"sha": ' + "9" * 5000 + "}", "[" * 10000 + "]" * 10000):
+            evidence = self.evidence()
+            (evidence / "captures" / "result.json").write_text(text)
+            status, lines = linux_verdict.safe_verdict(evidence, SHA)
+            self.assertEqual(status, "FIX")
+            self.assertEqual(lines[-1], f"FIX {SHA}")
+
+    def test_unencodable_error_text_still_writes_the_report(self) -> None:
+        evidence = self.evidence()
+        path = evidence / "captures" / "result.json"
+        data = json.loads(path.read_text())
+        data["error"] = "\ud800"
+        path.write_text(json.dumps(data))
+        status, lines = linux_verdict.safe_verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        written = linux_verdict.write_report(evidence / "report.md", lines).decode("utf-8")
+        self.assertTrue(written.rstrip().endswith(f"FIX {SHA}"))
+
     def test_tampered_capture_is_fix(self) -> None:
         evidence = self.evidence()
         (evidence / "captures" / "home-dark.png").write_bytes(png(5, 3))

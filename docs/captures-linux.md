@@ -59,6 +59,6 @@ Le registre du pilote fournit ces vues, dans cet ordre. Le viewport est de 1440 
 
 `platform` vaut `linux`. `renderer` vaut `chromium-web-fallback`. `chrome_version` indique la version réellement interrogée. `viewport` contient `width`, `height` et `device_scale_factor`.
 
-`views` est un tableau ordonné. Chaque entrée contient `id`, `label`, `file`, `sha256`, `width` et `height`. `file` est le nom relatif du PNG dans le même dossier. `sha256` est l'empreinte hexadécimale SHA-256 des octets du fichier. Une preuve complète contient exactement les vues documentées et tous leurs PNG valides.
+`views` est un tableau ordonné. Chaque entrée contient `id`, `label`, `file`, `sha256`, `size`, `width` et `height`. L'étape de capture calcule `sha256` et `size` sur les octets qu'elle écrit. `file` est le nom relatif du PNG dans le même dossier. `sha256` est l'empreinte hexadécimale SHA-256 des octets du fichier. Une preuve complète contient exactement les vues documentées et tous leurs PNG valides.
 
 Le script vérifie le SHA annoncé par le wrapper compilé. Il ne publie le nouveau manifeste qu'après la réussite de toutes les vues. Une nouvelle exécution peut avoir une autre date de capture. L'acceptation exige les mêmes vues. Elle ne suppose pas que des versions différentes de Chrome produisent les mêmes pixels.

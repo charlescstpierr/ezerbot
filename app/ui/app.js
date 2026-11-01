@@ -332,6 +332,8 @@
     if (kind === "conversation") {
       if (!state.conversations.some((item) => item.id === id)) throw new Error("Cette conversation est introuvable ou inaccessible sur ce Mac.");
       selectConversation(id, true);
+    } else if (kind === "notification") {
+      await window.EzerbotNotifications.activate(id);
     } else if (kind === "bot") {
       const bot = botById(id);
       if (!bot || bot.deleted) throw new Error("Ce bot est introuvable ou inaccessible sur ce Mac.");
@@ -631,7 +633,14 @@
       live: !task && Boolean(runningRun() || streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments)) });
     const live = control.live;
     const noMembers = group && !currentConversation().member_ids?.length;
-    ui.send.disabled = control.offline || taskFinished || (live ? ((group || task) && (control.busy || !connected)) : control.busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
+    // Keyring locked: nothing can be masked, so nothing is sent until it is unlocked.
+    const vaultLocked = state.vault?.locked === true;
+    const lockedBanner = $("vault-locked");
+    if (lockedBanner) {
+      lockedBanner.hidden = !vaultLocked;
+      lockedBanner.textContent = vaultLocked ? state.vault.message || "Déverrouillez votre trousseau pour continuer." : "";
+    }
+    ui.send.disabled = vaultLocked || control.offline || taskFinished || (live ? ((group || task) && (control.busy || !connected)) : control.busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
     ui.send.dataset.mode = control.mode;
     ui.send.title = control.title;
     ui.send.setAttribute("aria-label", control.label);

@@ -283,6 +283,8 @@ struct App(Option<Child>);
 
 impl App {
     fn start(binary: &Path, screen: &Screen, home: &TestDir, extra: &[(&str, &str)]) -> Self {
+        // A test HOME: the shell's wrapper never reaches the session bus from here.
+        std::fs::write(home.join(".ezerbot-test-home"), "test").unwrap();
         let shell = Command::new(binary)
             .arg("--data-dir")
             .arg(home.join("state"))
@@ -588,4 +590,80 @@ fn a_second_launch_shows_the_open_window_and_a_later_launch_starts_again() {
         (screen.windows().len() == 2).then_some(())
     });
     third.quit();
+}
+
+/// Keyring locked after a restart: the window says so above the composer and sends nothing.
+/// Enter neither stores a message nor starts a turn, so no draft can come back twice.
+#[test]
+fn a_locked_keyring_shows_the_banner_and_the_window_sends_nothing() {
+    use grokbot_forms::vault::Vault;
+    use grokbot_linux_desktop::testing::Keyring;
+    use std::os::unix::fs::PermissionsExt;
+    let keyring = Keyring::start();
+    let home = TestDir::new("ezerbot-locked-window");
+    let state = home.join("state");
+    std::fs::create_dir(&state).unwrap();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file = state.join("ezerbot.secrets.json");
+    Vault::open(&file)
+        .unwrap()
+        .set(
+            "PORCELAINE",
+            "Piège synthétique",
+            "porcelaine-ambree-synthetique-9931",
+        )
+        .unwrap();
+    Vault::open_test_keychain(&file, keyring.address()).unwrap();
+    keyring.lock();
+    let screen = Screen::start();
+    let keyring_home = keyring.home().path().to_str().unwrap().to_owned();
+    let extra = [
+        ("EZERBOT_FAKE_SIGNIN", "1"),
+        ("HOME", keyring_home.as_str()),
+        ("GROKBOT_TEST_SESSION_BUS", keyring.address()),
+    ];
+    let app = App::start(shell_with_wrapper(), &screen, &home, &extra);
+    wait_for("the window stayed blank", || {
+        (screen.colours().len() >= 16).then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    let area = screen.web_area();
+    screen.focus();
+    screen.click(area.x + area.width as i32 / 2, area.y + 200);
+    screen.press(&["Control_L", "n"]);
+    std::thread::sleep(Duration::from_millis(500));
+    screen.type_text("ce message attend le trousseau");
+    screen.press(&["Return"]);
+    screen.press(&["Return"]);
+    std::thread::sleep(Duration::from_secs(3));
+    let database = Connection::open_with_flags(
+        state.join("ezerbot.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let count = |sql: &str| {
+        database
+            .query_row(sql, [], |row| row.get::<_, i64>(0))
+            .unwrap()
+    };
+    assert_eq!(
+        count("SELECT count(*) FROM submissions"),
+        0,
+        "a message was sent while locked"
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM wrapper_engine_runs"),
+        0,
+        "a turn started while locked"
+    );
+    if let Ok(shot) = std::env::var("LIVE_SHOT") {
+        let status = Command::new("import")
+            .args(["-window", "root"])
+            .arg(&shot)
+            .env("DISPLAY", &screen.name)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    app.quit();
 }

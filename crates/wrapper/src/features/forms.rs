@@ -1917,6 +1917,13 @@ fn rules_value(conn: &Connection) -> Result<Value, ApiError> {
 }
 pub fn state(ctx: &Context<'_>) -> Value {
     fn load(ctx: &Context<'_>) -> Result<Value, ApiError> {
+        let vault = vault(ctx)?;
+        if vault.is_partial() {
+            // Rien ne peut être masqué : seul l'état du stockage est servi, pour dire quoi faire.
+            return Ok(
+                json!({"requests":[],"secrets":[],"bot_secrets":[],"storage":vault.storage_status()}),
+            );
+        }
         let mut statement = ctx.connection.prepare("SELECT id FROM forms_requests WHERE status='pending' OR rowid IN (SELECT rowid FROM forms_requests ORDER BY rowid DESC LIMIT 100) ORDER BY rowid")?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -1927,7 +1934,6 @@ pub fn state(ctx: &Context<'_>) -> Value {
                 requests.push(request_value(ctx, &request, false)?);
             }
         }
-        let vault = vault(ctx)?;
         let secrets = vault.list()?;
         let bot_secrets = live_bot_secrets(ctx, &vault)?;
         Ok(redact_value(

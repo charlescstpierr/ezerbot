@@ -642,8 +642,11 @@ fn extract(
     if human || form_overlap(conn, &input.text)? {
         return Ok(());
     }
-    let vault = Vault::open(&path.with_extension("secrets.json"))?;
-    if redact::redact(&vault, &input.text)? != input.text {
+    let vault = Vault::open_app(&path.with_extension("secrets.json"))?;
+    // An unreadable keyring lists no secret, which proves nothing about this text.
+    if vault.storage_status().backend == "file_fallback"
+        || redact::redact(&vault, &input.text)? != input.text
+    {
         return Ok(());
     }
     let version = memory_version(conn, &run.bot_id)?;

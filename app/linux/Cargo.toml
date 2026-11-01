@@ -23,5 +23,7 @@ wry = "=0.57.1"
 grokbot-test-support.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+grokbot-linux-desktop = { workspace = true, features = ["test-support"] }
+grokbot-forms = { workspace = true }
 rusqlite.workspace = true
 x11-dl = "2.21"

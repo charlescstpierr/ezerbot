@@ -693,3 +693,4 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .suggestion-grid { gap: 4px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+.vault-locked { margin: 0 0 8px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--pane); font-weight: 600; }

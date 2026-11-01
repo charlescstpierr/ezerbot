@@ -282,6 +282,23 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("hors du dépôt", result.stderr)
 
+    def test_equals_form_selects_the_same_path(self) -> None:
+        env = {key: value for key, value in os.environ.items() if key != "EZERBOT_VERIFY_BROWSER"}
+        inside = str(SCRIPTS.parents[3] / "inside")
+        for args in (["--sphere=linux", f"--evidence={inside}"], [f"--evidence={inside}"], ["--sphere", "linux", f"--evidence={inside}"]):
+            with self.subTest(args=args):
+                result = subprocess.run(["bash", str(SCRIPTS / "prove.sh"), *args], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("hors du dépôt", result.stderr)
+
+    def test_unknown_or_empty_option_is_refused(self) -> None:
+        for args in (["--evidance", "/tmp/x"], ["--verbose"], ["accueil"], ["--sphere"], ["--sphere="]):
+            with self.subTest(args=args):
+                result = subprocess.run(["bash", str(SCRIPTS / "prove.sh"), *args], capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("prove.sh:", result.stderr)
+                self.assertIn("Usage", result.stderr)
+
     def test_all_and_named_spheres_keep_the_prove_py_path(self) -> None:
         # `all` (and every existing sphere) must behave as on main: prove.py, not the Xvfb subset.
         env = {key: value for key, value in os.environ.items() if key != "EZERBOT_VERIFY_BROWSER"}

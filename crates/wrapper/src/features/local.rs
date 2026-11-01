@@ -457,12 +457,14 @@ fn protected_roots(ctx: &Context<'_>, home: Option<&Path>) -> Result<Vec<PathBuf
     }
     #[cfg(target_os = "linux")]
     {
+        // `ezerbot` : le dossier de données par défaut, où vivent les jetons même quand
+        // la base courante est ailleurs.
         let shares = home
             .map(|home| home.join(".local/share"))
             .into_iter()
             .chain(std::env::var_os("XDG_DATA_HOME").map(PathBuf::from));
         for share in shares {
-            for sub in ["keyrings", "kwalletd"] {
+            for sub in ["ezerbot", "keyrings", "kwalletd"] {
                 let root = share.join(sub);
                 roots.push(root.canonicalize().unwrap_or(root));
             }
@@ -2370,6 +2372,63 @@ mod tests {
             out.status.success() && String::from_utf8_lossy(&out.stdout).contains("refus-vu"),
             "{out:?}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn file_tools_refuse_the_default_linux_data_folder_even_when_the_database_is_elsewhere() {
+        let guard = grokbot_test_support::TestDir::new("ezerbot-linux-default");
+        let root = guard.to_path_buf();
+        let home = root.join("home");
+        let default = home.join(".local/share/ezerbot");
+        let elsewhere = root.join("ailleurs");
+        for dir in [&default, &elsewhere] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(default.join("workspace.codex-auth.json"), "jeton").unwrap();
+        // Lancé avec un autre dossier de données : la base courante est ailleurs.
+        let app = crate::App::open(&elsewhere.join("workspace.sqlite")).unwrap();
+        let ctx = app.feature_context();
+        let home = home.canonicalize().unwrap();
+        for (name, path) in [
+            ("read_file", default.join("workspace.codex-auth.json")),
+            ("list_directory", default.clone()),
+        ] {
+            let call = ToolCall {
+                call_id: "c".into(),
+                name: name.into(),
+                arguments: json!({"path": path}),
+            };
+            assert!(
+                touches_app_data_at(&ctx, &call, Some(&home)).unwrap(),
+                "{name} {}",
+                path.display()
+            );
+        }
+        // Le shell YOLO, par le même bac à sable, ne lit pas non plus le jeton, mais lit
+        // un fichier ordinaire voisin (le refus ne vient pas d'un dossier invisible).
+        let ordinary = home.join("notes.txt");
+        fs::write(&ordinary, "ordinaire").unwrap();
+        if super::super::yolo::sandbox::available() {
+            let out = super::super::yolo::sandbox::command(
+                &protected_roots(&ctx, Some(&home)).unwrap(),
+                &home,
+            )
+            .unwrap()
+            .arg("-c")
+            .arg(format!(
+                "cat {} {}",
+                ordinary.display(),
+                default.join("workspace.codex-auth.json").display()
+            ))
+            .output()
+            .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("ordinaire") && !stdout.contains("jeton"),
+                "{out:?}"
+            );
+        }
     }
 
     #[test]

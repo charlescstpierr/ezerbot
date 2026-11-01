@@ -197,6 +197,7 @@ struct Sent {
     clients: Mutex<Vec<String>>,
     closed: Mutex<Vec<u32>>,
     refuse_next: AtomicBool,
+    slow_close_ms: std::sync::atomic::AtomicU64,
 }
 
 struct Server(Arc<Sent>);
@@ -237,6 +238,9 @@ impl Server {
 
     fn close_notification(&self, id: u32) {
         self.0.closed.lock().unwrap().push(id);
+        std::thread::sleep(Duration::from_millis(
+            self.0.slow_close_ms.load(Ordering::SeqCst),
+        ));
     }
 
     fn get_capabilities(&self) -> Vec<String> {
@@ -273,6 +277,13 @@ impl FakeNotifications {
     /// The next `Notify` fails, as when the server is busy: it stays up and keeps its ids.
     pub fn refuse_next(&self) {
         self.sent.refuse_next.store(true, Ordering::SeqCst);
+    }
+
+    /// Each `CloseNotification` then takes this long to answer, as a busy server does.
+    pub fn slow_close(&self, delay: Duration) {
+        self.sent
+            .slow_close_ms
+            .store(delay.as_millis() as u64, Ordering::SeqCst);
     }
 
     pub fn closed(&self) -> Vec<u32> {

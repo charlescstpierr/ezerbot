@@ -111,6 +111,38 @@ impl Notifier {
             .map_err(|_| Unavailable)
     }
 
+    /// Asks each server to remove these notifications without waiting for any answer, then makes
+    /// sure the bus has the requests, all within `limit`: a slow server cannot hold the exit.
+    pub fn close_all_within(
+        &self,
+        shown: Vec<Shown>,
+        limit: std::time::Duration,
+    ) -> Result<(), Unavailable> {
+        let connection = self.connection.clone();
+        crate::bus::bounded(limit, move || {
+            for shown in shown {
+                let message = zbus::message::Message::method_call(PATH, "CloseNotification")
+                    .and_then(|builder| builder.destination(shown.server.as_str()))
+                    .and_then(|builder| builder.interface(INTERFACE))
+                    .and_then(|builder| builder.with_flags(zbus::message::Flags::NoReplyExpected))
+                    .and_then(|builder| builder.build(&shown.id))
+                    .map_err(|_| Unavailable)?;
+                connection.send(&message).map_err(|_| Unavailable)?;
+            }
+            // The bus answers in order: once it has, it holds every request above.
+            connection
+                .call_method(
+                    Some("org.freedesktop.DBus"),
+                    "/org/freedesktop/DBus",
+                    Some("org.freedesktop.DBus.Peer"),
+                    "Ping",
+                    &(),
+                )
+                .map(drop)
+                .map_err(|_| Unavailable)
+        })
+    }
+
     /// Calls `handler` with each notification that was clicked; the signal also reaches us for
     /// other applications. The thread ends with the connection, which closes when this
     /// `Notifier` is dropped.

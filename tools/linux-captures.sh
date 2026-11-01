@@ -82,8 +82,8 @@ run "$worktree/app/web" npm ci --no-audit --no-fund
 disk_guard
 run "$worktree/app/web" npm run build
 disk_guard
-rm -f -- "$cache/debug/grokbot-wrapper"
-run "$worktree" env CARGO_TARGET_DIR="$cache" CARGO_BUILD_JOBS=3 EZERBOT_GIT_COMMIT="$sha" EZERBOT_GIT_COMMIT_UNIX="$unix" cargo build -p grokbot-wrapper --locked
+rm -f -- "$cache/debug/grokbot-wrapper" "$cache/debug/ezerbot-linux"
+run "$worktree" env CARGO_TARGET_DIR="$cache" CARGO_BUILD_JOBS=3 EZERBOT_GIT_COMMIT="$sha" EZERBOT_GIT_COMMIT_UNIX="$unix" cargo build -p grokbot-wrapper -p ezerbot-linux --locked
 binary="$cache/debug/grokbot-wrapper"
 [[ -x $binary ]] || fail 'Wrapper build did not produce the capture binary.'
 

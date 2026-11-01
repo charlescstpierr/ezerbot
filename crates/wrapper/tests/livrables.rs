@@ -705,23 +705,15 @@ fn a_secret_absent_from_the_text_leaves_the_preview_untouched() {
 #[test]
 fn the_save_path_masks_only_the_file_name_never_the_home_folder() {
     let home = std::env::var("HOME").unwrap();
-    let account = std::path::Path::new(&home)
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_owned();
-    assert!(
-        account.chars().count() >= 6,
-        "compte trop court : {account}"
-    );
+    let folder = home.trim_start_matches('/');
+    assert!(folder.chars().count() >= 6, "dossier trop court : {folder}");
     let mut f = Fixture::new();
     let chat = f.chat("alpha");
     f.call(
         &chat,
         "d1",
         "create_document",
-        json!({"name":format!("Rapport-{account}"),"format":"md","content":"Bilan"}),
+        json!({"name":"Rapport-catalogue-r9-compte","format":"md","content":"Bilan"}),
     );
     f.call(
         &chat,
@@ -733,7 +725,7 @@ fn the_save_path_masks_only_the_file_name_never_the_home_folder() {
         &f,
         "SITE_COMPTE",
         "Formulaire de site privé",
-        &json!({"values":{"identifiant":account}}).to_string(),
+        &json!({"values":{"identifiant":"catalogue-r9-compte","dossier":folder}}).to_string(),
     );
     vault(
         &f,

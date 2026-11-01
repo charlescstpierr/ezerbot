@@ -419,6 +419,11 @@ impl Provider {
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
+    pub fn watchdog_test_committed(&self, run: &grokbot_engine::model::Run, seq: u64) {
+        self.watchdog().committed(run, seq);
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn watchdog_test_claim_run(
         &self,
         id: &str,

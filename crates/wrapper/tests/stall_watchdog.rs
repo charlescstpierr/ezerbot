@@ -150,6 +150,15 @@ impl Fixture {
             .unwrap();
     }
 
+    fn background_task(&self, run: &str) {
+        self.conn
+            .execute(
+                "INSERT INTO wrapper_shell_tasks(run_id,call_id,status) VALUES (?1,'shell','en cours')",
+                [run],
+            )
+            .unwrap();
+    }
+
     fn clock(&self, elapsed: u64) {
         self.provider().watchdog_test_clock(self.start + elapsed);
     }
@@ -1105,7 +1114,7 @@ fn thresholds_are_inclusive_and_the_scan_does_not_refresh_activity() {
 fn a_background_command_keeps_its_own_card_without_a_run_stall() {
     let mut f = Fixture::new();
     f.run("background", RunStatus::Running);
-    f.conn.execute("INSERT INTO wrapper_shell_tasks(run_id,call_id,status) VALUES ('background','shell','en cours')",[]).unwrap();
+    f.background_task("background");
     f.tick(0);
     f.tick(1_200_000);
     assert_eq!(f.state()["silence"], json!({}));
@@ -1115,6 +1124,126 @@ fn a_background_command_keeps_its_own_card_without_a_run_stall() {
     );
     assert_eq!(f.notification_count("background"), 0);
     assert!(f.messages("stalled").is_empty());
+}
+
+#[test]
+fn background_output_reaches_every_waiting_ancestor() {
+    let mut f = Fixture::new();
+    f.run("root", RunStatus::AwaitingChildren);
+    f.child("root", "parent", RunStatus::AwaitingChildren);
+    f.child("parent", "shell", RunStatus::Running);
+    f.child("parent", "worker", RunStatus::Running);
+    f.background_task("shell");
+    f.tick(0);
+    for elapsed in (30_000..=240_000).step_by(30_000) {
+        f.clock(elapsed);
+        f.provider().pulse_run("shell");
+        f.tick(elapsed);
+    }
+    assert_eq!(f.state()["silence"], json!({"worker": f.start}));
+}
+
+#[test]
+fn a_commit_of_a_background_child_counts_for_its_waiting_parent() {
+    let mut f = Fixture::new();
+    f.run("parent", RunStatus::AwaitingChildren);
+    f.child("parent", "shell", RunStatus::Running);
+    f.child("parent", "worker", RunStatus::Running);
+    f.background_task("shell");
+    f.tick(0);
+    f.clock(170_000);
+    let shell = store::required(&f.conn, "shell").unwrap();
+    f.provider().watchdog_test_committed(&shell, 1);
+    f.tick(240_000);
+    assert_eq!(f.state()["silence"], json!({"worker": f.start}));
+}
+
+#[test]
+fn a_quiet_background_child_is_not_silence_for_its_waiting_parent() {
+    let mut f = Fixture::new();
+    f.run("parent", RunStatus::AwaitingChildren);
+    f.child("parent", "shell", RunStatus::Running);
+    f.background_task("shell");
+    f.tick(0);
+    f.tick(1_200_000);
+    assert_eq!(f.state()["silence"], json!({}));
+    f.conn
+        .execute(
+            "UPDATE wrapper_shell_tasks SET status='terminé' WHERE run_id='shell'",
+            [],
+        )
+        .unwrap();
+    f.tick(1_215_000);
+    assert_eq!(f.state()["silence"], json!({}));
+    f.tick(1_395_000);
+    let since = f.start + 1_215_000;
+    assert_eq!(
+        f.state()["silence"],
+        json!({"parent": since, "shell": since})
+    );
+}
+
+#[test]
+fn a_real_background_shell_keeps_its_waiting_parent_alive() {
+    let mut f = Fixture::new();
+    f.post(
+        "/api/local/bot",
+        json!({"bot_id": "grokbot", "shell": true, "files": false}),
+    );
+    f.run("parent", RunStatus::AwaitingChildren);
+    f.child("parent", "shell", RunStatus::Running);
+    f.child("parent", "worker", RunStatus::Running);
+    let provider = f.provider();
+    provider.watchdog_test_clock(u64::MAX);
+    provider.watchdog_test_policy(watchdog::Policy {
+        soft_ms: 1_500,
+        hard_ms: 600_000,
+        scan_ms: 100,
+    });
+    let shell = store::required(&f.conn, "shell").unwrap();
+    let db_path = f.dir.join("workspace.sqlite");
+    let ctx = Context {
+        connection: &f.conn,
+        provider: &provider,
+        db_path: &db_path,
+        now_ms: 0,
+        bot_id: Some(&shell.bot_id),
+        conversation_id: Some(&shell.conversation_id),
+        run_id: Some("shell"),
+    };
+    let started = features::local::test_execute(
+        &ctx,
+        &ToolCall {
+            call_id: "shell".into(),
+            name: "run_shell".into(),
+            arguments: json!({
+                "description": "Compiler en silence",
+                "command": "while :; do echo tick; sleep 0.2; done",
+                "cwd": f.dir.path(),
+                "timeout_ms": 2000,
+                "output_limit": 1048576,
+                "background": true,
+            }),
+        },
+    );
+    assert!(matches!(started, ToolOutcome::Done { .. }), "{started:?}");
+    let deadline = Instant::now() + Duration::from_millis(3_500);
+    let mut flagged = None;
+    while Instant::now() < deadline {
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        f.app.tick(time);
+        flagged = f.state()["silence"].as_object().cloned();
+        assert!(!flagged.as_ref().unwrap().contains_key("parent"));
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        flagged.unwrap().keys().collect::<Vec<_>>(),
+        ["worker"],
+        "le frère sans signe reste signalé"
+    );
 }
 
 #[test]

@@ -1245,6 +1245,11 @@ fn read_path(ctx: &Context<'_>, call: &ToolCall) -> Result<PathBuf, ApiError> {
     }
     Ok(path)
 }
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_execute(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
+    execute(ctx, call, Arc::default())
+}
 pub(crate) fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: Arc<AtomicBool>) -> ToolOutcome {
     let result = (|| -> Result<Value, ApiError> {
         validate(ctx, call)?;

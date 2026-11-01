@@ -17,7 +17,7 @@ Ces statuts qualifient la preuve disponible. Ils ne mesurent pas un pourcentage 
 | Journal d'envoi | Trace client; protocol.md, fIe et z8e | Journal durable avec nonce, reçu et attente d'écho | Panne avant POST, après acceptation et avant écho; aucun doublon logique |
 | Snapshots et deltas | Trace client; protocol.md, ND, lM et $C | Génération serveur distincte de ReplicaEpoch et ReplicaSequence | Trou, duplicate, cursorTooOld, corps manquant et changement de source |
 | Annulation et nouvelle conversation | Trace client; protocol.md, trois annulations; execution.md, Lx | CancelQueued, cancel RPC, interrupt run et reset conversation distincts | Réponse tardive d'outil après interruption; message accepté conservé |
-| Moteur d'agent et prompts | Inconnu; protocol.md, corps JSON et inconnues serveur | RunEngine, ModelGateway, checkpoints, budgets et outils | Évaluations de tâches et résultats; pas d'égalité supposée des réponses du modèle |
+| Moteur d'agent et prompts | Inconnu; protocol.md, corps JSON et inconnues serveur | RunEngine, ModelGateway, checkpoints, budgets et outils | Évaluations de tâches et résultats; [scénario sensation sans outils inutiles](#scénario-sensation-sans-outils-inutiles-583); pas d'égalité supposée des réponses du modèle |
 | Mémoire | Contrat partiel; protocol.md, mémoire | Mémoire avec portée, version, source et budget de contexte | Fact obsolète remplacé; duplication de bot sans mémoire privée copiée |
 | Sous-agents et coordination | Contrat partiel; protocol.md, tâches/sous-agents et tours de room | Messages durables avec corrélation, budgets et prévention des cycles | Deux bots actifs, échec du receveur et cycle de délégation |
 | Ordinateur cloud partagé | Documentation; execution.md, gateway et VNC; documentation computer-and-apps | ComputerManager par compte et volume persistant | Client fermé, update machine et restauration de snapshot |
@@ -51,6 +51,27 @@ Ces statuts qualifient la preuve disponible. Ils ne mesurent pas un pourcentage 
 | Clients mobiles | Inconnu; Aucun artefact mobile sélectionné ou analysé | Réutiliser domain/wire/replica, adapters UI à spécifier | Captures et parité sur vrais artefacts mobiles avant revendication de support |
 | Internes des helpers natifs | Inconnu; native-boundaries.json; wrappers JS; six contradictions d'intégrité | Adapters OS audités et helpers reconstruits avec contrats propres | FIDO, permissions notifications, launcher et Messages sur OS réel |
 | Fleet, modèles et stockage privés | Inconnu; Frontières réseau du client; aucune source serveur | Control-plane/worker indépendants et garanties documentées | Tests de panne, charge, restauration et évaluations de tâches dans notre système |
+
+## Scénario sensation sans outils inutiles, #583
+
+Le parcours utilise le vrai modèle `gpt-6.1-sol` par la connexion de l'app, dans un espace isolé et avec un compte de test déjà autorisé. Le catalogue habituel reste proposé et `tool_choice` reste `auto`. Aucun écran n'est nécessaire. Le scénario ne retire aucune permission et ne force ni outil ni réponse.
+
+Envoyer les cinq messages suivants dans l'ordre dans une même conversation. Le dernier porte sur la réponse au quatrième message.
+
+| Tour | Message synthétique | Appels d'outil attendus |
+|---|---|---|
+| 1 | Salut. | 0 |
+| 2 | Explique-moi ce qu'est un mutex. | 0 |
+| 3 | À ton avis, vaut-il mieux apprendre Rust avec de petits projets ? | 0 |
+| 4 | Réécris cette phrase plus courte : Je te contacte afin de te demander de venir demain. | 0 |
+| 5 | Résume ce que tu viens de dire. | 0 |
+| 6 | Lis l'issue #557. | Au moins 1 pour lire l'état externe |
+
+Chaque tour doit terminer normalement. Le reçu conserve le SHA40 exact, le modèle et l'effort effectifs, le catalogue proposé, l'ordre des messages, les réponses synthétiques et les événements du run. Compter les `ToolCall` proposés séparément des outils exécutés et de leurs résultats. Pour le tour 6, relever la lecture réellement obtenue, son résultat ou le refus réel, sans transformer un refus en lecture réussie. Les appels auxiliaires de titre, mémoire ou sonde ne comptent pas comme des outils.
+
+**État de la preuve réelle : non exécutée.** Le harnais décrit dans [l'évaluation](../docs/evaluation.md) livre uniquement l'étape A avec `FakeOpenAi`. L'[étape B, #458](https://github.com/charlescstpierr/ezerbot/issues/458) demande encore un compte de test dédié et le véhicule réel. Le [parcours Cocoa opérateur](../docs/chat-openai-reel.md#validation-sans-secrets) nécessite une connexion et ne remplace pas cette autorisation sans écran. Aucun fichier d'authentification personnel ne doit être recherché ou importé pour ce scénario.
+
+Les tests `simple_chat_corpus_keeps_tools_available_and_finishes_without_calls`, `chat_run_finishes_without_task_status` et les sentinelles Task/compaction vérifient le transport des consignes, les outils proposés et la trace durable avec un fournisseur factice. Ils ne mesurent pas la décision du vrai Sol. La preuve réelle reste requise pour #583 tant qu'aucune décision explicite ne l'en dispense.
 
 ## Phases de construction et critères de sortie
 

@@ -6,6 +6,7 @@
 pub mod compaction;
 pub mod context;
 pub mod contracts;
+mod loop_guard;
 pub mod model;
 pub mod run_loop;
 pub mod schema;

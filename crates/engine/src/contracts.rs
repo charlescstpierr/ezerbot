@@ -369,6 +369,7 @@ pub enum RunEventKind {
     ResponseCompleted,
     ToolCall,
     ToolResult,
+    LoopGuard,
     Suspended,
     Resumed,
     TurnEnded,

@@ -18,6 +18,7 @@
   let botDialogInitial = "";
   const defaultWelcome = $("welcome-description").textContent;
   let favoriteOnly = false;
+  let sidebarSection = "conversations";
   let connected = false;
   let connectionStatus = "loading";
   let busy = false;
@@ -50,13 +51,33 @@
   const pendingStates = new Set(["queued", "dispatching", "unknown"]);
 
   const panels = new Map();
+  const unavailablePanels = new Set(window.EzerbotShell?.platform === "linux" ? window.EzerbotShell.unavailablePanels : []);
+  if (window.EzerbotShell?.platform === "linux") {
+    const notice = document.createElement("p");
+    notice.id = "linux-native-services";
+    notice.textContent = "Indisponibles sous Linux : dictée, microphone, appels et mode voix, enregistrement local de réunion, capture et contrôle de l’écran, démonstrations et fenêtre flottante.";
+    $("settings-extensions").before(notice);
+    for (const paragraph of document.querySelectorAll(".setting-info p")) {
+      paragraph.textContent = paragraph.textContent.replace("sur ce Mac", "sur cet ordinateur");
+    }
+    for (const row of $("settings-shortcuts").querySelectorAll("div")) {
+      if (row.textContent.includes("Dicter un message")) row.hidden = true;
+      const key = row.querySelector("kbd");
+      if (key) key.textContent = key.textContent.replace("⌘", "Ctrl");
+    }
+  }
   const panelFailed = Symbol("panel-failed");
   const botCleanups = [];
   // Keep the original extras until a queued submission settles, even if state refresh replaces its DTO.
   const pendingSends = new Map();
   const approvalFollow = window.GrokbotChat.createApprovalFollow();
   async function openRatings() {
-    const bridge = window.webkit?.messageHandlers?.ezerbotRatings;
+    const bridge = window.webkit?.messageHandlers?.ezerbotRatings || (window.EzerbotShell?.platform === "linux" ? {
+      // Le port change à chaque lancement : le stockage du navigateur ne survivrait pas.
+      postMessage: ({ command, value }) => command === "read"
+        ? api("/api/ratings").then((data) => data.value)
+        : api("/api/ratings", { value }),
+    } : null);
     if (bridge) return window.GrokbotChat.createNativeRatingTable(bridge);
     try { return window.GrokbotChat.createRatingTable?.(localStorage) || null; }
     catch { return null; }
@@ -64,7 +85,9 @@
   // Le démarrage n’attend pas le Mac : la table native remplace la table vide dès qu’elle est lue.
   const unavailable = () => { throw new Error("Notation indisponible."); };
   let ratings = { list() { return []; }, recordGood: unavailable, recordBad: unavailable, exportDocument() { return { notations: [] }; } };
-  const ratingsReady = openRatings().then((table) => { if (table) ratings = table; }, () => {});
+  let ratingsOpening = null;
+  const ratingsReady = () => ratingsOpening ??= openRatings().then((table) => { if (table) ratings = table; }, () => { ratingsOpening = null; });
+  ratingsReady();
   let pendingRating = null;
   let findState = { open: false, query: "", index: 0, matches: [], conversationId: null };
   let followAfterLayout = null;
@@ -73,7 +96,10 @@
   // botSection may return a cleanup function, called before remount and on dialog close.
   // onState(state, context), onConnection(connected, context), onCardAction(message, action, detail, context); only true claims an action.
   // wantsPolling(context) and sendExtras(context) are synchronous; sendExtras returns extra /api/send fields.
-  // composer: mount(container, context), onFiles(files, event, context), blocked(context), onSent({messageId, extras}, context).
+  // composer: mount(container, context), onFiles(files, event, context), blocked(context), capture(context),
+  // restore({messageId, extras, captured}, context), onSent({messageId, extras, captured}, context). capture runs with sendExtras when a message is submitted; its value
+  // comes back to the same panel as `captured`, so a panel tells what left with this message from what was staged since.
+  // restore runs after a refused draft returns and may return a warning to display.
   // onSent runs once the server holds the message, including unknown/queued states, not on confirmation.
   // onFiles returns false to preserve normal paste/drop. Async uploads call composerChanged() when ready.
   const panelContext = () => ({ state, connected, conversation: currentConversation(), bot: currentBot(), draft: ui.input?.value || "" });
@@ -112,7 +138,7 @@
       if (!pending) continue;
       if (!pending.consumed) {
         pending.consumed = true;
-        for (const panel of panels.values()) panelCall(panel, panel.composer?.onSent, { messageId: message.id, extras: pending.extras });
+        for (const panel of panels.values()) panelCall(panel, panel.composer?.onSent, { messageId: message.id, extras: pending.extras, captured: pending.captured.get(panel.id) });
       }
       if (message.state !== "queued") pendingSends.delete(message.id);
     }
@@ -128,6 +154,11 @@
       }
     }
     return extras;
+  }
+  function captureComposer() {
+    const captured = new Map();
+    for (const panel of panels.values()) if (panel.composer?.capture) captured.set(panel.id, panelCall(panel, panel.composer.capture));
+    return captured;
   }
   function composerFiles(files, event) {
     if (!files?.length) return false;
@@ -167,6 +198,7 @@
         panelError(panel?.id, new Error("Duplicate or missing panel id"));
         return false;
       }
+      if (unavailablePanels.has(panel.id)) return false;
       if (window.EzerbotIPhone?.remote && !["iphone", "notifications", "forms", "attachments", "multibot", "engine", "delegation", "local"].includes(panel.id)) return false;
       panels.set(panel.id, panel);
       if (!window.EzerbotIPhone?.remote || ["iphone", "notifications", "forms"].includes(panel.id)) {
@@ -176,6 +208,7 @@
       panelCall(panel, panel.composer?.mount, $("composer-attachments"));
       panelCall(panel, panel.onState, state);
       updateComposer();
+      syncSidebarRail();
       schedulePoll();
       return true;
     },
@@ -364,6 +397,7 @@
   function botName(id) { const bot = botById(id); return bot ? `${bot.name}${bot.deleted ? " (supprimé)" : ""}` : "Bot inconnu"; }
   function provider() { return state.provider || { connected: false, signin: "idle", models: [] }; }
   function streamingMessage(conversation = currentConversation()) { return conversation?.messages.find((message) => window.GrokbotChat.isPendingReply(message, conversation.kind === "group")); }
+  function runningRun(conversation = currentConversation()) { return state.engine?.runs?.find((run) => run.conversation_id === conversation?.id && run.status === "running"); }
 
   function icon(name, className = "icon") {
     const element = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -594,7 +628,7 @@
     const blockedReason = blockingPanel && panelCall(blockingPanel, blockingPanel.composer?.blockedReason);
     // The task banner is the single cancellation control. The composer only sends follow-ups.
     const control = window.GrokbotChat.composerConnectionState({ offline: connectionStatus === "offline", busy, group,
-      live: !task && Boolean(streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments)) });
+      live: !task && Boolean(runningRun() || streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments)) });
     const live = control.live;
     const noMembers = group && !currentConversation().member_ids?.length;
     ui.send.disabled = control.offline || taskFinished || (live ? ((group || task) && (control.busy || !connected)) : control.busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
@@ -618,7 +652,23 @@
   }
 
   // Changer d’écran sans ouvrir de fil (un autre bot, l’accueil) ferme aussi la page d’un sujet.
-  function notifyNavigation() { for (const panel of panels.values()) panelCall(panel, panel.onNavigate); }
+  function notifyNavigation() {
+    sidebarSection = "conversations";
+    for (const panel of panels.values()) panelCall(panel, panel.onNavigate);
+    syncSidebarRail();
+  }
+
+  function syncSidebarRail() {
+    const active = document.querySelector(".routines-dialog[open]") ? "routines"
+      : document.querySelector(".notifications-dialog[open]") ? "notifications"
+      : $("settings-dialog").open ? "settings"
+      : document.querySelector(".main-panel").dataset.view === "topic" ? "topics" : sidebarSection;
+    for (const button of document.querySelectorAll("[data-sidebar-destination]")) {
+      const id = button.dataset.sidebarDestination;
+      button.setAttribute("aria-pressed", String(id === active));
+      if (id === "topics" || id === "routines") button.hidden = !panels.has(id);
+    }
+  }
 
   function selectConversation(id, focus = false) {
     navigationGeneration++;
@@ -671,10 +721,14 @@
     let previousGroup;
     const today = new Date().toDateString();
     const yesterday = new Date(Date.now() - 86400000).toDateString();
+    const weekStart = new Date();
+    weekStart.setHours(0, 0, 0, 0);
+    weekStart.setDate(weekStart.getDate() - (weekStart.getDay() + 6) % 7);
     for (const conversation of items) {
       const bot = botById(conversation.bot_id);
-      const date = timestamp(conversation.updated_at).toDateString();
-      const group = date === today ? "Aujourd’hui" : date === yesterday ? "Hier" : "Précédemment";
+      const updated = timestamp(conversation.updated_at);
+      const date = updated.toDateString();
+      const group = date === today ? "Aujourd’hui" : date === yesterday ? "Hier" : updated >= weekStart ? "Cette semaine" : "Précédemment";
       if (group !== previousGroup) { ui.list.append(element("p", "list-group-title", group)); previousGroup = group; }
       const button = element("button", `conversation-item${conversation.id === selectedId ? " active" : ""}`);
       button.type = "button";
@@ -1025,6 +1079,7 @@
     onRegenerate: (message) => message.error_kind === "local_connection" ? refresh().catch((error) => notify(error.message)) : generation("/api/regenerate", message.id.replace(/^reply-/, "")),
     onSignIn: () => { void signIn(); },
     onCardAction: cardAction,
+    onOpenPage: (id) => { const pages = panels.get("pages"); if (pages) panelCall(pages, pages.openPage, id); },
     get usageUrl() { return usageUrl(); },
     // « Ouvrir la source » : un lien Google dans le navigateur, un fichier de la bibliothèque dans la fiche du bot.
     async onOpenSource(source, message) {
@@ -1072,9 +1127,6 @@
     };
     const hasMessages = Boolean(conversation?.messages.length);
     ui.findOpen = findState.open;
-    const name = state.account.name || "Espace personnel";
-    $("account-name").textContent = name;
-    $("account-avatar").textContent = name.charAt(0).toLocaleUpperCase("fr");
     ui.title.textContent = conversation?.title || "Nouvelle conversation";
     const bot = currentBot();
     const label = $("workspace-label");
@@ -1106,7 +1158,7 @@
     // Les correspondances d’un autre fil ou d’une recherche fermée ne survivent pas ; le fil validé les recalcule.
     if (!searching || findState.conversationId !== (conversation?.id || null)) findState.matches = [];
     findState.conversationId = conversation?.id || null;
-    window.GrokbotChat.renderThread(ui.messages, { messages: visibleMessages, busy: busy && connected, engineConnected: connected, providerConnected: Boolean(provider().connected), botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, find: searching ? { query, index: findState.index } : null, onFindMatches, onRateGood: rateGood, onRateBad: rateBad, memoSpeed: state.voice?.bots?.[conversation?.bot_id]?.speed, ...thread });
+    window.GrokbotChat.renderThread(ui.messages, { messages: visibleMessages, runs: state.engine?.runs, requests: state.forms?.requests, conversationId: conversation?.id, busy: busy && connected, engineConnected: connected, providerConnected: Boolean(provider().connected), botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, find: searching ? { query, index: findState.index } : null, onFindMatches, onRateGood: rateGood, onRateBad: rateBad, memoSpeed: state.voice?.bots?.[conversation?.bot_id]?.speed, ...thread });
     paintFind();
     renderThreadBanner(conversation);
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
@@ -1117,6 +1169,7 @@
     renderProvider();
     for (const panel of panels.values()) panelCall(panel, panel.onState, state);
     updateComposer();
+    syncSidebarRail();
   }
 
   function pill(kind, label, value, enabled = true) {
@@ -1383,13 +1436,15 @@
   async function sendMessage(event) {
     event.preventDefault();
     const live = streamingMessage();
-    if (live && ui.send.dataset.mode === "stop") { await generation("/api/stop", currentConversation()?.kind === "group" ? "groupe" : live.id.replace(/^reply-/, "")); return; }
+    const run = runningRun();
+    if ((run || live) && ui.send.dataset.mode === "stop") { await generation("/api/stop", currentConversation()?.kind === "group" ? "groupe" : run?.run_id || live.id.replace(/^reply-/, "")); return; }
     if (ui.send.disabled) return;
     const submittedScrollGeneration = scrollGeneration;
     const submittedDraft = ui.input.value;
     const submittedDocument = ui.input.document;
     const body = submittedDraft.trim();
     const extras = structuredClone(sendExtras());
+    const captured = captureComposer();
     let conversation = currentConversation();
     approvalFollow.arm(conversation?.id ?? null, conversation?.messages || [], ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);
     busy = true;
@@ -1398,7 +1453,7 @@
     let messageId;
     let delivered = false;
     const previousDraftKey = draftKey();
-    const restoreDraft = () => {
+    const restoreDraft = async () => {
       const remainder = ui.input.value;
       const remainderDocument = ui.input.document;
       setComposerText(submittedDraft && remainder ? `${submittedDraft}\n${remainder}` : submittedDraft || remainder);
@@ -1406,6 +1461,14 @@
         ? { type: "doc", content: [...submittedDocument.content, ...remainderDocument.content] }
         : submittedDraft ? submittedDocument : remainderDocument;
       saveDraft();
+      for (const panel of panels.values()) {
+        try {
+          const warning = await panel.composer?.restore?.({ messageId, extras, captured: captured.get(panel.id) }, panelContext());
+          if (warning) notify(warning);
+        } catch {
+          notify("La citation n’a pas pu être restaurée. Vérifiez-la avant de réessayer.");
+        }
+      }
     };
     try {
       // Consume only the submitted text, before creation can yield to another edit.
@@ -1421,7 +1484,7 @@
         approvalFollow.bind(conversation.id);
       }
       messageId = crypto.randomUUID();
-      pendingSends.set(messageId, { extras, consumed: false });
+      pendingSends.set(messageId, { extras, captured, consumed: false });
       conversation.messages.push({ ...extras, ...(conversation.kind === "task" ? { payload: { source: "follow_up" } } : {}), id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       removePreference(previousDraftKey);
       removePreference(`${previousDraftKey}.document`);
@@ -1439,8 +1502,8 @@
         try {
           await refresh();
           const savedMessage = currentConversation()?.messages.find((message) => message.id === messageId);
-          if (!savedMessage) { pendingSends.delete(messageId); restoreDraft(); }
           notify(error.message);
+          if (!savedMessage) { pendingSends.delete(messageId); await restoreDraft(); }
         } catch {
           const optimisticMessage = currentConversation()?.messages.find((message) => message.id === messageId);
           const confirmed = optimisticMessage && ["accepted", "echoed"].includes(optimisticMessage.state);
@@ -1450,12 +1513,12 @@
               if (owner) owner.messages = owner.messages.filter((message) => message.id !== messageId);
               pendingSends.delete(messageId);
             } else if (optimisticMessage) optimisticMessage.state = "unknown";
-            restoreDraft();
+            await restoreDraft();
           }
           render();
           showConnectionError(error);
         }
-      } else { restoreDraft(); notify(error.message); }
+      } else { notify(error.message); await restoreDraft(); }
     } finally {
       busy = false;
       submissionActivity = null;
@@ -1487,6 +1550,18 @@
 
   function attachmentIds(message, extras = {}) {
     return extras.attachments || (message.attachments || []).map((item) => typeof item === "string" ? item : item.id || item.attachment_id).filter(Boolean);
+  }
+
+  // Après un rechargement, pendingSends est vide : l'ancre enregistrée avec le message reste celle du premier envoi, que le moteur exige à l'identique.
+  function resendExtras(message) {
+    const pending = pendingSends.get(message.id)?.extras;
+    if (pending) return pending;
+    const anchor = message.payload?.page_anchor;
+    const attachments = attachmentIds(message);
+    return {
+      ...(attachments.length ? { attachments } : {}),
+      ...(anchor ? { page_anchor: { page_id: anchor.page_id, source_version: anchor.source_version, passage: anchor.passage } } : {}),
+    };
   }
 
   async function reactToMessage(message, emoji) {
@@ -1562,7 +1637,7 @@
         response = await api("/api/messages/resend", { conversation_id: conversation.id, message_id: message.id });
       } catch (error) {
         if (error.status !== 404) throw error;
-        const extras = pendingSends.get(message.id)?.extras || {};
+        const extras = resendExtras(message);
         response = await sendRequest(conversation, message.id, message.body, { ...extras, attachments: attachmentIds(message, extras) });
       }
       upsertConversation(response.conversation);
@@ -1598,8 +1673,7 @@
     let delivered = false;
     render();
     try {
-      const response = await sendRequest(conversation, message.id, message.body,
-        pendingSends.get(message.id)?.extras || (message.attachments?.length ? { attachments: message.attachments.map((item) => typeof item === "string" ? item : item.id || item.attachment_id) } : {}));
+      const response = await sendRequest(conversation, message.id, message.body, resendExtras(message));
       upsertConversation(response.conversation);
       delivered = response.conversation.messages.some((item) => item.id === message.id && ["accepted", "echoed"].includes(item.state));
       render();
@@ -1655,7 +1729,7 @@
   }
 
   async function exportConversation() {
-    await ratingsReady;
+    await ratingsReady();
     const conversation = currentConversation();
     if (!conversation) return;
     const notations = ratings.list().filter((row) => row.conversation_id === conversation.id);
@@ -1665,7 +1739,7 @@
   }
 
   async function exportRatings() {
-    await ratingsReady;
+    await ratingsReady();
     downloadJson(ratings.exportDocument(), "ezerbot-notations.json");
     closeMenu();
   }
@@ -1724,7 +1798,7 @@
   async function rateGood(message) {
     const conversation = currentConversation();
     if (!conversation || !message?.id) return;
-    await ratingsReady;
+    await ratingsReady();
     try { await ratings.recordGood({ conversationId: conversation.id, messageId: message.id, runId: message.payload?.run_id || null }); }
     catch { notify("Impossible d’enregistrer la notation."); return; }
     notify("Bon résultat enregistré.");
@@ -1821,6 +1895,43 @@
   $("sidebar-close").addEventListener("click", closeSidebar);
   $("sidebar-scrim").addEventListener("click", closeSidebar);
   $("settings-button").addEventListener("click", () => { closeSidebar(); $("settings-dialog").showModal(); });
+  const sidebarActions = {
+    conversations() {
+      if (busy) return;
+      notifyNavigation();
+      render();
+      ui.list.scrollIntoView({ block: "start" });
+      ui.list.focus({ preventScroll: true });
+    },
+    topics() {
+      if (busy || !panels.has("topics")) return;
+      notifyNavigation();
+      render();
+      sidebarSection = "topics";
+      $("sidebar-topics").scrollIntoView({ block: "start" });
+      $("new-topic").focus({ preventScroll: true });
+    },
+    routines() {
+      const panel = panels.get("routines");
+      if (panel) panelCall(panel, panel.openSidebar);
+    },
+    notifications() {
+      const panel = panels.get("notifications");
+      if (panel) panelCall(panel, panel.openSidebar);
+    },
+  };
+  for (const button of document.querySelectorAll("[data-sidebar-destination]")) {
+    button.addEventListener("click", () => {
+      sidebarActions[button.dataset.sidebarDestination]?.();
+      syncSidebarRail();
+    });
+  }
+  document.addEventListener("click", syncSidebarRail);
+  document.addEventListener("toggle", syncSidebarRail, true);
+  document.addEventListener("close", syncSidebarRail, true);
+  if (typeof MutationObserver !== "undefined") {
+    new MutationObserver(syncSidebarRail).observe(document.querySelector(".main-panel"), { attributes: true, attributeFilter: ["data-view"] });
+  }
   document.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", () => button.closest("dialog").close()));
   function applyAccent(choice) {
     accentChoice = accents.includes(choice) ? choice : "citron";
@@ -1967,7 +2078,7 @@
   $("rating-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!pendingRating) return;
-    await ratingsReady;
+    await ratingsReady();
     const selected = [...$("rating-form").querySelectorAll('input[name="motif"]')].find((input) => input.checked);
     try { await ratings.recordBad({
       conversationId: pendingRating.conversationId,

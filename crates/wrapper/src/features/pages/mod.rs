@@ -52,7 +52,32 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     if !kept {
         conn.execute_batch("ALTER TABLE bot_pages ADD COLUMN previous_source TEXT")?;
     }
+    refresh_previews(conn)?;
     anchors::migrate(conn)
+}
+
+/// The preview is derived from the source, and the passage of an anchor is checked against it: a Page
+/// written before the preview marked its block boundaries (`compile::BREAK`) would glue "Confort" and
+/// "19 €" and refuse the selection of both. Rebuild each ready Page's preview from its source; a second
+/// pass changes nothing, and a source that no longer compiles keeps what it had.
+fn refresh_previews(conn: &Connection) -> Result<(), ApiError> {
+    let ready: Vec<(String, String, String)> = {
+        let mut statement =
+            conn.prepare("SELECT id, source, preview FROM bot_pages WHERE status = 'ready'")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for (id, source, stored) in ready {
+        if let Ok(page) = compile::compile(&source) {
+            if page.preview != stored {
+                conn.execute(
+                    "UPDATE bot_pages SET preview = ?2 WHERE id = ?1",
+                    params![id, page.preview],
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn tools() -> Vec<ToolSpec> {

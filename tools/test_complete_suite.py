@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -51,6 +53,120 @@ sys.exit(failed)
 
 
 class CompleteSuiteTests(unittest.TestCase):
+    def test_preflight_failure_detail_is_visible_without_private_diagnostics(self):
+        spec = importlib.util.spec_from_file_location("runner", TOOLS / "run-complete-suite.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        cases = [
+            (ValueError("crates/sample/src/lib.rs: cannot resolve gated module missing"),
+             "crates/sample/src/lib.rs: cannot resolve gated module missing"),
+            (RuntimeError("expected-sha"), "expected-sha"),
+            (RuntimeError("PRIVATE_SENTINEL /Users/private/runtime"), None),
+            (ValueError('unsupported platform cfg: target_os="PRIVATE_SENTINEL"'), None),
+            (subprocess.CalledProcessError(1, ["git", "PRIVATE_SENTINEL"]), None),
+        ]
+        for error, message in cases:
+            with self.subTest(error=type(error).__name__, message=message), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "result.json"
+                stderr = io.StringIO()
+                stdout = io.StringIO()
+                with patch.object(sys, "argv", ["runner", "--output", str(output)]), \
+                     patch.object(runner, "git", side_effect=error), \
+                     contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
+                    self.assertEqual(runner.main(), 1)
+                report = json.loads(output.read_text())
+                self.assertEqual(report["failure_detail"]["type"], type(error).__name__)
+                self.assertTrue(report["failure_detail"]["message"])
+                if message is not None:
+                    self.assertEqual(report["failure_detail"]["message"], message)
+                self.assertIn(report["failure_detail"]["type"], stderr.getvalue())
+                self.assertIn(report["failure_detail"]["message"], stderr.getvalue())
+                self.assertNotIn("PRIVATE_SENTINEL", output.read_text() + stdout.getvalue() + stderr.getvalue())
+                self.assertNotIn("/Users/private", output.read_text() + stderr.getvalue())
+                self.assertIn("runner:preflight-failed", report["failures"])
+                self.assertIn("runner:incomplete", report["failures"])
+
+    def test_node_failure_names_the_failing_line_of_the_test(self):
+        spec = importlib.util.spec_from_file_location("runner", TOOLS / "run-complete-suite.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        file = "tools/test_complete_suite.py"
+        path = runner.ROOT / file
+        raw = f"""not ok 1 - sample
+  ---
+  location: '{path}:1:1'
+  error: 'PRIVATE_SENTINEL'
+  stack: |-
+    helper (/private/helper.cjs:9:9)
+    TestContext.<anonymous> ({path}:2:5)
+    async Test.run (node:internal/test_runner/test:1409:7)
+  ...
+# tests 1
+# pass 0
+# fail 1
+# skipped 0
+"""
+        _, failures, _ = runner.node_results(raw, "ui", [file], False)
+        self.assertEqual(failures, ["ui:" + file + ":2"])
+        _, failures, _ = runner.node_results(raw.replace("  stack: |-\n", "  nothing: |-\n"), "ui", [file], False)
+        self.assertEqual(failures, ["ui:" + file + ":1"])
+
+    def test_inventory_resolves_explicit_paths_and_inherits_platforms(self):
+        spec = importlib.util.spec_from_file_location("inventory", TOOLS / "suite-platform-inventory.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        fixtures = [
+            ("crates/sample/tests/keychain.rs", '#![cfg(target_os="macos")]\n#[path="support/shared.rs"] mod helper;', "crates/sample/tests/support/shared.rs"),
+            ("crates/sample/src/lib.rs", '#[cfg(target_os="macos")] #[path="support/shared.rs"] mod helper;', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/ordinary.rs", '#[cfg(target_os="macos")] #[path="support/shared.rs"] mod helper;', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/ordinary/mod.rs", '#[cfg(target_os="macos")] #[path="support/shared.rs"] mod helper;', "crates/sample/src/ordinary/support/shared.rs"),
+            ("crates/sample/src/lib.rs", '#[cfg(target_os="macos")] mod outer { #[path="../support/shared.rs"] mod helper; }', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/ordinary.rs", '#[cfg(target_os="macos")] mod outer { #[path="../../support/shared.rs"] mod helper; }', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/ordinary.rs", '#[cfg(target_os="macos")] #[path="renamed"] mod outer { #[path="../support/shared.rs"] mod helper; }', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/lib.rs", '#[cfg(target_os="macos")] #[path="support/shared.rs"] pub(crate) mod helper;', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/lib.rs", '#[cfg(target_os="macos")] #[path=r#"support/shared.rs"#] mod helper;', "crates/sample/src/support/shared.rs"),
+            ("crates/sample/src/lib.rs", r'#[cfg(target_os="macos")] #[path="supp\u{6f}rt/shared.rs"] mod helper;', "crates/sample/src/support/shared.rs"),
+        ]
+        for entry, source, child in fixtures:
+            with self.subTest(entry=entry, source=source):
+                leaf = str(Path(child).parent / "leaf.rs")
+                sources = {
+                    entry: source,
+                    child: 'mod leaf; #[test] fn absent() {}',
+                    leaf: '#[test] fn transitive() {}',
+                }
+                def read(command, **kwargs):
+                    return "\n".join(sources) if command[1] == "ls-tree" else sources[command[-1].split(":", 1)[1]]
+                with patch.object(module.subprocess, "check_output", side_effect=read):
+                    self.assertEqual(module.inventory()["absent"], sorted([child + "::absent", leaf + "::transitive"]))
+                sources[entry] = source.replace('target_os="macos"', 'not(target_os="macos")')
+                sources[child] = 'mod leaf; #[test] fn partial() { #[cfg(target_os="macos")] { check(); } }'
+                with patch.object(module.subprocess, "check_output", side_effect=read):
+                    self.assertEqual(module.inventory()["absent"], [])
+                sources[entry] = source.replace('#![cfg(target_os="macos")]', '').replace('#[cfg(target_os="macos")]', '')
+                with patch.object(module.subprocess, "check_output", side_effect=read):
+                    self.assertEqual(module.inventory()["partial"], [child + "::partial"])
+                del sources[child]
+                with patch.object(module.subprocess, "check_output", side_effect=read), self.assertRaises(ValueError):
+                    module.inventory()
+        sources = {
+            "crates/sample/src/lib.rs": '#[cfg(target_os="macos")] mod shared; #[path="shared.rs"] mod explicit;',
+            "crates/sample/src/shared.rs": 'mod leaf; #[test] fn shared() {}',
+            "crates/sample/src/shared/leaf.rs": '#[test] fn conventional() {}',
+            "crates/sample/src/leaf.rs": '#[test] fn explicit() {}',
+        }
+        with patch.object(module.subprocess, "check_output", side_effect=read):
+            self.assertEqual(module.inventory()["absent"], ["crates/sample/src/shared/leaf.rs::conventional"])
+        sources["crates/sample/src/lib.rs"] = '#[cfg(target_os="macos")] mod shared; #[cfg(target_os="linux")] #[path="shared.rs"] mod shared;'
+        sources["crates/sample/src/shared.rs"] = '''mod leaf;
+#[test] fn partial() { #[cfg(target_os="macos")] { check(); } }
+#[test] fn runtime() { if cfg!(target_os="macos") { check(); } }
+'''
+        with patch.object(module.subprocess, "check_output", side_effect=read):
+            result = module.inventory()
+        self.assertEqual(result["partial"], ["crates/sample/src/shared.rs::partial"])
+        self.assertEqual(result["runtime_branches"], ["crates/sample/src/shared.rs::runtime"])
+
     def test_cli_reports_failures_and_continues_without_publishing_diagnostics(self):
         LOGS.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=LOGS) as directory:
@@ -77,7 +193,7 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
             (root / "Cargo.lock").write_text("fixture")
             for name in ("app/web/src/sample.test.js", "app/ui/sample.test.cjs"):
                 (root / name).write_text("fixture\n")
-            (root / "crates/sample/src/lib.rs").write_text('#[cfg(target_os = "macos")] mod platform;\n#[cfg(not(target_os = "macos"))] mod outer;\n#[test] fn sample() {}')
+            (root / "crates/sample/src/lib.rs").write_text('#[cfg(target_os = "macos")] #[path = "platform.rs"] mod platform;\n#[cfg(not(target_os = "macos"))] mod outer;\n#[test] fn sample() {}')
             (root / "crates/sample/src/platform.rs").write_text("#[test] fn covered() {}")
             (root / "crates/sample/src/outer.rs").write_text('#[cfg(target_os = "macos")] mod child;')
             (root / "crates/sample/src/outer").mkdir()
@@ -134,10 +250,13 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
         self.assertEqual(result["partial"], ["fixture.rs::partial"])
         self.assertEqual(result["runtime_branches"], ["fixture.rs::runtime"])
         unreachable, children = module.source_inventory("outer.rs", '#[cfg(target_os = "macos")] mod child;', (True, False))
-        self.assertEqual(children, [(["child"], (False, False))])
+        self.assertEqual(children, [([("child", None)], (False, False))])
         self.assertEqual(unreachable["absent"], [])
         with self.assertRaises(ValueError):
             module.source_inventory("macro.rs", '#[cfg(target_os = "macos")] #[tokio::test] async fn hidden() {}')
+        for source in ('#[cfg_attr(test, path="hidden.rs")] mod hidden;', '#[path="hidden.rs"] mod r#hidden;', '#[path=b"hidden.rs"] mod hidden;'):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                module.source_inventory("path.rs", source)
 
     def test_inventory_follows_transitive_module_platforms(self):
         spec = importlib.util.spec_from_file_location("inventory", TOOLS / "suite-platform-inventory.py")

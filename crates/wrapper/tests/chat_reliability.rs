@@ -217,7 +217,7 @@ impl Fake {
                         },
                         Fault::EndlessEvents => { while !s.load(Ordering::SeqCst) { event(&mut socket,json!({"type":"response.in_progress"})); std::thread::sleep(Duration::from_millis(25)); } },
                         Fault::ToolStall => { event(&mut socket,json!({"type":"response.output_item.added","item":{"type":"function_call","id":"fc","call_id":"waiting","name":"local_exec"}})); hold(&mut socket,&s,true); },
-                        Fault::ToolApproval => { event(&mut socket,json!({"type":"response.output_item.done","item":{"type":"function_call","id":"fc","call_id":"ask","name":"run_shell","arguments":"{\"command\":\"echo faux\",\"cwd\":\"/tmp\",\"timeout_ms\":1000,\"output_limit\":1024}"}})); event(&mut socket,json!({"type":"response.completed"})); },
+                        Fault::ToolApproval => { event(&mut socket,json!({"type":"response.output_item.done","item":{"type":"function_call","id":"fc","call_id":"ask","name":"run_shell","arguments":"{\"description\":\"Afficher un résultat factice\",\"command\":\"echo faux\",\"cwd\":\"/tmp\",\"timeout_ms\":1000,\"output_limit\":1024}"}})); event(&mut socket,json!({"type":"response.completed"})); },
                         Fault::Invalid => { let _=socket.write_all(b"data: {broken}\n\n"); },
                         Fault::Refusal => event(&mut socket,json!({"type":"response.refusal.delta","delta":"refus factice"})),
                         Fault::Incomplete => event(&mut socket,json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}})),

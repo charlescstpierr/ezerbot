@@ -146,7 +146,7 @@ impl Fixture {
             .clone()
     }
     fn shell(&self, command: &str) -> Value {
-        json!({"command":command,"cwd":self.root(),"timeout_ms":2000,"output_limit":1024})
+        json!({"description":"Vérifier la commande locale","command":command,"cwd":self.root(),"timeout_ms":2000,"output_limit":1024})
     }
     fn card(&mut self, chat: &str, call_id: &str) -> Value {
         self.state()["conversations"]
@@ -496,6 +496,8 @@ fn ezerbot_data_and_credentials_stay_out_of_reach_even_in_yolo() {
         json!([]),
         "un refus du garde-fou n'est pas une action faite automatiquement"
     );
+    // Un lien dur hors des données refuse tout lancement de shell tant qu'il existe.
+    std::fs::remove_file(&alias).unwrap();
     // Le garde-fou ne bloque pas le travail ordinaire à côté.
     let out = f.runs_without_a_card("ordinaire", "run_shell", f.shell("printf utile"));
     assert_eq!(out["output"]["stdout"], "utile");
@@ -574,9 +576,10 @@ fn the_keychain_is_refused_by_the_kernel_however_the_command_is_spelled() {
         .args(["-c", r#"S=security; "$S" default-keychain"#])
         .output()
         .unwrap();
-    if !plain.status.success() {
-        return; // aucun trousseau lisible ici (ex. session sans trousseau) : rien à comparer
-    }
+    assert!(
+        plain.status.success(),
+        "aucun trousseau n'est lisible ici : ce test ne peut rien prouver sur cette machine ({plain:?})"
+    );
     assert!(String::from_utf8_lossy(&plain.stdout).contains("keychain"));
     for (id, command) in [
         ("var", r#"S=security; "$S" default-keychain"#),
@@ -600,6 +603,434 @@ fn the_keychain_is_refused_by_the_kernel_however_the_command_is_spelled() {
             "{id} a lu le trousseau : {out}"
         );
     }
+}
+
+/// Le texte de chaque commande évite le nom des données et des jetons (`"$D"ta`, `*auth*`) :
+/// le filtre de texte les refuserait avant le shell et le test ne prouverait plus le noyau.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_kernel_refuses_the_data_however_the_command_reaches_it() {
+    let mut f = Fixture::new();
+    let data = f.data();
+    let token = f.path.with_extension("chatgpt-auth.json");
+    let token_before = std::fs::read_to_string(&token).unwrap();
+    let names = |dir: &std::path::Path| -> std::collections::BTreeSet<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+    let pid = std::process::id();
+
+    let witness = f.runs_without_a_card(
+        "temoin",
+        "run_shell",
+        f.shell("echo contenu > temoin.txt && mkdir -p dossier-temoin && mv temoin.txt dossier-temoin/deplace.txt && cat dossier-temoin/deplace.txt"),
+    );
+    assert_eq!(witness["status"], "done", "{witness}");
+    assert!(
+        witness["output"]["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("contenu"),
+        "{witness}"
+    );
+    assert!(f.root().join("dossier-temoin/deplace.txt").exists());
+    // Le coffre naît à la première admission, côté hôte : l'instantané vient après.
+    let names_before = names(&data);
+
+    let attempts = [
+        (
+            "ecrire",
+            r#"D=da; echo x > "$D"ta/intrus.txt; echo rc=$?"#.to_owned(),
+        ),
+        (
+            "sous-dossier",
+            r#"D=da; mkdir "$D"ta/sous; echo rc=$?"#.to_owned(),
+        ),
+        (
+            "supprimer",
+            r#"D=da; rm -f "$D"ta/*auth*; echo rc=$?"#.to_owned(),
+        ),
+        (
+            "lister",
+            r#"D=da; ls -a "$D"ta; echo rc=$?"#.to_owned(),
+        ),
+        (
+            "hote-racine",
+            format!(r#"D=da; cat /proc/{pid}/root"$PWD"/"$D"ta/*auth*; ls /proc/{pid}/root"$PWD"/"$D"ta"#),
+        ),
+        (
+            "hote-cwd",
+            format!(r#"D=da; cat /proc/{pid}/cwd/Cargo.toml; ls /proc/{pid}/cwd/; cat /proc/{pid}/cwd/"$D"ta/*auth*"#),
+        ),
+        (
+            "hote-fd",
+            format!(r#"for n in /proc/{pid}/fd/*; do readlink "$n"; done"#),
+        ),
+        (
+            "descripteurs-herites",
+            r#"for n in /proc/self/fd/*; do readlink "$n"; done"#.to_owned(),
+        ),
+        (
+            "espace-imbrique-umount",
+            r#"D=da; unshare -Urm sh -c 'umount -l "$1"; grep -r refresh "$1"' sh "$PWD"/"$D"ta"#.to_owned(),
+        ),
+        (
+            "espace-imbrique-bind",
+            r#"mkdir -p pt; unshare -Urm sh -c 'mount --bind "$1" "$2" && grep -r refresh "$2"' sh "$PWD" "$PWD"/pt"#.to_owned(),
+        ),
+    ];
+    let mut seen = String::new();
+    for (id, command) in attempts {
+        let out = f.runs_without_a_card(id, "run_shell", f.shell(&command));
+        assert_eq!(out["status"], "done", "{id} n'a pas tourné : {out}");
+        let stdout = out["output"]["stdout"].as_str().unwrap_or("");
+        assert!(!stdout.contains("rc=0"), "{id} a réussi : {out}");
+        if id == "hote-cwd" {
+            assert!(!stdout.contains("[package]"), "{id} lit l'hôte : {out}");
+        }
+        if id == "descripteurs-herites" {
+            assert!(stdout.contains("socket:"), "{id} n'a rien lu : {out}");
+            assert!(
+                stdout.lines().all(|target| target == "/dev/null"
+                    || target.starts_with("socket:")
+                    || target.starts_with("pipe:")),
+                "{id} hérite d'un fichier : {out}"
+            );
+        }
+        if id == "hote-fd" {
+            assert_eq!(stdout, "", "{id} lit les descripteurs de l'hôte : {out}");
+        }
+        seen.push_str(&out.to_string());
+    }
+    assert!(!seen.contains("fake-refresh"), "un jeton a fuité : {seen}");
+
+    assert_eq!(std::fs::read_to_string(&token).unwrap(), token_before);
+    for forged in ["intrus.txt", "sous"] {
+        assert!(
+            !data.join(forged).exists(),
+            "{forged} existe dans les données"
+        );
+    }
+    let created: Vec<String> = names(&data)
+        .difference(&names_before)
+        .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
+        .cloned()
+        .collect();
+    assert!(created.is_empty(), "rien de neuf attendu : {created:?}");
+}
+
+/// Un nom de plus pour le même inode contourne un masque posé sur le chemin : le lancement
+/// est refusé tant que le lien existe, et la commande indirecte (`cat co*`) ne sort rien.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_hard_link_to_the_data_outside_the_data_refuses_the_launch() {
+    let mut f = Fixture::new();
+    let token = f.path.with_extension("chatgpt-auth.json");
+    let alias = f.root().join("copie.txt");
+    std::fs::hard_link(&token, &alias).unwrap();
+    std::fs::write(f.root().join("voisin.txt"), "utile").unwrap();
+
+    let refused = f.runs_without_a_card("lien", "run_shell", f.shell("cat co*"));
+    assert!(
+        !refused.to_string().contains("fake-refresh"),
+        "un jeton a fuité par le lien dur : {refused}"
+    );
+    assert_eq!(refused["status"], "failed", "{refused}");
+    let reason = refused["reason"].as_str().unwrap_or("");
+    assert!(reason.contains("lien dur"), "{refused}");
+    assert!(reason.contains("find / -samefile"), "{refused}");
+    assert!(reason.contains("chatgpt-auth.json"), "{refused}");
+    assert!(!reason.contains("fake-"), "{refused}");
+
+    std::fs::remove_file(&alias).unwrap();
+    let after = f.runs_without_a_card("apres", "run_shell", f.shell("cat co*"));
+    assert_eq!(after["status"], "done", "{after}");
+    assert!(!after.to_string().contains("fake-refresh"), "{after}");
+    let witness = f.runs_without_a_card("temoin", "run_shell", f.shell("cat vo*"));
+    assert_eq!(witness["output"]["stdout"], "utile", "{witness}");
+}
+
+/// Le fournisseur suit un lien symbolique placé dans les données : le fichier de session est
+/// alors ailleurs, et ni le shell ni les outils fichiers ne doivent l'atteindre par sa cible.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_session_behind_a_symlink_in_the_data_stays_out_of_reach() {
+    let mut f = Fixture::new();
+    let token = f.path.with_extension("chatgpt-auth.json");
+    let elsewhere = f.root().join("ailleurs");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let session = elsewhere.join("session.txt");
+    std::fs::rename(&token, &session).unwrap();
+    std::os::unix::fs::symlink(&session, &token).unwrap();
+    std::fs::write(elsewhere.join("voisin.txt"), "utile").unwrap();
+    f.reopen();
+
+    let shell = f.runs_without_a_card("cible", "run_shell", f.shell("cat ailleurs/se*"));
+    assert!(!shell.to_string().contains("fake-refresh"), "{shell}");
+    let file = f.runs_without_a_card("fichier", "read_file", json!({"path":session}));
+    assert!(!file.to_string().contains("fake-refresh"), "{file}");
+    assert_eq!(file["reason"], PROTECTED, "{file}");
+    let alias = f.root().join("copie.txt");
+    std::fs::hard_link(&session, &alias).unwrap();
+    let copy = f.runs_without_a_card("copie", "read_file", json!({"path":alias}));
+    assert!(!copy.to_string().contains("fake-refresh"), "{copy}");
+    assert_eq!(copy["reason"], PROTECTED, "{copy}");
+    std::fs::remove_file(&alias).unwrap();
+
+    let witness = f.runs_without_a_card("temoin", "run_shell", f.shell("cat ailleurs/vo*"));
+    assert_eq!(witness["output"]["stdout"], "utile", "{witness}");
+    assert_eq!(
+        std::fs::read_link(&token).unwrap(),
+        session,
+        "le lien reste en place"
+    );
+}
+
+/// Un second montage du même système de fichiers montre les mêmes inodes sous un autre
+/// chemin. Le test se relance dans un espace de noms de montage jetable pour en créer.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_second_mount_of_the_data_shows_nothing_and_stays_narrow() {
+    const CHILD: &str = "EZERBOT_YOLO_MONTAGES";
+    if std::env::var_os(CHILD).is_none() {
+        let out = std::process::Command::new("/usr/bin/unshare")
+            .args(["--user", "--map-root-user", "--mount"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_second_mount_of_the_data_shows_nothing_and_stays_narrow",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "le test relancé a échoué\nstdout : {stdout}\nstderr : {stderr}"
+        );
+        assert!(
+            stdout.contains("1 passed") && stdout.contains("montages-verifies"),
+            "le test relancé n'a rien prouvé\nstdout : {stdout}\nstderr : {stderr}"
+        );
+        return;
+    }
+    let mut f = Fixture::new();
+    let data = f.data();
+    std::fs::create_dir(data.join("sous")).unwrap();
+    std::fs::write(data.join("sous/jeton.txt"), "jeton-factice-sous").unwrap();
+    std::fs::write(f.root().join("voisin.txt"), "utile-voisin").unwrap();
+    let views = grokbot_test_support::TestDir::new("ezerbot-vues");
+    for (name, source) in [
+        ("parent", f.root()),
+        ("donnees", data.clone()),
+        ("sous", data.join("sous")),
+    ] {
+        let point = views.join(name);
+        std::fs::create_dir(&point).unwrap();
+        let mounted = std::process::Command::new("/usr/bin/mount")
+            .arg("--bind")
+            .arg(&source)
+            .arg(&point)
+            .output()
+            .unwrap();
+        assert!(mounted.status.success(), "{name} : {mounted:?}");
+    }
+    let command = format!(
+        r#"V='{}'; for f in "$V"/parent/da*/*auth* "$V"/donnees/*auth* "$V"/sous/*; do echo "lu:$(cat "$f" 2>&1)"; done; echo "voisin:$(cat "$V"/parent/voisin.txt 2>&1)""#,
+        views.display()
+    );
+    let reference = std::process::Command::new("/bin/sh")
+        .args(["-c", &command])
+        .output()
+        .unwrap();
+    let plain = String::from_utf8_lossy(&reference.stdout);
+    assert!(
+        plain.contains("fake-refresh") && plain.contains("jeton-factice-sous"),
+        "hors bac les vues doivent lire les jetons : {plain}"
+    );
+    let out = f.runs_without_a_card("montages", "run_shell", f.shell(&command));
+    assert_eq!(out["status"], "done", "{out}");
+    let shown = out["output"]["stdout"].as_str().unwrap_or("");
+    assert!(
+        !shown.contains("fake-") && !shown.contains("jeton-factice-sous"),
+        "un jeton a fuité par une vue : {out}"
+    );
+    assert!(shown.contains("voisin:utile-voisin"), "{out}");
+    println!("montages-verifies");
+}
+
+/// Un bus de session peut vivre n'importe où : sur un chemin quelconque ou dans l'espace
+/// abstrait. Aucun n'est joignable du shell YOLO, mais un serveur lancé par la même
+/// commande l'est.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_session_bus_on_any_path_or_in_the_abstract_space_is_unreachable_from_the_shell() {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
+    let mut f = Fixture::new();
+    let path = f.root().join("dbus-test");
+    let name = format!("ezerbot-dbus-test-{}", std::process::id());
+    let _on_path = UnixListener::bind(&path).unwrap();
+    let abstract_address = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+    let _abstract = UnixListener::bind_addr(&abstract_address).unwrap();
+    UnixStream::connect(&path).expect("la référence atteint le socket sur chemin");
+    UnixStream::connect_addr(&abstract_address).expect("la référence atteint le socket abstrait");
+    std::fs::write(
+        f.root().join("joindre.py"),
+        concat!(
+            "import socket, sys\n",
+            "addr = sys.argv[1]\n",
+            "if addr.startswith('@'):\n",
+            "    addr = '\\0' + addr[1:]\n",
+            "s = socket.socket(socket.AF_UNIX)\n",
+            "try:\n",
+            "    s.connect(addr)\n",
+            "    print('connecte')\n",
+            "except OSError as e:\n",
+            "    print('refuse', e)\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        f.root().join("serveur.py"),
+        concat!(
+            "import socket, sys\n",
+            "for addr in (sys.argv[1], '\\0' + sys.argv[2]):\n",
+            "    server = socket.socket(socket.AF_UNIX)\n",
+            "    server.bind(addr)\n",
+            "    server.listen(1)\n",
+            "    client = socket.socket(socket.AF_UNIX)\n",
+            "    client.connect(addr)\n",
+            "    print('interne-ok')\n",
+        ),
+    )
+    .unwrap();
+    let from_shell = |f: &mut Fixture, id: &str, target: &str| {
+        let out = f.runs_without_a_card(
+            id,
+            "run_shell",
+            f.shell(&format!("python3 joindre.py '{target}'")),
+        );
+        assert_eq!(out["status"], "done", "{id} : {out}");
+        out["output"]["stdout"].as_str().unwrap_or("").to_owned()
+    };
+    let on_path = from_shell(&mut f, "chemin", &path.display().to_string());
+    assert!(
+        on_path.contains("refuse"),
+        "le bus sur chemin est joignable : {on_path}"
+    );
+    let in_space = from_shell(&mut f, "abstrait", &format!("@{name}"));
+    assert!(
+        in_space.contains("refuse"),
+        "le bus abstrait est joignable : {in_space}"
+    );
+
+    let inside = f.runs_without_a_card(
+        "interne",
+        "run_shell",
+        f.shell(&format!(
+            "python3 serveur.py '{}' '{name}-interne'",
+            f.root().join("interne.sock").display()
+        )),
+    );
+    let shown = inside["output"]["stdout"].as_str().unwrap_or("");
+    assert_eq!(shown.matches("interne-ok").count(), 2, "{inside}");
+}
+
+/// Un vrai refus du noyau, sans point d'injection en production : le test se relance
+/// dans un espace de noms où la limite d'espaces utilisateur est à zéro.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_kernel_without_namespaces_keeps_the_yolo_mode_off() {
+    if std::env::var_os("EZERBOT_YOLO_SANS_ESPACES").is_none() {
+        let out = std::process::Command::new("/usr/bin/unshare")
+            .args([
+                "-Ur",
+                "/bin/sh",
+                "-c",
+                r#"echo 0 > /proc/sys/user/max_user_namespaces && exec "$@""#,
+                "sh",
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_kernel_without_namespaces_keeps_the_yolo_mode_off",
+                "--nocapture",
+            ])
+            .env("EZERBOT_YOLO_SANS_ESPACES", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "le test relancé a échoué\nstdout : {stdout}\nstderr : {stderr}"
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "le test relancé n'a rien exécuté\nstdout : {stdout}\nstderr : {stderr}"
+        );
+        return;
+    }
+    let refused = std::process::Command::new("/usr/bin/bwrap")
+        .args([
+            "--unshare-user",
+            "--dev-bind",
+            "/",
+            "/",
+            "/bin/sh",
+            "-c",
+            ":",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "le noyau devrait refuser les espaces de noms ici : {refused:?}"
+    );
+    let mut f = Fixture::new();
+    let yolo = f.yolo();
+    assert_eq!(yolo["mode"], "ask", "{yolo}");
+    assert!(
+        yolo["unavailable"]
+            .as_str()
+            .unwrap_or("")
+            .contains("bubblewrap"),
+        "{yolo}"
+    );
+    assert_eq!(yolo["saved"], "yolo", "{yolo}");
+    for bot in yolo["bots"].as_array().unwrap() {
+        assert_eq!(bot["effective"], "ask", "{bot}");
+    }
+    for (path, body) in [
+        ("/api/yolo/mode", json!({"mode":"yolo"})),
+        ("/api/yolo/bot", json!({"bot_id":"grokbot","mode":"yolo"})),
+    ] {
+        let error = f
+            .app
+            .api("POST", path, body.to_string().as_bytes())
+            .expect_err(path);
+        assert_eq!(error.status, 409, "{path} : {}", error.message);
+    }
+    let stored = || {
+        f.db()
+            .query_row("SELECT mode FROM wrapper_yolo_settings", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(stored(), "yolo", "le réglage enregistré ne change pas");
+    f.local("grokbot", true, true);
+    f.send("lance", "run_shell", f.shell("touch lance.txt"));
+    let request = f.request("lance");
+    assert_eq!(request.status, requests::RequestStatus::Pending);
+    assert!(!f.root().join("lance.txt").exists());
+    f.mode("ask");
+    assert_eq!(f.yolo()["saved"], "ask");
 }
 
 /// Un auditeur local qui compte les connexions reçues.

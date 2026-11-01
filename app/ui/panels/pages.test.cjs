@@ -30,7 +30,15 @@ class Element {
     this.disabled = false;
     this.type = "";
     this.id = "";
+    this.style = {};
+    this.offsetWidth = 90;
+    this.offsetHeight = 30;
+    this.rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
   }
+  get firstChild() { return this.children[0]; }
+  contains(node) { return node === this || this.children.some((child) => child === node || (child instanceof Element && child.contains(node))); }
+  getBoundingClientRect() { return this.rect; }
+  scrollIntoView() { this.scrolled = true; }
   append(...children) {
     for (const child of children) {
       if (child instanceof Element) child.parentElement = this;
@@ -51,7 +59,7 @@ class Element {
   getAttribute(key) { return this.attributes[key]; }
   addEventListener(name, action) { this.listeners[name] = action; }
   click() { if (!this.disabled) this.listeners.click?.(); }
-  focus() {}
+  focus() { this.focused = true; this.ownerDocument.activeElement = this; }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   querySelectorAll(selector) {
     const matches = (el) => {
@@ -112,15 +120,37 @@ function harness(page) {
   chat.id = "chat-scroll";
   const composer = new Element("div");
   composer.classes = ["composer-dock"];
+  const area = new Element("div");
+  area.classes = ["composer-area"];
+  const form = new Element("form");
+  form.id = "composer-form";
+  const editor = new Element("div");
+  form.append(editor);
+  area.append(form);
+  composer.append(area);
   main.append(chat, composer);
   sidebar.append(list);
   const nodes = { sidebar, "conversation-list": list, "chat-scroll": chat, "main-panel": main };
   const document = documentOf(nodes);
+  for (const el of [area, form, editor]) el.ownerDocument = document;
   document.querySelector = (selector) => {
     if (selector === ".main-panel") return main;
     if (selector === ".composer-dock") return composer;
+    if (selector === ".composer-area") return area;
+    if (selector === "#composer-input [contenteditable='true']") return editor;
     return main.querySelector(selector) || sidebar.querySelector(selector);
   };
+  const selection = {
+    rangeCount: 0, isCollapsed: true, text: "", range: null,
+    getRangeAt() { return this.range; },
+    toString() { return this.text; },
+    removeAllRanges() { this.change(0, ""); },
+    change(count, text, range = null) { this.rangeCount = count; this.isCollapsed = !count; this.text = text; this.range = range; document.listeners.selectionchange?.(); },
+  };
+  document.listeners = {};
+  document.activeElement = null;
+  document.addEventListener = (name, action) => { document.listeners[name] = action; };
+  document.getSelection = () => selection;
   const requests = [];
   let current = { ...page };
   const panels = {
@@ -134,6 +164,7 @@ function harness(page) {
         return { page: current };
       }
       if (path === `/api/pages/${page.id}`) return { page: current };
+      if (panels.others?.[path]) return { page: panels.others[path] };
       throw new Error(`adresse inattendue ${path}`);
     },
     async refresh() {},
@@ -150,6 +181,9 @@ function harness(page) {
     main,
     chat,
     sidebar,
+    area,
+    editor,
+    selection,
     current: () => current,
     use(next) { current = next; },
   };
@@ -294,6 +328,16 @@ for (const [levels, text] of [[14, "x"], [14, ""], [8, "é".repeat(3000)], [40, 
   });
 }
 
+test("1 000 000 octets de texte répartis en 100 paragraphes se peignent, un de plus non (même borne que compile.rs)", async () => {
+  for (const [size, painted] of [[10000, true], [10001, false]]) {
+    const view = { type: "element", tag: "div", children: [{ type: "map", items: Array.from({ length: 100 }, (_, n) => [n]), node: { type: "element", tag: "p", children: [{ type: "text", text: "x".repeat(size) }] } }] };
+    const { panels, main } = harness({ id: "budget", title: "Budget", status: "ready", document: { states: [], view } });
+    await panels.panel.onState(panels.state, { bot: { id: "grokbot" }, conversation: { id: "fil" } });
+    assert.equal(/la Page dépasse le budget de rendu/.test(main.textContent), !painted, String(size));
+    assert.equal(canvasOf(main).children.length > 0, painted, String(size));
+  }
+});
+
 const ctxOf = (conversation, bot = "grokbot") => ({ bot: { id: bot }, conversation: conversation ? { id: conversation } : null });
 
 test("un rafraîchissement identique ne reconstruit pas la Page et garde le focus", async () => {
@@ -352,4 +396,357 @@ test("une navigation refusée pendant une réponse prévient au lieu d’affiche
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(notices.length, 1);
   assert.equal(descendants(main).some((el) => el.classes.includes("page-canvas") && el.children.length > 0), false);
+});
+
+const cell = (text) => ({ type: "element", tag: "td", children: [{ type: "text", text }] });
+const forfaits = {
+  id: "page_forfaits", bot_id: "grokbot", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "ready", diagnostic: null,
+  preview: `Trois forfaits Forfait A 9 € Forfait B 19 € Forfait C 29 € ${"long ".repeat(100)}fin${"é".repeat(501)}${"😀".repeat(501)}${"a".repeat(500)}\uFEFFabc`, source_version: "a".repeat(64),
+  document: { states: [], view: { type: "element", tag: "article", children: [
+    { type: "element", tag: "h1", children: [{ type: "text", text: "Trois forfaits" }] },
+    { type: "element", tag: "table", children: [{ type: "element", tag: "tbody", children: [
+      { type: "element", tag: "tr", children: [cell("Forfait A"), cell("9 €")] },
+      { type: "element", tag: "tr", children: [cell("Forfait B"), cell("19 €")] },
+    ] }] },
+    { type: "element", tag: "p", children: [{ type: "text", text: `${"long ".repeat(100)}fin` }] },
+  ] } },
+};
+const textNode = (root, text) => {
+  for (const child of root.children) {
+    if (!(child instanceof Element)) { if (child.textContent === text) return child; continue; }
+    const found = textNode(child, text);
+    if (found) return found;
+  }
+  return null;
+};
+const byClass = (root, name) => descendants(root).find((el) => el.classes.includes(name));
+
+async function openForfaits() {
+  const h = harness(forfaits);
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  const stage = byClass(h.main, "page-stage");
+  stage.rect = { left: 400, top: 60, right: 800, bottom: 660, width: 400, height: 600 };
+  byClass(h.main, "page-canvas").rect = { left: 400, top: 120, right: 800, bottom: 660, width: 400, height: 540 };
+  const comment = byClass(h.main, "page-comment");
+  const quoteBar = byClass(h.area, "gb-quote-chip");
+  const inCanvas = () => textNode(canvasOf(h.main), "Forfait B");
+  const select = (text, container = textNode(canvasOf(h.main), text) || inCanvas(), rect = { left: 450, top: 200, right: 520, bottom: 220, width: 70, height: 20 }) =>
+    h.selection.change(1, text, { startContainer: container, endContainer: container, getBoundingClientRect: () => rect });
+  return { ...h, stage, comment, quoteBar, select, anchor: () => JSON.parse(JSON.stringify(h.panels.panel.sendExtras())) };
+}
+
+test("sélectionner « Forfait B » affiche « Commenter » près de la sélection ; le clic pose la puce au-dessus de la boîte de message", async () => {
+  const { comment, quoteBar, area, select, selection, editor, anchor } = await openForfaits();
+  assert.equal(comment.hidden, true);
+  select("Forfait B");
+  assert.equal(comment.hidden, false);
+  assert.equal(comment.textContent, "Commenter");
+  assert.deepEqual([comment.style.left, comment.style.top], ["50px", "166px"]);
+  assert.equal(quoteBar.hidden, true);
+  comment.click();
+  assert.equal(quoteBar.hidden, false);
+  assert.equal(area.children[0], quoteBar);
+  assert.equal(quoteBar.textContent, "Page « Trois forfaits » — « Forfait B »");
+  assert.equal(comment.hidden, true);
+  assert.equal(selection.rangeCount, 0);
+  assert.equal(editor.focused, true);
+  assert.deepEqual(anchor(), { page_anchor: { page_id: "page_forfaits", source_version: "a".repeat(64), passage: "Forfait B" } });
+});
+
+test("l’envoi transmet la Page, la version lue par le panneau et le passage rogné ; la puce part avec le message", async () => {
+  const { comment, quoteBar, panels, select, selection, anchor } = await openForfaits();
+  const before = panels.panel.composer.capture();
+  select("  Forfait B\n");
+  comment.click();
+  assert.equal(anchor().page_anchor.passage, "Forfait B");
+  panels.panel.composer.onSent({ messageId: "m1", extras: { mentions: [] }, captured: before });
+  assert.equal(quoteBar.hidden, false, "un envoi sans ancre ne retire pas la puce");
+  const extras = anchor();
+  panels.panel.composer.onSent({ messageId: "m2", extras, captured: panels.panel.composer.capture() });
+  assert.equal(quoteBar.hidden, true);
+  assert.deepEqual(anchor(), {});
+  assert.equal(selection.rangeCount, 0);
+});
+
+test("l’accusé d’un envoi ne retire que sa citation : la même citation posée à nouveau entre-temps reste", async () => {
+  const { comment, quoteBar, panels, select, anchor } = await openForfaits();
+  select("Forfait B");
+  comment.click();
+  const extras = anchor();
+  const captured = panels.panel.composer.capture();
+  buttons(quoteBar)[0].click();
+  select("Forfait B");
+  comment.click();
+  assert.deepEqual(anchor(), extras, "même Page, même version, même passage");
+  panels.panel.composer.onSent({ messageId: "m1", extras, captured });
+  assert.equal(quoteBar.hidden, false, "la nouvelle citation n’est pas celle qui est partie");
+  assert.deepEqual(anchor(), extras);
+});
+
+test("la croix retire la puce : le message part sans ancre", async () => {
+  const { comment, quoteBar, select, anchor } = await openForfaits();
+  select("Forfait B");
+  comment.click();
+  const cross = buttons(quoteBar)[0];
+  assert.equal(cross.attributes["aria-label"], "Retirer la citation");
+  cross.click();
+  assert.equal(quoteBar.hidden, true);
+  assert.equal(quoteBar.children.length, 0);
+  assert.deepEqual(anchor(), {});
+});
+
+test("une sélection de plus de 500 caractères ne donne ni bouton ni ancre ; 500 passent", async () => {
+  const { comment, select, anchor } = await openForfaits();
+  const long = `${"long ".repeat(100)}fin`;
+  select(long);
+  assert.equal(long.length > 500, true);
+  assert.equal(comment.hidden, true);
+  assert.deepEqual(anchor(), {});
+  const exact = "é".repeat(500);
+  select(exact);
+  assert.equal(comment.hidden, false);
+  select("é".repeat(501));
+  assert.equal(comment.hidden, true);
+});
+
+test("une sélection vide, hors de la Page ou qui déborde du canevas ne donne pas de bouton", async () => {
+  const { comment, select, selection, sidebar, main } = await openForfaits();
+  select("   ");
+  assert.equal(comment.hidden, true);
+  select("Forfait B");
+  assert.equal(comment.hidden, false);
+  selection.change(0, "");
+  assert.equal(comment.hidden, true);
+  select("Pages", sidebar.children[0]);
+  assert.equal(comment.hidden, true);
+  const inside = textNode(canvasOf(main), "Forfait B");
+  selection.change(1, "Forfait B et la suite", { startContainer: inside, endContainer: sidebar, getBoundingClientRect: () => ({ left: 450, top: 200, bottom: 220 }) });
+  assert.equal(comment.hidden, true);
+  select("Forfait B", inside, { left: 450, top: 20, right: 520, bottom: 40, width: 70, height: 20 });
+  assert.equal(comment.hidden, true, "une sélection défilée hors du canevas n’a pas de bouton flottant");
+});
+
+test("au clavier, « Commenter » est un bouton après le canevas et garde la sélection quand il prend le focus", async () => {
+  const { comment, quoteBar, stage, select, selection, anchor } = await openForfaits();
+  const order = stage.children;
+  assert.equal(order.indexOf(comment) > order.indexOf(byClass(stage, "page-canvas")), true);
+  assert.equal(comment.tagName, "button");
+  assert.equal(comment.type, "button");
+  assert.equal(comment.attributes.tabindex, undefined);
+  select("Forfait B");
+  comment.focus();
+  selection.change(0, "");
+  assert.equal(comment.hidden, false, "Tab vers le bouton ne le fait pas disparaître");
+  comment.click();
+  assert.equal(quoteBar.textContent, "Page « Trois forfaits » — « Forfait B »");
+  assert.equal(anchor().page_anchor.passage, "Forfait B");
+});
+
+test("changer de fil retire la puce, et « Commenter » depuis la pleine page revient au fil pour écrire", async () => {
+  const h = await openForfaits();
+  h.select("Forfait B");
+  buttons(h.main).find((button) => button.textContent === "Ouvrir en pleine page").click();
+  assert.equal(h.main.classList.contains("page-full"), true);
+  h.comment.click();
+  assert.equal(h.main.classList.contains("page-full"), false);
+  assert.equal(h.quoteBar.hidden, false);
+  await h.panels.panel.onState(h.panels.state, ctxOf("autre"));
+  assert.equal(h.quoteBar.hidden, true);
+  assert.deepEqual(h.anchor(), {});
+});
+
+test("un clic sur la puce du fil montre la Page ; une Page disparue prévient", async () => {
+  const h = await openForfaits();
+  h.panels.state.conversations = [{ id: "fil" }, { id: "autre" }];
+  const opened = [];
+  h.panels.openConversation = (id) => { opened.push(id); return true; };
+  const notices = [];
+  h.panels.notify = (message) => notices.push(message);
+  h.stage.scrolled = false;
+  h.panels.panel.openPage("page_forfaits");
+  assert.deepEqual(opened, []);
+  assert.equal(h.stage.scrolled, true);
+  h.panels.panel.openPage("page_disparue");
+  assert.deepEqual(notices, ["Cette Page n’existe plus."]);
+  await h.panels.panel.onState(h.panels.state, ctxOf("autre"));
+  assert.equal(h.stage.hidden, true);
+  h.panels.panel.openPage("page_forfaits");
+  assert.deepEqual(opened, ["fil"]);
+});
+
+test("ouvrir une autre Page du même fil retire la citation de la première avant tout envoi", async () => {
+  const other = { id: "page_autre", title: "Autre", filename: "autre.page.tsx", status: "ready", diagnostic: null, preview: "Autre", source_version: "b".repeat(64), document: readyDocument };
+  const h = await openForfaits();
+  h.panels.others = { "/api/pages/page_autre": other };
+  h.panels.state.conversations = [{ id: "fil" }];
+  h.panels.state.pages.by_bot.grokbot.push({ id: "page_autre", bot_id: "grokbot", conversation_id: "fil", title: "Autre", filename: "autre.page.tsx", status: "ready" });
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  h.select("Forfait B");
+  h.comment.click();
+  assert.equal(h.anchor().page_anchor.page_id, "page_forfaits");
+  descendants(h.sidebar).find((el) => el.tagName === "button" && el.dataset.pageId === "page_autre").click();
+  assert.equal(h.quoteBar.hidden, true);
+  assert.deepEqual(h.anchor(), {});
+});
+
+test("dans une sous-tâche déléguée, « Commenter » n’est pas proposé : son envoi n’emporte pas d’ancre", async () => {
+  const h = harness(forfaits);
+  h.panels.state.conversations = [{ id: "fil", kind: "task" }];
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  const comment = byClass(h.main, "page-comment");
+  byClass(h.main, "page-stage").rect = { left: 400, top: 60, right: 800, bottom: 660, width: 400, height: 600 };
+  byClass(h.main, "page-canvas").rect = { left: 400, top: 120, right: 800, bottom: 660, width: 400, height: 540 };
+  const node = textNode(canvasOf(h.main), "Forfait B");
+  h.selection.change(1, "Forfait B", { startContainer: node, endContainer: node, getBoundingClientRect: () => ({ left: 450, top: 200, right: 520, bottom: 220, width: 70, height: 20 }) });
+  assert.equal(comment.hidden, true);
+});
+
+test("500 caractères en comptant les emoji comme le moteur : 500 passent, 501 non", async () => {
+  const { comment, select, anchor } = await openForfaits();
+  select("😀".repeat(500));
+  assert.equal(comment.hidden, false);
+  comment.click();
+  assert.equal([...anchor().page_anchor.passage].length, 500);
+  select("😀".repeat(501));
+  assert.equal(comment.hidden, true);
+});
+
+test("le rognage suit `str::trim` de Rust : U+0085 est retiré, U+FEFF est gardé", async () => {
+  const { comment, select, anchor } = await openForfaits();
+  select(`\u0085${"a".repeat(500)}`);
+  assert.equal(comment.hidden, false, "500 caractères une fois U+0085 retiré");
+  comment.click();
+  assert.equal(anchor().page_anchor.passage, "a".repeat(500));
+  select("\uFEFFabc");
+  comment.click();
+  assert.equal(anchor().page_anchor.passage, "\uFEFFabc");
+});
+
+test("une sélection sur plusieurs cellules et paragraphes donne le bouton et part telle quelle", async () => {
+  const { comment, select, anchor } = await openForfaits();
+  select("Trois forfaits\n\nForfait A\t9 €\nForfait B");
+  assert.equal(comment.hidden, false);
+  comment.click();
+  assert.equal(anchor().page_anchor.passage, "Trois forfaits\n\nForfait A\t9 €\nForfait B");
+});
+
+test("les blancs sont réduits à un espace, jamais supprimés : un blanc dans un mot, ou absent entre deux cellules, ne donne pas de bouton", async () => {
+  const { comment, select } = await openForfaits();
+  for (const refused of ["For fait B", "Forfait B 1 9 €", "Forfait B19 €", "Forfait B 99 €", "Forfait B\t1 9 €", "Forfait A 19 €", "Forfait A\tForfait B", "Forfait B 19 € Forfait C29 €"]) {
+    select(refused);
+    assert.equal(comment.hidden, true, JSON.stringify(refused));
+  }
+  for (const accepted of ["Forfait B", "Forfait B 19 €", "Forfait B\t19 €", "  Forfait B \n\t 19   €\n", "Forfait   B", "Trois forfaits\n\nForfait A\t9 €", "Forfait A\t9 €\nForfait B\t19 €"]) {
+    select(accepted);
+    assert.equal(comment.hidden, false, JSON.stringify(accepted));
+  }
+});
+
+test("un texte changé par l’état interactif de la Page, absent de l’aperçu que contrôle le moteur, ne donne pas de bouton", async () => {
+  const { comment, select } = await openForfaits();
+  select("Offre choisie : Confort");
+  assert.equal(comment.hidden, true);
+  select("Forfait B\t19 €");
+  assert.equal(comment.hidden, false);
+});
+
+test("dans un groupe, la Page d’un autre participant que le bot du fil ne donne pas de bouton (le moteur répondrait 409)", async () => {
+  const h = harness(forfaits);
+  h.panels.state.conversations = [{ id: "fil", kind: "group", bot_id: "coordinateur" }];
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil", "coordinateur"));
+  byClass(h.main, "page-stage").rect = { left: 400, top: 60, right: 800, bottom: 660, width: 400, height: 600 };
+  byClass(h.main, "page-canvas").rect = { left: 400, top: 120, right: 800, bottom: 660, width: 400, height: 540 };
+  const comment = byClass(h.main, "page-comment");
+  const node = textNode(canvasOf(h.main), "Forfait B");
+  const range = { startContainer: node, endContainer: node, getBoundingClientRect: () => ({ left: 450, top: 200, right: 520, bottom: 220, width: 70, height: 20 }) };
+  h.selection.change(1, "Forfait B", range);
+  assert.equal(comment.hidden, true);
+  h.panels.state.conversations = [{ id: "fil", kind: "group", bot_id: "grokbot" }];
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil", "grokbot"));
+  h.selection.change(1, "Forfait B", range);
+  assert.equal(comment.hidden, false);
+});
+
+test("une navigation refusée vers une autre Page (liste ou puce du fil) garde la citation posée", async () => {
+  const h = await openForfaits();
+  h.panels.state.conversations = [{ id: "fil" }, { id: "autre" }];
+  h.panels.state.pages.by_bot.grokbot.push({ id: "page_autre", bot_id: "grokbot", conversation_id: "autre", title: "Autre", filename: "autre.page.tsx", status: "ready" });
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  h.select("Forfait B");
+  h.comment.click();
+  const posed = h.anchor();
+  const notices = [];
+  h.panels.notify = (message) => notices.push(message);
+  h.panels.openConversation = () => false;
+  descendants(h.sidebar).find((el) => el.tagName === "button" && el.dataset.pageId === "page_autre").click();
+  h.panels.panel.openPage("page_autre");
+  assert.equal(notices.length, 2);
+  assert.equal(h.quoteBar.hidden, false, "la Page affichée n’a pas changé : sa citation reste");
+  assert.deepEqual(h.anchor(), posed);
+});
+
+test("renommer la Page met le nouveau titre dans la puce de la citation posée", async () => {
+  const h = await openForfaits();
+  h.select("Forfait B");
+  h.comment.click();
+  const rename = descendants(h.main).find((el) => el.tagName === "input");
+  rename.value = "Mes forfaits";
+  rename.listeners.change?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.quoteBar.textContent, "Page « Mes forfaits » — « Forfait B »");
+  // Un renommage venu d’ailleurs (autre fenêtre) arrive avec le rafraîchissement de la Page.
+  h.use({ ...h.current(), title: "Forfaits 2027" });
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  assert.equal(h.quoteBar.textContent, "Page « Forfaits 2027 » — « Forfait B »");
+});
+
+test("après un renommage, la liste garde le nouveau titre quand l’hôte repeint avec son état", async () => {
+  const h = await openForfaits();
+  const api = h.panels.api.bind(h.panels);
+  // Le moteur renomme ; l’état de l’hôte (liste « Pages ») ne change qu’avec un rafraîchissement.
+  h.panels.api = async (path, body) => {
+    if (path !== "/api/pages/rename") return api(path, body);
+    h.use({ ...h.current(), title: body.title });
+    return { page: h.current() };
+  };
+  let refreshed = 0;
+  h.panels.refresh = async () => {
+    refreshed += 1;
+    h.panels.state.pages.by_bot.grokbot[0].title = h.current().title;
+    await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  };
+  const rename = descendants(h.main).find((el) => el.tagName === "input");
+  rename.value = "Mes forfaits";
+  rename.listeners.change?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  assert.equal(refreshed, 1);
+  assert.equal(descendants(h.sidebar).find((el) => el.dataset.pageId === "page_forfaits").textContent, "Mes forfaits");
+});
+
+test("« Commenter » gardé au clavier ne cite pas un passage que la Page modifiée entre-temps n’affiche plus", async () => {
+  const h = await openForfaits();
+  h.select("Forfait B");
+  h.comment.focus();
+  h.selection.change(0, "");
+  assert.equal(h.comment.hidden, false);
+  const edited = JSON.parse(JSON.stringify(forfaits));
+  edited.source_version = "b".repeat(64);
+  edited.preview = edited.preview.replace("Forfait B", "Forfait Duo");
+  edited.document.view.children[1].children[0].children[1].children[0] = cell("Forfait Duo");
+  h.use(edited);
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  h.comment.click();
+  assert.equal(h.quoteBar.hidden, true, "le moteur refuserait ce passage (400)");
+  assert.deepEqual(h.anchor(), {});
+  assert.equal(h.comment.hidden, true);
+  // Un passage encore affiché après la modification se cite avec la version lue maintenant.
+  h.editor.focus(); // le bouton caché perd le focus, ce que le faux document ne fait pas seul
+  h.select("19 €", textNode(canvasOf(h.main), "19 €"));
+  assert.equal(h.comment.hidden, false);
+  h.comment.focus();
+  h.use({ ...edited, source_version: "c".repeat(64) });
+  await h.panels.panel.onState(h.panels.state, ctxOf("fil"));
+  h.comment.click();
+  assert.deepEqual(h.anchor(), { page_anchor: { page_id: "page_forfaits", source_version: "c".repeat(64), passage: "19 €" } });
 });

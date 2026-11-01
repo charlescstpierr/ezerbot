@@ -75,11 +75,11 @@ export function openConnectors(connector) {
   });
 }
 
-export function TaskInputView({ line, onLine, onSubmit, sending, notice }) {
+export function TaskInputView({ line, onLine, onSubmit, sending, disabled = false, notice }) {
   return <>
     <form className="gb-local-input" onSubmit={onSubmit}>
-      <input type="text" name="task-input" value={line} maxLength={511} autoComplete="off" spellCheck={false} placeholder="Une ligne pour le programme" aria-label="Saisie pour la tâche" onChange={(event) => onLine?.(event.target.value)} />
-      <button type="submit" className="gb-retry" disabled={sending}>Envoyer</button>
+      <input type="text" name="task-input" value={line} disabled={disabled} maxLength={511} autoComplete="off" spellCheck={false} placeholder="Une ligne pour le programme" aria-label="Saisie pour la tâche" onChange={(event) => onLine?.(event.target.value)} />
+      <button type="submit" className="gb-retry" disabled={sending || disabled}>Envoyer</button>
     </form>
     {notice && <p className="gb-local-failure" data-tone="warning" role="alert">{notice}</p>}
   </>;
@@ -90,20 +90,20 @@ export const settleDraft = (current, sent) => current === sent ? "" : current;
 
 // One line to the program's standard input. A refusal (finished task, password
 // prompt) is the engine's French sentence, kept on the card with the line.
-function TaskInput({ onSend }) {
+export function TaskInput({ onSend, disabled = false }) {
   const [line, setLine] = useState("");
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState("");
   const submit = async (event) => {
     event.preventDefault();
-    if (sending) return;
+    if (sending || disabled) return;
     setSending(true);
     const sent = line;
     try { await onSend(sent); setLine((current) => settleDraft(current, sent)); setNotice(""); }
     catch (error) { setNotice(error?.message || "La saisie n’a pas été envoyée."); }
     finally { setSending(false); }
   };
-  return <TaskInputView line={line} onLine={setLine} onSubmit={submit} sending={sending} notice={notice} />;
+  return <TaskInputView line={line} onLine={setLine} onSubmit={submit} sending={sending} disabled={disabled} notice={notice} />;
 }
 
 function LocalCard({ message, run, onAction, busy }) {

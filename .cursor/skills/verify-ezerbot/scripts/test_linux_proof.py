@@ -323,28 +323,40 @@ console.log(JSON.stringify(pointerTarget(el)));
         "settings-connectors": {"#settings-dialog[open] [data-panel=mcp] h3": ["Connecteurs"], "#settings-dialog[open] [data-panel=mcp]": ["Connecteurs"]},
     }
 
-    def ready(self, view: str, page: dict, hidden: str | None = None) -> bool:
-        # Evaluates the driver's real `ready` expression against a fake page; `hidden` is rendered display:none
-        # (checkVisibility false, innerText empty) while its textContent would still hold the text.
+    def ready(self, view: str, page: dict, hidden: str | None = None, how: str = "hidden") -> bool:
+        # Evaluates the driver's real `ready` expression against a fake page. The `hidden` selector is made
+        # invisible to the user while its text stays in the DOM: display:none (`hidden`), covered by an
+        # opaque panel (`covered`) or clipped by an ancestor with overflow:hidden (`clipped`).
         script = r"""
-const [drive, view, page, hidden] = [require(process.argv[1]), process.argv[2], JSON.parse(process.argv[3]), process.argv[4]];
+const [drive, view, page, hidden, how] = [require(process.argv[1]), process.argv[2], JSON.parse(process.argv[3]), process.argv[4], process.argv[5]];
 globalThis.innerWidth = 1440; globalThis.innerHeight = 900;
-const node = (selector, text) => ({ textContent: text, innerText: selector === hidden ? "" : text, checkVisibility: () => selector !== hidden,
-  getBoundingClientRect: () => selector === hidden ? { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 } : { left: 10, top: 10, width: 100, height: 20, right: 110, bottom: 30 } });
-globalThis.document = { querySelectorAll: selector => (page[selector] ?? []).map(text => node(selector, text)) };
+const nodes = []; const cover = { tag: "cover" };
+const rect = (left, top, width, height) => ({ left, top, width, height, right: left + width, bottom: top + height });
+const clipper = { parentElement: null, getBoundingClientRect: () => rect(0, 0, 1440, 5), style: { overflowX: "hidden", overflowY: "hidden" } };
+const node = (selector, text) => { const index = nodes.length; const masked = selector === hidden;
+  const self = { textContent: text, innerText: masked && how === "hidden" ? "" : text, checkVisibility: () => !(masked && how === "hidden"),
+    parentElement: masked && how === "clipped" ? clipper : null, style: { overflowX: "visible", overflowY: "visible" },
+    getBoundingClientRect: () => masked && how === "hidden" ? rect(0, 0, 0, 0) : rect(10, 40 + 30 * index, 100, 20), contains: other => other === self };
+  self.covered = masked && how === "covered"; nodes.push(self); return self; };
+globalThis.getComputedStyle = element => element.style;
+globalThis.document = {
+  querySelectorAll: selector => (page[selector] ?? []).map(text => node(selector, text)),
+  elementFromPoint: (x, y) => { const found = [...nodes].reverse().find(item => { const box = item.getBoundingClientRect(); return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom; }); return found?.covered ? cover : found ?? null; },
+};
 globalThis.GrokbotPanels = { state: { conversations: [] } };
 const found = drive.selectedViews().find(item => item.id === view);
 console.log(JSON.stringify(Boolean(eval(found.ready))));
 """
-        result = subprocess.run(["node", "-e", script, str(SCRIPTS / "linux_drive.cjs"), view, json.dumps(page), hidden or ""], capture_output=True, text=True, check=True)
+        result = subprocess.run(["node", "-e", script, str(SCRIPTS / "linux_drive.cjs"), view, json.dumps(page), hidden or "", how], capture_output=True, text=True, check=True)
         return json.loads(result.stdout)
 
     def test_visible_content_is_ready_and_hidden_content_is_not(self) -> None:
         cases = {"thread-reply": "#chat-scroll .gb-assistant", "conversation-dark": "#chat-scroll .gb-assistant", "settings-connectors": "#settings-dialog[open] [data-panel=mcp] h3", "home-dark": "#welcome"}
         for view, hidden in cases.items():
-            with self.subTest(view=view):
-                self.assertTrue(self.ready(view, self.PAGES[view]))
-                self.assertFalse(self.ready(view, self.PAGES[view], hidden), f"{view} prêt avec {hidden} masqué")
+            self.assertTrue(self.ready(view, self.PAGES[view]), view)
+            for how in ("hidden", "covered", "clipped"):
+                with self.subTest(view=view, how=how):
+                    self.assertFalse(self.ready(view, self.PAGES[view], hidden, how), f"{view} prêt avec {hidden} {how}")
 
     def test_hidden_bot_reply_is_fix(self) -> None:
         for view in ("thread-reply", "conversation-dark", "settings-connectors"):

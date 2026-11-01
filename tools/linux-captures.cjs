@@ -67,8 +67,19 @@ function findVisible(target, text = "") {
   const nodes = typeof target === "string" ? [...document.querySelectorAll(target)] : [].concat(target ?? []);
   return nodes.find(node => {
     if (!node?.checkVisibility?.({ visibilityProperty: true, opacityProperty: true })) return false;
+    // Exposed area: the box clipped by the viewport and by every ancestor that clips its overflow.
     const box = node.getBoundingClientRect();
-    if (!(box.width > 0 && box.height > 0 && box.bottom > 0 && box.right > 0 && box.top < innerHeight && box.left < innerWidth)) return false;
+    let area = { left: Math.max(box.left, 0), top: Math.max(box.top, 0), right: Math.min(box.right, innerWidth), bottom: Math.min(box.bottom, innerHeight) };
+    for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      if (style.overflowX === "visible" && style.overflowY === "visible") continue;
+      const clip = parent.getBoundingClientRect();
+      area = { left: Math.max(area.left, clip.left), top: Math.max(area.top, clip.top), right: Math.min(area.right, clip.right), bottom: Math.min(area.bottom, clip.bottom) };
+    }
+    if (!(area.right > area.left && area.bottom > area.top)) return false;
+    // Not covered: the topmost element at the centre of the exposed area belongs to the node.
+    const hit = document.elementFromPoint((area.left + area.right) / 2, (area.top + area.bottom) / 2);
+    if (!(hit && (hit === node || node.contains(hit)))) return false;
     return String(node.innerText ?? "").includes(text);
   }) ?? null;
 }

@@ -35,7 +35,7 @@ Une vue manquante ou cassée donne `FIX` : `result.json` nomme l’étape qui a 
 
 ### Ce que la preuve garantit / ne garantit pas
 
-Chaque vue n'est capturée que lorsque son contenu est **visible** pour l'utilisateur : élément rendu, non transparent, de taille non nulle, dans la fenêtre, texte lu par `innerText` (jamais `textContent`). Toutes les assertions passent par `findVisible` / `expectVisibleText` ; les clics sont de vrais clics pointeur sur une cible visible.
+Chaque vue n'est capturée que lorsque son contenu est **visible** pour l'utilisateur : élément rendu, non transparent, zone exposée non nulle après rognage par la fenêtre et par tout ancêtre qui masque son débordement, non recouvert (l'élément au centre de cette zone lui appartient), texte lu par `innerText` (jamais `textContent`). Toutes les assertions passent par `findVisible` / `expectVisibleText` ; les clics sont de vrais clics pointeur sur une cible visible.
 
 | Vue | Garantit |
 |---|---|
@@ -49,7 +49,7 @@ Chaque vue n'est capturée que lorsque son contenu est **visible** pour l'utilis
 | `settings-connectors` | clic réel sur Réglages ; panneau et titre « Connecteurs » visibles en haut |
 | `settings-connectors-add` | « Ajouter un serveur MCP » visible et cliquable, centré |
 
-Ne garantit pas : l'application macOS native (rendu web dans Chrome sous Xvfb), un vrai fournisseur (fournisseur factice local uniquement), l'exactitude pixel par pixel ni l'esthétique (les captures sont à regarder), le contenu des réponses au-delà des textes listés, ni les autres entrées de la carte des fonctionnalités. Le PNG est garanti identique à celui écrit par l'étape de capture (sha256 + taille), pas « correct ».
+Ne garantit pas : l'application macOS native (rendu web dans Chrome sous Xvfb), un vrai fournisseur (fournisseur factice local uniquement), l'exactitude pixel par pixel ni l'esthétique (les captures sont à regarder), le contenu des réponses au-delà des textes listés, ni les autres entrées de la carte des fonctionnalités, ni un recouvrement partiel hors du centre ou par un calque `pointer-events:none`. Le PNG est garanti identique à celui écrit par l'étape de capture (sha256 + taille), pas « correct ».
 
 ## Mac
 

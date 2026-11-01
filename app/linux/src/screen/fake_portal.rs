@@ -23,7 +23,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, Mutex,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -149,6 +149,7 @@ struct Seen {
     screenshots: AtomicUsize,
     closed: AtomicBool,
     interactive: AtomicBool,
+    request: Mutex<Option<(String, String)>>,
 }
 
 struct FakePortal {
@@ -174,6 +175,8 @@ fn answer(message: &Message, conn: &Connection, script: &Script, seen: &Seen) {
             );
             let sender = message.sender().unwrap().replace(':', "").replace('.', "_");
             let handle = format!("{OBJECT}/request/{sender}/{token}");
+            *seen.request.lock().unwrap() =
+                Some((message.sender().unwrap().to_string(), handle.clone()));
             let mut results = HashMap::new();
             if let Some(uri) = &script.uri {
                 results.insert("uri".to_owned(), Variant(uri.clone()));
@@ -355,6 +358,53 @@ fn a_revocation_during_a_portal_wait_closes_the_request_and_delivers_no_image() 
     worker.join().unwrap();
     assert_eq!(sink.lines(), [serde_json::json!({"event":"revoked"})]);
     assert!(fake.seen.closed.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_response_from_another_client_is_ignored_and_touches_no_file() {
+    let bus = Bus::start();
+    let (victim, uri) = bus.picture();
+    let mut script = Script::refusing(0);
+    script.hold = true;
+    let fake = FakePortal::serve(&bus, script);
+    let rogue = std::thread::spawn({
+        let (address, seen) = (bus.address.clone(), fake.seen.clone());
+        move || {
+            let mut channel = Channel::open_private(&address).unwrap();
+            channel.register().unwrap();
+            let (client, handle) = loop {
+                if let Some(request) = seen.request.lock().unwrap().clone() {
+                    break request;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            let results = HashMap::from([("uri".to_owned(), Variant(uri))]);
+            let mut forged = Message::new_signal(handle.as_str(), REQUEST, "Response")
+                .unwrap()
+                .append2(0_u32, results);
+            forged.set_destination(Some(client.into()));
+            channel.send(forged).unwrap();
+            channel.flush();
+        }
+    });
+    let mut portal = portal(&bus);
+    portal.limit = Duration::from_millis(400);
+    assert!(matches!(portal.shot(&|| false), Err(Refusal::Portal)));
+    rogue.join().unwrap();
+    assert!(victim.exists());
+}
+
+#[test]
+fn a_file_that_is_not_an_image_is_refused_and_stays() {
+    let bus = Bus::start();
+    let (path, uri) = bus.picture();
+    std::fs::write(&path, "notes personnelles").unwrap();
+    let _fake = FakePortal::serve(&bus, Script::answering(Order::ReplyFirst, uri));
+    assert!(matches!(
+        portal(&bus).shot(&|| false),
+        Err(Refusal::Capture)
+    ));
+    assert!(path.exists());
 }
 
 #[test]

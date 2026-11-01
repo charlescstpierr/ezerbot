@@ -181,6 +181,16 @@ impl Portal {
             .is_ok()
     }
 
+    fn owner(&self) -> Result<String, Refusal> {
+        let bus = "org.freedesktop.DBus";
+        let (owner,): (String,) = self
+            .conn
+            .with_proxy(bus, "/org/freedesktop/DBus", PROBE_LIMIT)
+            .method_call(bus, "GetNameOwner", (DESKTOP,))
+            .map_err(|_| Refusal::Portal)?;
+        Ok(owner)
+    }
+
     /// The handle is computed, not received: the match exists before the call,
     /// so a portal that answers before its method return is still heard.
     pub fn shot(&mut self, give_up: &dyn Fn() -> bool) -> Result<Shot, Refusal> {
@@ -189,9 +199,11 @@ impl Portal {
         let handle = format!("{OBJECT}/request/{}/{token}", self.sender);
         let path = Path::new(handle).map_err(|_| Refusal::Portal)?;
         let (answer, answers) = mpsc::channel();
+        // Any client can address a signal to us, and a well-known sender name
+        // matches them all: only the name's current owner is the portal.
         let rule = MatchRule::new_signal(REQUEST, "Response")
             .with_path(path.clone())
-            .with_sender(DESKTOP);
+            .with_strict_sender(self.owner()?);
         let listening = self
             .conn
             .add_match(
@@ -205,9 +217,7 @@ impl Portal {
             .map_err(|_| Refusal::Portal)?;
         let outcome = self.ask(&token, &path, &answers, give_up);
         let _ = self.conn.remove_match(listening);
-        let uri = outcome?;
-        let pixbuf =
-            Pixbuf::from_read(Cursor::new(take_file(&uri)?)).map_err(|_| Refusal::Capture)?;
+        let pixbuf = take_image(&outcome?)?;
         let bounds = Bounds {
             x: 0.0,
             y: 0.0,
@@ -259,8 +269,8 @@ impl Portal {
 }
 
 /// Backends write into the person's folders, and a lease leaves no desktop
-/// pixels behind. The open descriptor outlives the name.
-fn take_file(uri: &str) -> Result<Vec<u8>, Refusal> {
+/// pixels behind. Only a file proven to be an image is removed.
+fn take_image(uri: &str) -> Result<Pixbuf, Refusal> {
     let path = url::Url::parse(uri)
         .ok()
         .filter(|url| url.scheme() == "file")
@@ -274,7 +284,6 @@ fn take_file(uri: &str) -> Result<Vec<u8>, Refusal> {
     if !file.metadata().is_ok_and(|meta| meta.is_file()) {
         return Err(Refusal::Portal);
     }
-    fs::remove_file(&path).map_err(|_| Refusal::Capture)?;
     let mut bytes = Vec::new();
     file.take(FILE_LIMIT + 1)
         .read_to_end(&mut bytes)
@@ -282,7 +291,9 @@ fn take_file(uri: &str) -> Result<Vec<u8>, Refusal> {
     if bytes.len() as u64 > FILE_LIMIT {
         return Err(Refusal::TooLarge);
     }
-    Ok(bytes)
+    let pixbuf = Pixbuf::from_read(Cursor::new(bytes)).map_err(|_| Refusal::Capture)?;
+    fs::remove_file(&path).map_err(|_| Refusal::Capture)?;
+    Ok(pixbuf)
 }
 
 pub struct X11Root {
@@ -337,17 +348,25 @@ impl X11Root {
         let (width, height, rgb) = unsafe {
             let x = &self.xlib;
             let root = (x.XDefaultRootWindow)(self.display);
-            let (width, height) = self.size(root)?;
-            let image = (x.XGetImage)(
-                self.display,
-                root,
-                0,
-                0,
-                width as u32,
-                height as u32,
-                !0,
-                xlib::ZPixmap,
-            );
+            // A resize between these two requests would be a fatal BadMatch.
+            (x.XGrabServer)(self.display);
+            let size = self.size(root);
+            let image = size.map(|(width, height)| {
+                (x.XGetImage)(
+                    self.display,
+                    root,
+                    0,
+                    0,
+                    width as u32,
+                    height as u32,
+                    !0,
+                    xlib::ZPixmap,
+                )
+            });
+            (x.XUngrabServer)(self.display);
+            (x.XFlush)(self.display);
+            let (width, height) = size?;
+            let image = image?;
             if image.is_null() {
                 return Err(Refusal::Capture);
             }

@@ -212,6 +212,36 @@ class VerdictTests(unittest.TestCase):
     def test_png_with_bad_row_filter_is_fix(self) -> None:
         self.assert_bad_png_is_fix(png(raw=b"".join(b"\x09" + b"\x00" * 4 * 3 for _ in range(3))))
 
+    def test_png_without_iend_is_fix(self) -> None:
+        data = png()
+        self.assert_bad_png_is_fix(data[: data.rindex(b"IEND") - 4])
+
+    def test_png_with_bad_crc_is_fix(self) -> None:
+        data = bytearray(png())
+        idat = data.index(b"IDAT")
+        length = int.from_bytes(data[idat - 4 : idat], "big")
+        data[idat + 4 + length] ^= 0xFF
+        self.assert_bad_png_is_fix(bytes(data))
+
+    def assert_features_rejected(self, mutate) -> None:
+        evidence = self.evidence()
+        path = evidence / "captures" / "result.json"
+        result = json.loads(path.read_text())
+        mutate(result["features"])
+        path.write_text(json.dumps(result))
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertIn("`result.json` : liste `features` invalide.", lines)
+
+    def test_duplicate_feature_entry_is_fix(self) -> None:
+        self.assert_features_rejected(lambda items: items.append(dict(items[0])))
+
+    def test_duplicate_entry_with_other_status_is_fix(self) -> None:
+        self.assert_features_rejected(lambda items: items.insert(0, dict(items[0], status="fail")))
+
+    def test_unknown_status_is_fix(self) -> None:
+        self.assert_features_rejected(lambda items: items[0].update(status="ok"))
+
     def test_tampered_capture_is_fix(self) -> None:
         evidence = self.evidence()
         (evidence / "captures" / "home-dark.png").write_bytes(png(5, 3))

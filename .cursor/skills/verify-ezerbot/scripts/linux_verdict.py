@@ -75,7 +75,16 @@ def png_decodes(path: Path) -> None:
     with Image.open(path) as image:
         if image.format != "PNG":
             raise ValueError("pas un PNG")
-        image.load()
+        image.verify()  # chunk CRCs and IEND
+    with Image.open(path) as image:
+        image.load()  # every pixel
+
+
+def valid_features(items: list) -> bool:
+    """Strict schema: string fields, status in {pass, fail}, (feature, view) and view ids unique."""
+    if not all(isinstance(item, dict) and set(item) == {"feature", "view", "file", "status"} and all(isinstance(item[key], str) for key in item) and item["status"] in ("pass", "fail") for item in items):
+        return False
+    return len({(item["feature"], item["view"]) for item in items}) == len(items) and len({item["view"] for item in items}) == len(items)
 
 
 def write_report(path: Path, lines: list[str]) -> bytes:
@@ -104,7 +113,7 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
     if manifest is not None and not (isinstance(views, list) and all(isinstance(view, dict) and isinstance(view.get("file"), str) and isinstance(view.get("sha256"), str) for view in views)):
         problems.append("`manifest.json` : liste `views` invalide.")
         manifest, views = None, []
-    if result is not None and not (isinstance(result.get("features"), list) and all(isinstance(item, dict) and all(isinstance(item.get(key), str) for key in ("feature", "view", "file", "status")) for item in result["features"])):
+    if result is not None and not (isinstance(result.get("features"), list) and valid_features(result["features"])):
         problems.append("`result.json` : liste `features` invalide.")
         result = None
     hashes = {view["file"]: view["sha256"] for view in views}

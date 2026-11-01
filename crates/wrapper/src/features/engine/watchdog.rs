@@ -322,16 +322,23 @@ fn eligible(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<b
     let mut statement = conn.prepare("WITH RECURSIVE children(id) AS (
         SELECT child_run_id FROM delegation_graph WHERE parent_run_id=?1 AND json_extract(status,'$.status')='running'
         UNION SELECT d.child_run_id FROM delegation_graph d JOIN children c ON d.parent_run_id=c.id WHERE json_extract(d.status,'$.status')='running')
-        SELECT r.status FROM children c JOIN engine_runs r ON r.run_id=c.id")?;
-    let statuses = statement
-        .query_map([&run.run_id], |r| r.get::<_, String>(0))?
+        SELECT r.status,EXISTS(SELECT 1 FROM wrapper_shell_tasks t WHERE t.run_id=r.run_id AND t.status='en cours')
+        FROM children c JOIN engine_runs r ON r.run_id=c.id")?;
+    let branches = statement
+        .query_map([&run.run_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(
-        (run.status == RunStatus::Running || statuses.iter().any(|s| s == "running"))
-            && !statuses
-                .iter()
-                .any(|s| matches!(s.as_str(), "awaiting_approval" | "awaiting_human_input")),
-    )
+    Ok((run.status == RunStatus::Running
+        || branches
+            .iter()
+            .any(|(status, background)| status == "running" && !background))
+        && !branches.iter().any(|(status, _)| {
+            matches!(
+                status.as_str(),
+                "awaiting_approval" | "awaiting_human_input"
+            )
+        }))
 }
 
 fn has_active_child(conn: &Connection, id: &str) -> grokbot_engine::contracts::Result<bool> {

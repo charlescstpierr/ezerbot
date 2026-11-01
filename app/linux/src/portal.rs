@@ -18,6 +18,7 @@ const PATH: &str = "/org/freedesktop/portal/desktop";
 const SHORTCUTS: &str = "org.freedesktop.portal.GlobalShortcuts";
 const REQUEST: &str = "org.freedesktop.portal.Request";
 const SESSION: &str = "org.freedesktop.portal.Session";
+const BUS: &str = "org.freedesktop.DBus";
 /// The portal may put a dialog in front of the user, so this is generous.
 const RESPONSE_LIMIT: Duration = Duration::from_secs(120);
 
@@ -91,6 +92,16 @@ struct State {
     held: Option<Held>,
     binding: bool,
     requests: u32,
+}
+
+impl State {
+    /// A session the portal ended no longer binds anything, so the same choice
+    /// must bind again. A `disabled` choice holds no session and stays.
+    fn forget(&mut self) {
+        if self.held.take().is_some() {
+            self.chosen = None;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -185,7 +196,11 @@ impl Portal {
         let connection = gio::bus_get_future(gio::BusType::Session)
             .await
             .map_err(|_| Outcome::Unavailable)?;
-        let state = Rc::clone(&self.state);
+        let (state, closed, vanished) = (
+            Rc::clone(&self.state),
+            Rc::clone(&self.state),
+            Rc::clone(&self.state),
+        );
         let activated = Rc::clone(&self.activated);
         connection.signal_subscribe(
             Some(PORTAL),
@@ -207,6 +222,31 @@ impl Portal {
                     activated();
                 }
             },
+        );
+        // A session this client closed to replace it is no longer `held` when
+        // its `Closed` arrives, so only the session in force is forgotten.
+        connection.signal_subscribe(
+            Some(PORTAL),
+            Some(SESSION),
+            Some("Closed"),
+            None,
+            None,
+            DBusSignalFlags::NONE,
+            move |_, _, path, _, _, _| {
+                let mut state = closed.borrow_mut();
+                if state.held.as_ref().is_some_and(|held| held.session == path) {
+                    state.forget();
+                }
+            },
+        );
+        connection.signal_subscribe(
+            Some(BUS),
+            Some(BUS),
+            Some("NameOwnerChanged"),
+            Some("/org/freedesktop/DBus"),
+            Some(PORTAL),
+            DBusSignalFlags::NONE,
+            move |_, _, _, _, _, _| vanished.borrow_mut().forget(),
         );
         self.state.borrow_mut().connection = Some(connection.clone());
         Ok(connection)
@@ -383,6 +423,25 @@ mod tests {
         let answer = Delivery::new();
         answer.fulfil(7);
         assert_eq!(context.block_on(answered(limit, answer)), Ok(7));
+    }
+
+    #[test]
+    fn forgetting_keeps_a_choice_that_held_no_session() {
+        let mut state = State {
+            chosen: Some(DISABLED),
+            ..State::default()
+        };
+        state.forget();
+        assert_eq!(state.chosen, Some(DISABLED));
+        let shortcut = Shortcut::find("cmd+option+j").unwrap();
+        state.chosen = Some(shortcut.name);
+        state.held = Some(Held {
+            shortcut,
+            session: "/s".into(),
+            trigger: None,
+        });
+        state.forget();
+        assert!(state.held.is_none() && state.chosen.is_none());
     }
 
     #[test]

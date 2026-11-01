@@ -996,6 +996,7 @@ impl Drop for Bus {
 }
 
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+const PORTAL_NAME: &str = "org.freedesktop.portal.Desktop";
 const ASSIGNED: &str = "Ctrl Alt K";
 const SHORTCUTS_INTERFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
 
@@ -1215,6 +1216,47 @@ impl FakePortal {
             )
             .unwrap();
     }
+
+    /// The portal ending a session on its own: no `Close` call came first.
+    fn end(&self, session: &str) {
+        self.connection
+            .emit_signal(
+                None,
+                session,
+                "org.freedesktop.portal.Session",
+                "Closed",
+                Some(&(HashMap::<String, Variant>::new(),).to_variant()),
+            )
+            .unwrap();
+        self.connection
+            .flush_sync(None::<&gio::Cancellable>)
+            .unwrap();
+    }
+
+    fn bus_name(&self, method: &str, parameters: Variant) {
+        self.connection
+            .call_sync(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                "org.freedesktop.DBus",
+                method,
+                Some(&parameters),
+                None,
+                gio::DBusCallFlags::NONE,
+                -1,
+                None::<&gio::Cancellable>,
+            )
+            .unwrap();
+    }
+
+    /// Gives up the portal's name, as a crashed or restarting portal does.
+    fn vanish(&self) {
+        self.bus_name("ReleaseName", (PORTAL_NAME,).to_variant());
+    }
+
+    fn reappear(&self) {
+        self.bus_name("RequestName", (PORTAL_NAME, 0u32).to_variant());
+    }
 }
 
 impl Drop for FakePortal {
@@ -1320,6 +1362,79 @@ fn the_portal_opens_the_panel_and_a_replacement_never_loses_the_shortcut() {
         true,
         "the shortcut in force stopped working after a conflict",
     );
+    shell.app.quit();
+}
+
+#[test]
+fn a_shortcut_the_portal_ended_is_bound_again_by_the_same_choice() {
+    // `Scripted::run` finds its answer by the body, so a repeat needs a new body.
+    let mut spaces = 0;
+    let mut again = || {
+        spaces += 1;
+        format!(
+            r#"{{"command":"configure",{}"shortcut":"cmd+option+j"}}"#,
+            " ".repeat(spaces)
+        )
+    };
+    let home = TestDir::new("ezerbot-bus");
+    let bus = Bus::start(&home);
+    let portal = FakePortal::start(&bus.address);
+    let shell = Scripted::start(
+        "",
+        &[
+            ("DBUS_SESSION_BUS_ADDRESS", bus.address.as_str()),
+            ("WAYLAND_DISPLAY", "ezerbot-test-0"),
+        ],
+    );
+    assert_eq!(
+        status(&shell.run("main", &configure("cmd+option+j"))),
+        "registered"
+    );
+    let first = portal.session(0);
+
+    portal.end(&first);
+    // Same sender, so the shell sees this after the `Closed` above.
+    portal.activate(&first, "cmd+option+j");
+    shell.assert_no_panel_for(
+        Duration::from_secs(1),
+        "a session the portal ended still opened the panel",
+    );
+    assert_eq!(status(&shell.run("main", &again())), "registered");
+    let second = portal.session(1);
+    assert!(portal
+        .calls()
+        .last()
+        .unwrap()
+        .starts_with("BindShortcuts cmd+option+j "));
+    portal.activate(&second, "cmd+option+j");
+    shell.wait_panel(true, "the shortcut bound again did not open the panel");
+    shell.run("panel", r#"{"command":"close"}"#);
+    shell.wait_panel(false, "the panel stayed open");
+
+    portal.vanish();
+    portal.reappear();
+    // The bus delivered the owner change before this signal, and the shell
+    // handles them in that order, which `configure` alone does not promise.
+    portal.activate(&second, "cmd+option+j");
+    shell.assert_no_panel_for(
+        Duration::from_secs(1),
+        "a session of a portal that went away still opened the panel",
+    );
+    assert_eq!(status(&shell.run("main", &again())), "registered");
+    let third = portal.session(2);
+    assert!(portal
+        .calls()
+        .last()
+        .unwrap()
+        .starts_with("BindShortcuts cmd+option+j "));
+    portal.activate(&third, "cmd+option+j");
+    shell.wait_panel(
+        true,
+        "the shortcut bound after a portal restart did not open the panel",
+    );
+    shell.run("panel", r#"{"command":"close"}"#);
+    shell.wait_panel(false, "the panel stayed open");
+
     shell.app.quit();
 }
 

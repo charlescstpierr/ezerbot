@@ -673,16 +673,25 @@ fn the_preview_masks_a_secret_cut_by_the_cell_width() {
 }
 
 #[test]
-fn the_preview_masks_a_secret_only_the_decoded_json_shows() {
-    const SECRET: &str = "catalogue-r10-jeton";
+fn the_preview_masks_a_secret_only_its_drawing_shows() {
+    const JETON: &str = "catalogue-r10-jeton";
     const ACCENT: &str = "clé-r10-jeton";
+    const SPACED: &str = "catalogue r13-jeton";
+    const TABBED: &str = "catalogue    r13-jeton";
     let table = |cell: &str| format!(r#"[["Public"],["{cell}"]]"#);
     let graph = |node: &str| format!(r#"{{"nodes":["Public","{node}"],"edges":[[0,1]]}}"#);
     for (format, content, secret) in [
-        ("csv", table(r"\u0063atalogue-r10-jeton"), SECRET),
-        ("xlsx", table(r"\u0063atalogue-r10-jeton"), SECRET),
-        ("svg", graph(r"\u0063atalogue-r10-jeton"), SECRET),
+        ("csv", table(r"\u0063atalogue-r10-jeton"), JETON),
+        ("xlsx", table(r"\u0063atalogue-r10-jeton"), JETON),
+        ("svg", graph(r"\u0063atalogue-r10-jeton"), JETON),
         ("csv", table(r"cl\u00e9-r10-jeton"), ACCENT),
+        ("csv", table(r"catalogue\nr13-jeton"), SPACED),
+        ("xlsx", table(r"catalogue\tr13-jeton"), SPACED),
+        ("csv", table(r"catalogue\rr13-jeton"), SPACED),
+        ("md", "Public : catalogue\tr13-jeton".to_owned(), TABBED),
+        ("md", "Public : catalogue\rr13-jeton".to_owned(), SPACED),
+        ("pdf", "Public : catalogue\tr13-jeton".to_owned(), TABBED),
+        ("pptx", "Public : catalogue\tr13-jeton".to_owned(), TABBED),
     ] {
         assert!(!content.contains(secret), "{format} : {content}");
         let (before, after) = previews(format, &content, secret);
@@ -1793,6 +1802,32 @@ fn a_deleted_file_can_be_created_again_with_current_public_coverage() {
     );
     assert!(preview.contains("Texte public du retour"));
     assert!(!preview.contains("Aperçu indisponible"));
+}
+
+#[test]
+fn a_historical_document_created_again_is_readable_while_its_old_card_stays_neutral() {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    let request = json!({"name":"Retour public","format":"md","content":"Texte public du retour"});
+    f.call(&chat, "ancien", "create_document", request.clone());
+    let id = f.list("")[0]["id"].as_str().unwrap().to_owned();
+    let path = f.path.with_extension("secrets.json");
+    let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("_privacy");
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    f.reopen();
+    assert!(f.list("")[0]["id"].is_null());
+    f.call(&chat, "nouveau", "create_document", request);
+    let items = f.list("");
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[0]["id"], id.as_str(), "{items:?}");
+    assert!(items[1]["id"].is_null(), "{items:?}");
+    assert!(items[1]["open_url"].is_null(), "{items:?}");
+    let url = items[0]["open_url"].as_str().unwrap().to_owned();
+    let preview = body(&mut f, "GET", &url, json!(null));
+    assert!(preview.contains("Texte public du retour"), "{preview}");
+    let save = format!("/api/generated/{id}/save-path");
+    assert!(f.app.api("GET", &save, b"").unwrap()["path"].is_string());
 }
 
 #[test]

@@ -435,7 +435,8 @@ fn a_see_only_lease_offers_the_model_nothing_but_the_screenshot() {
     assert_eq!(names(false).len(), 6);
 }
 
-const KEEPS_RUNNING: &str = "exec cat >/dev/null";
+/// Keeps stdout open: its end is a revocation for the reader.
+const KEEPS_RUNNING: &str = "while read -r _; do :; done";
 
 /// A helper process that stays silent until `go` exists, then runs `clicked`, like
 /// one whose button is clicked while the wrapper stores a capture.
@@ -553,11 +554,11 @@ fn a_capture_nothing_interrupts_is_stored_and_returned() {
 fn a_stop_from_the_helper_before_the_commit_stores_and_returns_nothing() {
     for clicked in [
         // Arrêter.
-        r#"echo '{"event":"revoked"}'; exec cat >/dev/null"#,
+        r#"echo '{"event":"revoked"}'; while read -r _; do :; done"#,
         // Pause.
-        r#"echo '{"event":"paused"}'; exec cat >/dev/null"#,
+        r#"echo '{"event":"paused"}'; while read -r _; do :; done"#,
         // Pause, and a resume the reader has not reached yet.
-        r#"echo '{"event":"paused"}'; echo '{"event":"resumed"}'; exec cat >/dev/null"#,
+        r#"echo '{"event":"paused"}'; echo '{"event":"resumed"}'; while read -r _; do :; done"#,
         // The helper dies.
         "exit 0",
     ] {
@@ -592,7 +593,10 @@ fn a_helper_stop_reads_as_stopped_only_once_the_decision_in_flight_is_over() {
     let permit = Arc::new(Mutex::new(()));
     let generation = Arc::new(AtomicU64::new(1));
     let client = native::Client::launch(
-        clicked_helper(&go, r#"echo '{"event":"revoked"}'; exec cat >/dev/null"#),
+        clicked_helper(
+            &go,
+            r#"echo '{"event":"revoked"}'; while read -r _; do :; done"#,
+        ),
         permit.clone(),
         generation.clone(),
     )
@@ -623,7 +627,7 @@ fn a_resume_the_helper_refuses_names_the_banner_and_stays_paused() {
     let client = native::Client::launch(
         clicked_helper(
             &go,
-            r#"echo '{"event":"paused","reason":"banner"}'; exec cat >/dev/null"#,
+            r#"echo '{"event":"paused","reason":"banner"}'; while read -r _; do :; done"#,
         ),
         Arc::default(),
         Arc::default(),

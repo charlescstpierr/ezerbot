@@ -21,6 +21,9 @@ pub fn routes(
     path: &str,
     body: &[u8],
 ) -> Option<Result<ApiResponse, ApiError>> {
+    if path == "/api/ratings" && matches!(method, "GET" | "POST") {
+        return Some(ratings(app, method, body).map(ApiResponse::Json));
+    }
     if !matches!(
         (method, path),
         ("GET", "/api/state" | "/api/ping")
@@ -38,6 +41,40 @@ pub fn routes(
         return None;
     }
     Some(route(app, path, body).map(ApiResponse::Json))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RatingsDocument {
+    value: String,
+}
+
+// The Linux shell's origin changes with its port on every launch, so browser
+// storage cannot keep these. Each write resends a window's whole document: rows
+// merge by id so that two windows on one data folder keep each other's votes.
+fn ratings(app: &mut App, method: &str, body: &[u8]) -> Result<Value, ApiError> {
+    if method == "GET" {
+        let mut statement = app
+            .connection
+            .prepare("SELECT row FROM wrapper_ratings ORDER BY rowid")?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(json!({"value": format!("[{}]", rows.join(","))}));
+    }
+    let invalid = || ApiError::new(400, "Notation invalide.");
+    let input: RatingsDocument = parse(body)?;
+    let rows: Vec<Value> = serde_json::from_str(&input.value).map_err(|_| invalid())?;
+    let transaction = app.connection.transaction()?;
+    for row in &rows {
+        let id = row["id"].as_str().ok_or_else(invalid)?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO wrapper_ratings (id, row) VALUES (?1, ?2)",
+            params![id, row.to_string()],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(json!({"ok": true}))
 }
 
 // Detect writes from both this connection and background engine connections.

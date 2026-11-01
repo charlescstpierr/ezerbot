@@ -50,7 +50,7 @@ Le fichier écrit par le portail est retiré dès sa lecture.
 
 Une superposition reste affichée pendant tout le bail, avec **Pause** et **Arrêter**.
 La fermer révoque le bail. La réduire ou la couvrir le met en pause, et aucune capture ne part avant son retour à l’écran, même après une reprise.
-Sous Wayland, rien ne prouve que la superposition reste visible : le bail reste en pause et refuse chaque capture.
+Sous Wayland, ou sous X11 avec un gestionnaire de composition, rien ne prouve que la superposition reste visible : le bail s’annonce en pause dès le départ et refuse chaque capture.
 Seul l’écran entier est partagé. Le partage d’une seule fenêtre est reporté.
 Il n’existe pas de touche Échap globale sous Linux. Échap agit quand Ezerbot ou la superposition a le focus.
 L’image contient la superposition et la fenêtre d’Ezerbot si elles sont visibles.

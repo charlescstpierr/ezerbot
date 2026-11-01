@@ -75,6 +75,13 @@ impl Helper {
         helper
     }
 
+    /// Started where the banner cannot be proven visible: it announces a pause.
+    fn start_paused(display: &str) -> Self {
+        let mut helper = Self::start(display, 60_000, None);
+        assert_eq!(helper.line(), json!({"event":"paused"}));
+        helper
+    }
+
     fn line(&mut self) -> Value {
         self.lines
             .recv_timeout(WAIT)
@@ -242,6 +249,19 @@ impl Viewer {
         unsafe {
             (self.xlib.XDestroyWindow)(self.display, window);
             (self.xlib.XSync)(self.display, 0);
+        }
+    }
+
+    /// Claims `_NET_WM_CM_S0`, as a compositing manager does.
+    fn compositor(&self) -> xlib::Window {
+        unsafe {
+            let root = (self.xlib.XDefaultRootWindow)(self.display);
+            let owner = (self.xlib.XCreateSimpleWindow)(self.display, root, 0, 0, 1, 1, 0, 0, 0);
+            let name = CString::new("_NET_WM_CM_S0").unwrap();
+            let atom = (self.xlib.XInternAtom)(self.display, name.as_ptr(), 0);
+            (self.xlib.XSetSelectionOwner)(self.display, atom, owner, xlib::CurrentTime);
+            (self.xlib.XSync)(self.display, 0);
+            owner
         }
     }
 
@@ -539,4 +559,21 @@ fn the_debug_binary_holds_no_capture_code() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn under_a_compositing_manager_the_lease_starts_paused_and_captures_nothing() {
+    let server = Xvfb::start("1280x900x24");
+    let viewer = Viewer::on(&server.name);
+    let _compositor = viewer.compositor();
+    let mut helper = Helper::start_paused(&server.name);
+    viewer.visible_overlay();
+    assert!(helper.screenshot(1).get("image").is_none());
+    helper.send(json!({"command":"resume"}));
+    assert_eq!(helper.line(), json!({"event":"resumed"}));
+    let refused = helper.screenshot(2);
+    assert!(
+        refused["error"].as_str().unwrap().contains("bandeau"),
+        "{refused}"
+    );
 }

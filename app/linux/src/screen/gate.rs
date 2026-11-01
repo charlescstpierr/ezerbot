@@ -118,8 +118,14 @@ impl<W: Write> Gate<W> {
         state
     }
 
+    /// A banner not proven visible by now pauses the lease at once, so the app
+    /// never announces a live share that refuses every capture.
     pub fn ready(&self) {
-        self.state().say(json!({"ready":true}));
+        let mut state = self.state();
+        state.say(json!({"ready":true}));
+        if matches!(*state, State::Open { banner: false, .. }) {
+            state.pause();
+        }
     }
 
     /// Ends the lease before it started: the wrapper reads this in place of `ready`.
@@ -286,6 +292,21 @@ mod tests {
         let lines = sink.lines();
         let line = lines.iter().rev().find(|line| line["id"] == id).unwrap();
         line["error"].as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn a_lease_ready_without_its_banner_says_it_is_paused() {
+        let sink = Sink::default();
+        let gate = Gate::new(sink.clone(), Instant::now() + Duration::from_secs(60));
+        gate.ready();
+        assert_eq!(
+            sink.lines(),
+            [json!({"ready":true}), json!({"event":"paused"})]
+        );
+        gate.banner(true);
+        assert!(gate.admit(1).is_none(), "paused until the person resumes");
+        gate.resume();
+        assert!(gate.admit(2).is_some());
     }
 
     #[test]

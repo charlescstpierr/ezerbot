@@ -16,7 +16,8 @@ button:disabled { background-color: #2b2d36; }
 button:disabled label { color: #8a8d99; }";
 
 /// What X11 tells about the banner. Wayland tells nothing that proves it is on top,
-/// so a Wayland banner is never proven visible and its lease stays paused.
+/// and a compositing manager makes X11 compute visibility on an offscreen buffer:
+/// in both cases the banner is never proven visible and the lease stays paused.
 #[derive(Clone, Copy, Default)]
 struct Sight {
     mapped: bool,
@@ -31,12 +32,13 @@ impl Sight {
 }
 
 fn provable() -> bool {
-    gdk::Display::default().is_some_and(|display| display.type_().name() == "GdkX11Display")
+    let x11 =
+        gdk::Display::default().is_some_and(|display| display.type_().name() == "GdkX11Display");
+    x11 && !gdk::Screen::default().is_some_and(|screen| screen.is_composited())
 }
 
 /// Reports every change of what the person can see to the gate.
 fn watch(window: &gtk::Window, gate: &Arc<Gate<Stdout>>) {
-    let provable = provable();
     let sight = Rc::new(Cell::new(Sight::default()));
     let report = {
         let (sight, gate) = (sight.clone(), gate.clone());
@@ -44,9 +46,13 @@ fn watch(window: &gtk::Window, gate: &Arc<Gate<Stdout>>) {
             let mut now = sight.get();
             change(&mut now);
             sight.set(now);
-            gate.banner(now.visible(provable));
+            gate.banner(now.visible(provable()));
         }
     };
+    if let Some(screen) = gdk::Screen::default() {
+        let composited = report.clone();
+        screen.connect_composited_changed(move |_| composited(&|_| {}));
+    }
     window.add_events(gdk::EventMask::VISIBILITY_NOTIFY_MASK | gdk::EventMask::STRUCTURE_MASK);
     let mapped = report.clone();
     window.connect_map_event(move |_, _| {

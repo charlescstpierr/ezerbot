@@ -176,13 +176,16 @@ const NAMES: [(&str, &str); 2] = [
     ("Micro systeme", "Micro fixture"),
     ("Micro système", "Micro fixture é"),
 ];
-/// Largest sample difference accepted between the fixture and the capture. PulseAudio is
-/// bit-exact. PipeWire rate-matches the pipe with an adaptive resampler, which shifts the
-/// 440 Hz, amplitude 1200 sine by a fraction of a sample (one sample is 207); measured 103.
-const TOLERANCES: [(i32, usize); 2] = [(0, 0), (150, 1)];
-/// The tunnel buffers little: stay slightly ahead of the clock, never far ahead.
+/// Largest sample difference accepted between the fixture and the capture. Both servers are
+/// bit-exact: the FIFO is fed in real time, and the PipeWire tunnel drives its own clock so nothing
+/// is resampled (as a follower it was off by up to a sample and glitched in one run in twenty).
+const TOLERANCE: i32 = 0;
+/// The tunnel buffers little: stay slightly ahead of the clock, never far ahead. Small chunks keep
+/// its rate matching steady (20 ms chunks glitched the capture in about one run in fourteen).
 const LEAD: Duration = Duration::from_millis(100);
-const CHUNK: usize = 640;
+const CHUNK: usize = 160;
+/// Silence between two copies of the fixture, in bytes.
+const GAP: usize = BYTES_PER_SECOND / 10;
 const BYTES_PER_SECOND: usize = SAMPLE_RATE as usize * 2;
 
 fn fixture_pcm() -> &'static [u8] {
@@ -227,7 +230,6 @@ struct Headless {
     server: Server,
     /// Descriptions of the default source and of the fixture source.
     names: (&'static str, &'static str),
-    tolerance: (i32, usize),
     session: AudioSession,
     fifo: PathBuf,
     /// Dropped before `dir`, which they run in.
@@ -334,7 +336,6 @@ impl Headless {
         Some(Headless {
             server: Server::PulseAudio,
             names: NAMES[0],
-            tolerance: TOLERANCES[0],
             session,
             fifo,
             _processes: processes,
@@ -356,7 +357,7 @@ impl Headless {
             format!(
                 r#"context.properties = {{ default.clock.rate = 16000 default.clock.allowed-rates = [ 16000 ] }}
 context.objects = [ {{ factory = adapter args = {{ factory.name = support.null-audio-sink node.name = systeme node.description = "{system_name}" media.class = Audio/Source/Virtual audio.position = [ MONO ] priority.session = 2000 }} }} ]
-context.modules = [ {{ name = libpipewire-module-pipe-tunnel args = {{ tunnel.mode = source pipe.filename = "{path}/mic.fifo" audio.format = S16LE audio.rate = 16000 audio.channels = 1 audio.position = [ MONO ] stream.props = {{ node.name = fixture node.description = "{fixture_name}" media.class = Audio/Source }} }} }} ]
+context.modules = [ {{ name = libpipewire-module-pipe-tunnel args = {{ tunnel.mode = source pipe.filename = "{path}/mic.fifo" audio.format = S16LE audio.rate = 16000 audio.channels = 1 audio.position = [ MONO ] stream.props = {{ node.driver = true node.name = fixture node.description = "{fixture_name}" media.class = Audio/Source }} }} }} ]
 "#
             ),
         )
@@ -385,7 +386,6 @@ context.modules = [ {{ name = libpipewire-module-pipe-tunnel args = {{ tunnel.mo
         Some(Headless {
             server: Server::PipeWire,
             names: NAMES[1],
-            tolerance: TOLERANCES[1],
             session,
             fifo,
             _processes: processes,
@@ -429,7 +429,7 @@ context.modules = [ {{ name = libpipewire-module-pipe-tunnel args = {{ tunnel.mo
         );
     }
 
-    /// Writes silence in real time until `go`, then the fixture, then silence again.
+    /// Writes silence in real time until `go`, then the fixture over and over, a gap apart.
     fn feed(&self, go: Arc<AtomicBool>, quit: Arc<AtomicBool>) -> JoinHandle<()> {
         let fifo = self.fifo.clone();
         thread::spawn(move || {
@@ -456,15 +456,19 @@ context.modules = [ {{ name = libpipewire-module-pipe-tunnel args = {{ tunnel.mo
                 if let Some(position) = played.as_mut() {
                     let pcm = fixture_pcm();
                     if *position < pcm.len() {
-                        chunk = &pcm[*position..(*position + CHUNK).min(pcm.len())];
-                        *position += chunk.len();
+                        chunk = &pcm[*position..*position + CHUNK];
                     }
+                    *position = (*position + CHUNK) % (pcm.len() + GAP);
                 }
                 let mut written = 0;
                 while written < chunk.len() {
                     match file.write(&chunk[written..]) {
                         Ok(count) => written += count,
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            // A full FIFO means nobody reads it any more: stop with the test.
+                            if quit.load(Ordering::Relaxed) {
+                                return;
+                            }
                             thread::sleep(Duration::from_millis(5))
                         }
                         Err(_) => return,
@@ -513,41 +517,13 @@ fn samples(pcm: &[u8]) -> Vec<i16> {
         .collect()
 }
 
-/// Aligns the capture on the fixture by its onset (the silence fed before it makes it unambiguous),
-/// then returns the largest difference from the closest fixture sample within `slip` samples.
-/// The first and last samples are skipped: a resampler rings around an abrupt start and end.
-fn compare_with_fixture(label: &str, captured: &[u8], slip: usize) -> i32 {
-    const EDGE: usize = 100;
-    const ONSET: i16 = 100;
-    let onset = |pcm: &[i16]| {
-        pcm.iter()
-            .position(|sample| sample.abs() >= ONSET)
-            .expect("no signal")
-    };
-    let (heard, fixture) = (samples(captured), samples(fixture_pcm()));
-    let expected = onset(&heard).saturating_sub(onset(&fixture));
-    let inner = EDGE..fixture.len() - EDGE;
-    let error = |start: usize| -> Option<(i32, usize)> {
-        let heard = heard.get(start..start + fixture.len())?;
-        let diffs = inner.clone().map(|i| {
-            (i - slip..=i + slip)
-                .map(|j| (i32::from(fixture[j]) - i32::from(heard[i])).abs())
-                .min()
-                .unwrap()
-        });
-        Some((diffs.clone().max()?, diffs.filter(|&d| d == 0).count()))
-    };
-    let (worst, exact, start) = (expected.saturating_sub(8)..=expected + 8)
-        .filter_map(|start| error(start).map(|(worst, exact)| (worst, exact, start)))
-        .min_by_key(|(worst, ..)| *worst)
-        .expect("capture ends inside the fixture");
-    println!(
-        "audio-headless: {label}: fixture at sample {start} ({} from the onset), {exact}/{} samples exact, largest difference {worst}, {} bytes captured",
-        start as i64 - expected as i64,
-        inner.len(),
-        captured.len()
-    );
-    worst
+/// Where a copy of the fixture starts in the capture, every sample within `TOLERANCE` of it.
+fn find_fixture(heard: &[i16]) -> Option<usize> {
+    let fixture = samples(fixture_pcm());
+    let close = |a: i16, b: i16| (i32::from(a) - i32::from(b)).abs() <= TOLERANCE;
+    heard
+        .windows(fixture.len())
+        .position(|window| window.iter().zip(&fixture).all(|(a, b)| close(*a, *b)))
 }
 
 fn scenario(headless: Option<Headless>, label: &str) {
@@ -579,19 +555,18 @@ fn scenario(headless: Option<Headless>, label: &str) {
     );
     let feeder = headless.feed(go.clone(), quit.clone());
     let capture = session.capture(&chosen).unwrap();
-    let mut first = None;
-    let captured = pump(capture, Duration::from_secs(20), |all| {
-        let first = *first.get_or_insert(all.len());
+    // The tunnel can drop what is fed while the stream is still settling: the fixture is fed
+    // repeatedly and the capture ends at the first copy that arrives whole.
+    let captured = pump(capture, Duration::from_secs(15), |all| {
         go.store(true, Ordering::Relaxed);
-        all.len() >= first + fixture_pcm().len() + BYTES_PER_SECOND
+        find_fixture(&samples(all)).is_some()
     });
     quit.store(true, Ordering::Relaxed);
     feeder.join().unwrap();
-    let (tolerance, slip) = headless.tolerance;
-    let worst = compare_with_fixture(label, &captured, slip);
-    assert!(
-        worst <= tolerance,
-        "{label}: largest difference {worst} above {tolerance}"
+    let start = find_fixture(&samples(&captured)).expect("the fixture never arrived whole");
+    println!(
+        "audio-headless: {label}: fixture found at sample {start} within {} bytes captured, largest difference {TOLERANCE} allowed",
+        captured.len()
     );
 
     headless.remove_fixture();

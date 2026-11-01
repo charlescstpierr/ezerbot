@@ -42,7 +42,7 @@ L'échec ou l'arrêt du run de retour ferme son reçu sans relance automatique.
 | Fin normale du Chat initial | Les enfants background continuent. |
 | Arrêt explicite du Chat initial | Le reçu et les descendants sont annulés, même si le Chat était déjà fini. |
 | Reset du fil | Les retours en attente sont annulés avant le marqueur. |
-| Suppression du fil ou d'un bot concerné | Les gardes de lancement et la réconciliation refusent le retour. |
+| Suppression du fil ou d'un bot concerné | Les gardes de lancement et la réconciliation refusent le retour et ses descendants. |
 | Suppression du fil enfant | Le groupe est annulé. |
 | Régénération | L'ancienne attempt et son reçu sont invalidés avant la nouvelle. |
 | Arrêt d'un enfant | Son état terminal participe au résumé groupé. Aucun résultat tardif ne le remplace. |

@@ -315,19 +315,6 @@ fn members_finished(conn: &Connection, edges: &[Delegation]) -> Result<bool> {
 }
 
 pub(super) fn available(ctx: &Context<'_>, run: &Run) -> Result<bool> {
-    if let Trigger::DelegationReturn { parent_run_id } = &run.trigger {
-        let Some(group) = get(ctx.connection, parent_run_id)? else {
-            return Ok(false);
-        };
-        let Some(parent) = store::get(ctx.connection, parent_run_id)? else {
-            return Ok(false);
-        };
-        return Ok(group.state == State::Started
-            && return_matches(&group, &parent, run)
-            && normal_finish(&parent)
-            && origin_available(ctx.connection, &group, &parent)?
-            && member_edges(ctx.connection, &group)?.is_some());
-    }
     let mut current = run.clone();
     let mut seen = HashSet::new();
     while let Trigger::Delegation { delegation_id } = &current.trigger {
@@ -347,7 +334,20 @@ pub(super) fn available(ctx: &Context<'_>, run: &Run) -> Result<bool> {
         }
         current = parent;
     }
-    Ok(true)
+    let Trigger::DelegationReturn { parent_run_id } = &current.trigger else {
+        return Ok(true);
+    };
+    let Some(group) = get(ctx.connection, parent_run_id)? else {
+        return Ok(false);
+    };
+    let Some(parent) = store::get(ctx.connection, parent_run_id)? else {
+        return Ok(false);
+    };
+    Ok(group.state == State::Started
+        && return_matches(&group, &parent, &current)
+        && normal_finish(&parent)
+        && origin_available(ctx.connection, &group, &parent)?
+        && member_edges(ctx.connection, &group)?.is_some())
 }
 
 pub(super) fn return_origin(ctx: &Context<'_>, request: &ContextRequest) -> Result<Option<String>> {

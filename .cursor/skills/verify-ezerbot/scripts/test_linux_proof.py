@@ -117,6 +117,14 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("details.mcp-add[open]", view["ready"])
         self.assertIn("details.mcp-add[open]", view["visible"])
 
+    def test_missing_capture_with_valid_manifest_is_a_tool_error(self) -> None:
+        evidence = self.evidence()
+        (evidence / "captures" / "home-dark.png").unlink()
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertIn("## Erreur d’outil", lines)
+        self.assertIn("`captures/home-dark.png` absente alors que le pilote la déclare capturée.", lines)
+
     def test_failed_driver_exit_is_fix_even_with_complete_captures(self) -> None:
         status, lines = linux_verdict.verdict(self.evidence(), SHA, drive_status=134)
         self.assertEqual(status, "FIX")

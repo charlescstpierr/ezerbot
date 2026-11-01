@@ -142,6 +142,8 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
         item = reported.get((feature, view), {"feature": feature, "view": view, "file": f"{view}.png", "status": "absent"})
         shot = captures / f"{view}.png"
         passed = item["status"] == "pass" and item.get("file") == f"{view}.png" and shot.is_file() and (FEATURES_DIR / f"{feature}.md").is_file()
+        if item["status"] == "pass" and not shot.is_file():
+            problems.append(f"`captures/{view}.png` absente alors que le pilote la déclare capturée.")
         if passed and manifest is not None:
             data = shot.read_bytes()
             if recorded.get(f"{view}.png") != (hashlib.sha256(data).hexdigest(), len(data)):

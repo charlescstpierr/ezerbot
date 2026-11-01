@@ -1,0 +1,496 @@
+//! Real screen sources. Compiled in release and in the unit test harness only:
+//! a debug binary holds no capture code, and only `Env::read` touches the session.
+use super::{
+    image::{Bounds, Shot},
+    Refusal, Source,
+};
+use dbus::{
+    arg::{PropMap, RefArg, Variant},
+    blocking::{stdintf::org_freedesktop_dbus::Properties, Connection},
+    channel::Channel,
+    message::MatchRule,
+    Message, Path,
+};
+use gtk::{
+    gdk_pixbuf::{Colorspace, Pixbuf},
+    glib::Bytes,
+};
+use nix::fcntl::OFlag;
+use std::{
+    ffi::CString,
+    fs::{self, OpenOptions},
+    io::{Cursor, Read},
+    os::{raw::c_ulong, unix::fs::OpenOptionsExt},
+    sync::{
+        mpsc::{self, Receiver},
+        Once,
+    },
+    time::{Duration, Instant},
+};
+use x11_dl::xlib::{self, Xlib};
+
+pub(super) const DESKTOP: &str = "org.freedesktop.portal.Desktop";
+pub(super) const OBJECT: &str = "/org/freedesktop/portal/desktop";
+pub(super) const REQUEST: &str = "org.freedesktop.portal.Request";
+const SCREENSHOT: &str = "org.freedesktop.portal.Screenshot";
+const PROBE_LIMIT: Duration = Duration::from_secs(1);
+const CALL_LIMIT: Duration = Duration::from_secs(5);
+// Under the 20 s of Client::action: a slow first consent fails one call, not the lease.
+const ANSWER_LIMIT: Duration = Duration::from_secs(18);
+const FILE_LIMIT: u64 = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Display {
+    Wayland,
+    X11,
+    None,
+}
+
+impl Display {
+    pub fn of_session(wayland: bool, session_type: Option<&str>, x11: bool) -> Self {
+        if wayland || session_type == Some("wayland") {
+            Self::Wayland
+        } else if x11 {
+            Self::X11
+        } else {
+            Self::None
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Route {
+    Portal,
+    X11Root,
+}
+
+/// XWayland's root shows only X clients, so Wayland never falls back to it: the
+/// model would receive a false desktop.
+pub fn route(display: Display, portal: bool) -> Result<Route, Refusal> {
+    match (display, portal) {
+        (Display::None, _) => Err(Refusal::NoDisplay),
+        (_, true) => Ok(Route::Portal),
+        (Display::X11, false) => Ok(Route::X11Root),
+        (Display::Wayland, false) => Err(Refusal::WaylandNeedsPortal),
+    }
+}
+
+pub struct BusAddress(String);
+pub struct XDisplay(CString);
+
+impl BusAddress {
+    #[cfg(not(debug_assertions))]
+    fn session() -> Option<Self> {
+        std::env::var("DBUS_SESSION_BUS_ADDRESS").ok().map(Self)
+    }
+
+    #[cfg(test)]
+    pub fn private(address: String) -> Self {
+        Self(address)
+    }
+}
+
+impl XDisplay {
+    #[cfg(not(debug_assertions))]
+    fn session() -> Option<Self> {
+        let name = std::env::var("DISPLAY").ok()?;
+        CString::new(name).ok().map(Self)
+    }
+
+    #[cfg(test)]
+    pub fn private(name: &str) -> Self {
+        Self(CString::new(name).unwrap())
+    }
+}
+
+pub struct Env {
+    pub display: Display,
+    pub bus: Option<BusAddress>,
+    pub x: Option<XDisplay>,
+}
+
+impl Env {
+    #[cfg(not(debug_assertions))]
+    pub fn read() -> Self {
+        let set = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+        let session = std::env::var("XDG_SESSION_TYPE").ok();
+        let x = XDisplay::session();
+        Self {
+            display: Display::of_session(set("WAYLAND_DISPLAY"), session.as_deref(), x.is_some()),
+            bus: BusAddress::session(),
+            x,
+        }
+    }
+}
+
+/// Connects without capturing. It never opens a dialog, so the settings route
+/// can call it too.
+pub fn open(env: &Env) -> Result<Source, Refusal> {
+    let portal = env
+        .bus
+        .as_ref()
+        .and_then(|bus| Portal::open(bus).ok())
+        .filter(Portal::available);
+    match (route(env.display, portal.is_some())?, portal) {
+        (Route::Portal, Some(portal)) => Ok(Source::Portal(portal)),
+        _ => X11Root::open(env.x.as_ref().ok_or(Refusal::NoDisplay)?).map(Source::X11),
+    }
+}
+
+pub struct Portal {
+    conn: Connection,
+    sender: String,
+    next: u64,
+}
+
+impl Portal {
+    pub fn open(address: &BusAddress) -> Result<Self, Refusal> {
+        let mut channel = Channel::open_private(&address.0).map_err(|_| Refusal::Portal)?;
+        channel.register().map_err(|_| Refusal::Portal)?;
+        let conn = Connection::from(channel);
+        let sender = conn.unique_name().replace(':', "").replace('.', "_");
+        Ok(Self {
+            conn,
+            sender,
+            next: 0,
+        })
+    }
+
+    fn available(&self) -> bool {
+        self.conn
+            .with_proxy(DESKTOP, OBJECT, PROBE_LIMIT)
+            .get::<u32>(SCREENSHOT, "version")
+            .is_ok()
+    }
+
+    /// The handle is computed, not received: the match exists before the call,
+    /// so a portal that answers before its method return is still heard.
+    pub fn shot(&mut self, give_up: &dyn Fn() -> bool) -> Result<Shot, Refusal> {
+        self.next += 1;
+        let token = format!("ezerbot{}", self.next);
+        let handle = format!("{OBJECT}/request/{}/{token}", self.sender);
+        let path = Path::new(handle).map_err(|_| Refusal::Portal)?;
+        let (answer, answers) = mpsc::channel();
+        let rule = MatchRule::new_signal(REQUEST, "Response")
+            .with_path(path.clone())
+            .with_sender(DESKTOP);
+        let listening = self
+            .conn
+            .add_match(
+                rule,
+                move |(code, results): (u32, PropMap), _: &Connection, _: &Message| {
+                    let uri = results.get("uri").and_then(|value| value.0.as_str());
+                    let _ = answer.send((code, uri.map(str::to_owned)));
+                    true
+                },
+            )
+            .map_err(|_| Refusal::Portal)?;
+        let outcome = self.ask(&token, &path, &answers, give_up);
+        let _ = self.conn.remove_match(listening);
+        let uri = outcome?;
+        let pixbuf =
+            Pixbuf::from_read(Cursor::new(take_file(&uri)?)).map_err(|_| Refusal::Capture)?;
+        let bounds = Bounds {
+            x: 0.0,
+            y: 0.0,
+            w: f64::from(pixbuf.width()),
+            h: f64::from(pixbuf.height()),
+        };
+        Ok(Shot { pixbuf, bounds })
+    }
+
+    fn ask(
+        &self,
+        token: &str,
+        path: &Path<'static>,
+        answers: &Receiver<(u32, Option<String>)>,
+        give_up: &dyn Fn() -> bool,
+    ) -> Result<String, Refusal> {
+        let mut options = PropMap::new();
+        options.insert("handle_token".into(), Variant(Box::new(token.to_owned())));
+        options.insert("interactive".into(), Variant(Box::new(false)));
+        options.insert("modal".into(), Variant(Box::new(false)));
+        let (handle,): (Path,) = self
+            .conn
+            .with_proxy(DESKTOP, OBJECT, CALL_LIMIT)
+            .method_call(SCREENSHOT, "Screenshot", ("", options))
+            .map_err(|_| Refusal::Portal)?;
+        if handle != *path {
+            return Err(Refusal::Portal);
+        }
+        let deadline = Instant::now() + ANSWER_LIMIT;
+        loop {
+            match answers.try_recv() {
+                Ok((0, Some(uri))) => return Ok(uri),
+                Ok((0, None)) => return Err(Refusal::Portal),
+                Ok(_) => return Err(Refusal::Denied),
+                Err(_) => {}
+            }
+            if give_up() || Instant::now() >= deadline {
+                let _: Result<(), _> = self
+                    .conn
+                    .with_proxy(DESKTOP, path.clone(), PROBE_LIMIT)
+                    .method_call(REQUEST, "Close", ());
+                return Err(Refusal::Portal);
+            }
+            self.conn
+                .process(Duration::from_millis(100))
+                .map_err(|_| Refusal::Portal)?;
+        }
+    }
+}
+
+/// Backends write into the person's folders, and a lease leaves no desktop
+/// pixels behind. The open descriptor outlives the name.
+fn take_file(uri: &str) -> Result<Vec<u8>, Refusal> {
+    let path = url::Url::parse(uri)
+        .ok()
+        .filter(|url| url.scheme() == "file")
+        .and_then(|url| url.to_file_path().ok())
+        .ok_or(Refusal::Portal)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK).bits())
+        .open(&path)
+        .map_err(|_| Refusal::Portal)?;
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return Err(Refusal::Portal);
+    }
+    fs::remove_file(&path).map_err(|_| Refusal::Capture)?;
+    let mut bytes = Vec::new();
+    file.take(FILE_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Refusal::Capture)?;
+    if bytes.len() as u64 > FILE_LIMIT {
+        return Err(Refusal::TooLarge);
+    }
+    Ok(bytes)
+}
+
+pub struct X11Root {
+    xlib: Box<Xlib>,
+    display: *mut xlib::Display,
+}
+
+/// Must run before any other Xlib call of the process, GTK's included.
+pub fn init_x_threads() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if let Ok(xlib) = Xlib::open() {
+            unsafe { (xlib.XInitThreads)() };
+        }
+    });
+}
+
+impl X11Root {
+    pub fn open(address: &XDisplay) -> Result<Self, Refusal> {
+        init_x_threads();
+        let xlib = Box::new(Xlib::open().map_err(|_| Refusal::NoDisplay)?);
+        let display = unsafe { (xlib.XOpenDisplay)(address.0.as_ptr()) };
+        if display.is_null() {
+            return Err(Refusal::NoDisplay);
+        }
+        Ok(Self { xlib, display })
+    }
+
+    pub fn shot(&mut self) -> Result<Shot, Refusal> {
+        let (width, height, rgb) = unsafe {
+            let x = &self.xlib;
+            let screen = (x.XDefaultScreen)(self.display);
+            let (width, height) = (
+                (x.XDisplayWidth)(self.display, screen),
+                (x.XDisplayHeight)(self.display, screen),
+            );
+            let image = (x.XGetImage)(
+                self.display,
+                (x.XDefaultRootWindow)(self.display),
+                0,
+                0,
+                width as u32,
+                height as u32,
+                !0,
+                xlib::ZPixmap,
+            );
+            if image.is_null() {
+                return Err(Refusal::Capture);
+            }
+            let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+            let masks = [(*image).red_mask, (*image).green_mask, (*image).blue_mask];
+            for y in 0..height {
+                for x_position in 0..width {
+                    let pixel = (x.XGetPixel)(image, x_position, y);
+                    rgb.extend(masks.map(|mask| channel(pixel, mask)));
+                }
+            }
+            (x.XDestroyImage)(image);
+            (width, height, rgb)
+        };
+        let pixbuf = Pixbuf::from_bytes(
+            &Bytes::from_owned(rgb),
+            Colorspace::Rgb,
+            false,
+            8,
+            width,
+            height,
+            width * 3,
+        );
+        let bounds = Bounds {
+            x: 0.0,
+            y: 0.0,
+            w: f64::from(width),
+            h: f64::from(height),
+        };
+        Ok(Shot { pixbuf, bounds })
+    }
+}
+
+impl Drop for X11Root {
+    fn drop(&mut self) {
+        unsafe { (self.xlib.XCloseDisplay)(self.display) };
+    }
+}
+
+fn channel(pixel: c_ulong, mask: c_ulong) -> u8 {
+    if mask == 0 {
+        return 0;
+    }
+    let shift = mask.trailing_zeros();
+    (((pixel & mask) >> shift) * 255 / (mask >> shift)) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{image::encode, xvfb::Xvfb};
+    use super::*;
+    use gtk::glib;
+
+    struct Painter {
+        xlib: Xlib,
+        display: *mut xlib::Display,
+    }
+
+    impl Painter {
+        fn on(name: &str) -> Self {
+            let xlib = Xlib::open().unwrap();
+            let address = CString::new(name).unwrap();
+            let display = unsafe { (xlib.XOpenDisplay)(address.as_ptr()) };
+            assert!(!display.is_null());
+            Self { xlib, display }
+        }
+
+        /// The server paints a window's background by itself when it is mapped.
+        fn rectangle(&self, x: i32, y: i32, size: u32, [red, green, blue]: [u8; 3]) {
+            let color = u64::from(u32::from_be_bytes([0, red, green, blue]));
+            unsafe {
+                let root = (self.xlib.XDefaultRootWindow)(self.display);
+                let window = (self.xlib.XCreateSimpleWindow)(
+                    self.display,
+                    root,
+                    x,
+                    y,
+                    size,
+                    size,
+                    0,
+                    0,
+                    color,
+                );
+                (self.xlib.XMapWindow)(self.display, window);
+                (self.xlib.XSync)(self.display, 0);
+            }
+        }
+    }
+
+    impl Drop for Painter {
+        fn drop(&mut self) {
+            unsafe { (self.xlib.XCloseDisplay)(self.display) };
+        }
+    }
+
+    fn pixel(image: &Pixbuf, x: usize, y: usize) -> [u8; 3] {
+        let bytes = image.read_pixel_bytes();
+        let start = y * image.rowstride() as usize + x * image.n_channels() as usize;
+        [bytes[start], bytes[start + 1], bytes[start + 2]]
+    }
+
+    fn decoded(data_url: &str) -> Pixbuf {
+        let png = data_url.strip_prefix("data:image/png;base64,").unwrap();
+        Pixbuf::from_read(Cursor::new(glib::base64_decode(png).to_vec())).unwrap()
+    }
+
+    #[test]
+    fn xgetimage_reads_a_known_pattern() {
+        const RED: [u8; 3] = [255, 0, 0];
+        const GREEN: [u8; 3] = [0, 255, 0];
+        const BLUE: [u8; 3] = [0, 0, 255];
+        const PLUM: [u8; 3] = [18, 52, 86];
+        let server = Xvfb::start("640x480x24");
+        let painter = Painter::on(&server.name);
+        painter.rectangle(10, 10, 100, RED);
+        painter.rectangle(200, 10, 100, GREEN);
+        painter.rectangle(10, 200, 100, BLUE);
+        painter.rectangle(200, 200, 100, PLUM);
+        let mut root = X11Root::open(&XDisplay::private(&server.name)).unwrap();
+        let shot = root.shot().unwrap();
+        assert_eq!((shot.pixbuf.width(), shot.pixbuf.height()), (640, 480));
+        let encoded = encode(&shot).unwrap();
+        for image in [shot.pixbuf, decoded(&encoded.data_url)] {
+            assert_eq!(pixel(&image, 60, 60), RED);
+            assert_eq!(pixel(&image, 250, 60), GREEN);
+            assert_eq!(pixel(&image, 60, 250), BLUE);
+            assert_eq!(pixel(&image, 250, 250), PLUM);
+        }
+    }
+
+    #[test]
+    fn a_large_screen_is_sent_at_1280_wide_and_keeps_its_bounds() {
+        let server = Xvfb::start("2560x1440x24");
+        let mut root = X11Root::open(&XDisplay::private(&server.name)).unwrap();
+        let shot = root.shot().unwrap();
+        let encoded = encode(&shot).unwrap();
+        assert_eq!((encoded.width, encoded.height), (1280, 720));
+        assert_eq!(shot.bounds.w, 2560.0);
+        assert_eq!(shot.bounds.h, 1440.0);
+        let image = decoded(&encoded.data_url);
+        assert_eq!((image.width(), image.height()), (1280, 720));
+    }
+
+    #[test]
+    fn a_display_that_does_not_exist_is_refused() {
+        let missing = XDisplay::private(":59999");
+        assert!(matches!(X11Root::open(&missing), Err(Refusal::NoDisplay)));
+    }
+
+    #[test]
+    fn the_session_picks_the_display_and_wayland_wins() {
+        for (wayland, kind, x11, expected) in [
+            (true, None, true, Display::Wayland),
+            (false, Some("wayland"), true, Display::Wayland),
+            (false, Some("x11"), true, Display::X11),
+            (false, None, true, Display::X11),
+            (false, Some("tty"), false, Display::None),
+        ] {
+            assert_eq!(Display::of_session(wayland, kind, x11), expected);
+        }
+    }
+
+    #[test]
+    fn the_route_never_shows_a_false_desktop() {
+        assert_eq!(route(Display::Wayland, true), Ok(Route::Portal));
+        assert_eq!(route(Display::X11, true), Ok(Route::Portal));
+        assert_eq!(route(Display::X11, false), Ok(Route::X11Root));
+        assert_eq!(
+            route(Display::Wayland, false),
+            Err(Refusal::WaylandNeedsPortal)
+        );
+        assert_eq!(route(Display::None, true), Err(Refusal::NoDisplay));
+        assert_eq!(route(Display::None, false), Err(Refusal::NoDisplay));
+    }
+
+    #[test]
+    fn a_pixel_scales_whatever_the_channel_depth() {
+        assert_eq!(channel(0xff0000, 0xff0000), 255);
+        assert_eq!(channel(0x123456, 0xff00), 0x34);
+        assert_eq!(channel(0xf800, 0xf800), 255);
+        assert_eq!(channel(0x1234, 0), 0);
+    }
+}

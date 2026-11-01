@@ -1,4 +1,12 @@
 //! The image sent to the model is the only coordinate space.
+use super::Refusal;
+use gtk::{
+    gdk_pixbuf::{InterpType, Pixbuf},
+    glib,
+};
+
+const MAX_WIDTH: i32 = 1280;
+const MAX_PNG: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bounds {
@@ -14,10 +22,43 @@ pub struct ScreenPoint {
     pub y: f64,
 }
 
+/// `bounds` is the screen area the pixels came from, in that source's own units.
+pub struct Shot {
+    pub pixbuf: Pixbuf,
+    pub bounds: Bounds,
+}
+
 pub struct Encoded {
     pub data_url: String,
     pub width: i32,
     pub height: i32,
+}
+
+pub fn encode(shot: &Shot) -> Result<Encoded, Refusal> {
+    let (width, height) = (shot.pixbuf.width(), shot.pixbuf.height());
+    let sent = if width > MAX_WIDTH {
+        let scaled = f64::from(MAX_WIDTH) * f64::from(height) / f64::from(width);
+        shot.pixbuf
+            .scale_simple(
+                MAX_WIDTH,
+                (scaled.round() as i32).max(1),
+                InterpType::Bilinear,
+            )
+            .ok_or(Refusal::Capture)?
+    } else {
+        shot.pixbuf.clone()
+    };
+    let png = sent
+        .save_to_bufferv("png", &[])
+        .map_err(|_| Refusal::Capture)?;
+    if png.len() > MAX_PNG {
+        return Err(Refusal::TooLarge);
+    }
+    Ok(Encoded {
+        data_url: format!("data:image/png;base64,{}", glib::base64_encode(&png)),
+        width: sent.width(),
+        height: sent.height(),
+    })
 }
 
 pub fn image_point(x: f64, y: f64, width: i32, height: i32, bounds: Bounds) -> Option<ScreenPoint> {

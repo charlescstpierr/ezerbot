@@ -6,15 +6,24 @@ export EZERBOT_VERIFY_LOGIN_HOME="${EZERBOT_VERIFY_LOGIN_HOME:-$HOME}"
 # Linux (plateforme principale) : sans choix explicite de navigateur, preuve sous Xvfb privé.
 # Ce chemin s'appelle `--sphere linux` (défaut sous Linux) ; toute autre sphère, `all` compris,
 # garde le parcours de prove.py, inchangé. --patch et EZERBOT_VERIFY_PATCH_ID suivent le chemin choisi.
-linux_xvfb=1
-args=("$@")
-for ((i = 0; i < ${#args[@]}; i++)); do
-  case ${args[i]} in
-    --evidence | --patch) i=$((i + 1)) ;;
-    --sphere) [[ ${args[i + 1]:-} == linux ]] || linux_xvfb=0; i=$((i + 1)) ;;
-    *) linux_xvfb=0 ;;
+# Analyse stricte : `--opt valeur` ou `--opt=valeur` pour --evidence, --sphere, --patch ; tout
+# autre argument est refusé (code 2) au lieu de retomber silencieusement sur un autre parcours.
+usage() { printf 'prove.sh: %s\nUsage : prove.sh [--sphere <sphère>|linux] [--evidence <dossier>] [--patch <patch-id>]\n' "$1" >&2; exit 2; }
+sphere=''
+args=()
+while (($#)); do
+  case $1 in
+    --evidence=* | --sphere=* | --patch=*) name=${1%%=*}; value=${1#*=}; shift ;;
+    --evidence | --sphere | --patch) [[ $# -ge 2 ]] || usage "$1 exige une valeur."; name=$1; value=$2; shift 2 ;;
+    *) usage "argument inconnu : $1" ;;
   esac
+  [[ -n $value ]] || usage "$name exige une valeur non vide."
+  [[ $name != --sphere ]] || sphere=$value
+  args+=("$name" "$value")
 done
+set -- ${args[@]+"${args[@]}"}
+linux_xvfb=0
+[[ -z $sphere || $sphere == linux ]] && linux_xvfb=1
 if [[ "$(uname -s)" == "Linux" && -z "${EZERBOT_VERIFY_BROWSER:-}" && $linux_xvfb == 1 ]]; then
   exec bash "$DIR/prove-linux.sh" "$@"
 fi

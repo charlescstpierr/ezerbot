@@ -12,7 +12,7 @@
     if (query.get("notification")) { launch = { id: query.get("notification"), reply: query.get("reply") === "1" }; window.history?.replaceState(null, "", window.location.pathname); }
   } catch { /* no launch destination */ }
   let listSignature = "", settingsSignature = "";
-  const bridge = () => window.webkit?.messageHandlers?.ezerbotNotifications;
+  const bridge = () => window.EzerbotShell?.notifications ?? window.webkit?.messageHandlers?.ezerbotNotifications;
   async function native(command, fields = {}) {
     if (!bridge()) return { status: "unavailable" };
     return await bridge().postMessage({ command, ...fields });

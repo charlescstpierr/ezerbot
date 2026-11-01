@@ -1,0 +1,436 @@
+//! The wrapper against real freedesktop services on a throwaway bus and HOME: the `ezerbot://`
+//! registration, `xdg-open`, and the notification bridge.
+#![cfg(all(target_os = "linux", debug_assertions))]
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
+#[path = "support/linux_host.rs"]
+mod linux_host;
+use grokbot_linux_desktop::{
+    notifications::{Alert, Notifier},
+    open,
+    testing::{recording_handler, tools, wait_for, FakeNotifications, Home, PrivateBus},
+};
+use grokbot_wrapper::App;
+use rusqlite::{params, Connection};
+use serde_json::json;
+use std::{ffi::OsStr, fs, path::PathBuf, process::Command};
+
+const BODY: &str = "Ouvrez Ezerbot pour consulter cet événement.";
+
+fn register(home: &Home, handler: &std::path::Path) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"));
+    home.env(&mut command)
+        .arg("--register-url-handler")
+        .arg(handler);
+    command.output().unwrap()
+}
+
+#[test]
+fn register_url_handler_makes_xdg_open_start_the_handler_with_the_exact_link() {
+    tools(&["xdg-open", "xdg-mime"]);
+    let home = Home::new("ezw");
+    let log = home.path().join("received.log");
+    let handler = recording_handler(home.path(), &log);
+    for _ in 0..2 {
+        let output = register(&home, &handler);
+        assert!(output.status.success());
+        let desktop = home
+            .path()
+            .join("data/applications/ca.ezerbot.Ezerbot.desktop");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            desktop.to_str().unwrap()
+        );
+    }
+    let link = "ezerbot://app/v1/thread?id=abc";
+    let mut command = open::command(OsStr::new(link));
+    home.env(&mut command);
+    open::run(command).unwrap();
+    wait_for("the handler to record the link", || {
+        fs::read_to_string(&log).is_ok_and(|text| text == format!("{link}\n"))
+    });
+}
+
+#[test]
+fn xdg_open_reaches_a_handler_whose_path_needs_quoting() {
+    tools(&["xdg-open", "xdg-mime"]);
+    for folder in [
+        "Mon Ezerbot",
+        "100%",
+        "a=b",
+        "a\"b'c`d$e\\f&g(h)#i*j~k;l<m>n|o?p",
+    ] {
+        let home = Home::new("ezw");
+        let log = home.path().join("received.log");
+        let directory = home.path().join(folder);
+        fs::create_dir(&directory).unwrap();
+        let handler = recording_handler(&directory, &log);
+        assert!(register(&home, &handler).status.success(), "{folder}");
+        let link = "ezerbot://app/v1/thread?id=abc";
+        let mut command = open::command(OsStr::new(link));
+        home.env(&mut command);
+        open::run(command).expect(folder);
+        wait_for(folder, || {
+            fs::read_to_string(&log).is_ok_and(|text| text == format!("{link}\n"))
+        });
+    }
+}
+
+#[test]
+fn a_data_folder_that_needs_quoting_refuses_a_path_that_needs_quoting() {
+    let home = Home::new("ezw");
+    let data = home.path().join("Mes données");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"));
+    home.env(&mut command)
+        .env("XDG_DATA_HOME", &data)
+        .args(["--register-url-handler", "/opt/Mon Ezerbot/ezerbot"]);
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    let message = String::from_utf8(output.stderr).unwrap();
+    assert!(message.contains("dossier de données"), "{message}");
+    assert!(output.stdout.is_empty());
+    assert!(!data
+        .join("applications/ca.ezerbot.Ezerbot.desktop")
+        .exists());
+}
+
+#[test]
+fn register_url_handler_fails_in_french_when_xdg_mime_is_missing() {
+    let home = Home::new("ezw");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"));
+    home.env(&mut command)
+        .env("PATH", home.path().join("etc"))
+        .args(["--register-url-handler", "/opt/ezerbot"]);
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    let message = String::from_utf8(output.stderr).unwrap();
+    assert!(message.contains("n’a pas pu être enregistré"), "{message}");
+    assert!(output.stdout.is_empty());
+}
+
+struct Desk {
+    bus: PrivateBus,
+    db: PathBuf,
+    conversation: String,
+    home: Home,
+}
+impl Desk {
+    fn new() -> Self {
+        tools(&["dbus-daemon", "xdg-open", "xdg-mime"]);
+        let home = Home::new("ezw");
+        let bus = PrivateBus::new(&home);
+        let db = home.path().join("workspace.sqlite");
+        let mut app = App::open(&db).unwrap();
+        let conversation = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]
+            ["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO wrapper_notifications VALUES ('local-workspace','reply:one','reply',?1,'card-1','Réponse terminée',1,1,1)",
+                params![conversation],
+            )
+            .unwrap();
+        Self {
+            bus,
+            db,
+            conversation,
+            home,
+        }
+    }
+    fn add_notification(&self, id: &str) {
+        Connection::open(&self.db)
+            .unwrap()
+            .execute(
+                "INSERT INTO wrapper_notifications VALUES ('local-workspace',?1,'reply',?2,'card-2','Réponse terminée',2,1,1)",
+                params![id, self.conversation],
+            )
+            .unwrap();
+    }
+    fn host(&self, with_bus: bool) -> linux_host::Host {
+        linux_host::launch(
+            &self.home,
+            &self.db,
+            with_bus.then(|| self.bus.address()),
+            None,
+        )
+    }
+    fn deliver(&self, host: &linux_host::Host, id: &str) -> serde_json::Value {
+        host.post(
+            "/api/notifications/native",
+            json!({"command":"deliver","event":{"id":id,"kind":"reply","conversation_id":"x","card_id":"y","title":"Titre venu du moteur de rendu"}}),
+        )
+    }
+}
+
+#[test]
+fn the_native_route_reports_the_service_and_delivers_the_stored_title_with_a_fixed_body() {
+    let desk = Desk::new();
+    let server = FakeNotifications::new(&desk.bus);
+    let host = desk.host(true);
+    for command in ["status", "authorize"] {
+        let reply = host.post("/api/notifications/native", json!({ "command": command }));
+        assert_eq!(reply, json!({"status":"granted"}));
+    }
+    let presence = host.post(
+        "/api/notifications/native",
+        json!({"command":"presence","conversation_id":"x","visible":true}),
+    );
+    assert_eq!(presence, json!({"status":"ok"}));
+    assert!(server.calls().is_empty());
+
+    assert_eq!(
+        desk.deliver(&host, "reply:one"),
+        json!({"status":"delivered"})
+    );
+    let calls = server.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].summary, "Réponse terminée");
+    assert_eq!(calls[0].body, BODY);
+    assert_eq!(calls[0].app_name, "Ezerbot");
+
+    let unknown = host
+        .try_post(
+            "/api/notifications/native",
+            json!({"command":"deliver","event":{"id":"reply:absent"}}),
+        )
+        .unwrap_err();
+    assert!(matches!(*unknown, ureq::Error::Status(404, _)));
+    let stray = host
+        .try_post(
+            "/api/notifications/native",
+            json!({"command":"status","title":"x"}),
+        )
+        .unwrap_err();
+    assert!(matches!(*stray, ureq::Error::Status(400, _)));
+    assert_eq!(server.calls().len(), 1);
+}
+
+#[test]
+fn without_the_session_override_the_native_route_is_disabled_and_sends_nothing() {
+    let desk = Desk::new();
+    let server = FakeNotifications::new(&desk.bus);
+    let host = linux_host::launch(&desk.home, &desk.db, None, Some(desk.bus.address()));
+    assert_eq!(
+        host.post("/api/notifications/native", json!({"command":"status"})),
+        json!({"status":"disabled"})
+    );
+    assert_eq!(
+        desk.deliver(&host, "reply:one"),
+        json!({"status":"disabled"})
+    );
+    assert!(server.calls().is_empty());
+}
+
+#[test]
+fn a_lost_notification_server_is_an_error_and_the_next_delivery_reconnects() {
+    let desk = Desk::new();
+    let host = desk.host(true);
+    assert_eq!(desk.deliver(&host, "reply:one"), json!({"status":"error"}));
+    let server = FakeNotifications::new(&desk.bus);
+    assert_eq!(
+        desk.deliver(&host, "reply:one"),
+        json!({"status":"delivered"})
+    );
+    drop(server);
+    assert_eq!(desk.deliver(&host, "reply:one"), json!({"status":"error"}));
+    let server = FakeNotifications::new(&desk.bus);
+    assert_eq!(
+        desk.deliver(&host, "reply:one"),
+        json!({"status":"delivered"})
+    );
+    assert_eq!(server.calls().len(), 1);
+}
+
+#[test]
+fn a_failed_delivery_keeps_the_destinations_of_the_notifications_still_on_the_desktop() {
+    let desk = Desk::new();
+    let log = desk.home.path().join("clicked.log");
+    let handler = recording_handler(desk.home.path(), &log);
+    assert!(register(&desk.home, &handler).status.success());
+    let server = FakeNotifications::new(&desk.bus);
+    let host = desk.host(true);
+    assert_eq!(
+        desk.deliver(&host, "reply:one"),
+        json!({"status":"delivered"})
+    );
+    server.refuse_next();
+    assert_eq!(desk.deliver(&host, "reply:one"), json!({"status":"error"}));
+    assert_eq!(
+        host.post("/api/notifications/native", json!({"command":"status"})),
+        json!({"status":"granted"})
+    );
+    server.click(1);
+    let link = "ezerbot://app/v1/notification?id=reply%3Aone\n";
+    wait_for("the handler to receive the event link", || {
+        fs::read_to_string(&log).is_ok_and(|text| text == link)
+    });
+}
+
+#[test]
+fn after_the_bus_restarts_the_next_delivery_reconnects_and_forgets_the_old_destinations() {
+    let mut desk = Desk::new();
+    let log = desk.home.path().join("clicked.log");
+    let handler = recording_handler(desk.home.path(), &log);
+    assert!(register(&desk.home, &handler).status.success());
+    desk.add_notification("reply:two");
+    // First on both buses: a new bus hands out the same unique name again.
+    let server = FakeNotifications::new(&desk.bus);
+    let host = desk.host(true);
+    assert_eq!(
+        desk.deliver(&host, "reply:one"),
+        json!({"status":"delivered"})
+    );
+    drop(server);
+    desk.bus.restart(&desk.home);
+    let server = FakeNotifications::new(&desk.bus);
+    assert_eq!(
+        desk.deliver(&host, "reply:two"),
+        json!({"status":"delivered"})
+    );
+    assert_eq!(server.calls().len(), 1);
+    server.click(1);
+    let link = "ezerbot://app/v1/notification?id=reply%3Atwo\n";
+    wait_for("the handler to receive the event of the new bus", || {
+        fs::read_to_string(&log).is_ok_and(|text| text == link)
+    });
+}
+
+#[test]
+fn quitting_closes_the_notifications_whose_click_would_reach_nobody() {
+    let desk = Desk::new();
+    desk.add_notification("reply:two");
+    let server = FakeNotifications::new(&desk.bus);
+    let mut host = desk.host(true);
+    desk.deliver(&host, "reply:one");
+    desk.deliver(&host, "reply:two");
+    assert_eq!(server.closed(), [] as [u32; 0]);
+    assert!(host.quit().success());
+    assert_eq!(server.closed(), [1, 2]);
+}
+
+#[test]
+fn past_the_limit_the_oldest_notification_is_closed_and_every_other_click_still_works() {
+    let desk = Desk::new();
+    let log = desk.home.path().join("clicked.log");
+    let handler = recording_handler(desk.home.path(), &log);
+    assert!(register(&desk.home, &handler).status.success());
+    desk.add_notification("reply:two");
+    let server = FakeNotifications::new(&desk.bus);
+    let host = desk.host(true);
+    assert_eq!(
+        desk.deliver(&host, "reply:one"),
+        json!({"status":"delivered"})
+    );
+    for _ in 1..64 {
+        desk.deliver(&host, "reply:two");
+    }
+    assert_eq!(server.closed(), [] as [u32; 0]);
+    assert_eq!(
+        desk.deliver(&host, "reply:two"),
+        json!({"status":"delivered"})
+    );
+    assert_eq!(server.calls().len(), 65);
+    assert_eq!(server.closed(), [1]);
+    server.click(1);
+    server.click(2);
+    let link = "ezerbot://app/v1/notification?id=reply%3Atwo\n";
+    wait_for("the handler to receive the second event", || {
+        fs::read_to_string(&log).is_ok_and(|text| text == link)
+    });
+}
+
+#[test]
+fn after_a_restart_the_ids_of_other_applications_are_neither_closed_nor_opened() {
+    let desk = Desk::new();
+    let log = desk.home.path().join("clicked.log");
+    let handler = recording_handler(desk.home.path(), &log);
+    assert!(register(&desk.home, &handler).status.success());
+    desk.add_notification("reply:two");
+    let server = FakeNotifications::new(&desk.bus);
+    let host = desk.host(true);
+    for _ in 0..64 {
+        desk.deliver(&host, "reply:one");
+    }
+    assert_eq!(server.calls().len(), 64);
+    drop(server);
+    let restarted = FakeNotifications::new(&desk.bus);
+    let other = Notifier::connect(&desk.bus.bus()).unwrap();
+    for _ in 0..64 {
+        other
+            .send(&Alert {
+                title: "Autre application",
+                body: "",
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        desk.deliver(&host, "reply:two"),
+        json!({"status":"delivered"})
+    );
+    assert_eq!(restarted.closed(), [] as [u32; 0]);
+    restarted.invoke(2, "default");
+    restarted.click(65);
+    let link = "ezerbot://app/v1/notification?id=reply%3Atwo\n";
+    wait_for("the handler to receive the newest event", || {
+        fs::read_to_string(&log).is_ok_and(|text| text == link)
+    });
+}
+
+#[test]
+fn clicking_a_notification_opens_its_thread_through_the_registered_link_handler() {
+    let desk = Desk::new();
+    let log = desk.home.path().join("clicked.log");
+    let handler = recording_handler(desk.home.path(), &log);
+    assert!(register(&desk.home, &handler).status.success());
+    let server = FakeNotifications::new(&desk.bus);
+    let host = desk.host(true);
+    assert_eq!(
+        desk.deliver(&host, "reply:one"),
+        json!({"status":"delivered"})
+    );
+    server.invoke(1, "ouvrir-autre");
+    server.click(1);
+    let link = "ezerbot://app/v1/notification?id=reply%3Aone\n";
+    wait_for("the handler to receive the event link", || {
+        fs::read_to_string(&log).is_ok_and(|text| text == link)
+    });
+    let resolved = host.post("/api/deep-links/resolve", json!({ "url": link.trim() }));
+    assert_eq!(
+        resolved["destination"],
+        json!({"kind":"notification","id":"reply:one"})
+    );
+    assert_eq!(
+        host.post("/api/notifications/open", json!({"id":"reply:one"})),
+        json!({"id":"reply:one","conversation_id":desk.conversation,"card_id":"card-1"})
+    );
+}
+
+#[test]
+fn after_the_notification_server_restarts_a_reused_id_opens_the_newest_thread() {
+    let desk = Desk::new();
+    let log = desk.home.path().join("clicked.log");
+    let handler = recording_handler(desk.home.path(), &log);
+    assert!(register(&desk.home, &handler).status.success());
+    desk.add_notification("reply:two");
+    let server = FakeNotifications::new(&desk.bus);
+    let host = desk.host(true);
+    for _ in 0..64 {
+        desk.deliver(&host, "reply:one");
+    }
+    assert_eq!(server.calls().len(), 64);
+    drop(server);
+    let restarted = FakeNotifications::new(&desk.bus);
+    assert_eq!(
+        desk.deliver(&host, "reply:two"),
+        json!({"status":"delivered"})
+    );
+    assert_eq!(restarted.closed(), [] as [u32; 0]);
+    restarted.click(1);
+    let link = "ezerbot://app/v1/notification?id=reply%3Atwo\n";
+    wait_for("the handler to receive the newest event", || {
+        fs::read_to_string(&log).is_ok_and(|text| text == link)
+    });
+}

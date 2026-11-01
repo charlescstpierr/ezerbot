@@ -35,6 +35,13 @@
   Object.defineProperty(window, 'EzerbotShell', {
     value: Object.freeze({
       platform: 'linux',
+      notifications: Object.freeze({
+        postMessage: message => window.fetch('/api/notifications/native', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json', 'X-Grokbot-Request': 'local'},
+          body: JSON.stringify(message),
+        }).then(response => response.json()),
+      }),
       unavailablePanels: Object.freeze([
         'voice', 'voice-conversation', 'voice-call', 'meetings', 'screen', 'demonstrations', 'floating',
       ]),

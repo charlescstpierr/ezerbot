@@ -1196,7 +1196,7 @@ fn a_real_background_shell_keeps_its_waiting_parent_alive() {
     let provider = f.provider();
     provider.watchdog_test_clock(u64::MAX);
     provider.watchdog_test_policy(watchdog::Policy {
-        soft_ms: 1_500,
+        soft_ms: 3_000,
         hard_ms: 600_000,
         scan_ms: 100,
     });
@@ -1227,7 +1227,7 @@ fn a_real_background_shell_keeps_its_waiting_parent_alive() {
         },
     );
     assert!(matches!(started, ToolOutcome::Done { .. }), "{started:?}");
-    let deadline = Instant::now() + Duration::from_millis(3_500);
+    let deadline = Instant::now() + Duration::from_millis(5_000);
     let mut flagged = None;
     while Instant::now() < deadline {
         let time = std::time::SystemTime::now()

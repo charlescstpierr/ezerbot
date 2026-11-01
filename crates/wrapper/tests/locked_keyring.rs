@@ -5,7 +5,7 @@ mod support;
 use grokbot_engine::{contracts::RunEventKind, model::RunStatus, store};
 use grokbot_forms::{redact, requests, vault::Vault};
 use grokbot_linux_desktop::testing::Keyring;
-use grokbot_wrapper::{App, Provider};
+use grokbot_wrapper::{features::iphone, ApiResponse, App, Provider};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::{
@@ -319,5 +319,101 @@ fn a_tool_output_is_not_kept_or_sent_while_the_keyring_is_locked() {
             resolved.is_err_and(|e| e.message.contains(MESSAGE)) || state.contains(MESSAGE),
             "{state}"
         );
+    }
+}
+
+/// Un ancien message contient une valeur enregistrée ensuite comme secret. Après la migration
+/// vers le trousseau et un redémarrage verrouillé, l'iPhone ne reçoit jamais cette valeur.
+#[test]
+fn a_locked_restart_never_serves_an_old_secret_to_the_iphone() {
+    let Some(phase) = support::keyring_phases(
+        "a_locked_restart_never_serves_an_old_secret_to_the_iphone",
+        2,
+        |phase, keyring| {
+            if phase == 1 {
+                keep_only_in_the_keyring(keyring);
+                keyring.lock();
+            }
+        },
+    ) else {
+        return;
+    };
+    let mut f = Fixture::new();
+    let remote = |app: &mut App, method: &str, path: &str, body: Value, token: Option<&str>| {
+        let headers = token
+            .map(|token| vec![("Cookie".into(), format!("ezerbot_device={token}"))])
+            .unwrap_or_default();
+        iphone::remote(app, method, path, body.to_string().as_bytes(), &headers)
+    };
+    let json_of = |response: ApiResponse| match response {
+        ApiResponse::Json(value) => value,
+        _ => panic!("JSON attendu"),
+    };
+    let token_file = f.path.with_extension("iphone-token");
+    if phase == 0 {
+        let chat = f.chat();
+        f.post(
+            "/api/send",
+            json!({"conversation_id":chat,"message_id":"vieux","body":format!("Note : {SECRET}")}),
+        );
+        wait("réponse", || {
+            f.messages(&chat)
+                .iter()
+                .any(|m| m["id"] == "reply-vieux" && m["state"] == "echoed")
+        });
+        f.post("/api/iphone/enabled", json!({"enabled":true}));
+        let code = f.post("/api/iphone/code", json!({}))["code"].clone();
+        let receipt = json_of(
+            remote(
+                &mut f.app,
+                "POST",
+                "/api/iphone/claim",
+                json!({"code":code,"name":"iPhone"}),
+                None,
+            )
+            .unwrap(),
+        )["receipt"]
+            .clone();
+        let status = f.app.api("GET", "/api/iphone/status", b"").unwrap();
+        let id = status["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["status"] == "pending")
+            .unwrap()["id"]
+            .clone();
+        f.post("/api/iphone/confirm", json!({"id":id,"allow":true}));
+        let token = json_of(
+            remote(
+                &mut f.app,
+                "POST",
+                "/api/iphone/exchange",
+                json!({"receipt":receipt}),
+                None,
+            )
+            .unwrap(),
+        )["credential"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let served =
+            json_of(remote(&mut f.app, "GET", "/api/state", json!({}), Some(&token)).unwrap());
+        assert!(
+            served.to_string().contains(SECRET),
+            "le témoin doit voir le message avant le secret"
+        );
+        std::fs::write(&token_file, token).unwrap();
+    } else {
+        let token = std::fs::read_to_string(&token_file).unwrap();
+        match remote(&mut f.app, "GET", "/api/state", Value::Null, Some(&token)) {
+            Ok(ApiResponse::Json(value)) => {
+                assert!(
+                    !value.to_string().contains(SECRET),
+                    "le secret a atteint l'iPhone"
+                )
+            }
+            Ok(_) => panic!("JSON attendu"),
+            Err(error) => assert!(error.to_string().contains(MESSAGE), "{error}"),
+        }
     }
 }

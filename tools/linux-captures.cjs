@@ -1,6 +1,6 @@
 const { createHash } = require("node:crypto");
 const { execFileSync } = require("node:child_process");
-const { readFileSync, writeFileSync } = require("node:fs");
+const { existsSync, readFileSync, writeFileSync } = require("node:fs");
 const { join, resolve } = require("node:path");
 const { launchFixture } = require("../app/ui/wrapper-chrome-fixture.cjs");
 
@@ -72,6 +72,7 @@ async function capture(sha, binary, output, signal, views = VIEWS) {
   const relay = () => cancelled.abort();
   signal?.addEventListener("abort", relay, { once: true });
   let stage = "fixture launch";
+  const captured = [];
   try {
     const fixture = await bounded(launchFixture({ after: callback => cleanup.push(callback) }, {
       documents: [], binary, headless: false, navigate: false, viewport: { width: VIEWPORT.width, height: VIEWPORT.height },
@@ -132,7 +133,6 @@ async function capture(sha, binary, output, signal, views = VIEWS) {
     })()`), stage, cancelled.signal);
     await evaluate(`document.documentElement.dataset.theme='dark';
       const style=document.createElement('style'); style.textContent='*,*::before,*::after { animation:none!important; transition:none!important; caret-color:transparent!important; }'; document.head.append(style);`);
-    const captured = [];
     for (const view of views) {
       stage = `${view.id} readiness`;
       await bounded(evaluate(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); ${view.action || ""}`), stage, cancelled.signal);
@@ -172,6 +172,8 @@ async function capture(sha, binary, output, signal, views = VIEWS) {
     writeFileSync(join(output, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
     return manifest;
   } catch (error) {
+    // Partial manifest: the views already written keep the hash and size recorded at capture time.
+    if (captured.length && !existsSync(join(output, "manifest.json"))) writeFileSync(join(output, "manifest.json"), `${JSON.stringify({ schema_version: 1, sha, complete: false, platform: "linux", viewport: VIEWPORT, views: captured }, null, 2)}\n`, { flag: "wx" });
     throw new Error(`${stage} failed. ${error.message}`, { cause: error });
   } finally {
     cancelled.abort();

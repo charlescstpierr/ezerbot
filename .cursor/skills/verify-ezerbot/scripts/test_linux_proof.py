@@ -83,6 +83,20 @@ class VerdictTests(unittest.TestCase):
                 self.assertTrue(all(row.endswith("| non vérifié |") for row in rows), rows)
                 self.assertFalse(any(" ok" in line for line in lines if line.startswith(("| `", "Entrées"))), lines)
 
+    def test_partial_manifest_verifies_earlier_views_and_never_passes(self) -> None:
+        evidence = self.evidence(error="thread-menu readiness failed.", failing="thread-menu")
+        path = evidence / "captures" / "manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["complete"] = False
+        path.write_text(json.dumps(manifest))
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertIn("| `accueil` | `home-dark` | `captures/home-dark.png` | ok |", lines)
+        self.assertIn("## Échec", lines)
+        self.assertNotIn("## Erreur d’outil", lines)
+        (evidence / "captures" / "result.json").write_text(json.dumps({"sha": SHA, "error": None, "features": [{"feature": f, "view": v, "file": f"{v}.png", "status": "pass"} for f, v in linux_verdict.EXPECTED]}))
+        self.assertEqual(linux_verdict.verdict(evidence, SHA)[0], "FIX")
+
     def test_failed_driver_exit_is_fix_even_with_complete_captures(self) -> None:
         status, lines = linux_verdict.verdict(self.evidence(), SHA, drive_status=134)
         self.assertEqual(status, "FIX")

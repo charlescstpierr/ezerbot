@@ -127,7 +127,7 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
         "|---|---|---|---|",
     ]
     ok = not problems and drive_status == 0 and result is not None and result.get("error") is None
-    ok = ok and manifest is not None and manifest.get("sha") == sha
+    ok = ok and manifest is not None and manifest.get("sha") == sha and manifest.get("complete", True) is True
     entries: dict[str, bool] = {}
     reported = {(item.get("feature"), item.get("view")): item for item in (result or {}).get("features", [])}
     if result is not None and set(reported) != set(EXPECTED):
@@ -139,7 +139,7 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
         item = reported.get((feature, view), {"feature": feature, "view": view, "file": f"{view}.png", "status": "absent"})
         shot = captures / f"{view}.png"
         passed = item["status"] == "pass" and item.get("file") == f"{view}.png" and shot.is_file() and (FEATURES_DIR / f"{feature}.md").is_file()
-        if passed:
+        if passed and manifest is not None:
             data = shot.read_bytes()
             if recorded.get(f"{view}.png") != (hashlib.sha256(data).hexdigest(), len(data)):
                 problems.append(f"`captures/{view}.png` ne correspond pas à l’empreinte du manifeste.")
@@ -152,6 +152,7 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
                 passed = False
         entries[feature] = entries.get(feature, True) and passed
         ok = ok and passed
+        passed = passed and manifest is not None
         mark = "non vérifié" if manifest is None else "ok" if passed else "ÉCHEC"
         lines.append(f"| `{feature}` | `{view}` | `captures/{view}.png` | {mark} |")
     if lines_extra:

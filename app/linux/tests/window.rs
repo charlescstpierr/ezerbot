@@ -601,12 +601,23 @@ fn a_second_launch_shows_the_open_window_and_a_later_launch_starts_again() {
     third.quit();
 }
 
+/// The notification belongs to another thread than the one shown: only following the link
+/// opens it. The visible thread marks its own notifications read by itself.
 fn notification(database: &Path, id: &str) {
     let database = Connection::open(database).unwrap();
+    let thread = format!("autre-{}", id.replace(':', "-"));
+    database
+        .execute_batch(&format!(
+            "CREATE TEMP TABLE copy AS SELECT * FROM wrapper_conversations LIMIT 1;
+             UPDATE copy SET id='{thread}';
+             INSERT INTO wrapper_conversations SELECT * FROM copy;
+             DROP TABLE copy;"
+        ))
+        .unwrap();
     database
         .execute(
-            "INSERT INTO wrapper_notifications SELECT account_id,?1,'reply',id,'card','Réponse',1,1,1 FROM wrapper_conversations LIMIT 1",
-            [id],
+            "INSERT INTO wrapper_notifications SELECT account_id,?1,'reply',id,'card','Réponse',1,1,1 FROM wrapper_conversations WHERE id=?2",
+            [id, thread.as_str()],
         )
         .unwrap();
 }

@@ -69,4 +69,6 @@ def exec_argument(value):
 )
 PY
 chmod 644 "$bundle/ezerbot.desktop"
+"$bundle/grokbot-wrapper" --register-url-handler "$bundle/ezerbot-linux" "$bundle/ezerbot.png" >/dev/null ||
+  printf 'Les liens ezerbot:// ne sont pas enregistrés sur ce poste.\n' >&2
 printf 'Application créée : %s\nLancer : "%s/Ouvrir Ezerbot.sh"\n' "$bundle" "$bundle"

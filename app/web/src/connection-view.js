@@ -60,10 +60,11 @@ export function replyProblemState(message, { isGroup = false, isTask = false, en
   const signin = ["signin", "signin_expired"].includes(message.error_kind);
   const local = message.error_kind === "local_connection";
   const group = (isGroup || Boolean(message.payload?.turn_id)) && !signin && !local;
-  const retry = local || (!group && !isTask && message.error_kind !== "context_budget");
+  const context = ["context", "context_budget"].includes(message.error_kind);
+  const retry = local || (!group && !isTask && !context);
   const error = presentedFailureText(message.error, { retry, replacement: isTask ? "Poursuivez dans la conversation principale." : "Envoyez un nouveau message." });
   const shown = `${message.error || ""} ${error}`.toLocaleLowerCase("fr");
-  const advice = local || signin || shown.includes("envoyez un nouveau message") || shown.includes("poursuivez dans la conversation principale") ? null
+  const advice = local || signin || context || shown.includes("envoyez un nouveau message") || shown.includes("poursuivez dans la conversation principale") ? null
     : group ? "Envoyez un nouveau message pour demander une nouvelle réponse."
       : isTask ? "Poursuivez dans la conversation principale." : null;
   return { signin, advice, error, retry, retryDisabled: !engineConnected,

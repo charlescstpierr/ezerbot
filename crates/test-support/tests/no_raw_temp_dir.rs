@@ -12,6 +12,9 @@ const PENDING: &[&str] = &[
     "crates/wrapper/tests/chat_reliability.rs",
 ];
 
+/// Racines parcourues, relatives au dépôt.
+const ROOTS: &[&str] = &["crates", "app/linux"];
+
 fn rust_files(directory: &Path, found: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory).unwrap().flatten() {
         let path = entry.path();
@@ -25,17 +28,18 @@ fn rust_files(directory: &Path, found: &mut Vec<PathBuf>) {
 
 #[test]
 fn no_test_builds_a_path_directly_under_the_system_temp_dir() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut files = Vec::new();
-    rust_files(&crates, &mut files);
+    for root in ROOTS {
+        rust_files(&repository.join(root), &mut files);
+    }
     let mut offenders = Vec::new();
     for file in files {
         let relative = file
-            .strip_prefix(&crates)
+            .strip_prefix(&repository)
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let relative = format!("crates/{relative}");
         if relative.starts_with("crates/test-support/") || PENDING.contains(&relative.as_str()) {
             continue;
         }

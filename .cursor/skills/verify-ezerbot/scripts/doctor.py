@@ -128,10 +128,10 @@ def linux_chrome() -> str | None:
     for variable in ("EZERBOT_VERIFY_CHROME", "CHROME_BIN"):
         value = os.environ.get(variable)
         if value:
-            return os.path.realpath(value) if os.path.isfile(value) and os.access(value, os.X_OK) else None
+            return value if os.path.isfile(value) and os.access(value, os.X_OK) else None
     for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
         if found := shutil.which(name):
-            return os.path.realpath(found)
+            return found
     return None
 
 

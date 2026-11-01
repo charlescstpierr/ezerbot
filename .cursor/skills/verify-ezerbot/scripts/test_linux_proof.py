@@ -236,6 +236,20 @@ class LinuxPrerequisitesTests(unittest.TestCase):
                 result = subprocess.run([sys.executable, str(SCRIPTS / "doctor.py"), "--prerequisites"], env=env, capture_output=True, text=True)
                 self.assertIn("echec  chrome:", result.stdout)
 
+    def test_launcher_symlink_keeps_its_own_name(self) -> None:
+        # Snap launchers (/snap/bin/chromium -> /usr/bin/snap) dispatch on the name they are called by.
+        scratch = Path(tempfile.mkdtemp(prefix="linux-snap-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(scratch)], check=True))
+        target = scratch / "snap"
+        target.write_text("#!/bin/sh\n")
+        target.chmod(0o755)
+        (scratch / "chromium").symlink_to(target)
+        env = {key: value for key, value in os.environ.items() if key not in ("EZERBOT_VERIFY_CHROME", "CHROME_BIN")}
+        env["PATH"] = f"{scratch}:/usr/bin:/bin"
+        env["EZERBOT_VERIFY_CHROME"] = str(scratch / "chromium")
+        result = subprocess.run([sys.executable, str(SCRIPTS / "doctor.py"), "--chrome"], env=env, capture_output=True, text=True)
+        self.assertEqual(result.stdout.strip(), str(scratch / "chromium"))
+
     def test_doctor_lists_prerequisites(self) -> None:
         names = {line.split(":")[0].split()[-1] for line in subprocess.run(
             [sys.executable, str(SCRIPTS / "doctor.py"), "--prerequisites"], capture_output=True, text=True

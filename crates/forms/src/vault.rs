@@ -460,13 +460,16 @@ impl Vault {
             ));
         }
         self.reconcile_privacy()?;
-        let mut secrets = self.read_strict().map_err(|error| {
-            #[cfg(target_os = "macos")]
+        let secrets = self.read_strict();
+        #[cfg(target_os = "macos")]
+        let secrets = secrets.map_err(|error| {
             if self.keychain.is_some() {
-                return invalid("Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez.");
+                invalid("Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez.")
+            } else {
+                error
             }
-            error
-        })?;
+        });
+        let mut secrets = secrets?;
         self.capture_privacy(&secrets, true)?;
         #[cfg(target_os = "macos")]
         if let Some(target) = &self.keychain {

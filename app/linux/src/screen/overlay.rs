@@ -4,7 +4,7 @@ use super::gate::{Gate, Stop, View};
 use gtk::{gdk, prelude::*};
 use std::{cell::Cell, io::Stdout, rc::Rc, sync::Arc};
 
-const WIDTH: i32 = 560;
+const WIDTH: i32 = 640;
 const HEIGHT: i32 = 44;
 const LIVE: &str = "Ezerbot voit l’écran";
 const UNPROVEN: &str = "Partage en pause : bandeau non garanti visible";

@@ -23,7 +23,7 @@ use xvfb::Xvfb;
 
 const HELPER: &str = env!("CARGO_BIN_EXE_ezerbot-linux");
 const WAIT: Duration = Duration::from_secs(20);
-const OVERLAY_WIDTH: u32 = 560;
+const OVERLAY_WIDTH: u32 = 640;
 
 /// A pause the app must not mistake for the person's own.
 fn hidden() -> Value {

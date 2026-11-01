@@ -15,7 +15,7 @@ struct Fixture {
     app: App,
     server: FakeOpenAi,
     path: PathBuf,
-    _dir: grokbot_test_support::TestDir,
+    _dir: Option<grokbot_test_support::TestDir>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -24,6 +24,9 @@ impl Fixture {
     fn with_small_model(memory_model: bool) -> Self {
         let guard = grokbot_test_support::TestDir::new("memory-auto");
         let path = guard.to_path_buf().join("workspace.sqlite");
+        Self::at(path, memory_model, Some(guard))
+    }
+    fn at(path: PathBuf, memory_model: bool, guard: Option<grokbot_test_support::TestDir>) -> Self {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1400,15 +1403,16 @@ fn known_vault_values_are_excluded_even_without_secret_keywords() {
 /// The vault backend and the bus are per process, so a scenario runs in its own, on a real
 /// keyring. Returns true there; the outer process has already checked its result.
 #[cfg(all(target_os = "linux", debug_assertions))]
-fn in_its_own_process_on_a_keyring(name: &str, locked: bool) -> bool {
+fn in_its_own_process_on_a_keyring(
+    name: &str,
+    before: impl FnOnce(&grokbot_linux_desktop::testing::Keyring),
+) -> bool {
     if std::env::var_os("GROKBOT_TEST_SESSION_BUS").is_some() {
         grokbot_forms::vault::enable_os_vault(true);
         return true;
     }
     let keyring = grokbot_linux_desktop::testing::Keyring::start();
-    if locked {
-        keyring.lock();
-    }
+    before(&keyring);
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     keyring
         .home()
@@ -1430,7 +1434,7 @@ fn in_its_own_process_on_a_keyring(name: &str, locked: bool) -> bool {
 fn a_secret_kept_in_secret_service_still_stops_automatic_memory() {
     if !in_its_own_process_on_a_keyring(
         "a_secret_kept_in_secret_service_still_stops_automatic_memory",
-        false,
+        |_| {},
     ) {
         return;
     }
@@ -1458,22 +1462,38 @@ fn a_secret_kept_in_secret_service_still_stops_automatic_memory() {
 
 #[cfg(all(target_os = "linux", debug_assertions))]
 #[test]
-fn a_locked_secret_service_stops_automatic_memory_because_its_secrets_are_unknown() {
+fn a_secret_migrated_then_locked_across_a_restart_still_stops_automatic_memory() {
+    use grokbot_forms::vault::Vault;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
     if !in_its_own_process_on_a_keyring(
-        "a_locked_secret_service_stops_automatic_memory_because_its_secrets_are_unknown",
-        true,
+        "a_secret_migrated_then_locked_across_a_restart_still_stops_automatic_memory",
+        |keyring| {
+            let file = keyring.home().path().join("workspace.secrets.json");
+            Vault::open(&file)
+                .unwrap()
+                .set("PORCELAINE", "Piège synthétique", "porcelaine ambrée")
+                .unwrap();
+            Vault::open_test_keychain(&file, keyring.address()).unwrap();
+            assert!(!std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("porcelaine"));
+            keyring.lock();
+        },
     ) {
         return;
     }
-    let mut f = Fixture::new();
+    let path = home.unwrap().join("workspace.sqlite");
+    let mut f = Fixture::at(path, true, None);
+    let vault = Vault::open_app(&f.path.with_extension("secrets.json")).unwrap();
+    assert_eq!(vault.storage_status().backend, "file_fallback");
     let c = f.conv("grokbot");
-    f.script(json!([fact("Je préfère le thé vert.", None)]));
-    f.send(&c, "m", "Je préfère le thé vert.");
+    f.script(json!([fact("Je préfère la porcelaine ambrée.", None)]));
+    f.send(&c, "m", "Je préfère la porcelaine ambrée.");
     f.settle();
     assert_eq!(
         f.calls().len(),
         0,
-        "extraction ran without knowing the secrets"
+        "the secret reached the extraction model"
     );
     assert!(f.facts("grokbot").is_empty());
 }

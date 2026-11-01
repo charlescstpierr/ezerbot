@@ -140,21 +140,12 @@ impl Desk {
             home,
         }
     }
-    fn conversation(&self) -> String {
-        App::open(&self.db)
-            .unwrap()
-            .api("POST", "/api/conversations", b"{}")
-            .unwrap()["conversation"]["id"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    }
-    fn add_notification(&self, id: &str, conversation: &str) {
+    fn add_notification(&self, id: &str) {
         Connection::open(&self.db)
             .unwrap()
             .execute(
                 "INSERT INTO wrapper_notifications VALUES ('local-workspace',?1,'reply',?2,'card-2','Réponse terminée',2,1,1)",
-                params![id, conversation],
+                params![id, self.conversation],
             )
             .unwrap();
     }
@@ -272,8 +263,8 @@ fn a_failed_delivery_keeps_the_destinations_of_the_notifications_still_on_the_de
         json!({"status":"granted"})
     );
     server.click(1);
-    let link = format!("ezerbot://app/v1/thread?id={}\n", desk.conversation);
-    wait_for("the handler to receive the thread link", || {
+    let link = "ezerbot://app/v1/notification?id=reply%3Aone\n";
+    wait_for("the handler to receive the event link", || {
         fs::read_to_string(&log).is_ok_and(|text| text == link)
     });
 }
@@ -284,8 +275,7 @@ fn after_the_bus_restarts_the_next_delivery_reconnects_and_forgets_the_old_desti
     let log = desk.home.path().join("clicked.log");
     let handler = recording_handler(desk.home.path(), &log);
     assert!(register(&desk.home, &handler).status.success());
-    let second = desk.conversation();
-    desk.add_notification("reply:two", &second);
+    desk.add_notification("reply:two");
     // First on both buses: a new bus hands out the same unique name again.
     let server = FakeNotifications::new(&desk.bus);
     let host = desk.host(true);
@@ -302,8 +292,8 @@ fn after_the_bus_restarts_the_next_delivery_reconnects_and_forgets_the_old_desti
     );
     assert_eq!(server.calls().len(), 1);
     server.click(1);
-    let link = format!("ezerbot://app/v1/thread?id={second}\n");
-    wait_for("the handler to receive the thread of the new bus", || {
+    let link = "ezerbot://app/v1/notification?id=reply%3Atwo\n";
+    wait_for("the handler to receive the event of the new bus", || {
         fs::read_to_string(&log).is_ok_and(|text| text == link)
     });
 }
@@ -314,8 +304,7 @@ fn past_the_limit_the_oldest_notification_is_closed_and_every_other_click_still_
     let log = desk.home.path().join("clicked.log");
     let handler = recording_handler(desk.home.path(), &log);
     assert!(register(&desk.home, &handler).status.success());
-    let second = desk.conversation();
-    desk.add_notification("reply:two", &second);
+    desk.add_notification("reply:two");
     let server = FakeNotifications::new(&desk.bus);
     let host = desk.host(true);
     assert_eq!(
@@ -334,8 +323,8 @@ fn past_the_limit_the_oldest_notification_is_closed_and_every_other_click_still_
     assert_eq!(server.closed(), [1]);
     server.click(1);
     server.click(2);
-    let link = format!("ezerbot://app/v1/thread?id={second}\n");
-    wait_for("the handler to receive the second thread", || {
+    let link = "ezerbot://app/v1/notification?id=reply%3Atwo\n";
+    wait_for("the handler to receive the second event", || {
         fs::read_to_string(&log).is_ok_and(|text| text == link)
     });
 }
@@ -346,8 +335,7 @@ fn after_a_restart_the_ids_of_other_applications_are_neither_closed_nor_opened()
     let log = desk.home.path().join("clicked.log");
     let handler = recording_handler(desk.home.path(), &log);
     assert!(register(&desk.home, &handler).status.success());
-    let second = desk.conversation();
-    desk.add_notification("reply:two", &second);
+    desk.add_notification("reply:two");
     let server = FakeNotifications::new(&desk.bus);
     let host = desk.host(true);
     for _ in 0..64 {
@@ -372,11 +360,10 @@ fn after_a_restart_the_ids_of_other_applications_are_neither_closed_nor_opened()
     assert_eq!(restarted.closed(), [] as [u32; 0]);
     restarted.invoke(2, "default");
     restarted.click(65);
-    let link = format!("ezerbot://app/v1/thread?id={second}\n");
-    wait_for(
-        "the handler to receive the thread of the newest alert",
-        || fs::read_to_string(&log).is_ok_and(|text| text == link),
-    );
+    let link = "ezerbot://app/v1/notification?id=reply%3Atwo\n";
+    wait_for("the handler to receive the newest event", || {
+        fs::read_to_string(&log).is_ok_and(|text| text == link)
+    });
 }
 
 #[test]
@@ -393,10 +380,19 @@ fn clicking_a_notification_opens_its_thread_through_the_registered_link_handler(
     );
     server.invoke(1, "ouvrir-autre");
     server.click(1);
-    let link = format!("ezerbot://app/v1/thread?id={}\n", desk.conversation);
-    wait_for("the handler to receive the thread link", || {
+    let link = "ezerbot://app/v1/notification?id=reply%3Aone\n";
+    wait_for("the handler to receive the event link", || {
         fs::read_to_string(&log).is_ok_and(|text| text == link)
     });
+    let resolved = host.post("/api/deep-links/resolve", json!({ "url": link.trim() }));
+    assert_eq!(
+        resolved["destination"],
+        json!({"kind":"notification","id":"reply:one"})
+    );
+    assert_eq!(
+        host.post("/api/notifications/open", json!({"id":"reply:one"})),
+        json!({"id":"reply:one","conversation_id":desk.conversation,"card_id":"card-1"})
+    );
 }
 
 #[test]
@@ -405,8 +401,7 @@ fn after_the_notification_server_restarts_a_reused_id_opens_the_newest_thread() 
     let log = desk.home.path().join("clicked.log");
     let handler = recording_handler(desk.home.path(), &log);
     assert!(register(&desk.home, &handler).status.success());
-    let second = desk.conversation();
-    desk.add_notification("reply:two", &second);
+    desk.add_notification("reply:two");
     let server = FakeNotifications::new(&desk.bus);
     let host = desk.host(true);
     for _ in 0..64 {
@@ -421,8 +416,8 @@ fn after_the_notification_server_restarts_a_reused_id_opens_the_newest_thread() 
     );
     assert_eq!(restarted.closed(), [] as [u32; 0]);
     restarted.click(1);
-    let link = format!("ezerbot://app/v1/thread?id={second}\n");
-    wait_for("the handler to receive the newest thread", || {
+    let link = "ezerbot://app/v1/notification?id=reply%3Atwo\n";
+    wait_for("the handler to receive the newest event", || {
         fs::read_to_string(&log).is_ok_and(|text| text == link)
     });
 }

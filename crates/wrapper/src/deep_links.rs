@@ -46,6 +46,9 @@ pub enum Destination {
     Settings {
         id: String,
     },
+    Notification {
+        id: String,
+    },
     Compose {
         text: String,
         agent: Option<String>,
@@ -115,7 +118,7 @@ pub fn parse_link(raw: &str) -> Result<Link, ApiError> {
         }
     }
     let allowed: &[&str] = match path {
-        "v1/agent" | "v1/settings" => &["id"],
+        "v1/agent" | "v1/settings" | "v1/notification" => &["id"],
         "v1/thread" | "v1/routine" | "v1/skill" => &["id", "agent"],
         "v1/open" => &["text", "agent"],
         "v1/bot-template" => &["id", "data"],
@@ -160,6 +163,7 @@ pub fn parse_link(raw: &str) -> Result<Link, ApiError> {
             }
             Destination::Settings { id }
         }
+        "v1/notification" => Destination::Notification { id: get("id")? },
         "v1/open" => {
             let text = get("text")?;
             if text.trim().is_empty()
@@ -224,6 +228,16 @@ impl App {
                     if !matches {
                         return Err(inaccessible());
                     }
+                }
+            }
+            Destination::Notification { id } => {
+                let exists: bool = self.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM wrapper_notifications n JOIN wrapper_conversations c ON c.account_id=n.account_id AND c.id=n.conversation_id WHERE n.account_id=?1 AND n.id=?2 AND c.deleted=0)",
+                    params![ACCOUNT, id],
+                    |row| row.get(0),
+                )?;
+                if !exists {
+                    return Err(inaccessible());
                 }
             }
             Destination::Routine { id, agent } | Destination::Skill { id, agent } => {

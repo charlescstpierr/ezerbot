@@ -752,6 +752,36 @@ fn a_hard_link_to_the_data_outside_the_data_refuses_the_launch() {
     assert_eq!(witness["output"]["stdout"], "utile", "{witness}");
 }
 
+/// Le fournisseur suit un lien symbolique placé dans les données : le fichier de session est
+/// alors ailleurs, et ni le shell ni les outils fichiers ne doivent l'atteindre par sa cible.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_session_behind_a_symlink_in_the_data_stays_out_of_reach() {
+    let mut f = Fixture::new();
+    let token = f.path.with_extension("chatgpt-auth.json");
+    let elsewhere = f.root().join("ailleurs");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let session = elsewhere.join("session.txt");
+    std::fs::rename(&token, &session).unwrap();
+    std::os::unix::fs::symlink(&session, &token).unwrap();
+    std::fs::write(elsewhere.join("voisin.txt"), "utile").unwrap();
+    f.reopen();
+
+    let shell = f.runs_without_a_card("cible", "run_shell", f.shell("cat ailleurs/se*"));
+    assert!(!shell.to_string().contains("fake-refresh"), "{shell}");
+    let file = f.runs_without_a_card("fichier", "read_file", json!({"path":session}));
+    assert!(!file.to_string().contains("fake-refresh"), "{file}");
+    assert_eq!(file["reason"], PROTECTED, "{file}");
+
+    let witness = f.runs_without_a_card("temoin", "run_shell", f.shell("cat ailleurs/vo*"));
+    assert_eq!(witness["output"]["stdout"], "utile", "{witness}");
+    assert_eq!(
+        std::fs::read_link(&token).unwrap(),
+        session,
+        "le lien reste en place"
+    );
+}
+
 /// Un second montage du même système de fichiers montre les mêmes inodes sous un autre
 /// chemin. Le test se relance dans un espace de noms de montage jetable pour en créer.
 #[cfg(target_os = "linux")]

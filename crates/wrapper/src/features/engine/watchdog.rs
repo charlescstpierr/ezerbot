@@ -114,6 +114,15 @@ impl Registry {
             }
         }
     }
+    /// A run exempted from silence has no watch, but its signs still count for its ancestors.
+    fn signal(state: &mut State, id: &str, time: u64, step: Option<&str>) {
+        let mut current = Some(id.to_owned());
+        let mut seen = HashSet::new();
+        while let Some(id) = current.filter(|id| seen.insert(id.clone())) {
+            Self::touch(state, &id, time, step);
+            current = state.parents.get(&id).cloned();
+        }
+    }
     pub(crate) fn pulse(&self, id: &str) {
         self.activity(id, None);
     }
@@ -123,20 +132,10 @@ impl Registry {
     pub(crate) fn activity_kind(&self, id: &str, step: Option<&str>, internal: Option<bool>) {
         let time = self.now();
         let mut state = self.lock();
-        if !state.watches.contains_key(id) {
-            return;
+        if let (Some(active), Some(watch)) = (internal, state.watches.get_mut(id)) {
+            watch.internal_active = active;
         }
-        if let Some(active) = internal {
-            if let Some(watch) = state.watches.get_mut(id) {
-                watch.internal_active = active;
-            }
-        }
-        let mut current = Some(id.to_owned());
-        let mut seen = HashSet::new();
-        while let Some(id) = current.filter(|id| seen.insert(id.clone())) {
-            Self::touch(&mut state, &id, time, step);
-            current = state.parents.get(&id).cloned();
-        }
+        Self::signal(&mut state, id, time, step);
     }
     pub(crate) fn committed(&self, run: &Run, seq: u64) {
         let time = self.now();
@@ -166,28 +165,19 @@ impl Registry {
                 };
             }
             if run.status.is_terminal() {
-                let mut parent = state.parents.get(&run.run_id).cloned();
-                let mut seen = HashSet::new();
-                while let Some(id) = parent.filter(|id| seen.insert(id.clone())) {
-                    Self::touch(&mut state, &id, time, None);
-                    parent = state.parents.get(&id).cloned();
+                if let Some(parent) = state.parents.get(&run.run_id).cloned() {
+                    Self::signal(&mut state, &parent, time, None);
                 }
             }
             return;
         }
-        let Some(watch) = state.watches.get_mut(&run.run_id) else {
-            return;
-        };
-        if seq <= watch.seq {
-            return;
+        if let Some(watch) = state.watches.get_mut(&run.run_id) {
+            if seq <= watch.seq {
+                return;
+            }
+            watch.seq = seq;
         }
-        watch.seq = seq;
-        let mut current = Some(run.run_id.clone());
-        let mut seen = HashSet::new();
-        while let Some(id) = current.filter(|id| seen.insert(id.clone())) {
-            Self::touch(&mut state, &id, time, None);
-            current = state.parents.get(&id).cloned();
-        }
+        Self::signal(&mut state, &run.run_id, time, None);
     }
     fn due(&self, time: u64) -> bool {
         let mut state = self.lock();

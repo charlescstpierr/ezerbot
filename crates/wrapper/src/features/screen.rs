@@ -58,8 +58,8 @@ struct Lease {
     paused: AtomicBool,
     revoked: AtomicBool,
     serial: Mutex<()>,
-    permit: Mutex<()>,
-    generation: AtomicU64,
+    permit: Arc<Mutex<()>>,
+    generation: Arc<AtomicU64>,
     #[cfg(debug_assertions)]
     events: Mutex<Vec<Value>>,
     #[cfg(not(debug_assertions))]
@@ -402,6 +402,8 @@ pub fn routes(
                 static NEXT: AtomicU64 = AtomicU64::new(0);
                 let id = crate::now() * 1000 + NEXT.fetch_add(1, Ordering::SeqCst);
                 let expires = crate::now() + input.minutes * 60_000;
+                let permit = Arc::new(Mutex::new(()));
+                let generation = Arc::new(AtomicU64::new(1));
                 let lease = Lease {
                     bot: input.bot_id,
                     conversation: input.conversation_id,
@@ -410,12 +412,16 @@ pub fn routes(
                     paused: AtomicBool::new(false),
                     revoked: AtomicBool::new(false),
                     serial: Mutex::new(()),
-                    permit: Mutex::new(()),
-                    generation: AtomicU64::new(1),
+                    #[cfg(not(debug_assertions))]
+                    native: native::Client::start(
+                        input.minutes * 60_000,
+                        permit.clone(),
+                        generation.clone(),
+                    )?,
+                    permit,
+                    generation,
                     #[cfg(debug_assertions)]
                     events: Mutex::new(vec![]),
-                    #[cfg(not(debug_assertions))]
-                    native: native::Client::start(input.minutes * 60_000)?,
                 };
                 all.insert(app.db_path.clone(), Arc::new(lease));
             }
@@ -506,6 +512,33 @@ fn verify_human(ctx: &Context<'_>, call: &ToolCall, lease: &Lease) -> Result<(),
         "Cette action exige votre décision dans une carte de la session actuelle.",
     ))
 }
+/// Decides under one permit whether a capture exists. An image line can reach us
+/// just before a stop, so a stop that arrives before the COMMIT discards it. Waiting
+/// for the database can last seconds, so the permit comes after it.
+fn store(
+    ctx: &Context<'_>,
+    lease: &Lease,
+    generation: u64,
+    id: &str,
+    image: &str,
+) -> Result<(), ApiError> {
+    let allowed =
+        || lease.live() && !lease.paused() && lease.generation.load(Ordering::SeqCst) == generation;
+    let tx = write_transaction(ctx.connection)?;
+    let _permit = lease.permit.lock().unwrap_or_else(|e| e.into_inner());
+    if !allowed() {
+        return Err(ApiError::new(403, STOPPED));
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO wrapper_screen_shots VALUES (?1,?2,?3,?4)",
+        params![id, lease.conversation, ctx.run_id, image],
+    )?;
+    if !allowed() {
+        return Err(ApiError::new(403, STOPPED));
+    }
+    tx.commit()?;
+    Ok(())
+}
 pub(crate) fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: Arc<AtomicBool>) -> ToolOutcome {
     let result = (|| -> Result<Value, ApiError> {
         validate(ctx, call)?;
@@ -569,21 +602,7 @@ pub(crate) fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: Arc<AtomicBool
                 ms.parse::<u64>().unwrap_or(0).min(2000),
             ));
         }
-        // An image line can reach us just before `revoked`. Waiting for the
-        // database can last seconds, so the permit and the check come after it:
-        // a stop never waits on SQLite. live and paused also read the helper, whose
-        // buttons stop it directly, and the generation rejects a pause since resumed.
-        let tx = write_transaction(ctx.connection)?;
-        let _permit = lease.permit.lock().unwrap_or_else(|e| e.into_inner());
-        if !lease.live() || lease.paused() || lease.generation.load(Ordering::SeqCst) != generation
-        {
-            return Err(ApiError::new(403, STOPPED));
-        }
-        tx.execute(
-            "INSERT OR IGNORE INTO wrapper_screen_shots VALUES (?1,?2,?3,?4)",
-            params![id, lease.conversation, ctx.run_id, image],
-        )?;
-        tx.commit()?;
+        store(ctx, &lease, generation, &id, image)?;
         Ok(
             json!({"capture_id":id,"action":call.name,"fixture":cfg!(debug_assertions),"width":output["width"],"height":output["height"]}),
         )
@@ -704,7 +723,8 @@ pub fn hydrate(conn: &rusqlite::Connection, run_id: &str, input: &mut Vec<Histor
     }
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(any(test, not(debug_assertions)))]
+#[cfg_attr(test, allow(dead_code))]
 #[path = "screen_native.rs"]
 mod native;
 

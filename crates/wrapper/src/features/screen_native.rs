@@ -55,9 +55,21 @@ pub struct Client {
     sequence: AtomicU64,
 }
 impl Client {
-    pub fn start(duration: u64) -> Result<Self, ApiError> {
-        let mut child = Command::new(executable()?)
-            .args(["--screen-helper", &duration.to_string()])
+    pub fn start(
+        duration: u64,
+        permit: Arc<Mutex<()>>,
+        generation: Arc<AtomicU64>,
+    ) -> Result<Self, ApiError> {
+        let mut command = Command::new(executable()?);
+        command.args(["--screen-helper", &duration.to_string()]);
+        Self::launch(command, permit, generation)
+    }
+    pub(super) fn launch(
+        mut command: Command,
+        _permit: Arc<Mutex<()>>,
+        _generation: Arc<AtomicU64>,
+    ) -> Result<Self, ApiError> {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

@@ -4,6 +4,73 @@ use grokbot_engine::{
     contracts::{with_tx, ApprovalCheck, RunBudgets, RunKind, Trigger},
     model::{self, Run, RunStatus},
 };
+/// A running call whose card the person approved, journaled as the engine does.
+fn approved_call(
+    app: &mut App,
+    chat: &str,
+    i: u32,
+    name: &str,
+    arguments: Value,
+) -> (Run, ToolCall) {
+    let run = Run {
+        run_id: format!("screen-queue-{i}"),
+        bot_id: "grokbot".into(),
+        conversation_id: chat.to_owned(),
+        trigger: Trigger::UserMessage {
+            message_id: format!("m{i}"),
+            attempt: 0,
+        },
+        kind: RunKind::Chat,
+        status: RunStatus::Running,
+        task_status: None,
+        turn_end: None,
+        budgets: RunBudgets::default(),
+        started_at: crate::now() as i64,
+    };
+    let call = ToolCall {
+        call_id: format!("queued-{i}"),
+        name: name.into(),
+        arguments,
+    };
+    with_tx(
+        &app.connection,
+        |conn| -> grokbot_engine::contracts::Result<()> {
+            model::start(conn, &run)?;
+            let ctx = Context {
+                connection: conn,
+                bot_id: Some("grokbot"),
+                conversation_id: Some(chat),
+                run_id: Some(&run.run_id),
+                ..app.feature_context()
+            };
+            let cause = super::super::forms::request_tool_approval(&ctx, &run, &call).unwrap();
+            let grokbot_engine::contracts::SuspendCause::HumanInput { id } = cause else {
+                panic!()
+            };
+            grokbot_forms::approvals::decide(
+                conn,
+                &id,
+                chat,
+                "user:queue",
+                grokbot_forms::approvals::ApprovalDecision::AllowOnce,
+                crate::now() as i64,
+            )?;
+            let ApprovalCheck::Authorized { by } =
+                super::super::forms::check_tool_approval(&ctx, &run, &call).unwrap()
+            else {
+                panic!()
+            };
+            conn.execute(
+                "INSERT INTO engine_external_tools(run_id,call_id,authorized_by) VALUES (?1,?2,?3)",
+                params![run.run_id, call.call_id, json!(by).to_string()],
+            )?;
+            Ok(())
+        },
+    )
+    .unwrap();
+    (run, call)
+}
+
 #[test]
 fn queued_actions_cannot_outlive_revoke_or_bind_a_new_lease() {
     let _mac = TEST_MAC.lock().unwrap();
@@ -32,40 +99,17 @@ fn queued_actions_cannot_outlive_revoke_or_bind_a_new_lease() {
     )
     .unwrap();
     let lease = current(&path).unwrap();
-    let mut prepared = Vec::new();
-    for i in 0..2 {
-        let run = Run {
-            run_id: format!("screen-queue-{i}"),
-            bot_id: "grokbot".into(),
-            conversation_id: chat.clone(),
-            trigger: Trigger::UserMessage {
-                message_id: format!("m{i}"),
-                attempt: 0,
-            },
-            kind: RunKind::Chat,
-            status: RunStatus::Running,
-            task_status: None,
-            turn_end: None,
-            budgets: RunBudgets::default(),
-            started_at: crate::now() as i64,
-        };
-        let call = ToolCall {
-            call_id: format!("queued-{i}"),
-            name: "computer_click".into(),
-            arguments: json!({"x":10,"y":20,"button":"left"}),
-        };
-        with_tx(&app.connection,|conn|->grokbot_engine::contracts::Result<()>{
-            model::start(conn,&run)?;
-            let ctx=Context{connection:conn,bot_id:Some("grokbot"),conversation_id:Some(&chat),run_id:Some(&run.run_id),..app.feature_context()};
-            let cause=super::super::forms::request_tool_approval(&ctx,&run,&call).unwrap();
-            let grokbot_engine::contracts::SuspendCause::HumanInput{id}=cause else {panic!()};
-            grokbot_forms::approvals::decide(conn,&id,&chat,"user:queue",grokbot_forms::approvals::ApprovalDecision::AllowOnce,crate::now() as i64)?;
-            let ApprovalCheck::Authorized{by}=super::super::forms::check_tool_approval(&ctx,&run,&call).unwrap() else {panic!()};
-            conn.execute("INSERT INTO engine_external_tools(run_id,call_id,authorized_by) VALUES (?1,?2,?3)",params![run.run_id,call.call_id,json!(by).to_string()])?;
-            Ok(())
-        }).unwrap();
-        prepared.push((run, call));
-    }
+    let prepared: Vec<_> = (0..2)
+        .map(|i| {
+            approved_call(
+                &mut app,
+                &chat,
+                i,
+                "computer_click",
+                json!({"x":10,"y":20,"button":"left"}),
+            )
+        })
+        .collect();
     // Both approved calls queue behind a busy helper; revocation must NOT wait
     // for that queue lock, and neither call may use the next session's permit.
     let busy = lease.serial.lock().unwrap();
@@ -389,4 +433,154 @@ fn a_see_only_lease_offers_the_model_nothing_but_the_screenshot() {
     };
     assert_eq!(names(true), ["computer_screenshot"]);
     assert_eq!(names(false).len(), 6);
+}
+
+const KEEPS_RUNNING: &str = "exec cat >/dev/null";
+
+/// A helper process that stays silent until `go` exists, then runs `clicked`, like
+/// one whose button is clicked while the wrapper stores a capture.
+fn clicked_helper(go: &Path, clicked: &str) -> std::process::Command {
+    let mut helper = std::process::Command::new("sh");
+    helper.args([
+        "-c",
+        &format!(
+            r#"echo '{{"ready":true}}'
+            while [ ! -e "$0" ]; do sleep 0.01; done
+            {clicked}"#
+        ),
+    ]);
+    helper.arg(go);
+    helper
+}
+
+/// Runs a real capture of the debug fixture. While its row is being inserted, so
+/// after the check and before the COMMIT, `during_insert` acts. Returns the outcome
+/// and the number of stored rows.
+fn capture_interrupted(
+    clicked: &str,
+    during_insert: impl Fn(&Arc<Lease>) + Send + 'static,
+) -> (ToolOutcome, i64) {
+    let _mac = TEST_MAC.lock().unwrap();
+    let guard = grokbot_test_support::TestDir::new("ezerbot-screen-stop-before-commit");
+    let root = guard.to_path_buf();
+    let path = root.join("workspace.sqlite");
+    let mut app = App::open(&path).unwrap();
+    let chat = app
+        .api("POST", "/api/conversations", br#"{"title":"Stop"}"#)
+        .unwrap()["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    app.api(
+        "POST",
+        "/api/screen/bot",
+        br#"{"bot_id":"grokbot","enabled":true}"#,
+    )
+    .unwrap();
+    app.api(
+        "POST",
+        "/api/screen/grant",
+        json!({"bot_id":"grokbot","conversation_id":chat,"minutes":1})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    let (run, call) = approved_call(&mut app, &chat, 0, "computer_screenshot", json!({}));
+    let lease = current(&path).unwrap();
+    let go = root.join("go");
+    let client = native::Client::launch(
+        clicked_helper(&go, clicked),
+        lease.permit.clone(),
+        lease.generation.clone(),
+    )
+    .unwrap();
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.busy_timeout(Duration::from_secs(3)).unwrap();
+    let inserting = lease.clone();
+    let inserted = go.clone();
+    conn.update_hook(Some(
+        move |_: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
+            if table == "wrapper_screen_shots" {
+                std::fs::write(&inserted, b"").unwrap();
+                during_insert(&inserting);
+            }
+        },
+    ));
+    let provider = crate::Provider::with_endpoints(&path, crate::Endpoints::default(), false);
+    let ctx = Context {
+        connection: &conn,
+        provider: &provider,
+        db_path: &path,
+        now_ms: crate::now(),
+        bot_id: Some(&run.bot_id),
+        conversation_id: Some(&run.conversation_id),
+        run_id: Some(&run.run_id),
+    };
+    let outcome = execute(&ctx, &call, Arc::new(AtomicBool::new(false)));
+    let rows = app
+        .connection
+        .query_row("SELECT count(*) FROM wrapper_screen_shots", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap();
+    drop(client);
+    startup(&path);
+    drop(app);
+    let _ = std::fs::remove_dir_all(root);
+    (outcome, rows)
+}
+
+/// Returns once the helper's line has reached the wrapper, while the store goes on.
+fn until_heard(from: u64) -> impl Fn(&Arc<Lease>) + Send + 'static {
+    move |lease| {
+        let start = std::time::Instant::now();
+        while lease.generation.load(Ordering::SeqCst) == from {
+            assert!(start.elapsed() < Duration::from_secs(5), "line never read");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+#[test]
+fn a_capture_nothing_interrupts_is_stored_and_returned() {
+    let (outcome, rows) = capture_interrupted(KEEPS_RUNNING, |_| {});
+    assert!(matches!(outcome, ToolOutcome::Done { .. }));
+    assert_eq!(rows, 1);
+}
+
+#[test]
+fn a_stop_from_the_helper_before_the_commit_stores_and_returns_nothing() {
+    for clicked in [
+        // Arrêter.
+        r#"echo '{"event":"revoked"}'; exec cat >/dev/null"#,
+        // Pause.
+        r#"echo '{"event":"paused"}'; exec cat >/dev/null"#,
+        // Pause, and a resume the reader has not reached yet.
+        r#"echo '{"event":"paused"}'; echo '{"event":"resumed"}'; exec cat >/dev/null"#,
+        // The helper dies.
+        "exit 0",
+    ] {
+        let (outcome, rows) = capture_interrupted(clicked, until_heard(1));
+        assert!(matches!(outcome, ToolOutcome::Failed { .. }), "{clicked}");
+        assert_eq!(rows, 0, "{clicked}");
+    }
+}
+
+#[test]
+fn a_stop_from_the_app_before_the_commit_stores_and_returns_nothing() {
+    let (outcome, rows) = capture_interrupted(KEEPS_RUNNING, |lease| {
+        let stopping = lease.clone();
+        std::thread::spawn(move || stopping.stop());
+        let start = std::time::Instant::now();
+        while lease.live() {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "stop never landed"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    assert!(matches!(outcome, ToolOutcome::Failed { .. }));
+    assert_eq!(rows, 0);
 }

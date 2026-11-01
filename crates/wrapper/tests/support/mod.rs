@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use grokbot_wrapper::Endpoints;
+use grokbot_wrapper::{Endpoints, Provider};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde_json::{json, Value};
 
@@ -658,6 +658,39 @@ impl Drop for FakeOpenAi {
 pub fn ask_before_acting(app: &mut grokbot_wrapper::App) {
     app.api("POST", "/api/yolo/mode", br#"{"mode":"ask"}"#)
         .expect("retour au mode Demander avant d'agir");
+}
+
+/// Un fournisseur de test qui attend ses fils de fond quand il est détruit. `Drop` s'exécute aussi
+/// pendant l'unwinding d'une assertion qui échoue : l'attente a donc lieu avant la destruction de
+/// ce qui a été déclaré avant lui (le faux serveur, puis le dossier). Il se déclare après eux.
+pub struct Guarded(pub Provider);
+
+impl Guarded {
+    /// Attend maintenant les fils de fond (point de synchronisation au milieu d'un test).
+    pub fn settle(&self) {
+        if let Err(message) = self.0.wait_for_background_work() {
+            panic!("{message}");
+        }
+    }
+}
+
+impl std::ops::Deref for Guarded {
+    type Target = Provider;
+    fn deref(&self) -> &Provider {
+        &self.0
+    }
+}
+
+impl Drop for Guarded {
+    fn drop(&mut self) {
+        match self.0.wait_for_background_work() {
+            Ok(()) => {}
+            // Une seconde panique pendant l'unwinding abattrait tout le binaire : l'échec du test
+            // est déjà en cours, on dit seulement que la fuite existe aussi.
+            Err(message) if std::thread::panicking() => eprintln!("{message}"),
+            Err(message) => panic!("{message}"),
+        }
+    }
 }
 
 pub fn wait(what: &str, mut ready: impl FnMut() -> bool) {

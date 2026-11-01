@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
+use support::{wait, FakeOpenAi, Guarded, ScriptedResponse, Seen, CLIENT};
 
 const ACCOUNT: &str = "account-ezerbot-livrables";
 const PNG_B64: &str =
@@ -26,7 +26,7 @@ const PAGE: &str = r#"export default function Bilan() {
 
 struct Fixture {
     app: App,
-    provider: Provider,
+    provider: Guarded,
     server: FakeOpenAi,
     path: PathBuf,
     _dir: grokbot_test_support::TestDir,
@@ -57,7 +57,7 @@ impl Fixture {
         let path = root.join("data/workspace.sqlite");
         std::fs::write(path.with_extension("chatgpt-auth.json"), json!({"host_id":"test-host","client_id":CLIENT,"account_id":ACCOUNT,"access_token":session_token(ACCOUNT),"refresh_token":"fake-refresh","expires_at":now()/1000+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
-        let provider = Provider::with_endpoints(&path, server.endpoints(), false);
+        let provider = Guarded(Provider::with_endpoints(&path, server.endpoints(), false));
         let mut app = App::open_with(&path, provider.clone()).unwrap();
         wait("models", || provider.status()["models_ready"] == true);
         app.api(
@@ -174,7 +174,11 @@ impl Fixture {
 
     fn reopen(&mut self) {
         assert_eq!(self.provider.status()["titling"], false);
-        self.provider = Provider::with_endpoints(&self.path, self.server.endpoints(), false);
+        self.provider = Guarded(Provider::with_endpoints(
+            &self.path,
+            self.server.endpoints(),
+            false,
+        ));
         self.app = App::open_with(&self.path, self.provider.clone()).unwrap();
         wait("reopened models", || {
             self.provider.status()["models_ready"] == true

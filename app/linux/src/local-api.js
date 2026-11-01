@@ -54,11 +54,21 @@
       if (!opaque(inner)) revoked = true;
     }
   };
+  // The shell hears of the revocation once, so a panel waiting on this page
+  // fails at once instead of waiting for an answer that will never come.
+  // Only this page holds the token; a forged notice could only revoke more.
+  let announced = false;
+  const announce = () => {
+    if (!revoked || announced) return;
+    announced = true;
+    try { ipc.postMessage(JSON.stringify({launch, id: ++sequence, body: {command: 'revoked'}})); } catch (_) {}
+  };
   const record = records => {
     for (const change of records) {
       if (change.type === 'attributes') inspect(change.target);
       for (const node of change.addedNodes || []) inspect(node);
     }
+    announce();
   };
   const Observer = window.MutationObserver;
   const observer = typeof Observer === 'function' ? new Observer(record) : null;
@@ -69,6 +79,7 @@
       try { if (framesOf[index].document) revoked = true; } catch (_) {}
     }
     for (const element of document.querySelectorAll?.('iframe,frame,object,embed') || []) inspect(element);
+    announce();
     return !revoked;
   };
   const post = body => new Promise((resolve, reject) => {

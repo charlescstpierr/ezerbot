@@ -1,17 +1,13 @@
 #![cfg(all(target_os = "linux", debug_assertions))]
 
 use grokbot_test_support::TestDir;
-use gtk::{
-    gio::{self, prelude::*},
-    glib::{self, Variant},
-};
 use nix::{
     sys::signal::{kill, Signal},
     unistd::Pid,
 };
 use rusqlite::{Connection, OpenFlags};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     ffi::CString,
     io::{BufRead, BufReader},
     os::raw::{c_int, c_uint},
@@ -20,7 +16,6 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     ptr,
     sync::OnceLock,
-    sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant},
 };
 use x11_dl::{
@@ -805,7 +800,7 @@ import http.server, json, os, sys, threading
 sys.stdin.buffer.read()
 root = os.path.dirname(os.path.abspath(__file__)) + "/.."
 pages = {"/": "main.html", "/floating": "panel.html", "/frame": "frame.html"}
-cursor = {"main": 0, "panel": 0}
+cursor = {"main": 0, "panel": 0, "frame": 0}
 lock = threading.Lock()
 class Handler(http.server.BaseHTTPRequestHandler):
     def reply(self, status, body=b"", kind="text/plain"):
@@ -849,7 +844,7 @@ fn scripted_page(view: &str, extra: &str) -> String {
 const view = "{view}";
 const record = (key, value) => fetch("/result", {{method: "POST", body: JSON.stringify([key, value])}});
 window.EzerbotFloating = {{open() {{ record("reopened", true); }}}};
-window.EzerbotFloatingMain = {{openConversation: async id => ({{opened: id === "present", reason: "Fil absent."}}), shortcutLost() {{ record("lost-" + Date.now() + Math.random(), true); }}, shortcutBound(trigger) {{ record("bound-" + Date.now() + Math.random(), trigger); }}, shortcutAbandoned() {{ record("abandoned-" + Date.now() + Math.random(), true); }}}};
+window.EzerbotFloatingMain = {{openConversation: async id => ({{opened: id === "present", reason: "Fil absent."}})}};
 (async () => {{
   for (;;) {{
     const line = await (await fetch("/next?view=" + view)).text();
@@ -948,34 +943,6 @@ impl Scripted {
             .map(|(window, _)| window)
     }
 
-    /// Waits until the main page was told `count` times that its shortcut was lost.
-    fn wait_lost(&self, count: usize, what: &str) {
-        wait_for(what, || {
-            let told = self
-                .results()
-                .iter()
-                .filter(|(key, _)| key.starts_with("lost-"))
-                .count();
-            (told >= count).then_some(())
-        });
-    }
-
-    /// What the shell told the main page, oldest first, for notices starting with `kind`.
-    fn notices(&self, kind: &str) -> Vec<serde_json::Value> {
-        self.results()
-            .into_iter()
-            .filter(|(key, _)| key.starts_with(kind))
-            .map(|(_, value)| value)
-            .collect()
-    }
-
-    fn wait_notices(&self, kind: &str, count: usize, what: &str) -> Vec<serde_json::Value> {
-        wait_for(what, || {
-            let notices = self.notices(kind);
-            (notices.len() >= count).then_some(notices)
-        })
-    }
-
     fn wait_panel(&self, open: bool, what: &str) {
         wait_for(what, || (self.panel_open() == open).then_some(()));
     }
@@ -989,343 +956,60 @@ impl Scripted {
     }
 }
 
-struct Bus {
-    daemon: Child,
-    address: String,
-}
-
-impl Bus {
-    /// No service directory: a call to an absent portal fails instead of
-    /// starting the real one.
-    fn start(home: &TestDir) -> Self {
-        let config = home.join("bus.conf");
-        std::fs::write(
-            &config,
-            format!(
-                r#"<busconfig><type>session</type><listen>unix:tmpdir={}</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*" eavesdrop="true"/><allow eavesdrop="true"/><allow own="*"/></policy></busconfig>"#,
-                home.path().display()
-            ),
-        )
-        .unwrap();
-        let mut daemon = Command::new("dbus-daemon")
-            .args(["--nofork", "--print-address=1"])
-            .arg(format!("--config-file={}", config.display()))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("dbus-daemon is required: sudo apt install dbus");
-        let mut address = String::new();
-        BufReader::new(daemon.stdout.take().unwrap())
-            .read_line(&mut address)
-            .unwrap();
-        Self {
-            daemon,
-            address: address.trim().to_owned(),
-        }
+/// Adds the frame of `FRAME_PAGE` once the test appends a line to `commands-frame`.
+const FRAME_ON_DEMAND: &str = r#"<script>(async () => {
+  for (;;) {
+    if (await (await fetch("/next?view=frame")).text()) {
+      document.body.insertAdjacentHTML("beforeend", '<iframe src="/frame"></iframe>');
+      return;
     }
-}
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+})();</script>"#;
 
-impl Drop for Bus {
-    fn drop(&mut self) {
-        let _ = self.daemon.kill();
-        let _ = self.daemon.wait();
-    }
-}
+#[test]
+fn a_thread_asked_from_the_panel_fails_at_once_when_the_main_page_revoked_its_bridge() {
+    let shell = Scripted::start(FRAME_ON_DEMAND, &[]);
+    assert_eq!(
+        status(&shell.run("main", &configure("cmd+option+j"))),
+        "registered"
+    );
+    shell.screen.press(&SUPER_ALT_J);
+    shell.wait_panel(true, "the shortcut did not open the panel");
+    let open = r#"{"command":"openConversation","conversation_id":"present"}"#;
+    assert_eq!(
+        shell.run("panel", open)["ok"],
+        true,
+        "a thread did not open before"
+    );
 
-const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
-const PORTAL_NAME: &str = "org.freedesktop.portal.Desktop";
-const ASSIGNED: &str = "Ctrl Alt K";
-const SHORTCUTS_INTERFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
-
-const PORTAL_XML: &str = r#"<node><interface name="org.freedesktop.portal.GlobalShortcuts">
-<method name="CreateSession"><arg type="a{sv}" direction="in"/><arg type="o" direction="out"/></method>
-<method name="BindShortcuts"><arg type="o" direction="in"/><arg type="a(sa{sv})" direction="in"/><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="o" direction="out"/></method>
-</interface></node>"#;
-
-const SESSION_XML: &str = r#"<node><interface name="org.freedesktop.portal.Session">
-<method name="Close"/></interface></node>"#;
-
-#[derive(Default)]
-struct PortalState {
-    calls: Mutex<Vec<String>>,
-    taken: Mutex<Vec<String>>,
-}
-
-/// The GlobalShortcuts portal as the specification describes it, answering on
-/// its own thread with its own main loop.
-struct FakePortal {
-    state: Arc<PortalState>,
-    connection: gio::DBusConnection,
-    main_loop: glib::MainLoop,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-fn request_sender(sender: &str) -> String {
-    sender.trim_start_matches(':').replace('.', "_")
-}
-
-fn object_path(path: &str) -> glib::variant::ObjectPath {
-    glib::variant::ObjectPath::try_from(path.to_owned()).unwrap()
-}
-
-fn token(options: &Variant, key: &str) -> String {
-    glib::VariantDict::new(Some(options))
-        .lookup::<String>(key)
-        .unwrap()
-        .unwrap()
-}
-
-impl FakePortal {
-    fn start(address: &str) -> Self {
-        let state = Arc::new(PortalState::default());
-        let (ready, started) = mpsc::channel();
-        let context = glib::MainContext::new();
-        let main_loop = glib::MainLoop::new(Some(&context), false);
-        let (handler_state, address, quit) =
-            (Arc::clone(&state), address.to_owned(), main_loop.clone());
-        let thread = std::thread::spawn(move || {
-            let _ = context.with_thread_default(|| {
-                let connection = gio::DBusConnection::for_address_sync(
-                    &address,
-                    gio::DBusConnectionFlags::AUTHENTICATION_CLIENT
-                        | gio::DBusConnectionFlags::MESSAGE_BUS_CONNECTION,
-                    None,
-                    None::<&gio::Cancellable>,
-                )
-                .unwrap();
-                let node = gio::DBusNodeInfo::for_xml(PORTAL_XML).unwrap();
-                let interface = node.lookup_interface(SHORTCUTS_INTERFACE).unwrap();
-                connection
-                    .register_object(
-                        PORTAL_PATH,
-                        &interface,
-                        move |connection, sender, _, _, method, parameters, invocation| {
-                            Self::answer(
-                                &handler_state,
-                                &connection,
-                                sender,
-                                method,
-                                &parameters,
-                                invocation,
-                            );
-                        },
-                        |_, _, _, _, _| unreachable!(),
-                        |_, _, _, _, _, _| false,
-                    )
-                    .unwrap();
-                let acquired = ready.clone();
-                gio::bus_own_name_on_connection(
-                    &connection,
-                    "org.freedesktop.portal.Desktop",
-                    gio::BusNameOwnerFlags::NONE,
-                    move |_, _| {
-                        let _ = acquired.send(None);
-                    },
-                    |_, _| {},
-                );
-                ready.send(Some(connection)).unwrap();
-                quit.run();
-            });
-        });
-        let connection = started.recv().unwrap().expect("the connection comes first");
-        started.recv().unwrap();
-        Self {
-            state,
-            connection,
-            main_loop,
-            thread: Some(thread),
-        }
-    }
-
-    fn answer(
-        state: &Arc<PortalState>,
-        connection: &gio::DBusConnection,
-        sender: &str,
-        method: &str,
-        parameters: &Variant,
-        invocation: gio::DBusMethodInvocation,
-    ) {
-        let who = request_sender(sender);
-        let (options, mut results) = (
-            parameters.child_value(parameters.n_children() - 1),
-            HashMap::new(),
-        );
-        let request = format!(
-            "{PORTAL_PATH}/request/{who}/{}",
-            token(&options, "handle_token")
-        );
-        match method {
-            "CreateSession" => {
-                let session = format!(
-                    "{PORTAL_PATH}/session/{who}/{}",
-                    token(&options, "session_handle_token")
-                );
-                state
-                    .calls
-                    .lock()
-                    .unwrap()
-                    .push(format!("CreateSession {session}"));
-                let node = gio::DBusNodeInfo::for_xml(SESSION_XML).unwrap();
-                let interface = node
-                    .lookup_interface("org.freedesktop.portal.Session")
-                    .unwrap();
-                let closing = Arc::clone(state);
-                let path = session.clone();
-                connection
-                    .register_object(
-                        &session,
-                        &interface,
-                        move |_, _, _, _, _, _, invocation| {
-                            closing.calls.lock().unwrap().push(format!("Close {path}"));
-                            invocation.return_value(None);
-                        },
-                        |_, _, _, _, _| unreachable!(),
-                        |_, _, _, _, _, _| false,
-                    )
-                    .unwrap();
-                results.insert("session_handle".to_owned(), session.to_variant());
-            }
-            _ => {
-                let shortcuts: Vec<(String, HashMap<String, Variant>)> =
-                    parameters.child_value(1).get().unwrap();
-                let trigger: String = shortcuts[0].1["preferred_trigger"].get().unwrap();
-                let session = parameters.child_value(0).str().unwrap().to_owned();
-                state.calls.lock().unwrap().push(format!(
-                    "BindShortcuts {} {trigger} {session}",
-                    shortcuts[0].0
-                ));
-                // The portal may assign another combination than the one asked for.
-                let bound = if state.taken.lock().unwrap().contains(&trigger) {
-                    Vec::new()
-                } else {
-                    shortcuts
-                        .into_iter()
-                        .map(|(id, mut details)| {
-                            details.insert("trigger_description".into(), ASSIGNED.to_variant());
-                            (id, details)
-                        })
-                        .collect()
-                };
-                results.insert("shortcuts".to_owned(), bound.to_variant());
-            }
-        }
-        invocation.return_value(Some(&(object_path(&request),).to_variant()));
-        connection
-            .emit_signal(
-                Some(sender),
-                &request,
-                "org.freedesktop.portal.Request",
-                "Response",
-                Some(&(0u32, results).to_variant()),
-            )
-            .unwrap();
-    }
-
-    fn calls(&self) -> Vec<String> {
-        self.state.calls.lock().unwrap().clone()
-    }
-
-    /// The session the latest `CreateSession` returned.
-    fn session(&self, nth: usize) -> String {
-        self.calls()
-            .iter()
-            .filter_map(|call| call.strip_prefix("CreateSession "))
-            .nth(nth)
-            .unwrap()
-            .to_owned()
-    }
-
-    fn activate(&self, session: &str, shortcut: &str) {
-        self.activate_with(session, shortcut, HashMap::new());
-    }
-
-    fn activate_with(&self, session: &str, shortcut: &str, options: HashMap<String, Variant>) {
-        let parameters = (object_path(session), shortcut.to_owned(), 0u64, options).to_variant();
-        self.connection
-            .emit_signal(
-                None,
-                PORTAL_PATH,
-                SHORTCUTS_INTERFACE,
-                "Activated",
-                Some(&parameters),
-            )
-            .unwrap();
-    }
-
-    /// The portal ending a session on its own: no `Close` call came first.
-    fn end(&self, session: &str) {
-        self.connection
-            .emit_signal(
-                None,
-                session,
-                "org.freedesktop.portal.Session",
-                "Closed",
-                Some(&(HashMap::<String, Variant>::new(),).to_variant()),
-            )
-            .unwrap();
-        self.connection
-            .flush_sync(None::<&gio::Cancellable>)
-            .unwrap();
-    }
-
-    /// The desktop changing the combination of `shortcut` in `session`.
-    fn change(&self, session: &str, shortcut: &str, text: &str) {
-        let details = HashMap::from([("trigger_description".to_owned(), text.to_variant())]);
-        let parameters = (object_path(session), vec![(shortcut.to_owned(), details)]).to_variant();
-        self.connection
-            .emit_signal(
-                None,
-                PORTAL_PATH,
-                SHORTCUTS_INTERFACE,
-                "ShortcutsChanged",
-                Some(&parameters),
-            )
-            .unwrap();
-        self.connection
-            .flush_sync(None::<&gio::Cancellable>)
-            .unwrap();
-    }
-
-    fn sessions(&self) -> usize {
-        self.calls()
-            .iter()
-            .filter(|call| call.starts_with("CreateSession "))
-            .count()
-    }
-
-    fn bus_name(&self, method: &str, parameters: Variant) {
-        self.connection
-            .call_sync(
-                Some("org.freedesktop.DBus"),
-                "/org/freedesktop/DBus",
-                "org.freedesktop.DBus",
-                method,
-                Some(&parameters),
-                None,
-                gio::DBusCallFlags::NONE,
-                -1,
-                None::<&gio::Cancellable>,
-            )
-            .unwrap();
-    }
-
-    /// Gives up the portal's name, as a crashed or restarting portal does.
-    fn vanish(&self) {
-        self.bus_name("ReleaseName", (PORTAL_NAME,).to_variant());
-    }
-
-    fn reappear(&self) {
-        self.bus_name("RequestName", (PORTAL_NAME, 0u32).to_variant());
-    }
-}
-
-impl Drop for FakePortal {
-    fn drop(&mut self) {
-        self.main_loop.quit();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
+    shell.command("frame", "go");
+    let via_parent = wait_for("the frame never used the page's bridge", || {
+        shell
+            .results()
+            .into_iter()
+            .find(|(key, _)| key == "frame-via-parent")
+            .map(|(_, value)| value)
+    });
+    assert!(
+        via_parent.as_str().unwrap().contains("refusée"),
+        "{via_parent}"
+    );
+    shell.screen.press(&SUPER_ALT_J);
+    shell.wait_panel(true, "the shortcut did not open the panel again");
+    let asked = Instant::now();
+    let again = r#"{"command":"openConversation", "conversation_id":"present"}"#;
+    let refused = shell.run("panel", again);
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "the panel waited {:?} for a page that cannot answer",
+        asked.elapsed()
+    );
+    assert!(
+        refused["error"].as_str().unwrap().contains("Rechargez"),
+        "{refused}"
+    );
+    shell.app.quit();
 }
 
 fn status(outcome: &serde_json::Value) -> &str {
@@ -1336,231 +1020,23 @@ fn configure(shortcut: &str) -> String {
     format!(r#"{{"command":"configure","shortcut":"{shortcut}"}}"#)
 }
 
+/// Under Wayland nothing is started: no portal, no D-Bus. The session bus here
+/// does not exist, so any attempt would fail as `unavailable`. Issue #635.
 #[test]
-fn the_portal_opens_the_panel_and_a_replacement_never_loses_the_shortcut() {
-    let home = TestDir::new("ezerbot-bus");
-    let bus = Bus::start(&home);
-    let portal = FakePortal::start(&bus.address);
+fn under_wayland_the_shortcut_is_announced_unavailable_without_any_portal() {
     let shell = Scripted::start(
         "",
         &[
-            ("DBUS_SESSION_BUS_ADDRESS", bus.address.as_str()),
-            ("WAYLAND_DISPLAY", "ezerbot-test-0"),
-        ],
-    );
-
-    let registered = shell.run("main", &configure("cmd+option+j"));
-    assert_eq!(status(&registered), "registered");
-    assert_eq!(registered["ok"]["trigger"], ASSIGNED);
-    let first = portal.session(0);
-    assert!(portal.calls()[1].starts_with("BindShortcuts cmd+option+j LOGO+ALT+j "));
-    let repeated = shell.run(
-        "main",
-        r#"{"command":"configure", "shortcut":"cmd+option+j"}"#,
-    );
-    assert_eq!(status(&repeated), "registered");
-    assert_eq!(repeated["ok"]["trigger"], ASSIGNED);
-    assert_eq!(
-        portal.calls().len(),
-        2,
-        "a repeated name asked the portal again"
-    );
-    let token = "ezerbot-jeton-42";
-    portal.activate_with(
-        &first,
-        "cmd+option+j",
-        HashMap::from([("activation_token".to_owned(), token.to_variant())]),
-    );
-    shell.wait_panel(true, "the portal's Activated did not open the panel");
-    // GTK hands the token to the display server: `_NET_STARTUP_ID` on X11,
-    // xdg-activation on Wayland. Without it a Wayland panel may not get the keyboard.
-    wait_for("the activation token never reached the panel", || {
-        let panel = shell.panel_window()?;
-        let (_, value) = shell.screen.property(panel, "_NET_STARTUP_ID");
-        (value == token.as_bytes()).then_some(())
-    });
-    shell.run("panel", r#"{"command":"close"}"#);
-    shell.wait_panel(false, "the panel stayed open");
-
-    assert_eq!(
-        status(&shell.run("main", &configure("ctrl+option+space"))),
-        "registered"
-    );
-    let second = portal.session(1);
-    let calls = portal.calls();
-    let position = |prefix: String| calls.iter().position(|call| call.starts_with(&prefix));
-    assert!(
-        position("BindShortcuts ctrl+option+space".into()) < position(format!("Close {first}")),
-        "the old session closed before the new one was bound: {calls:?}"
-    );
-    portal.activate(&first, "cmd+option+j");
-    shell.assert_no_panel_for(
-        Duration::from_secs(1),
-        "a closed session still opened the panel",
-    );
-    portal.activate(&second, "ctrl+option+space");
-    shell.wait_panel(true, "the replacement did not open the panel");
-    shell.run("panel", r#"{"command":"close"}"#);
-    shell.wait_panel(false, "the panel stayed open");
-
-    portal
-        .state
-        .taken
-        .lock()
-        .unwrap()
-        .push("LOGO+SHIFT+space".into());
-    assert_eq!(
-        status(&shell.run("main", &configure("cmd+shift+space"))),
-        "conflict"
-    );
-    let third = portal.session(2);
-    wait_for("the refused session was never closed", || {
-        portal
-            .calls()
-            .contains(&format!("Close {third}"))
-            .then_some(())
-    });
-    assert!(
-        !portal.calls().contains(&format!("Close {second}")),
-        "the shortcut in force was closed"
-    );
-    portal.activate(&third, "cmd+shift+space");
-    shell.assert_no_panel_for(
-        Duration::from_secs(1),
-        "the refused shortcut opened the panel",
-    );
-    portal.activate(&second, "ctrl+option+space");
-    shell.wait_panel(
-        true,
-        "the shortcut in force stopped working after a conflict",
-    );
-    shell.app.quit();
-}
-
-#[test]
-fn a_shortcut_the_portal_ended_is_bound_again_by_the_shell_even_after_a_slow_restart() {
-    let home = TestDir::new("ezerbot-bus");
-    let bus = Bus::start(&home);
-    let portal = FakePortal::start(&bus.address);
-    let shell = Scripted::start(
-        "",
-        &[
-            ("DBUS_SESSION_BUS_ADDRESS", bus.address.as_str()),
+            (
+                "DBUS_SESSION_BUS_ADDRESS",
+                "unix:path=/nonexistent/ezerbot-bus",
+            ),
             ("WAYLAND_DISPLAY", "ezerbot-test-0"),
         ],
     );
     assert_eq!(
         status(&shell.run("main", &configure("cmd+option+j"))),
-        "registered"
-    );
-    let first = portal.session(0);
-
-    // The portal ends the session: the shell binds the same choice again, unasked.
-    portal.end(&first);
-    shell.wait_lost(1, "the page never heard that the portal ended the shortcut");
-    let bound = shell.wait_notices("bound-", 1, "the shell never bound the shortcut again");
-    assert_eq!(bound[0], ASSIGNED);
-    let second = portal.session(1);
-    assert!(portal
-        .calls()
-        .last()
-        .unwrap()
-        .starts_with("BindShortcuts cmd+option+j "));
-    portal.activate(&first, "cmd+option+j");
-    shell.assert_no_panel_for(
-        Duration::from_secs(1),
-        "a session the portal ended still opened the panel",
-    );
-    portal.activate(&second, "cmd+option+j");
-    shell.wait_panel(true, "the shortcut bound again did not open the panel");
-    shell.run("panel", r#"{"command":"close"}"#);
-    shell.wait_panel(false, "the panel stayed open");
-
-    // The portal stays away long enough for several attempts to fail, then returns.
-    portal.vanish();
-    shell.wait_lost(2, "the page never heard that the portal went away");
-    std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(portal.sessions(), 2, "a portal that is away answered");
-    assert!(
-        shell.notices("abandoned-").is_empty(),
-        "the shell gave up within seconds"
-    );
-    portal.activate(&second, "cmd+option+j");
-    shell.assert_no_panel_for(
-        Duration::from_secs(1),
-        "a session of a portal that went away still opened the panel",
-    );
-    portal.reappear();
-    shell.wait_notices(
-        "bound-",
-        2,
-        "the shell never bound the shortcut once the portal returned",
-    );
-    let third = portal.session(2);
-    portal.activate(&third, "cmd+option+j");
-    shell.wait_panel(
-        true,
-        "the shortcut bound after a slow portal restart did not open the panel",
-    );
-    shell.run("panel", r#"{"command":"close"}"#);
-    shell.wait_panel(false, "the panel stayed open");
-    shell.app.quit();
-}
-
-#[test]
-fn a_combination_changed_from_the_desktop_is_what_the_page_shows() {
-    let home = TestDir::new("ezerbot-bus");
-    let bus = Bus::start(&home);
-    let portal = FakePortal::start(&bus.address);
-    let shell = Scripted::start(
-        "",
-        &[
-            ("DBUS_SESSION_BUS_ADDRESS", bus.address.as_str()),
-            ("WAYLAND_DISPLAY", "ezerbot-test-0"),
-        ],
-    );
-    let registered = shell.run("main", &configure("cmd+option+j"));
-    assert_eq!(registered["ok"]["trigger"], ASSIGNED);
-    let session = portal.session(0);
-
-    // Another session's change is not ours.
-    portal.change(
-        "/org/freedesktop/portal/desktop/session/other/x",
-        "cmd+option+j",
-        "Super F1",
-    );
-    portal.change(&session, "cmd+option+j", "Super Maj F2");
-    let bound = shell.wait_notices("bound-", 1, "the page never heard of the new combination");
-    assert_eq!(bound, [serde_json::json!("Super Maj F2")]);
-    // The answer to the same choice now gives the desktop's new combination.
-    let again = shell.run(
-        "main",
-        r#"{"command":"configure", "shortcut":"cmd+option+j"}"#,
-    );
-    assert_eq!(status(&again), "registered");
-    assert_eq!(again["ok"]["trigger"], "Super Maj F2");
-    assert_eq!(
-        portal.sessions(),
-        1,
-        "a changed combination bound a new session"
-    );
-    shell.app.quit();
-}
-
-#[test]
-fn without_a_portal_the_shortcut_is_announced_unavailable() {
-    let home = TestDir::new("ezerbot-bus");
-    let bus = Bus::start(&home);
-    let shell = Scripted::start(
-        "",
-        &[
-            ("DBUS_SESSION_BUS_ADDRESS", bus.address.as_str()),
-            ("WAYLAND_DISPLAY", "ezerbot-test-0"),
-        ],
-    );
-    assert_eq!(
-        status(&shell.run("main", &configure("cmd+option+j"))),
-        "unavailable"
+        "wayland"
     );
     assert_eq!(
         status(&shell.run("main", &configure("disabled"))),

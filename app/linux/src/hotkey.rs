@@ -1,4 +1,3 @@
-use crate::portal::Portal;
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
@@ -68,6 +67,9 @@ pub enum Outcome {
     Conflict,
     Error,
     Unavailable,
+    /// A Wayland session: no client may grab a key there, and the GlobalShortcuts
+    /// portal is not used yet (issue #635).
+    Wayland,
 }
 
 impl Outcome {
@@ -84,18 +86,19 @@ impl Outcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hotkeys {
     X11,
-    Portal,
+    Wayland,
     Unavailable,
 }
 
 impl Hotkeys {
     /// XGrabKey under XWayland only sees keys while an X client has focus, so
-    /// any Wayland session goes through the portal, whatever GDK runs on.
+    /// any Wayland session has no global shortcut, whatever GDK runs on, until
+    /// the GlobalShortcuts portal is supported (issue #635).
     pub fn choose(wayland_display: Option<&str>, session_type: Option<&str>, x11: bool) -> Self {
         let wayland = wayland_display.is_some_and(|value| !value.is_empty())
             || session_type.is_some_and(|value| value.eq_ignore_ascii_case("wayland"));
         if wayland {
-            Self::Portal
+            Self::Wayland
         } else if x11 {
             Self::X11
         } else {
@@ -193,11 +196,11 @@ impl Grabs for X11 {
     }
 }
 
-struct Nothing;
+struct Nothing(Outcome);
 
 impl Grabs for Nothing {
     fn acquire(&mut self, _: &Shortcut) -> Result<(), Outcome> {
-        Err(Outcome::Unavailable)
+        Err(self.0)
     }
     fn release(&mut self, _: &Shortcut) {}
 }
@@ -207,7 +210,7 @@ impl Slot {
     fn x11(on_press: impl Fn(u32) + Send + Sync + 'static) -> Self {
         // A dead grab thread would still answer `Ok`: only start it under X11.
         let Ok(manager) = GlobalHotKeyManager::new() else {
-            return Self::new(Box::new(Nothing));
+            return Self::new(Box::new(Nothing(Outcome::Unavailable)));
         };
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
             if event.state() == HotKeyState::Pressed {
@@ -219,36 +222,25 @@ impl Slot {
 }
 
 /// Where the chosen backend keeps the shortcut in force.
-pub enum Registrar {
-    Slot(Slot),
-    Portal(Portal),
-}
+pub struct Registrar(Slot);
 
 impl Registrar {
-    pub fn open(
-        choice: Hotkeys,
-        on_press: impl Fn(u32) + Send + Sync + 'static,
-        on_portal: impl Fn(Option<String>) + 'static,
-        on_notice: impl Fn(crate::portal::Notice) + 'static,
-    ) -> Self {
-        match choice {
-            Hotkeys::X11 => Self::Slot(Slot::x11(on_press)),
-            Hotkeys::Portal => Self::Portal(Portal::new(on_portal, on_notice)),
-            Hotkeys::Unavailable => Self::Slot(Slot::new(Box::new(Nothing))),
-        }
+    /// Under Wayland nothing is started: no portal, no D-Bus call (issue #635).
+    pub fn open(choice: Hotkeys, on_press: impl Fn(u32) + Send + Sync + 'static) -> Self {
+        Self(match choice {
+            Hotkeys::X11 => Slot::x11(on_press),
+            Hotkeys::Wayland => Slot::new(Box::new(Nothing(Outcome::Wayland))),
+            Hotkeys::Unavailable => Slot::new(Box::new(Nothing(Outcome::Unavailable))),
+        })
     }
 
-    /// `done` runs at once for a grab, and after the portal answered for the portal.
-    /// Only the portal can report a combination other than the one asked for.
+    /// `done` runs at once; no backend reports a combination other than the one asked for.
     pub fn configure(&mut self, name: &str, done: impl FnOnce(Outcome, Option<String>) + 'static) {
-        match self {
-            Self::Slot(slot) => done(slot.configure(name), None),
-            Self::Portal(portal) => portal.configure(name, done),
-        }
+        done(self.0.configure(name), None);
     }
 
     pub fn fires(&self, id: u32) -> bool {
-        matches!(self, Self::Slot(slot) if slot.fires(id))
+        self.0.fires(id)
     }
 }
 
@@ -344,7 +336,7 @@ mod tests {
 
     #[test]
     fn an_unavailable_backend_registers_nothing() {
-        let mut slot = Slot::new(Box::new(Nothing));
+        let mut slot = Slot::new(Box::new(Nothing(Outcome::Unavailable)));
         assert_eq!(slot.configure("cmd+option+j"), Outcome::Unavailable);
         assert_eq!(slot.configure(DISABLED), Outcome::Disabled);
         assert_eq!(slot.configure("cmd+option+j"), Outcome::Unavailable);
@@ -400,16 +392,40 @@ mod tests {
     }
 
     #[test]
-    fn wayland_sessions_use_the_portal_even_when_gdk_runs_on_x11() {
+    fn under_wayland_every_choice_is_announced_as_wayland_and_disabled_stays_allowed() {
+        let mut registrar = Registrar::open(Hotkeys::Wayland, |_| {});
+        let answers = Rc::new(RefCell::new(Vec::new()));
+        for name in ["cmd+option+j", "ctrl+option+space", DISABLED] {
+            let answers = Rc::clone(&answers);
+            registrar.configure(name, move |outcome, trigger| {
+                answers.borrow_mut().push((outcome, trigger))
+            });
+        }
+        assert_eq!(
+            *answers.borrow(),
+            [
+                (Outcome::Wayland, None),
+                (Outcome::Wayland, None),
+                (Outcome::Disabled, None)
+            ]
+        );
+        assert_eq!(
+            Outcome::Wayland.reply(None).to_string(),
+            r#"{"status":"wayland"}"#
+        );
+    }
+
+    #[test]
+    fn wayland_sessions_get_no_shortcut_even_when_gdk_runs_on_x11() {
         use Hotkeys::*;
         let cases = [
             (None, None, true, X11),
             (None, None, false, Unavailable),
             (Some(""), Some("x11"), true, X11),
-            (Some("wayland-0"), None, true, Portal),
-            (Some("wayland-0"), Some("x11"), false, Portal),
-            (None, Some("wayland"), true, Portal),
-            (Some(""), Some("Wayland"), false, Portal),
+            (Some("wayland-0"), None, true, Wayland),
+            (Some("wayland-0"), Some("x11"), false, Wayland),
+            (None, Some("wayland"), true, Wayland),
+            (Some(""), Some("Wayland"), false, Wayland),
             (None, Some("tty"), true, X11),
         ];
         for (display, session, x11, expected) in cases {

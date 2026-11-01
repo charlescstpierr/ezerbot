@@ -150,7 +150,8 @@ test('the bridge refuses once a same-origin frame was reachable, even after it i
   await assert.rejects(window.EzerbotShell.floating.postMessage({command: 'show'}), /refusée/);
   frames.pop();
   const again = window.EzerbotShell.floating.postMessage({command: 'show'});
-  assert.equal(window.posted.length, 1, 'the bridge served again once the frame was removed');
+  assert.ok(window.posted.slice(1).every(message => message.body.command === 'revoked'),
+    'the bridge served again once the frame was removed');
   await assert.rejects(again, /refusée/);
 });
 
@@ -171,6 +172,10 @@ test('a frame attached and removed between two calls revokes the bridge', async 
   // Attached then removed before any call: only the mutation record remains.
   pending.push({type: 'childList', addedNodes: [element('IFRAME', 'allow-scripts allow-same-origin')]});
   const late = window.EzerbotShell.floating.postMessage({command: 'show'});
-  assert.equal(window.posted.length, 1, 'a command went out after a same-origin frame came and went');
+  // The only message that still goes out tells the shell, once, that the page revoked its bridge.
+  assert.deepEqual(window.posted.slice(1).map(message => message.body), [{command: 'revoked'}]);
+  assert.equal(window.posted[1].launch, identity);
   await assert.rejects(late, /refusée/);
+  await assert.rejects(window.EzerbotShell.floating.postMessage({command: 'show'}), /refusée/);
+  assert.equal(window.posted.length, 2, 'the revocation was announced twice');
 });

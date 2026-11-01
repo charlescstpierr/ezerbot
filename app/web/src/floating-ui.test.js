@@ -350,23 +350,10 @@ test("native test builds compile out global registration and all event capture",
   assert.match(source, /panel.minSize = NSMakeSize\(360, 520\)/);
 });
 
-test("on Linux the page shows what the shell reports about the shortcut and leaves the binding to it", async () => {
-  const f = fixture(null, {}, "registered");
+test("under Wayland the settings say plainly the global shortcut is unavailable", async () => {
+  const f = fixture(null, {}, "wayland");
   f.registration.onState({ floating: { shortcut: "cmd+option+j" } }, { connected: true });
   await flush();
-  assert.equal(f.calls.filter((call) => call.command === "configure").length, 1);
-  f.window.EzerbotFloatingMain.shortcutLost();
-  await flush();
-  assert.match(f.status.textContent, /retiré le raccourci/);
-  f.window.EzerbotFloatingMain.shortcutBound("Ctrl+Alt+K");
-  assert.equal(f.status.textContent, "Raccourci attribué par le bureau : Ctrl+Alt+K.");
-  f.window.EzerbotFloatingMain.shortcutBound(null);
-  assert.match(f.status.textContent, /rétabli/);
-  // The shell binds again itself: a second request from the page would collide with it.
-  assert.equal(f.calls.filter((call) => call.command === "configure").length, 1);
-  f.window.EzerbotFloatingMain.shortcutAbandoned();
-  assert.match(f.status.textContent, /pas pu être rétabli/);
-  f.registration.onState({ floating: { shortcut: "cmd+option+j" } }, { connected: true });
-  await flush();
-  assert.equal(f.calls.filter((call) => call.command === "configure").length, 2, "after giving up, the next state binds the choice again");
+  assert.match(f.status.textContent, /pas disponible sous Wayland/);
+  assert.match(f.status.textContent, /menu Ezerbot/);
 });

@@ -73,12 +73,17 @@ pub enum Command {
     OpenConversation {
         conversation_id: ConversationId,
     },
+    /// The main page stopped serving its bridge: a frame could reach it.
+    Revoked {},
 }
 
 impl Command {
     fn view(&self) -> View {
         match self {
-            Self::Show {} | Self::Configure { .. } | Self::ConversationOpened { .. } => View::Main,
+            Self::Show {}
+            | Self::Configure { .. }
+            | Self::ConversationOpened { .. }
+            | Self::Revoked {} => View::Main,
             Self::Close {}
             | Self::Appearance { .. }
             | Self::Drag {}
@@ -319,6 +324,12 @@ mod tests {
                     opened: false,
                     reason: "non".into(),
                 },
+            ),
+            (
+                View::Main,
+                &main,
+                json!({"command": "revoked"}),
+                Command::Revoked {},
             ),
             (
                 View::Panel,

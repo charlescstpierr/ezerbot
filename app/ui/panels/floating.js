@@ -21,6 +21,8 @@
     const result = await bridge({ command: "configure", shortcut });
     if (result?.status === "conflict") throw new Error("Ce raccourci est déjà utilisé par une autre application. Choisissez-en un autre.");
     if (result?.status === "error") throw new Error("Le raccourci n’a pas pu être activé. L’ouverture par le menu reste disponible.");
+    // Wayland lets no application grab a key; the GlobalShortcuts portal is not supported yet (issue #635).
+    if (result?.status === "wayland") throw new Error("Le raccourci global n’est pas disponible sous Wayland pour l’instant. Ouvrez le panneau depuis le menu Ezerbot.");
     if (result?.status === "unavailable") throw new Error("Le raccourci global n’est pas disponible dans cette session. Ouvrez le panneau depuis le menu Ezerbot.");
     const granted = result?.status === "registered" && typeof result.trigger === "string" && result.trigger ? result.trigger : null;
     status.textContent = granted ? `Raccourci attribué par le bureau : ${granted}.` : result?.status === "recording" ? "Mode test : aucun raccourci global enregistré." : result?.status === "disabled" ? "Raccourci global désactivé. Ouvrez le panneau depuis le menu Ezerbot." : result ? `Raccourci enregistré sur ${linux ? "cet ordinateur" : "ce Mac"}, sans ${linux ? "surveillance" : "permission de surveillance"} du clavier.` : "L’ouverture globale est disponible dans l’application Mac. Ici, le panneau s’ouvre dans le navigateur.";
@@ -28,20 +30,6 @@
     return granted;
   }
   window.EzerbotFloatingMain = {
-    // The desktop ended the shortcut (portal restarted or session closed). The shell
-    // binds the same choice again on its own and reports the outcome below.
-    shortcutLost() {
-      if (status) status.textContent = "Le bureau a retiré le raccourci. Nouvel enregistrement…";
-    },
-    // Bound again, or changed in the desktop settings: show what the desktop assigned.
-    shortcutBound(trigger) {
-      if (!status) return;
-      status.textContent = typeof trigger === "string" && trigger ? `Raccourci attribué par le bureau : ${trigger}.` : "Raccourci rétabli par le bureau.";
-    },
-    shortcutAbandoned() {
-      configured = undefined;
-      if (status) status.textContent = "Le raccourci n’a pas pu être rétabli. Enregistrez-le de nouveau ou ouvrez le panneau depuis le menu Ezerbot.";
-    },
     async openConversation(id) {
       try {
         await P.refresh();

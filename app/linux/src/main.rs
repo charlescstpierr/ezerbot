@@ -7,8 +7,6 @@ mod hotkey;
 #[cfg(target_os = "linux")]
 mod local_api;
 #[cfg(target_os = "linux")]
-mod portal;
-
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("ezerbot-linux est disponible uniquement sous Linux.");
@@ -66,9 +64,9 @@ mod linux {
         /// With the portal's activation token, when the portal sent one.
         OpenPanel(Option<String>),
         Hotkey(u32),
-        /// News of the shortcut the portal holds, for the page to show.
-        Shortcut(crate::portal::Notice),
         Configured(u64, Outcome, Option<String>),
+        /// The main page starts loading: a new page, with its bridge whole again.
+        MainLoading,
         Command(View, Message),
         LinkFailed(url::Url),
     }
@@ -113,7 +111,11 @@ mod linux {
         /// panel message to settle.
         opening: HashMap<u64, u64>,
         requests: u64,
+        /// The main page refuses its bridge until reloaded: it cannot answer a panel.
+        main_revoked: bool,
     }
+
+    const MAIN_REVOKED: &str = "La fenêtre principale a bloqué son pont après l’ouverture d’un cadre. Rechargez Ezerbot pour ouvrir ce fil.";
 
     impl Drop for Shell {
         fn drop(&mut self) {
@@ -140,6 +142,18 @@ mod linux {
             let ipc = bridge(View::Panel, Arc::clone(&api), self.proxy.clone());
             self.panel = Some(Panel::open(target, &api, ipc, token)?);
             Ok(())
+        }
+
+        /// The page that was asked to open a thread is gone: its answer will never come.
+        fn main_loading(&mut self) {
+            self.main_revoked = false;
+            for (_, panel_id) in std::mem::take(&mut self.opening) {
+                self.settle(
+                    View::Panel,
+                    panel_id,
+                    Err("La fenêtre principale s’est rechargée. Réessayez."),
+                );
+            }
         }
 
         fn settle(&self, view: View, id: u64, result: Result<serde_json::Value, &str>) {
@@ -223,7 +237,17 @@ mod linux {
                     }
                     Ok(json!(true))
                 }
+                PanelCommand::Revoked {} => {
+                    self.main_revoked = true;
+                    for (_, panel_id) in std::mem::take(&mut self.opening) {
+                        self.settle(View::Panel, panel_id, Err(MAIN_REVOKED));
+                    }
+                    Ok(json!(true))
+                }
                 PanelCommand::OpenConversation { conversation_id } => {
+                    if self.main_revoked {
+                        return Some(Err(MAIN_REVOKED));
+                    }
                     let Some(webview) = &self.webview else {
                         return Some(Err("La fenêtre principale est indisponible."));
                     };
@@ -381,8 +405,14 @@ mod linux {
         let links = api.origin.clone();
         let link_proxy = event_loop.create_proxy();
         let resource_api = Arc::clone(&api);
+        let load_proxy = event_loop.create_proxy();
         let webview = WebViewBuilder::new()
             .with_initialization_script_for_main_only(api.initialization_script(), true)
+            .with_on_page_load_handler(move |event, _| {
+                if matches!(event, wry::PageLoadEvent::Started) {
+                    let _ = load_proxy.send_event(ShellEvent::MainLoading);
+                }
+            })
             .with_ipc_handler(bridge(
                 View::Main,
                 Arc::clone(&api),
@@ -407,22 +437,11 @@ mod linux {
             .build_gtk(vbox)
             .map_err(|_| "La vue Ezerbot n'a pas pu être créée.")?;
         let hotkey_proxy = Mutex::new(event_loop.create_proxy());
-        let portal_proxy = event_loop.create_proxy();
-        let lost_proxy = event_loop.create_proxy();
-        let hotkeys = Registrar::open(
-            Hotkeys::detect(),
-            move |id| {
-                if let Ok(proxy) = hotkey_proxy.lock() {
-                    let _ = proxy.send_event(ShellEvent::Hotkey(id));
-                }
-            },
-            move |token| {
-                let _ = portal_proxy.send_event(ShellEvent::OpenPanel(token));
-            },
-            move |notice| {
-                let _ = lost_proxy.send_event(ShellEvent::Shortcut(notice));
-            },
-        );
+        let hotkeys = Registrar::open(Hotkeys::detect(), move |id| {
+            if let Ok(proxy) = hotkey_proxy.lock() {
+                let _ = proxy.send_event(ShellEvent::Hotkey(id));
+            }
+        });
         let mut shell = Some(Shell {
             hotkeys,
             panel: None,
@@ -431,6 +450,7 @@ mod linux {
             backend,
             proxy: event_loop.create_proxy(),
             opening: HashMap::new(),
+            main_revoked: false,
             requests: 0,
         });
         let failure_proxy = event_loop.create_proxy();
@@ -482,9 +502,9 @@ mod linux {
                 if let Some(shell) = shell.as_mut().filter(|shell| shell.hotkeys.fires(*id)) {
                     let _ = shell.show_panel(target, None);
                 }
-            } else if let Event::UserEvent(ShellEvent::Shortcut(notice)) = &event {
-                if let Some(webview) = shell.as_ref().and_then(|shell| shell.webview.as_ref()) {
-                    let _ = webview.evaluate_script(&notice.script());
+            } else if matches!(event, Event::UserEvent(ShellEvent::MainLoading)) {
+                if let Some(shell) = shell.as_mut() {
+                    shell.main_loading();
                 }
             } else if let Event::UserEvent(ShellEvent::OpenPanel(token)) = &event {
                 if let Some(shell) = shell.as_mut() {

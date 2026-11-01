@@ -9,6 +9,8 @@ use std::{
 };
 
 const STOPPED: &str = "Partage en pause ou arrêté. Reprenez-le depuis l’application.";
+const HIDDEN: &str =
+    "Le bandeau de partage n’est pas visible : aucune capture tant qu’il ne l’est pas.";
 
 pub struct Gate<W: Write>(Mutex<State<W>>);
 
@@ -18,6 +20,9 @@ enum State<W> {
         phase: Phase,
         generation: u64,
         deadline: Instant,
+        /// The overlay alone sets it, once the person can see the banner. No capture
+        /// is admitted or delivered without it.
+        banner: bool,
     },
     Closed,
 }
@@ -65,6 +70,19 @@ impl<W: Write> State<W> {
         }
     }
 
+    fn pause(&mut self) {
+        if let Self::Open {
+            phase, generation, ..
+        } = self
+        {
+            if *phase == Phase::Live {
+                *phase = Phase::Paused;
+                *generation += 1;
+                self.say(json!({"event":"paused"}));
+            }
+        }
+    }
+
     fn revoke(&mut self) {
         self.say(json!({"event":"revoked"}));
         *self = Self::Closed;
@@ -78,7 +96,7 @@ impl<W: Write> State<W> {
     }
 
     fn honors(&self, ticket: Ticket) -> bool {
-        matches!(self, Self::Open { phase: Phase::Live, generation, .. }
+        matches!(self, Self::Open { phase: Phase::Live, generation, banner: true, .. }
             if *generation == ticket.generation)
     }
 }
@@ -90,6 +108,7 @@ impl<W: Write> Gate<W> {
             phase: Phase::Live,
             generation: 1,
             deadline,
+            banner: false,
         }))
     }
 
@@ -116,8 +135,15 @@ impl<W: Write> Gate<W> {
             State::Open {
                 phase: Phase::Live,
                 generation,
+                banner: true,
                 ..
             } => Some(Ticket { id, generation }),
+            State::Open {
+                phase: Phase::Live, ..
+            } => {
+                state.say(json!({"id":id,"error":HIDDEN}));
+                None
+            }
             _ => {
                 state.say(json!({"id":id,"error":STOPPED}));
                 None
@@ -146,18 +172,25 @@ impl<W: Write> Gate<W> {
         let mut state = self.state();
         match (stop, &mut *state) {
             (Stop::Revoke, _) => state.revoke(),
-            (
-                Stop::Pause,
-                State::Open {
-                    phase, generation, ..
-                },
-            ) if *phase == Phase::Live => {
-                *phase = Phase::Paused;
-                *generation += 1;
-                state.say(json!({"event":"paused"}));
-            }
-            _ => {}
+            (Stop::Pause, _) => state.pause(),
         }
+    }
+
+    /// What the overlay can prove about its banner. Losing it while live pauses the
+    /// lease, like the Pause button: covered, minimized or unprovable, it fails closed.
+    /// Seeing it again resumes nothing; it only lets a resumed lease capture.
+    pub fn banner(&self, visible: bool) {
+        let mut state = self.state();
+        let State::Open { banner, .. } = &mut *state else {
+            return;
+        };
+        if std::mem::replace(banner, visible) && !visible {
+            state.pause();
+        }
+    }
+
+    pub fn showing(&self) -> bool {
+        matches!(*self.state(), State::Open { banner: true, .. })
     }
 
     pub fn resume(&self) {
@@ -229,7 +262,9 @@ mod tests {
     fn gate() -> (Gate<Sink>, Sink) {
         let sink = Sink::default();
         let deadline = Instant::now() + Duration::from_secs(60);
-        (Gate::new(sink.clone(), deadline), sink)
+        let gate = Gate::new(sink.clone(), deadline);
+        gate.banner(true);
+        (gate, sink)
     }
 
     fn image() -> Reply {
@@ -245,6 +280,51 @@ mod tests {
             .iter()
             .filter(|line| line.get("image").is_some())
             .count()
+    }
+
+    fn refused(sink: &Sink, id: u64) -> String {
+        let lines = sink.lines();
+        let line = lines.iter().rev().find(|line| line["id"] == id).unwrap();
+        line["error"].as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn no_capture_is_admitted_before_the_banner_is_seen() {
+        let sink = Sink::default();
+        let gate = Gate::new(sink.clone(), Instant::now() + Duration::from_secs(60));
+        assert!(gate.admit(1).is_none());
+        assert_eq!(refused(&sink, 1), HIDDEN);
+        gate.banner(true);
+        assert!(gate.admit(2).is_some());
+    }
+
+    #[test]
+    fn losing_the_banner_pauses_and_discards_the_capture_in_flight() {
+        let (gate, sink) = gate();
+        let ticket = gate.admit(1).unwrap();
+        gate.banner(false);
+        gate.deliver(ticket, image());
+        assert_eq!(images(&sink), 0);
+        assert_eq!(sink.lines()[0], json!({"event":"paused"}));
+        gate.banner(true);
+        assert!(
+            gate.admit(2).is_none(),
+            "seeing the banner again resumes nothing"
+        );
+        assert_eq!(refused(&sink, 2), STOPPED);
+    }
+
+    #[test]
+    fn after_a_resume_nothing_is_captured_until_the_banner_is_back() {
+        let (gate, sink) = gate();
+        gate.banner(false);
+        gate.resume();
+        assert!(gate.admit(1).is_none());
+        assert_eq!(refused(&sink, 1), HIDDEN);
+        gate.banner(true);
+        let ticket = gate.admit(2).unwrap();
+        gate.deliver(ticket, image());
+        assert_eq!(images(&sink), 1);
     }
 
     #[test]
@@ -334,6 +414,7 @@ mod tests {
     fn expiry_revokes_without_a_timer_and_while_paused() {
         let sink = Sink::default();
         let gate = Gate::new(sink.clone(), Instant::now() + Duration::from_millis(40));
+        gate.banner(true);
         let ticket = gate.admit(1).unwrap();
         gate.stop(Stop::Pause);
         std::thread::sleep(Duration::from_millis(60));

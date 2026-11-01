@@ -133,6 +133,8 @@ fn opened() -> Result<Source, Refusal> {
     capture::open(&capture::Env::read())
 }
 
+const BANNER_WAIT: Duration = Duration::from_secs(2);
+
 fn helper(duration: Duration) -> i32 {
     let gate = Arc::new(Gate::new(stdout(), Instant::now() + duration));
     #[cfg(not(debug_assertions))]
@@ -142,6 +144,16 @@ fn helper(duration: Duration) -> i32 {
         return 1;
     }
     let overlay = Overlay::build(&gate);
+    // `ready` waits for the banner, so a lease never opens on a hidden one. A banner
+    // that cannot be proven (Wayland) gives up here and stays paused.
+    let shown = Instant::now() + BANNER_WAIT;
+    while !gate.showing() && Instant::now() < shown {
+        if gtk::events_pending() {
+            gtk::main_iteration();
+        } else {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
     while gtk::events_pending() {
         gtk::main_iteration();
     }

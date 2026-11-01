@@ -134,7 +134,7 @@
       dialog.append(actions);
     } else {
       const chat = context.conversation, bot = context.bot;
-      dialog.append(node("p", linux ? "Le modèle pourra voir des captures de tout l’écran. Le bot n’effectue aucun geste. Les captures restent dans le fil et sont envoyées au fournisseur d’IA. Sous Wayland, le bandeau de partage peut passer derrière d’autres fenêtres. Fermez vos fenêtres privées avant de commencer." : "Le modèle pourra voir des captures de l’écran principal et proposer des gestes. Les captures et actions restent dans le fil et sont envoyées au fournisseur d’IA. Fermez vos fenêtres privées avant de commencer."));
+      dialog.append(node("p", linux ? "Le modèle pourra voir des captures de tout l’écran. Le bot n’effectue aucun geste. Les captures restent dans le fil et sont envoyées au fournisseur d’IA. Le partage se met en pause dès que son bandeau est couvert. Sous Wayland, sa visibilité ne peut pas être garantie : le partage y reste en pause. Fermez vos fenêtres privées avant de commencer." : "Le modèle pourra voir des captures de l’écran principal et proposer des gestes. Les captures et actions restent dans le fil et sont envoyées au fournisseur d’IA. Fermez vos fenêtres privées avant de commencer."));
       const available = chat?.kind === "chat" && screenOpen(bot?.id);
       if (!available) dialog.append(node("p", `Activez d’abord ce bot dans Paramètres › ${screenName}, puis ouvrez un fil direct existant (envoyez un message pour créer le fil).`), button("Ouvrir Paramètres", () => { dialog.close(); document.getElementById("settings-button").click(); }));
       else {

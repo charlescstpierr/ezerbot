@@ -211,6 +211,40 @@ impl Viewer {
         }
     }
 
+    /// Another application's window, placed over `area` and raised above everything.
+    fn cover(&self, (x, y, width, height): (i32, i32, u32, u32)) -> xlib::Window {
+        unsafe {
+            let root = (self.xlib.XDefaultRootWindow)(self.display);
+            let mut attributes: xlib::XSetWindowAttributes = std::mem::zeroed();
+            attributes.override_redirect = 1;
+            attributes.background_pixel = 0x00ff_ffff;
+            let window = (self.xlib.XCreateWindow)(
+                self.display,
+                root,
+                x - 10,
+                y - 5,
+                width + 20,
+                height + 10,
+                0,
+                0,
+                xlib::InputOutput as u32,
+                ptr::null_mut(),
+                xlib::CWOverrideRedirect | xlib::CWBackPixel,
+                &mut attributes,
+            );
+            (self.xlib.XMapRaised)(self.display, window);
+            (self.xlib.XSync)(self.display, 0);
+            window
+        }
+    }
+
+    fn uncover(&self, window: xlib::Window) {
+        unsafe {
+            (self.xlib.XDestroyWindow)(self.display, window);
+            (self.xlib.XSync)(self.display, 0);
+        }
+    }
+
     /// What a window manager sends when the person closes a window.
     fn ask_to_close(&self) {
         let (window, _) = self.overlay_window().unwrap();
@@ -445,7 +479,53 @@ fn minimizing_the_overlay_pauses_and_resuming_shows_it_again() {
     assert_eq!(viewer.overlay(), None);
     helper.send(json!({"command":"resume"}));
     assert_eq!(helper.line(), json!({"event":"resumed"}));
+    // The banner is still on its way back: a capture asked now must not happen.
+    let early = helper.screenshot(1);
+    assert!(
+        early.get("image").is_none() && early["error"].as_str().unwrap().contains("bandeau"),
+        "{early}"
+    );
     viewer.visible_overlay();
+    let start = Instant::now();
+    let mut id = 2;
+    while helper.screenshot(id).get("image").is_none() {
+        assert!(
+            start.elapsed() < WAIT,
+            "the banner came back but no capture"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        id += 1;
+    }
+}
+
+#[test]
+fn a_window_over_the_banner_pauses_and_nothing_is_captured_until_it_is_seen_again() {
+    let server = Xvfb::start("1280x900x24");
+    let viewer = Viewer::on(&server.name);
+    let mut helper = Helper::start(&server.name, 60_000, None);
+    let area = viewer.visible_overlay();
+    assert!(helper.screenshot(1)["image"].is_string());
+    let cover = viewer.cover(area);
+    assert_eq!(helper.line(), json!({"event":"paused"}));
+    assert!(helper.screenshot(2).get("image").is_none());
+    helper.send(json!({"command":"resume"}));
+    assert_eq!(helper.line(), json!({"event":"resumed"}));
+    let hidden = helper.screenshot(3);
+    assert!(
+        hidden["error"].as_str().unwrap().contains("bandeau"),
+        "{hidden}"
+    );
+    viewer.uncover(cover);
+    let start = Instant::now();
+    let mut id = 4;
+    while helper.screenshot(id).get("image").is_none() {
+        assert!(
+            start.elapsed() < WAIT,
+            "the banner was seen again but no capture"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        id += 1;
+    }
 }
 
 #[test]

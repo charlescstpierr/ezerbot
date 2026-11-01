@@ -21,6 +21,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Cursor, Read},
     os::{raw::c_ulong, unix::fs::OpenOptionsExt},
+    path::PathBuf,
     sync::{
         mpsc::{self, Receiver},
         Once,
@@ -158,6 +159,9 @@ pub struct Portal {
     sender: String,
     next: u64,
     pub(super) limit: Duration,
+    /// The only folders a portal answer may name: the backends save there, and
+    /// nothing outside them is ever read or removed.
+    pub(super) captures: Vec<PathBuf>,
 }
 
 impl Portal {
@@ -171,6 +175,7 @@ impl Portal {
             sender,
             next: 0,
             limit: ANSWER_LIMIT,
+            captures: capture_folders(),
         })
     }
 
@@ -217,7 +222,7 @@ impl Portal {
             .map_err(|_| Refusal::Portal)?;
         let outcome = self.ask(&token, &path, &answers, give_up);
         let _ = self.conn.remove_match(listening);
-        let pixbuf = take_image(&outcome?)?;
+        let pixbuf = take_image(&outcome?, &self.captures)?;
         let bounds = Bounds {
             x: 0.0,
             y: 0.0,
@@ -268,13 +273,37 @@ impl Portal {
     }
 }
 
+/// Where the screenshot backends save: Pictures, and the Screenshots folder
+/// GNOME uses inside it.
+fn capture_folders() -> Vec<PathBuf> {
+    gtk::glib::user_special_dir(gtk::glib::UserDirectory::Pictures)
+        .map(|pictures| vec![pictures.join("Screenshots"), pictures])
+        .unwrap_or_default()
+}
+
+/// True when `path` names an entry directly inside one of `folders`, links resolved
+/// on the folder side: the answer of whoever owns the portal name is not trusted.
+fn inside(path: &std::path::Path, folders: &[PathBuf]) -> bool {
+    let (Some(parent), Some(_)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    let Ok(parent) = fs::canonicalize(parent) else {
+        return false;
+    };
+    folders
+        .iter()
+        .filter_map(|folder| fs::canonicalize(folder).ok())
+        .any(|folder| folder == parent)
+}
+
 /// Backends write into the person's folders, and a lease leaves no desktop
-/// pixels behind. Only a file proven to be an image is removed.
-fn take_image(uri: &str) -> Result<Pixbuf, Refusal> {
+/// pixels behind. Only an image inside a capture folder is read, then removed.
+fn take_image(uri: &str, captures: &[PathBuf]) -> Result<Pixbuf, Refusal> {
     let path = url::Url::parse(uri)
         .ok()
         .filter(|url| url.scheme() == "file")
         .and_then(|url| url.to_file_path().ok())
+        .filter(|path| inside(path, captures))
         .ok_or(Refusal::Portal)?;
     let file = OpenOptions::new()
         .read(true)

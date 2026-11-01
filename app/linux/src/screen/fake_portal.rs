@@ -258,7 +258,9 @@ fn the_fixture() -> Pixbuf {
 }
 
 fn portal(bus: &Bus) -> Portal {
-    Portal::open(&bus.client()).unwrap()
+    let mut portal = Portal::open(&bus.client()).unwrap();
+    portal.captures = vec![bus.directory.to_path_buf()];
+    portal
 }
 
 #[test]
@@ -337,13 +339,16 @@ fn a_revocation_during_a_portal_wait_closes_the_request_and_delivers_no_image() 
     let sink = Sink::default();
     let deadline = Instant::now() + Duration::from_secs(60);
     let gate = Arc::new(Gate::new(sink.clone(), deadline));
+    gate.banner(true);
+
     let ticket = gate.admit(1).unwrap();
     let worker = std::thread::spawn({
         let (gate, address) = (gate.clone(), bus.client());
+        let folder = bus.directory.to_path_buf();
         move || {
-            let shot = Portal::open(&address)
-                .unwrap()
-                .shot(&|| !gate.current(ticket));
+            let mut portal = Portal::open(&address).unwrap();
+            portal.captures = vec![folder];
+            let shot = portal.shot(&|| !gate.current(ticket));
             let reply = match shot.as_ref().map(encode) {
                 Ok(Ok(image)) => Reply::Image(image),
                 _ => Reply::Refused("Capture impossible.".into()),
@@ -392,6 +397,24 @@ fn a_response_from_another_client_is_ignored_and_touches_no_file() {
     assert!(matches!(portal.shot(&|| false), Err(Refusal::Portal)));
     rogue.join().unwrap();
     assert!(victim.exists());
+}
+
+#[test]
+fn a_portal_answer_outside_the_capture_folders_is_refused_and_touches_no_file() {
+    let bus = Bus::start();
+    let elsewhere = TestDir::new("ezerbot-not-a-capture-folder");
+    let victim = elsewhere.join("photo.png");
+    std::fs::write(&victim, FIXTURE).unwrap();
+    let escape = bus
+        .directory
+        .join("../")
+        .join(elsewhere.path().file_name().unwrap());
+    for target in [victim.clone(), escape.join("photo.png")] {
+        let uri = url::Url::from_file_path(&target).unwrap().to_string();
+        let _fake = FakePortal::serve(&bus, Script::answering(Order::ReplyFirst, uri));
+        assert!(matches!(portal(&bus).shot(&|| false), Err(Refusal::Portal)));
+        assert!(victim.exists(), "{} was removed", target.display());
+    }
 }
 
 #[test]
@@ -455,7 +478,10 @@ fn a_bus_with_a_portal_wins_on_x11_and_serves_wayland() {
             x: None,
         };
         let mut source = open(&env).unwrap();
-        assert!(matches!(source, Source::Portal(_)));
+        let Source::Portal(portal) = &mut source else {
+            panic!("the portal must win");
+        };
+        portal.captures = vec![bus.directory.to_path_buf()];
         assert_eq!(source.shot(&|| false).unwrap().pixbuf.width(), 1280);
     }
 }

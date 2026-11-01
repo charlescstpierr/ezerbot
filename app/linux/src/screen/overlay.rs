@@ -2,7 +2,7 @@
 //! because no input tap exists here: its buttons are the takeover.
 use super::gate::{Gate, Stop, View};
 use gtk::{gdk, prelude::*};
-use std::{cell::Cell, io::Stdout, sync::Arc};
+use std::{cell::Cell, io::Stdout, rc::Rc, sync::Arc};
 
 const WIDTH: i32 = 560;
 const HEIGHT: i32 = 44;
@@ -14,6 +14,67 @@ button { background-image: none; background-color: #3a3d4a; border: 1px solid #5
   box-shadow: none; text-shadow: none; }
 button:disabled { background-color: #2b2d36; }
 button:disabled label { color: #8a8d99; }";
+
+/// What X11 tells about the banner. Wayland tells nothing that proves it is on top,
+/// so a Wayland banner is never proven visible and its lease stays paused.
+#[derive(Clone, Copy, Default)]
+struct Sight {
+    mapped: bool,
+    minimized: bool,
+    unobscured: bool,
+}
+
+impl Sight {
+    fn visible(self, provable: bool) -> bool {
+        provable && self.mapped && !self.minimized && self.unobscured
+    }
+}
+
+fn provable() -> bool {
+    gdk::Display::default().is_some_and(|display| display.type_().name() == "GdkX11Display")
+}
+
+/// Reports every change of what the person can see to the gate.
+fn watch(window: &gtk::Window, gate: &Arc<Gate<Stdout>>) {
+    let provable = provable();
+    let sight = Rc::new(Cell::new(Sight::default()));
+    let report = {
+        let (sight, gate) = (sight.clone(), gate.clone());
+        move |change: &dyn Fn(&mut Sight)| {
+            let mut now = sight.get();
+            change(&mut now);
+            sight.set(now);
+            gate.banner(now.visible(provable));
+        }
+    };
+    window.add_events(gdk::EventMask::VISIBILITY_NOTIFY_MASK | gdk::EventMask::STRUCTURE_MASK);
+    let mapped = report.clone();
+    window.connect_map_event(move |_, _| {
+        mapped(&|sight| sight.mapped = true);
+        gtk::glib::Propagation::Proceed
+    });
+    let unmapped = report.clone();
+    window.connect_unmap_event(move |_, _| {
+        unmapped(&|sight| sight.mapped = false);
+        gtk::glib::Propagation::Proceed
+    });
+    let state = report.clone();
+    window.connect_window_state_event(move |_, event| {
+        let minimized = event
+            .new_window_state()
+            .intersects(gdk::WindowState::ICONIFIED | gdk::WindowState::WITHDRAWN);
+        state(&|sight| sight.minimized = minimized);
+        gtk::glib::Propagation::Proceed
+    });
+    // GTK 3 still emits `visibility-notify-event` on X11; gtk-rs no longer names it.
+    window.connect_event(move |_, event| {
+        if let Some(visibility) = event.downcast_ref::<gdk::EventVisibility>() {
+            let unobscured = visibility.state() == gdk::VisibilityState::Unobscured;
+            report(&|sight| sight.unobscured = unobscured);
+        }
+        gtk::glib::Propagation::Proceed
+    });
+}
 
 pub struct Overlay {
     window: gtk::Window,
@@ -67,16 +128,7 @@ impl Overlay {
             closing.stop(Stop::Revoke);
             gtk::glib::Propagation::Stop
         });
-        let minimized = gate.clone();
-        window.connect_window_state_event(move |_, event| {
-            if event
-                .new_window_state()
-                .contains(gdk::WindowState::ICONIFIED)
-            {
-                minimized.stop(Stop::Pause);
-            }
-            gtk::glib::Propagation::Proceed
-        });
+        watch(&window, gate);
         let escape = gate.clone();
         window.connect_key_press_event(move |_, event| {
             if event.keyval() == gdk::keys::constants::Escape {

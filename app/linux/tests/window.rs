@@ -1199,13 +1199,11 @@ impl FakePortal {
     }
 
     fn activate(&self, session: &str, shortcut: &str) {
-        let parameters = (
-            object_path(session),
-            shortcut.to_owned(),
-            0u64,
-            HashMap::<String, Variant>::new(),
-        )
-            .to_variant();
+        self.activate_with(session, shortcut, HashMap::new());
+    }
+
+    fn activate_with(&self, session: &str, shortcut: &str, options: HashMap<String, Variant>) {
+        let parameters = (object_path(session), shortcut.to_owned(), 0u64, options).to_variant();
         self.connection
             .emit_signal(
                 None,
@@ -1305,8 +1303,20 @@ fn the_portal_opens_the_panel_and_a_replacement_never_loses_the_shortcut() {
         2,
         "a repeated name asked the portal again"
     );
-    portal.activate(&first, "cmd+option+j");
+    let token = "ezerbot-jeton-42";
+    portal.activate_with(
+        &first,
+        "cmd+option+j",
+        HashMap::from([("activation_token".to_owned(), token.to_variant())]),
+    );
     shell.wait_panel(true, "the portal's Activated did not open the panel");
+    // GTK hands the token to the display server: `_NET_STARTUP_ID` on X11,
+    // xdg-activation on Wayland. Without it a Wayland panel may not get the keyboard.
+    wait_for("the activation token never reached the panel", || {
+        let panel = shell.panel_window()?;
+        let (_, value) = shell.screen.property(panel, "_NET_STARTUP_ID");
+        (value == token.as_bytes()).then_some(())
+    });
     shell.run("panel", r#"{"command":"close"}"#);
     shell.wait_panel(false, "the panel stayed open");
 
@@ -1471,10 +1481,11 @@ fn tool_present(tool: &str) -> bool {
 
 #[test]
 fn the_shortcut_opens_an_always_on_top_panel_that_takes_the_typing() {
-    if std::env::var_os("GITHUB_ACTIONS").is_some() && !tool_present("openbox") {
-        eprintln!("skipped: openbox is missing on this runner; add it to the apt-get install of linux-pr.yml and linux-shell.yml");
-        return;
-    }
+    // Never skipped: without openbox nothing proves the panel stays on top.
+    assert!(
+        tool_present("openbox"),
+        "openbox is required: sudo apt-get install openbox"
+    );
     let home = TestDir::new("ezerbot-panel");
     let screen = Screen::start_with_openbox(&home);
     let mut app = App::start(

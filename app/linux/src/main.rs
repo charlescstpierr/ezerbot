@@ -63,7 +63,8 @@ mod linux {
     enum ShellEvent {
         Quit,
         Show,
-        OpenPanel,
+        /// With the portal's activation token, when the portal sent one.
+        OpenPanel(Option<String>),
         Hotkey(u32),
         Configured(u64, Outcome, Option<String>),
         Command(View, Message),
@@ -127,14 +128,15 @@ mod linux {
         fn show_panel(
             &mut self,
             target: &EventLoopWindowTarget<ShellEvent>,
+            token: Option<String>,
         ) -> Result<(), &'static str> {
             if let Some(panel) = &self.panel {
-                panel.reopen();
+                panel.reopen(token);
                 return Ok(());
             }
             let api = Arc::clone(&self.backend.api);
             let ipc = bridge(View::Panel, Arc::clone(&api), self.proxy.clone());
-            self.panel = Some(Panel::open(target, &api, ipc)?);
+            self.panel = Some(Panel::open(target, &api, ipc, token)?);
             Ok(())
         }
 
@@ -173,7 +175,7 @@ mod linux {
             command: PanelCommand,
         ) -> Option<Result<serde_json::Value, &'static str>> {
             Some(match command {
-                PanelCommand::Show {} => self.show_panel(target).map(|()| json!(true)),
+                PanelCommand::Show {} => self.show_panel(target, None).map(|()| json!(true)),
                 PanelCommand::Configure { shortcut } => {
                     let proxy = self.proxy.clone();
                     self.hotkeys.configure(&shortcut, move |outcome, trigger| {
@@ -358,7 +360,7 @@ mod linux {
         });
         let proxy = event_loop.create_proxy();
         panel_item.connect_activate(move |_| {
-            let _ = proxy.send_event(ShellEvent::OpenPanel);
+            let _ = proxy.send_event(ShellEvent::OpenPanel(None));
         });
         menu.append(&panel_item);
         menu.append(&close);
@@ -411,8 +413,8 @@ mod linux {
                     let _ = proxy.send_event(ShellEvent::Hotkey(id));
                 }
             },
-            move || {
-                let _ = portal_proxy.send_event(ShellEvent::OpenPanel);
+            move |token| {
+                let _ = portal_proxy.send_event(ShellEvent::OpenPanel(token));
             },
         );
         let mut shell = Some(Shell {
@@ -472,11 +474,11 @@ mod linux {
             } else if let Event::UserEvent(ShellEvent::Hotkey(id)) = &event {
                 // A key pressed after `shell.take()` finds no shell and does nothing.
                 if let Some(shell) = shell.as_mut().filter(|shell| shell.hotkeys.fires(*id)) {
-                    let _ = shell.show_panel(target);
+                    let _ = shell.show_panel(target, None);
                 }
-            } else if matches!(event, Event::UserEvent(ShellEvent::OpenPanel)) {
+            } else if let Event::UserEvent(ShellEvent::OpenPanel(token)) = &event {
                 if let Some(shell) = shell.as_mut() {
-                    let _ = shell.show_panel(target);
+                    let _ = shell.show_panel(target, token.clone());
                 }
             } else if panel_closing {
                 if let Some(panel) = shell.as_ref().and_then(|shell| shell.panel.as_ref()) {

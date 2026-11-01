@@ -228,7 +228,7 @@ impl Registrar {
     pub fn open(
         choice: Hotkeys,
         on_press: impl Fn(u32) + Send + Sync + 'static,
-        on_portal: impl Fn() + 'static,
+        on_portal: impl Fn(Option<String>) + 'static,
     ) -> Self {
         match choice {
             Hotkeys::X11 => Self::Slot(Slot::x11(on_press)),

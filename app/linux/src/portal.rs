@@ -107,11 +107,13 @@ impl State {
 #[derive(Clone)]
 pub struct Portal {
     state: Rc<RefCell<State>>,
-    activated: Rc<dyn Fn()>,
+    activated: Rc<dyn Fn(Option<String>)>,
 }
 
 impl Portal {
-    pub fn new(activated: impl Fn() + 'static) -> Self {
+    /// `activated` receives the portal's `activation_token`, the only thing that lets
+    /// a Wayland compositor hand the keyboard to the panel.
+    pub fn new(activated: impl Fn(Option<String>) + 'static) -> Self {
         Self {
             state: Rc::default(),
             activated: Rc::new(activated),
@@ -219,7 +221,7 @@ impl Portal {
                         && Some(held.shortcut.name) == id.str()
                 });
                 if ours {
-                    activated();
+                    activated(activation_token(parameters));
                 }
             },
         );
@@ -407,8 +409,38 @@ fn close(connection: &DBusConnection, session: &str) {
     });
 }
 
+/// `options.activation_token` of an `Activated` signal `(o s t a{sv})`, when it is a string.
+fn activation_token(parameters: &Variant) -> Option<String> {
+    (parameters.n_children() >= 4)
+        .then(|| parameters.child_value(3))
+        .and_then(|options| {
+            glib::VariantDict::new(Some(&options)).lookup_value("activation_token", None)
+        })
+        .and_then(|token| token.str().map(str::to_owned))
+        .filter(|token| !token.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_activation_token_is_read_from_the_options_of_activated() {
+        use gtk::glib::{variant::ObjectPath, ToVariant};
+        use std::collections::HashMap;
+        let signal = |options: &[(&str, Variant)]| {
+            let options: HashMap<String, Variant> = options
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect();
+            let session = ObjectPath::try_from("/org/freedesktop/portal/desktop/session/1/a");
+            (session.unwrap(), "cmd+option+j", 7u64, options).to_variant()
+        };
+        let token = signal(&[("activation_token", "jeton-42".to_variant())]);
+        assert_eq!(super::activation_token(&token).as_deref(), Some("jeton-42"));
+        assert_eq!(super::activation_token(&signal(&[])), None);
+        let wrong = signal(&[("activation_token", 7u32.to_variant())]);
+        assert_eq!(super::activation_token(&wrong), None);
+    }
+
     use super::*;
 
     #[test]

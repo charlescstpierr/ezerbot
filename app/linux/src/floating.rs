@@ -169,6 +169,7 @@ impl Panel {
         target: &EventLoopWindowTarget<T>,
         api: &LocalApi,
         ipc: impl Fn(Request<String>) + 'static,
+        token: Option<String>,
     ) -> Result<Self, &'static str> {
         const ERROR: &str = "Le panneau flottant n'a pas pu être créé.";
         let window = WindowBuilder::new()
@@ -201,11 +202,13 @@ impl Panel {
             window,
             left_at: Cell::new(None),
         };
-        panel.show();
+        panel.show(token);
         Ok(panel)
     }
 
-    pub fn show(&self) {
+    /// `token` is the portal's activation token: on Wayland, `present` alone may
+    /// show the panel without the keyboard.
+    pub fn show(&self, token: Option<String>) {
         self.window.set_visible(true);
         // Asked before the window manager has mapped it again, the focus goes
         // to the window that held it.
@@ -213,20 +216,23 @@ impl Panel {
         gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
             // Hidden meanwhile, it must stay hidden.
             if window.is_visible() {
+                if let Some(token) = &token {
+                    window.set_startup_id(token);
+                }
                 window.present();
             }
         });
         let _ = self.webview.focus();
     }
 
-    pub fn reopen(&self) {
+    pub fn reopen(&self, token: Option<String>) {
         if let Some(at) = self.left_at.get() {
             self.window.set_outer_position(at);
         }
         let _ = self
             .webview
             .evaluate_script("window.EzerbotFloating?.open()");
-        self.show();
+        self.show(token);
         // The window manager drops this state when the window is withdrawn,
         // and GTK forgets it with it.
         self.window.set_always_on_top(true);

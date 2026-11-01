@@ -571,8 +571,9 @@ pub(crate) fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: Arc<AtomicBool
         }
         // An image line can reach us just before `revoked`. Lease::stop takes
         // the same permit, so storing is ordered against the person's revocation.
+        // live and paused also read the helper: its own buttons stop it directly.
         let _permit = lease.permit.lock().unwrap_or_else(|e| e.into_inner());
-        if lease.revoked.load(Ordering::SeqCst) {
+        if !lease.live() || lease.paused() {
             return Err(ApiError::new(403, STOPPED));
         }
         let tx = write_transaction(ctx.connection)?;

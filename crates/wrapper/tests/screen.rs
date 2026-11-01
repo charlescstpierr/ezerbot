@@ -384,6 +384,20 @@ fn screen_consent_approval_takeover_revocation_restart_and_vision() {
     std::env::remove_var("GROKBOT_SCREEN_FAKE_STORE_DELAY_MS");
     assert_eq!(f.shots(), before);
     assert_eq!(f.outcome("produced")["status"], "failed");
+    // The same holds for a pause, the state the helper's own button reports.
+    session = f.grant();
+    std::env::set_var("GROKBOT_SCREEN_FAKE_STORE_DELAY_MS", "1000");
+    f.send("paused-store", "computer_screenshot", json!({}));
+    let r = f.request("paused-store");
+    f.decide(&r, json!("allow_once"));
+    f.claimed("paused-store");
+    std::thread::sleep(Duration::from_millis(200));
+    f.post("/api/screen/fake-input", json!({"id":session}));
+    f.finish("paused-store");
+    std::env::remove_var("GROKBOT_SCREEN_FAKE_STORE_DELAY_MS");
+    assert_eq!(f.shots(), before);
+    assert_eq!(f.outcome("paused-store")["status"], "failed");
+    f.revoke(session);
     session = f.grant();
     std::env::set_var("GROKBOT_SCREEN_FAKE_PERMISSION", "denied");
     f.send("permission", "computer_screenshot", json!({}));

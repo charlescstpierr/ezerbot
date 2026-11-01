@@ -3,7 +3,7 @@
 #![cfg(all(target_os = "linux", debug_assertions))]
 mod support;
 use grokbot_engine::{contracts::RunEventKind, model::RunStatus, store};
-use grokbot_forms::{requests, vault::Vault};
+use grokbot_forms::{redact, requests, vault::Vault};
 use grokbot_linux_desktop::testing::Keyring;
 use grokbot_wrapper::{App, Provider};
 use rusqlite::Connection;
@@ -150,6 +150,39 @@ fn a_turn_waits_for_the_keyring_and_never_leaves_unmasked() {
         assert!(sent.contains("Voici la clé"), "{sent}");
         assert!(!sent.contains(SECRET), "the secret reached the provider");
     }
+}
+
+#[test]
+fn every_masking_refuses_a_partial_vault_and_only_a_rendering_reads_it() {
+    let Some(_) = support::keyring_phases(
+        "every_masking_refuses_a_partial_vault_and_only_a_rendering_reads_it",
+        1,
+        |_, keyring| {
+            keep_only_in_the_keyring(keyring);
+            keyring.lock();
+        },
+    ) else {
+        return;
+    };
+    let file = PathBuf::from(std::env::var_os("HOME").unwrap()).join("workspace.secrets.json");
+    let vault = Vault::open_app(&file).unwrap();
+    assert!(vault.is_partial());
+    let refused = |error: grokbot_engine::contracts::Error| {
+        assert!(error.to_string().contains(MESSAGE), "{error}");
+    };
+    refused(redact::redact(&vault, SECRET).unwrap_err());
+    refused(redact::redact_value(&vault, &json!(SECRET)).unwrap_err());
+    refused(redact::redact_live(&vault, SECRET).unwrap_err());
+    refused(redact::app_patterns(&file).err().unwrap());
+    refused(
+        redact::SnapshotRedactor::default()
+            .redact(&vault, &json!({}), false)
+            .unwrap_err(),
+    );
+    refused(vault.values_for_redaction().unwrap_err());
+    let _rendering = redact::rendering();
+    assert!(redact::redact(&vault, "texte").is_ok());
+    assert!(redact::app_patterns(&file).is_ok());
 }
 
 #[test]

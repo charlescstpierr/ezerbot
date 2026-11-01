@@ -1347,6 +1347,8 @@ fn without_a_portal_the_shortcut_is_announced_unavailable() {
 
 const SUPER_ALT_J: [&str; 3] = ["Super_L", "Alt_L", "j"];
 const PANEL: &str = "Panneau · Ezerbot";
+/// The flag of `_MOTIF_WM_HINTS` that says its decorations field is meaningful.
+const MOTIF_DECORATIONS: std::os::raw::c_ulong = 1 << 1;
 
 fn tool_present(tool: &str) -> bool {
     Command::new(tool).arg("--version").output().is_ok()
@@ -1520,6 +1522,14 @@ fn a_shortcut_another_client_holds_is_a_conflict_and_the_old_one_stays_in_force(
     );
     shell.screen.press(&SUPER_ALT_J);
     shell.wait_panel(true, "the old shortcut stopped working after the conflict");
+    // Without a window manager nothing else could have set this after the mapping.
+    // `_NET_WM_STATE_ABOVE` is not written without one: only the openbox test sees it.
+    let panel = shell.panel_window().unwrap();
+    let motif = shell.screen.longs(panel, "_MOTIF_WM_HINTS");
+    assert!(
+        motif.len() >= 3 && motif[0] & MOTIF_DECORATIONS != 0 && motif[2] == 0,
+        "the panel asks for decorations: {motif:?}"
+    );
     shell.app.quit();
 }
 

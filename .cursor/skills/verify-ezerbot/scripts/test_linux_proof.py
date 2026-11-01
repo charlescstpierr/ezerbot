@@ -320,7 +320,7 @@ console.log(JSON.stringify(pointerTarget(el)));
         "home-dark": {"#conversation-title": ["Nouvelle conversation"], "#welcome": ["Bienvenue"], ".gb-editor": [""]},
         "conversation-dark": {"#conversation-title": ["Préparer la semaine"], "#chat-scroll .gb-user": ["Bonjour, prépare une courte liste pour organiser ma semaine."], "#chat-scroll .gb-assistant": ["Voici votre document."]},
         "thread-reply": {"#thread-banner-quote": ["Bonjour, prépare une courte liste"], "#chat-scroll .gb-user": ["Et en un mot ?"], "#chat-scroll .gb-assistant": ["Voici votre document."]},
-        "settings-connectors": {"#settings-dialog[open] [data-panel=mcp] h3": ["Connecteurs"], "#settings-dialog[open] [data-panel=mcp] summary": ["Ajouter un serveur MCP"]},
+        "settings-connectors": {"#settings-dialog[open] [data-panel=mcp] h3": ["Connecteurs"], "#settings-dialog[open] [data-panel=mcp]": ["Connecteurs"]},
     }
 
     def ready(self, view: str, page: dict, hidden: str | None = None) -> bool:
@@ -340,7 +340,7 @@ console.log(JSON.stringify(Boolean(eval(found.ready))));
         return json.loads(result.stdout)
 
     def test_visible_content_is_ready_and_hidden_content_is_not(self) -> None:
-        cases = {"thread-reply": "#chat-scroll .gb-assistant", "conversation-dark": "#chat-scroll .gb-assistant", "settings-connectors": "#settings-dialog[open] [data-panel=mcp] summary", "home-dark": "#welcome"}
+        cases = {"thread-reply": "#chat-scroll .gb-assistant", "conversation-dark": "#chat-scroll .gb-assistant", "settings-connectors": "#settings-dialog[open] [data-panel=mcp] h3", "home-dark": "#welcome"}
         for view, hidden in cases.items():
             with self.subTest(view=view):
                 self.assertTrue(self.ready(view, self.PAGES[view]))

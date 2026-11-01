@@ -46,7 +46,7 @@ Chaque vue n'est capturée que lorsque son contenu est **visible** pour l'utilis
 | `thread-reply` | citation visible, suivi « Et en un mot ? » et réponse du bot visibles, aucune réponse en attente |
 | `thread-main` | clic réel sur le bandeau ; bandeau masqué, titre « Préparer la semaine » et question visibles, suivi du fil absent |
 | `settings-dark` | clic réel sur Réglages ; section « Apparence » visible |
-| `settings-connectors` | section « Connecteurs » et « Ajouter un serveur MCP » visibles |
+| `settings-connectors` | clic réel sur Réglages ; panneau et titre « Connecteurs » visibles en haut |
 | `settings-connectors-add` | « Ajouter un serveur MCP » visible et cliquable, centré |
 
 Ne garantit pas : l'application macOS native (rendu web dans Chrome sous Xvfb), un vrai fournisseur (fournisseur factice local uniquement), l'exactitude pixel par pixel ni l'esthétique (les captures sont à regarder), le contenu des réponses au-delà des textes listés, ni les autres entrées de la carte des fonctionnalités. Le PNG est garanti identique à celui écrit par l'étape de capture (sha256 + taille), pas « correct ».

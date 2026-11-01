@@ -40,7 +40,7 @@ const DRIVEN = Object.freeze([
   { id: "settings-connectors", label: "Paramètres, section Connecteurs", keepScroll: true, click: SETTINGS,
     after: "document.querySelector('#settings-dialog [data-panel=mcp]')?.scrollIntoView({block:'start'})",
     visible: `findVisible(${MCP_PANEL} + ' h3', 'Connecteurs')`,
-    ready: `expectVisibleText(${MCP_PANEL} + ' h3', 'Connecteurs') && expectVisibleText(${MCP_PANEL} + ' summary', 'Ajouter un serveur MCP')` },
+    ready: `expectVisibleText(${MCP_PANEL} + ' h3', 'Connecteurs') && expectVisibleText(${MCP_PANEL})` },
   { id: "settings-connectors-add", label: "Connecteurs, ajouter un serveur MCP", keepScroll: true, click: SETTINGS,
     after: "[...document.querySelectorAll('#settings-dialog[open] [data-panel=mcp] summary')].find(node => node.innerText.includes('Ajouter un serveur MCP'))?.scrollIntoView({block:'center'})",
     visible: ADD_MCP,

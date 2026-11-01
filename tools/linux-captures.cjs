@@ -60,6 +60,23 @@ function pointerTarget(element) {
   return element.contains(document.elementFromPoint(x, y)) ? { x, y } : null;
 }
 
+// Evaluated in the page: first node matching `target` (selector, node or list) that the user can see
+// (rendered, not transparent, non-zero box intersecting the viewport) and whose rendered innerText
+// contains `text`. innerText skips display:none content; textContent would not.
+function findVisible(target, text = "") {
+  const nodes = typeof target === "string" ? [...document.querySelectorAll(target)] : [].concat(target ?? []);
+  return nodes.find(node => {
+    if (!node?.checkVisibility?.({ visibilityProperty: true, opacityProperty: true })) return false;
+    const box = node.getBoundingClientRect();
+    if (!(box.width > 0 && box.height > 0 && box.bottom > 0 && box.right > 0 && box.top < innerHeight && box.left < innerWidth)) return false;
+    return String(node.innerText ?? "").includes(text);
+  }) ?? null;
+}
+
+function expectVisibleText(target, text = "") {
+  return findVisible(target, text) !== null;
+}
+
 async function capture(sha, binary, output, signal, views = VIEWS) {
   const source = resolve(__dirname, "..");
   if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error("Expected a full lowercase commit SHA.");
@@ -194,4 +211,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { VIEWS, VIEWPORT, bounded, waitFor, pngInfo, pointerTarget, capture };
+module.exports = { VIEWS, VIEWPORT, bounded, waitFor, pngInfo, pointerTarget, findVisible, expectVisibleText, capture };

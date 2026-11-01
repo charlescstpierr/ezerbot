@@ -316,6 +316,55 @@ console.log(JSON.stringify(pointerTarget(el)));
         self.assertEqual(status, "FIX")
         self.assertIn("| `parametres-connecteurs` | `settings-connectors-add` | `captures/settings-connectors-add.png` | ÉCHEC |", lines)
 
+    PAGES = {
+        "home-dark": {"#conversation-title": ["Nouvelle conversation"], "#welcome": ["Bienvenue"], ".gb-editor": [""]},
+        "conversation-dark": {"#conversation-title": ["Préparer la semaine"], "#chat-scroll .gb-user": ["Bonjour, prépare une courte liste pour organiser ma semaine."], "#chat-scroll .gb-assistant": ["Voici votre document."]},
+        "thread-reply": {"#thread-banner-quote": ["Bonjour, prépare une courte liste"], "#chat-scroll .gb-user": ["Et en un mot ?"], "#chat-scroll .gb-assistant": ["Voici votre document."]},
+        "settings-connectors": {"#settings-dialog[open] [data-panel=mcp] h3": ["Connecteurs"], "#settings-dialog[open] [data-panel=mcp] summary": ["Ajouter un serveur MCP"]},
+    }
+
+    def ready(self, view: str, page: dict, hidden: str | None = None) -> bool:
+        # Evaluates the driver's real `ready` expression against a fake page; `hidden` is rendered display:none
+        # (checkVisibility false, innerText empty) while its textContent would still hold the text.
+        script = r"""
+const [drive, view, page, hidden] = [require(process.argv[1]), process.argv[2], JSON.parse(process.argv[3]), process.argv[4]];
+globalThis.innerWidth = 1440; globalThis.innerHeight = 900;
+const node = (selector, text) => ({ textContent: text, innerText: selector === hidden ? "" : text, checkVisibility: () => selector !== hidden,
+  getBoundingClientRect: () => selector === hidden ? { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 } : { left: 10, top: 10, width: 100, height: 20, right: 110, bottom: 30 } });
+globalThis.document = { querySelectorAll: selector => (page[selector] ?? []).map(text => node(selector, text)) };
+globalThis.GrokbotPanels = { state: { conversations: [] } };
+const found = drive.selectedViews().find(item => item.id === view);
+console.log(JSON.stringify(Boolean(eval(found.ready))));
+"""
+        result = subprocess.run(["node", "-e", script, str(SCRIPTS / "linux_drive.cjs"), view, json.dumps(page), hidden or ""], capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
+
+    def test_visible_content_is_ready_and_hidden_content_is_not(self) -> None:
+        cases = {"thread-reply": "#chat-scroll .gb-assistant", "conversation-dark": "#chat-scroll .gb-assistant", "settings-connectors": "#settings-dialog[open] [data-panel=mcp] summary", "home-dark": "#welcome"}
+        for view, hidden in cases.items():
+            with self.subTest(view=view):
+                self.assertTrue(self.ready(view, self.PAGES[view]))
+                self.assertFalse(self.ready(view, self.PAGES[view], hidden), f"{view} prêt avec {hidden} masqué")
+
+    def test_hidden_bot_reply_is_fix(self) -> None:
+        for view in ("thread-reply", "conversation-dark", "settings-connectors"):
+            with self.subTest(view=view):
+                feature = dict((v, f) for f, v in linux_verdict.EXPECTED)[view]
+                evidence = self.evidence(error=f"{view} readiness failed. {view} readiness timed out.", failing=view)
+                status, lines = linux_verdict.verdict(evidence, SHA)
+                self.assertEqual(status, "FIX")
+                self.assertIn(f"| `{feature}` | `{view}` | `captures/{view}.png` | ÉCHEC |", lines)
+
+    def test_no_view_asserts_on_hidden_or_page_wide_text(self) -> None:
+        text = (SCRIPTS / "linux_drive.cjs").read_text()
+        for forbidden in ("textContent", "innerHTML", "outerHTML", "document.body", "document.documentElement"):
+            self.assertNotIn(forbidden, text)
+        result = subprocess.run(["node", "-e", "const m=require(process.argv[1]); console.log(JSON.stringify(m.DRIVEN.map(v => [v.id, v.ready])))", str(SCRIPTS / "linux_drive.cjs")], capture_output=True, text=True, check=True)
+        for view, ready in json.loads(result.stdout):
+            with self.subTest(view=view):
+                self.assertIn("expectVisibleText(", ready)
+                self.assertNotRegex(ready, r"getElementById\(|querySelector\(|\.innerText|\.hidden")
+
     def test_hidden_reply_target_is_fix(self) -> None:
         # What the driver writes when the « Répondre en fil » item never becomes visible.
         evidence = self.evidence(error="thread-open target not visible.", failing="thread-open")

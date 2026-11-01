@@ -33,6 +33,24 @@ Preuves : `<dossier>/doctor.txt`, `<dossier>/report.md`, `<dossier>/captures/{ma
 
 Une vue manquante ou cassée donne `FIX` : `result.json` nomme l’étape qui a échoué et les captures déjà prises restent. Chaque étape tourne dans son propre groupe de processus, tué à la fin de l’étape, même en échec. Le wrapper et Chrome de la fixture, détachés, sont retrouvés par leur environnement (`HOME` ou `TMPDIR` sous `/tmp/ezv.*` de ce run) et arrêtés à la fin de chaque étape et dans le `trap`, jamais par leur nom.
 
+### Ce que la preuve garantit / ne garantit pas
+
+Chaque vue n'est capturée que lorsque son contenu est **visible** pour l'utilisateur : élément rendu, non transparent, de taille non nulle, dans la fenêtre, texte lu par `innerText` (jamais `textContent`). Toutes les assertions passent par `findVisible` / `expectVisibleText` ; les clics sont de vrais clics pointeur sur une cible visible.
+
+| Vue | Garantit |
+|---|---|
+| `home-dark` | titre « Nouvelle conversation », accueil et éditeur visibles |
+| `conversation-dark` | titre « Préparer la semaine », question de l'utilisateur et réponse « Voici votre document. » visibles |
+| `thread-menu` | clic réel sur « Actions du message » de la question ; « Répondre en fil » visible et cliquable |
+| `thread-open` | clic réel sur « Répondre en fil » ; citation de la question et titre « Fil » visibles ; aucun message visible |
+| `thread-reply` | citation visible, suivi « Et en un mot ? » et réponse du bot visibles, aucune réponse en attente |
+| `thread-main` | clic réel sur le bandeau ; bandeau masqué, titre « Préparer la semaine » et question visibles, suivi du fil absent |
+| `settings-dark` | clic réel sur Réglages ; section « Apparence » visible |
+| `settings-connectors` | section « Connecteurs » et « Ajouter un serveur MCP » visibles |
+| `settings-connectors-add` | « Ajouter un serveur MCP » visible et cliquable, centré |
+
+Ne garantit pas : l'application macOS native (rendu web dans Chrome sous Xvfb), un vrai fournisseur (fournisseur factice local uniquement), l'exactitude pixel par pixel ni l'esthétique (les captures sont à regarder), le contenu des réponses au-delà des textes listés, ni les autres entrées de la carte des fonctionnalités. Le PNG est garanti identique à celui écrit par l'étape de capture (sha256 + taille), pas « correct ».
+
 ## Mac
 
 Les chemins du Mac du capitaine sont les défauts ci-dessous. Chaque chemin s’écrase avec une variable d’environnement.

@@ -584,3 +584,34 @@ fn a_stop_from_the_app_before_the_commit_stores_and_returns_nothing() {
     assert!(matches!(outcome, ToolOutcome::Failed { .. }));
     assert_eq!(rows, 0);
 }
+
+#[test]
+fn a_helper_stop_reads_as_stopped_only_once_the_decision_in_flight_is_over() {
+    let guard = grokbot_test_support::TestDir::new("ezerbot-screen-stop-waits");
+    let go = guard.to_path_buf().join("go");
+    let permit = Arc::new(Mutex::new(()));
+    let generation = Arc::new(AtomicU64::new(1));
+    let client = native::Client::launch(
+        clicked_helper(&go, r#"echo '{"event":"revoked"}'; exec cat >/dev/null"#),
+        permit.clone(),
+        generation.clone(),
+    )
+    .unwrap();
+    let deciding = permit.lock().unwrap();
+    std::fs::write(&go, b"").unwrap();
+    let start = std::time::Instant::now();
+    while generation.load(Ordering::SeqCst) == 1 {
+        assert!(start.elapsed() < Duration::from_secs(5), "line never read");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(client.live(), "a decision in flight is not over yet");
+    drop(deciding);
+    while client.live() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "stop never applied"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}

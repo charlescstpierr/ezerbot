@@ -84,13 +84,11 @@ impl Lease {
         !self.revoked.load(Ordering::SeqCst) && crate::now() < self.expires
     }
     fn stop(&self) {
-        {
-            let _permit = self.permit.lock().unwrap_or_else(|e| e.into_inner());
-            if self.revoked.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            self.generation.fetch_add(1, Ordering::SeqCst);
+        if self.revoked.swap(true, Ordering::SeqCst) {
+            return;
         }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        drop(self.permit.lock().unwrap_or_else(|e| e.into_inner()));
         #[cfg(not(debug_assertions))]
         self.native.stop();
     }

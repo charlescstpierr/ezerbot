@@ -66,8 +66,8 @@ impl Client {
     }
     pub(super) fn launch(
         mut command: Command,
-        _permit: Arc<Mutex<()>>,
-        _generation: Arc<AtomicU64>,
+        permit: Arc<Mutex<()>>,
+        generation: Arc<AtomicU64>,
     ) -> Result<Self, ApiError> {
         let mut child = command
             .stdin(Stdio::piped())
@@ -82,6 +82,14 @@ impl Client {
         let (tx, rx) = mpsc::channel();
         let (p, r) = (paused.clone(), revoked.clone());
         std::thread::spawn(move || {
+            // The generation moves first, so a capture on its way to the COMMIT is
+            // dropped. The permit then waits for a decision taken before the stop:
+            // once a flag reads stopped, no capture can still be stored.
+            let halt = |flag: &AtomicBool| {
+                generation.fetch_add(1, Ordering::SeqCst);
+                let _permit = permit.lock().unwrap_or_else(|e| e.into_inner());
+                flag.store(true, Ordering::SeqCst);
+            };
             let mut reader = BufReader::new(output);
             loop {
                 // Bounded line: at most 4 MiB PNG plus envelope. A broken helper
@@ -101,9 +109,9 @@ impl Client {
                     break;
                 };
                 match v["event"].as_str() {
-                    Some("paused") => p.store(true, Ordering::SeqCst),
+                    Some("paused") => halt(&p),
                     Some("resumed") => p.store(false, Ordering::SeqCst),
-                    Some("revoked") => r.store(true, Ordering::SeqCst),
+                    Some("revoked") => halt(&r),
                     _ => {
                         if tx.send(v).is_err() {
                             break;
@@ -111,7 +119,7 @@ impl Client {
                     }
                 }
             }
-            r.store(true, Ordering::SeqCst);
+            halt(&r);
         });
         let client = Self {
             input: Mutex::new(input),

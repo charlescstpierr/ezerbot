@@ -113,6 +113,9 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
     if result is not None and not (isinstance(result.get("features"), list) and valid_features(result["features"])):
         problems.append("`result.json` : liste `features` invalide.")
         result = None
+    if manifest is None:
+        # Sans manifeste aucune empreinte n'est vérifiable : aucune vue ne peut être déclarée ok.
+        problems.append("`manifest.json` absent ou illisible : captures non vérifiées.")
     recorded = {view["file"]: (view["sha256"], view["size"]) for view in views}
     lines = [
         "# verify-ezerbot (Linux, Xvfb)",
@@ -136,7 +139,7 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
         item = reported.get((feature, view), {"feature": feature, "view": view, "file": f"{view}.png", "status": "absent"})
         shot = captures / f"{view}.png"
         passed = item["status"] == "pass" and item.get("file") == f"{view}.png" and shot.is_file() and (FEATURES_DIR / f"{feature}.md").is_file()
-        if passed and manifest is not None:
+        if passed:
             data = shot.read_bytes()
             if recorded.get(f"{view}.png") != (hashlib.sha256(data).hexdigest(), len(data)):
                 problems.append(f"`captures/{view}.png` ne correspond pas à l’empreinte du manifeste.")
@@ -149,10 +152,11 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
                 passed = False
         entries[feature] = entries.get(feature, True) and passed
         ok = ok and passed
-        lines.append(f"| `{feature}` | `{view}` | `captures/{view}.png` | {'ok' if passed else 'ÉCHEC'} |")
+        mark = "non vérifié" if manifest is None else "ok" if passed else "ÉCHEC"
+        lines.append(f"| `{feature}` | `{view}` | `captures/{view}.png` | {mark} |")
     if lines_extra:
         lines += ["", "Vues inattendues ou manquantes dans result.json : " + ", ".join(f"`{name}`" for name in lines_extra)]
-    lines += ["", "Entrées : " + (", ".join(f"`{name}` {'ok' if good else 'ÉCHEC'}" for name, good in entries.items()) or "aucune")]
+    lines += ["", "Entrées : " + (", ".join(f"`{name}` {'non vérifié' if manifest is None else 'ok' if good else 'ÉCHEC'}" for name, good in entries.items()) or "aucune")]
     if problems:
         lines += ["", "## Erreur d’outil", "", *problems]
     elif result is None:

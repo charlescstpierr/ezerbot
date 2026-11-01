@@ -60,13 +60,28 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(lines[-1], f"PASS {SHA}")
 
     def test_broken_feature_is_fix_and_keeps_earlier_captures(self) -> None:
-        evidence = self.evidence(error="settings-connectors readiness failed.", failing="settings-connectors", manifest=False)
+        evidence = self.evidence(error="settings-connectors readiness failed.", failing="settings-connectors")
         status, lines = linux_verdict.verdict(evidence, SHA)
         self.assertEqual(status, "FIX")
         self.assertEqual(lines[-1], f"FIX {SHA}")
         self.assertIn("| `accueil` | `home-dark` | `captures/home-dark.png` | ok |", lines)
         self.assertIn("| `parametres-connecteurs` | `settings-connectors` | `captures/settings-connectors.png` | ÉCHEC |", lines)
         self.assertIn("Entrées : `accueil` ok, `reponse-fil` ok, `parametres-connecteurs` ÉCHEC", lines)
+
+    def test_missing_or_unreadable_manifest_marks_nothing_ok(self) -> None:
+        for broken in ("absent", "illisible"):
+            with self.subTest(broken=broken):
+                evidence = self.evidence(manifest=broken == "illisible")
+                if broken == "illisible":
+                    (evidence / "captures" / "manifest.json").write_text('{"views": [')
+                status, lines = linux_verdict.verdict(evidence, SHA)
+                self.assertEqual(status, "FIX")
+                self.assertIn("## Erreur d’outil", lines)
+                self.assertIn("`manifest.json` absent ou illisible : captures non vérifiées.", lines)
+                rows = [line for line in lines if line.startswith("| `")]
+                self.assertEqual(len(rows), len(linux_verdict.EXPECTED))
+                self.assertTrue(all(row.endswith("| non vérifié |") for row in rows), rows)
+                self.assertFalse(any(" ok" in line for line in lines if line.startswith(("| `", "Entrées"))), lines)
 
     def test_failed_driver_exit_is_fix_even_with_complete_captures(self) -> None:
         status, lines = linux_verdict.verdict(self.evidence(), SHA, drive_status=134)
@@ -255,7 +270,37 @@ console.log(JSON.stringify(out));
         text = (SCRIPTS / "linux_drive.cjs").read_text()
         self.assertNotIn("'Répondre en fil').click()", text)
         result = subprocess.run(["node", "-e", "const m=require(process.argv[1]); console.log(JSON.stringify(m.DRIVEN.filter(v => v.click).map(v => v.id)))", str(SCRIPTS / "linux_drive.cjs")], capture_output=True, text=True, check=True)
-        self.assertEqual(json.loads(result.stdout), ["thread-menu", "thread-open"])
+        self.assertTrue({"thread-menu", "thread-open", "settings-connectors-add"} <= set(json.loads(result.stdout)))
+
+    def test_transparent_target_is_not_clickable(self) -> None:
+        # checkVisibility must be asked about opacity: an opacity:0 element is not a target.
+        script = r"""
+const { pointerTarget } = require(process.argv[1]);
+globalThis.innerWidth = 1440; globalThis.innerHeight = 900;
+const el = { disabled: false, checkVisibility: options => !options?.opacityProperty, getBoundingClientRect: () => ({ left: 10, top: 10, width: 100, height: 20, right: 110, bottom: 30 }), contains: () => true };
+globalThis.document = { elementFromPoint: () => el };
+console.log(JSON.stringify(pointerTarget(el)));
+"""
+        result = subprocess.run(["node", "-e", script, str(SCRIPTS.parents[3] / "tools" / "linux-captures.cjs")], capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.strip(), "null")
+
+    def test_every_view_goes_through_the_visibility_helper(self) -> None:
+        text = (SCRIPTS / "linux_drive.cjs").read_text()
+        self.assertNotRegex(text, r"\.click\(")
+        self.assertNotIn("getBoundingClientRect", text)
+        result = subprocess.run(["node", "-e", "const m=require(process.argv[1]); console.log(JSON.stringify(m.selectedViews().map(v => ({id: v.id, click: v.click ?? null, visible: v.visible ?? null, script: (v.action ?? '') + (v.after ?? '')}))))", str(SCRIPTS / "linux_drive.cjs")], capture_output=True, text=True, check=True)
+        for view in json.loads(result.stdout):
+            with self.subTest(view=view["id"]):
+                self.assertTrue(view["visible"], "vue sans contrôle de visibilité")
+                self.assertNotIn(".click(", view["script"])
+                self.assertNotIn(".click(", view["click"] or "")
+        self.assertIn("ADD_MCP", text.split('id: "settings-connectors-add"')[1].split("},")[0])
+
+    def test_transparent_settings_target_is_fix(self) -> None:
+        evidence = self.evidence(error="settings-connectors-add target not visible.", failing="settings-connectors-add")
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertIn("| `parametres-connecteurs` | `settings-connectors-add` | `captures/settings-connectors-add.png` | ÉCHEC |", lines)
 
     def test_hidden_reply_target_is_fix(self) -> None:
         # What the driver writes when the « Répondre en fil » item never becomes visible.

@@ -136,15 +136,17 @@ async function capture(sha, binary, output, signal, views = VIEWS) {
     for (const view of views) {
       stage = `${view.id} readiness`;
       await bounded(evaluate(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); ${view.action || ""}`), stage, cancelled.signal);
-      if (view.click) {
-        // Real pointer click on a target proven visible: rendered, non-zero box, inside the viewport, hit-testable.
-        await waitFor(() => evaluate(`Boolean((${pointerTarget})(${view.click}))`), `${view.id} visible target`, cancelled.signal, 5000)
+      // Every element interaction goes through one helper: proven visible (pointerTarget), then a real pointer click.
+      for (const target of [].concat(view.click ?? [])) {
+        await waitFor(() => evaluate(`Boolean((${pointerTarget})(${target}))`), `${view.id} visible target`, cancelled.signal, 5000)
           .catch(() => { throw new Error(`${view.id} target not visible.`); });
-        const point = await evaluate(`(${pointerTarget})(${view.click})`);
+        const point = await evaluate(`(${pointerTarget})(${target})`);
         if (!point) throw new Error(`${view.id} target not visible.`);
         for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: type === "mouseMoved" ? "none" : "left", buttons: type === "mousePressed" ? 1 : 0, clickCount: type === "mouseMoved" ? 0 : 1 });
       }
-      await waitFor(() => check(view.ready), stage, cancelled.signal);
+      if (view.after) await bounded(evaluate(view.after), stage, cancelled.signal);
+      const ready = view.visible ? `(${view.ready}) && (${pointerTarget})(${view.visible})` : view.ready;
+      await waitFor(() => check(ready), stage, cancelled.signal);
       stage = `${view.id} fonts, images and paint`;
       await bounded(evaluate(`(async () => {
         await document.fonts.ready;
@@ -153,7 +155,7 @@ async function capture(sha, binary, output, signal, views = VIEWS) {
         ${view.keepScroll ? "" : "window.scrollTo(0,0); document.querySelectorAll('dialog[open],#chat-scroll,#conversation-list').forEach(element => element.scrollTop=0);"}
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       })()`), stage, cancelled.signal);
-      await waitFor(() => check(view.ready), `${view.id} after paint`, cancelled.signal);
+      await waitFor(() => check(ready), `${view.id} after paint`, cancelled.signal);
       if (browserFailure) throw new Error(browserFailure);
       stage = `${view.id} screenshot`;
       const { data } = await send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false });

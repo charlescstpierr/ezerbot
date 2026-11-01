@@ -12,6 +12,7 @@ const threadId = "GrokbotPanels.state.conversations.find(item => item.title?.sta
 
 const REPLY_ITEM = `[...document.querySelectorAll('[role=menu][aria-label="Actions du message"] [role=menuitem]')].find(item => item.textContent === 'Répondre en fil')`;
 const SETTINGS = "document.getElementById('settings-button')";
+const ADD_MCP_NAME = "document.querySelector('#settings-dialog[open] details.mcp-add[open] form input[name=name]')";
 const ADD_MCP = "[...document.querySelectorAll('#settings-dialog[open] [data-panel=mcp] summary')].find(item => item.textContent.includes('Ajouter un serveur MCP'))";
 
 // Views driven for each entry of features/, in order. The first two come from tools/linux-captures.cjs.
@@ -30,10 +31,11 @@ const DRIVEN = Object.freeze([
     after: "document.querySelector('#settings-dialog [data-panel=mcp]')?.scrollIntoView({block:'start'})",
     visible: "document.querySelector('#settings-dialog[open] [data-panel=mcp] h3')",
     ready: "(() => { const panel = document.querySelector('#settings-dialog[open] [data-panel=mcp]'); return panel?.querySelector('h3')?.textContent === 'Connecteurs' && [...panel.querySelectorAll('summary')].some(item => item.textContent.includes('Ajouter un serveur MCP')); })()" },
-  { id: "settings-connectors-add", label: "Connecteurs, ajouter un serveur MCP", keepScroll: true, click: SETTINGS,
-    after: `${ADD_MCP}?.scrollIntoView({block:'center'})`,
-    visible: ADD_MCP,
-    ready: `Boolean(${ADD_MCP})` },
+  // Real pointer click on Réglages, then on « Ajouter un serveur MCP » (scrolled into view first); the form must open.
+  { id: "settings-connectors-add", label: "Connecteurs, ajouter un serveur MCP", keepScroll: true,
+    click: [SETTINGS, `(() => { const summary = ${ADD_MCP}; summary?.scrollIntoView({block:'center'}); return summary; })()`],
+    visible: ADD_MCP_NAME,
+    ready: `${ADD_MCP}?.parentElement?.open === true && Boolean(${ADD_MCP_NAME})` },
 ]);
 
 // Entry of features/ -> views that must all be captured for the entry to pass.

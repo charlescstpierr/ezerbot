@@ -126,7 +126,10 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
         "| Entrée de la carte | Vue | Capture | Résultat |",
         "|---|---|---|---|",
     ]
-    ok = not problems and drive_status == 0 and result is not None and result.get("error") is None
+    if result is not None and not (result.get("status") in ("pass", "fix") and "error" in result and (result["error"] is None or isinstance(result["error"], str))):
+        problems.append("`result.json` : `status` ou `error` absent ou invalide.")
+        result = None
+    ok = not problems and drive_status == 0 and result is not None and result["error"] is None and result["status"] == "pass"
     ok = ok and manifest is not None and manifest.get("sha") == sha and manifest.get("complete", True) is True
     entries: dict[str, bool] = {}
     reported = {(item.get("feature"), item.get("view")): item for item in (result or {}).get("features", [])}

@@ -49,7 +49,7 @@ class VerdictTests(unittest.TestCase):
             features.append({"feature": feature, "view": view, "file": f"{view}.png", "status": status})
         features = [item for item in features if item["view"] != omit]
         views = [item for item in views if item["id"] != omit]
-        (captures / "result.json").write_text(json.dumps({"sha": SHA, "error": error, "features": features}))
+        (captures / "result.json").write_text(json.dumps({"sha": SHA, "error": error, "features": features, "status": "pass" if error is None and failing is None else "fix"}))
         if manifest:
             (captures / "manifest.json").write_text(json.dumps({"sha": SHA, "renderer": "r", "chrome_version": "c", "views": views}))
         return root
@@ -96,6 +96,26 @@ class VerdictTests(unittest.TestCase):
         self.assertNotIn("## Erreur d’outil", lines)
         (evidence / "captures" / "result.json").write_text(json.dumps({"sha": SHA, "error": None, "features": [{"feature": f, "view": v, "file": f"{v}.png", "status": "pass"} for f, v in linux_verdict.EXPECTED]}))
         self.assertEqual(linux_verdict.verdict(evidence, SHA)[0], "FIX")
+
+    def test_result_status_must_be_pass(self) -> None:
+        for mutate in (lambda r: r.update(status="fix"), lambda r: r.update(status=[]), lambda r: r.pop("status"), lambda r: r.pop("error"), lambda r: (r.pop("status"), r.pop("error")), lambda r: r.update(error=3)):
+            with self.subTest(mutate=mutate):
+                evidence = self.evidence()
+                path = evidence / "captures" / "result.json"
+                data = json.loads(path.read_text())
+                mutate(data)
+                path.write_text(json.dumps(data))
+                self.assertEqual(linux_verdict.verdict(evidence, SHA)[0], "FIX")
+
+    def test_add_mcp_is_clicked_and_must_open_the_form(self) -> None:
+        result = subprocess.run(["node", "-e", "const m=require(process.argv[1]); console.log(JSON.stringify(m.DRIVEN.find(v => v.id === 'settings-connectors-add')))", str(SCRIPTS / "linux_drive.cjs")], capture_output=True, text=True, check=True)
+        view = json.loads(result.stdout)
+        self.assertIsInstance(view["click"], list)
+        self.assertEqual(len(view["click"]), 2)
+        self.assertIn("settings-button", view["click"][0])
+        self.assertIn("Ajouter un serveur MCP", view["click"][1])
+        self.assertIn("details.mcp-add[open]", view["ready"])
+        self.assertIn("details.mcp-add[open]", view["visible"])
 
     def test_failed_driver_exit_is_fix_even_with_complete_captures(self) -> None:
         status, lines = linux_verdict.verdict(self.evidence(), SHA, drive_status=134)

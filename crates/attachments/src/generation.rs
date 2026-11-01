@@ -20,6 +20,15 @@ pub struct Request {
     pub format: String,
     pub content: String,
 }
+impl Request {
+    /// The value decoded from a table or a JSON diagram. Its strings are what the reader sees:
+    /// `content` is only their encoding, where `\u0070` hides a `p`.
+    pub fn json(&self) -> Option<serde_json::Value> {
+        let decoded = matches!(self.format.as_str(), "csv" | "xlsx")
+            || (self.format == "svg" && is_json_diagram(&self.content));
+        decoded.then(|| serde_json::from_str(&self.content).ok())?
+    }
+}
 pub struct Generated {
     pub name: String,
     pub format: String,
@@ -1725,8 +1734,11 @@ fn mermaid_link(s: &str) -> Option<(Link, &str)> {
     }
     Some(((None, dashed, arrow), rest))
 }
+fn is_json_diagram(content: &str) -> bool {
+    content.trim_start().starts_with('{')
+}
 fn diagram(content: &str) -> Result<String> {
-    let graph = if content.trim_start().starts_with('{') {
+    let graph = if is_json_diagram(content) {
         let d:JsonDiagram=serde_json::from_str(content).map_err(|_|invalid("Pour SVG, content doit être un flowchart Mermaid ou un graphe JSON : {\"nodes\":[\"Départ\",\"Arrivée\"],\"edges\":[[0,1]]}."))?;
         if d.edges.iter().flatten().any(|&i| i >= d.nodes.len()) {
             return Err(invalid(

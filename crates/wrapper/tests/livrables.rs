@@ -674,26 +674,20 @@ fn the_preview_masks_a_secret_cut_by_the_cell_width() {
 
 #[test]
 fn the_preview_masks_a_secret_only_the_decoded_json_shows() {
-    const ESCAPED: &str = "catalogue-r10-jeton";
-    let escaped = format!("\\u0063{}", &ESCAPED[1..]);
-    const QUOTED: &str = "jeton\"r10-guillemet";
+    const SECRET: &str = "catalogue-r10-jeton";
+    const ACCENT: &str = "clé-r10-jeton";
     let table = |cell: &str| format!(r#"[["Public"],["{cell}"]]"#);
     let graph = |node: &str| format!(r#"{{"nodes":["Public","{node}"],"edges":[[0,1]]}}"#);
-    for (format, content, secret, drawn) in [
-        ("csv", table(&escaped), ESCAPED, ESCAPED),
-        ("xlsx", table(&escaped), ESCAPED, ESCAPED),
-        ("svg", graph(&escaped), ESCAPED, ESCAPED),
-        (
-            "csv",
-            table(r#"jeton\"r10-guillemet"#),
-            QUOTED,
-            "jeton&quot;r10-guillemet",
-        ),
+    for (format, content, secret) in [
+        ("csv", table(r"\u0063atalogue-r10-jeton"), SECRET),
+        ("xlsx", table(r"\u0063atalogue-r10-jeton"), SECRET),
+        ("svg", graph(r"\u0063atalogue-r10-jeton"), SECRET),
+        ("csv", table(r"cl\u00e9-r10-jeton"), ACCENT),
     ] {
         assert!(!content.contains(secret), "{format} : {content}");
         let (before, after) = previews(format, &content, secret);
-        assert!(before.contains(drawn), "{format} : {before}");
-        assert!(!after.contains(drawn), "{format} : {after}");
+        assert!(before.contains(secret), "{format} : {before}");
+        assert!(!after.contains(secret), "{format} : {after}");
         assert!(
             after.contains("Public") && after.contains("[...]"),
             "{format} : {after}"

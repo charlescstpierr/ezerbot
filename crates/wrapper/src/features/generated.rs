@@ -464,14 +464,23 @@ fn preview(conn: &Connection, file: &File) -> Result<String, ApiError> {
         let Some(request) = source(conn, file)? else {
             return Ok(HIDDEN.into());
         };
-        let content = patterns.text(&request.content);
-        if content == request.content {
+        let masked = match request.json() {
+            Some(decoded) => {
+                let masked = patterns.value(&decoded)?;
+                (masked != decoded).then(|| masked.to_string())
+            }
+            None => {
+                let masked = patterns.text(&request.content);
+                (masked != request.content).then_some(masked)
+            }
+        };
+        let Some(content) = masked else {
             return Ok(conn.query_row(
                 "SELECT preview FROM attachments_generated WHERE id=?1",
                 [&file.id],
                 |r| r.get(0),
             )?);
-        }
+        };
         Ok(generation::generate(&Request { content, ..request })
             .map_or_else(|_| HIDDEN.into(), |masked| masked.preview))
     })

@@ -10,6 +10,7 @@ use std::{
     pin::Pin,
     rc::Rc,
     task::{Context, Poll, Waker},
+    time::Duration,
 };
 
 const PORTAL: &str = "org.freedesktop.portal.Desktop";
@@ -17,6 +18,8 @@ const PATH: &str = "/org/freedesktop/portal/desktop";
 const SHORTCUTS: &str = "org.freedesktop.portal.GlobalShortcuts";
 const REQUEST: &str = "org.freedesktop.portal.Request";
 const SESSION: &str = "org.freedesktop.portal.Session";
+/// The portal may put a dialog in front of the user, so this is generous.
+const RESPONSE_LIMIT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, PartialEq, Eq)]
 enum Plan {
@@ -266,6 +269,14 @@ impl Portal {
     }
 }
 
+/// Waits for a portal answer, up to `limit`. A request that never gets one
+/// would otherwise leave the bind in flight and refuse every later change.
+async fn answered<T>(limit: Duration, response: impl Future<Output = T>) -> Result<T, Outcome> {
+    glib::future_with_timeout(limit, response)
+        .await
+        .map_err(|_| Outcome::Error)
+}
+
 /// Calls a portal method and waits for the `Response` on its request. The
 /// subscription precedes the call: the reply may arrive after the signal.
 async fn request(
@@ -304,13 +315,13 @@ async fn request(
         )
         .await;
     let answer = if reply.is_ok() {
-        Some(response.await)
+        Some(answered(RESPONSE_LIMIT, response).await)
     } else {
         None
     };
     connection.signal_unsubscribe(subscription);
     // A portal or an interface that is absent cannot answer the call at all.
-    let answer = answer.ok_or(Outcome::Unavailable)?;
+    let answer = answer.ok_or(Outcome::Unavailable)??;
     let (code, results) = answer
         .get::<(u32, HashMap<String, Variant>)>()
         .ok_or(Outcome::Error)?;
@@ -342,6 +353,20 @@ fn close(connection: &DBusConnection, session: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wait_without_an_answer_ends_in_an_error() {
+        let context = glib::MainContext::new();
+        let silent = Delivery::<u32>::new();
+        let limit = Duration::from_millis(20);
+        assert_eq!(
+            context.block_on(answered(limit, silent)),
+            Err(Outcome::Error)
+        );
+        let answer = Delivery::new();
+        answer.fulfil(7);
+        assert_eq!(context.block_on(answered(limit, answer)), Ok(7));
+    }
 
     #[test]
     fn a_bind_in_flight_refuses_every_other_request() {

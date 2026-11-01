@@ -401,6 +401,13 @@ fn the_overlay_is_visible_and_its_buttons_pause_and_stop_the_lease() {
     let row = y + height as i32 / 2;
     let right = x + width as i32;
     let (pause, stop) = (right - 6 - 96 - 6 - 48, right - 6 - 48);
+    for button in [pause, stop] {
+        let [red, green, blue] = viewer.pixel(button - 40, row);
+        assert!(
+            red < 128 && green < 128 && blue < 128,
+            "white labels need a dark face"
+        );
+    }
 
     viewer.click(pause, row);
     assert_eq!(helper.line(), json!({"event":"paused"}));

@@ -8,8 +8,12 @@ const WIDTH: i32 = 560;
 const HEIGHT: i32 = 44;
 const LIVE: &str = "Ezerbot voit l’écran";
 const BUTTON_WIDTH: i32 = 96;
-const STYLE: &[u8] = b"window { background-color: #1f2129; }
-label { color: #ffffff; font-weight: 600; }";
+const STYLE: &str = "window { background-color: #1f2129; }
+label { color: #ffffff; font-weight: 600; }
+button { background-image: none; background-color: #3a3d4a; border: 1px solid #5a5e6e;
+  box-shadow: none; text-shadow: none; }
+button:disabled { background-color: #2b2d36; }
+button:disabled label { color: #8a8d99; }";
 
 pub struct Overlay {
     window: gtk::Window,
@@ -40,7 +44,7 @@ impl Overlay {
         window.set_resizable(false);
         window.set_default_size(WIDTH, HEIGHT);
         let style = gtk::CssProvider::new();
-        if style.load_from_data(STYLE).is_ok() {
+        if style.load_from_data(STYLE.as_bytes()).is_ok() {
             if let Some(screen) = gdk::Screen::default() {
                 gtk::StyleContext::add_provider_for_screen(
                     &screen,

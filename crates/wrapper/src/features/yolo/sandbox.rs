@@ -160,6 +160,78 @@ fn refused(path: &Path, error: &io::Error) -> ApiError {
     )
 }
 
+fn gone(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
+}
+
+/// `root` et tout ce qu'il contient, sans suivre les liens symboliques.
+fn tree(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>, ApiError> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error) if gone(&error) => continue,
+            Err(error) => return Err(refused(&path, &error)),
+        };
+        if meta.is_dir() {
+            let entries = match fs::read_dir(&path) {
+                Ok(entries) => entries,
+                Err(error) if gone(&error) => continue,
+                Err(error) => return Err(refused(&path, &error)),
+            };
+            for entry in entries {
+                match entry {
+                    Ok(entry) => pending.push(entry.path()),
+                    Err(error) if gone(&error) => {}
+                    Err(error) => return Err(refused(&path, &error)),
+                }
+            }
+        }
+        found.push((path, meta));
+    }
+    Ok(found)
+}
+
+/// Ceux qui lisent une racine suivent ses liens symboliques : le fournisseur charge son jeton
+/// par `fs::read`. Ce qu'un lien désigne est donc protégé comme la racine, et ses propres liens
+/// aussi. Un lien vers un dossier qui contient une racine refuse le lancement : le masquer
+/// cacherait le système ou le dossier de travail.
+pub fn with_link_targets(mut roots: Vec<PathBuf>) -> Result<Vec<PathBuf>, ApiError> {
+    let mut pending = roots.clone();
+    while let Some(root) = pending.pop() {
+        for (path, meta) in tree(&root)? {
+            if !meta.file_type().is_symlink() {
+                continue;
+            }
+            let real = match path.canonicalize() {
+                Ok(real) => real,
+                Err(error) if gone(&error) => continue,
+                Err(error) => return Err(refused(&path, &error)),
+            };
+            if roots.iter().any(|known| real.starts_with(known)) {
+                continue;
+            }
+            if roots.iter().any(|known| known.starts_with(&real)) {
+                return Err(ApiError::new(
+                    403,
+                    format!(
+                        "Mode YOLO : le lien symbolique {} désigne {}, un dossier qui contient une donnée protégée. Le bac à sable ne peut pas le masquer : supprimez ce lien, et relancez la commande.",
+                        path.display(),
+                        real.display()
+                    ),
+                ));
+            }
+            roots.push(real.clone());
+            pending.push(real);
+        }
+    }
+    Ok(roots)
+}
+
 /// Un lien dur est un second nom du même contenu : le masque d'un chemin ne le couvre pas.
 /// Chaque nom d'un objet à plusieurs liens doit se trouver dans une racine protégée. Un nom
 /// est une entrée de dossier réelle : deux vues d'un même dossier n'en font pas deux, et un
@@ -167,27 +239,11 @@ fn refused(path: &Path, error: &io::Error) -> ApiError {
 fn refuse_outside_links(roots: &[PathBuf], mounts: &[Mount]) -> Result<(), ApiError> {
     type Entry = ((u64, u64), OsString);
     let mut seen: HashMap<(u64, u64), (u64, HashSet<Entry>, PathBuf)> = HashMap::new();
-    let mut pending = roots.to_vec();
-    while let Some(path) = pending.pop() {
-        let meta = match fs::symlink_metadata(&path) {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(refused(&path, &error)),
-        };
-        if meta.is_dir() {
-            let entries = match fs::read_dir(&path) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(refused(&path, &error)),
-            };
-            for entry in entries {
-                match entry {
-                    Ok(entry) => pending.push(entry.path()),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(refused(&path, &error)),
-                }
+    for root in roots {
+        for (path, meta) in tree(root)? {
+            if meta.is_dir() || meta.file_type().is_symlink() || meta.nlink() <= 1 {
+                continue;
             }
-        } else if !meta.file_type().is_symlink() && meta.nlink() > 1 {
             let entry = path.parent().and_then(identity).zip(path.file_name());
             let entry = entry
                 .filter(|_| !mounts.iter().any(|mount| mount.point == path))
@@ -265,11 +321,7 @@ fn masks(protected: &[PathBuf]) -> Result<Vec<PathBuf>, ApiError> {
     for root in protected {
         match root.canonicalize() {
             Ok(real) => roots.push(real),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) => {}
+            Err(error) if gone(&error) => {}
             // Illisible n'est pas absent : un `chmod` depuis le shell la rendrait lisible, sans masque.
             Err(error) => return Err(refused(root, &error)),
         }
@@ -791,6 +843,62 @@ Num       RefCount Protocol Flags    Type St Inode Path
         let error = hidden.expect_err("un chmod rendrait la racine lisible, sans masque");
         assert_eq!(error.status, 403);
         assert!(masks(std::slice::from_ref(&root)).is_ok());
+    }
+
+    #[test]
+    fn what_a_link_in_a_root_reaches_is_masked_through_chains_and_folders() {
+        let dir = TestDir::new("ezerbot-bwrap");
+        for sub in ["data", "relais", "session", "coffre", "cles"] {
+            std::fs::create_dir(dir.join(sub)).unwrap();
+        }
+        let link = std::os::unix::fs::symlink::<PathBuf, PathBuf>;
+        std::fs::write(dir.join("session/jeton.txt"), "jeton-chaine").unwrap();
+        link(dir.join("session/jeton.txt"), dir.join("relais/saut")).unwrap();
+        link(dir.join("relais/saut"), dir.join("data/session")).unwrap();
+        link(dir.join("coffre"), dir.join("data/coffre")).unwrap();
+        std::fs::write(dir.join("coffre/cle.txt"), "cle-dossier").unwrap();
+        std::fs::write(dir.join("cles/profond.txt"), "cle-profonde").unwrap();
+        link(dir.join("cles/profond.txt"), dir.join("coffre/suite")).unwrap();
+        std::fs::write(dir.join("session/voisin.txt"), "utile").unwrap();
+        link(dir.join("data"), dir.join("data/retour")).unwrap();
+        link(dir.join("absente"), dir.join("data/pendant")).unwrap();
+        let read = "cat session/jeton.txt coffre/cle.txt cles/profond.txt; cat session/voisin.txt";
+        assert!(stdout(&host(&dir, read)).contains("jeton-chaine"));
+
+        let roots = with_link_targets(vec![dir.join("data")]).unwrap();
+        let shown = stdout(&run(&roots, &dir, read));
+        assert!(!shown.contains("jeton-chaine"), "{shown}");
+        assert!(!shown.contains("cle-dossier"), "{shown}");
+        assert!(!shown.contains("cle-profonde"), "{shown}");
+        assert!(shown.contains("utile"), "{shown}");
+    }
+
+    #[test]
+    fn a_hard_link_to_what_a_link_reaches_refuses_the_launch() {
+        let dir = TestDir::new("ezerbot-bwrap");
+        std::fs::create_dir(dir.join("data")).unwrap();
+        std::fs::write(dir.join("session.txt"), "jeton").unwrap();
+        std::os::unix::fs::symlink(dir.join("session.txt"), dir.join("data/session")).unwrap();
+        std::fs::hard_link(dir.join("session.txt"), dir.join("copie.txt")).unwrap();
+        let roots = with_link_targets(vec![dir.join("data")]).unwrap();
+        let error = masks(&roots).unwrap_err();
+        assert_eq!(error.status, 403);
+        assert!(error.message.contains("lien dur"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_link_to_a_folder_that_holds_a_root_refuses_the_launch() {
+        let dir = TestDir::new("ezerbot-bwrap");
+        let data = dir.join("data");
+        std::fs::create_dir(&data).unwrap();
+        for (name, target) in [("haut", dir.to_path_buf()), ("racine", PathBuf::from("/"))] {
+            let link = data.join(name);
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let error = with_link_targets(vec![data.canonicalize().unwrap()]).unwrap_err();
+            assert_eq!(error.status, 403);
+            assert!(error.message.contains(name), "{}", error.message);
+            std::fs::remove_file(&link).unwrap();
+        }
     }
 
     #[test]

@@ -479,6 +479,7 @@ fn protected_roots(ctx: &Context<'_>, home: Option<&Path>) -> Result<Vec<PathBuf
             let root = runtime.join(sub);
             roots.push(root.canonicalize().unwrap_or(root));
         }
+        roots = super::yolo::sandbox::with_link_targets(roots)?;
     }
     Ok(roots)
 }
@@ -496,8 +497,14 @@ fn yolo_protected(ctx: &Context<'_>, path: &Path, home: Option<&Path>) -> Result
             return Ok(true);
         }
         if let Ok(metadata) = fs::metadata(path) {
-            let folders: Vec<PathBuf> = roots.iter().filter(|r| r.is_dir()).cloned().collect();
-            if linked_into(&folders, &metadata)? {
+            use std::os::unix::fs::MetadataExt;
+            let (folders, files): (Vec<PathBuf>, Vec<PathBuf>) =
+                roots.iter().cloned().partition(|r| r.is_dir());
+            let same = |file: &PathBuf| {
+                fs::metadata(file)
+                    .is_ok_and(|m| (m.dev(), m.ino()) == (metadata.dev(), metadata.ino()))
+            };
+            if files.iter().any(same) || linked_into(&folders, &metadata)? {
                 return Ok(true);
             }
         }

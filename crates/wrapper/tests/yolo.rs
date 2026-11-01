@@ -772,6 +772,12 @@ fn a_session_behind_a_symlink_in_the_data_stays_out_of_reach() {
     let file = f.runs_without_a_card("fichier", "read_file", json!({"path":session}));
     assert!(!file.to_string().contains("fake-refresh"), "{file}");
     assert_eq!(file["reason"], PROTECTED, "{file}");
+    let alias = f.root().join("copie.txt");
+    std::fs::hard_link(&session, &alias).unwrap();
+    let copy = f.runs_without_a_card("copie", "read_file", json!({"path":alias}));
+    assert!(!copy.to_string().contains("fake-refresh"), "{copy}");
+    assert_eq!(copy["reason"], PROTECTED, "{copy}");
+    std::fs::remove_file(&alias).unwrap();
 
     let witness = f.runs_without_a_card("temoin", "run_shell", f.shell("cat ailleurs/vo*"));
     assert_eq!(witness["output"]["stdout"], "utile", "{witness}");

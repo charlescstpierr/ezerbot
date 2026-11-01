@@ -305,6 +305,26 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         result = subprocess.run(["bash", str(SCRIPTS / "prove.sh"), "--evidence", str(evidence)], env=env, capture_output=True, text=True, timeout=600)
         return result, evidence
 
+    def test_busy_lock_is_refused_at_once_and_cleans_up(self) -> None:
+        import fcntl
+
+        repo = SCRIPTS.parents[3]
+        dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", "crates", "app/ui", "app/web", "Cargo.toml", "Cargo.lock", "vendor", "tools/linux-captures.cjs", ".cursor/skills/verify-ezerbot/scripts"], capture_output=True, text=True, check=True).stdout
+        if dirty:
+            self.skipTest("checkout modifié : prove-linux.sh refuse avant le verrou")
+        target = repo / "target" / "verify-linux"
+        target.mkdir(parents=True, exist_ok=True)
+        holder = open(target / ".verify-build.lock", "w")
+        self.addCleanup(holder.close)
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        scratch = Path(tempfile.mkdtemp(prefix="linux-lock-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(scratch)], check=True))
+        before = set(Path("/tmp").glob("ezv.*"))
+        result = subprocess.run(["bash", str(SCRIPTS / "prove-linux.sh"), "--evidence", str(scratch / "ev")], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("un autre run tient", result.stderr)
+        self.assertEqual(set(Path("/tmp").glob("ezv.*")) - before, set())
+
     def test_failed_web_build_writes_a_fix_report_with_the_patch(self) -> None:
         result, evidence = self.failing_build("npm", {"EZERBOT_VERIFY_PATCH_ID": "e" * 40})
         self.assertEqual(result.returncode, 1, result.stderr)

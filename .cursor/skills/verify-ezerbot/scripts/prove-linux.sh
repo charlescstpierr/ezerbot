@@ -53,8 +53,9 @@ iso=(env -i PATH="$PATH" HOME="$run/home" XDG_CONFIG_HOME="$run/config" XDG_CACH
 mkdir -p "$target"
 # Un seul run à la fois par checkout : npm, Cargo et le pilote lisent les mêmes assets générés.
 # Le verrou reste tenu jusqu'à la fin du run (fermé par la sortie du script).
+# Refus immédiat si un autre run le tient : une attente bloquerait aussi SIGTERM et le nettoyage.
 exec 8>"$target/.verify-build.lock"
-flock 8
+flock -n 8 || fail "un autre run tient $target/.verify-build.lock ; relancer quand il est fini."
 # Un échec de build écrit quand même report.md et une ligne FIX (erreur d'outil), puis sort avec 1.
 build_failed() {
   local name=$1 code=$2

@@ -13,7 +13,7 @@ use std::{
     os::raw::{c_int, c_uint},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     ptr,
     sync::OnceLock,
     time::{Duration, Instant},
@@ -26,6 +26,7 @@ use x11_dl::{
 const SHELL: &str = env!("CARGO_BIN_EXE_ezerbot-linux");
 const MENU_HEIGHT: i32 = 40;
 const WAIT: Duration = Duration::from_secs(120);
+const RELAUNCH_LIMIT: Duration = Duration::from_secs(5);
 
 fn wait_for<T>(what: &str, mut ready: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + WAIT;
@@ -139,6 +140,32 @@ impl Screen {
                 .into_iter()
                 .max_by_key(|(_, area)| area.width)
         })
+    }
+
+    /// Stands in for whatever the user opened over the app. Narrower than the
+    /// app, so `app_window` still finds the app.
+    fn cover(&self, area: Rectangle) -> xlib::Window {
+        unsafe {
+            let root = (self.xlib.XDefaultRootWindow)(self.display);
+            let window = (self.xlib.XCreateSimpleWindow)(
+                self.display,
+                root,
+                area.x,
+                area.y,
+                200,
+                200,
+                0,
+                0,
+                0,
+            );
+            (self.xlib.XMapRaised)(self.display, window);
+            (self.xlib.XSync)(self.display, xlib::False);
+            window
+        }
+    }
+
+    fn top_window(&self) -> Option<xlib::Window> {
+        self.windows().last().map(|(window, _)| *window)
     }
 
     fn pixels(&self, area: Rectangle) -> Vec<u32> {
@@ -274,6 +301,10 @@ impl App {
             .spawn()
             .unwrap();
         Self(Some(shell))
+    }
+
+    fn exited(&mut self) -> Option<ExitStatus> {
+        self.0.as_mut().unwrap().try_wait().unwrap()
     }
 
     fn quit(mut self) {
@@ -517,4 +548,43 @@ fn the_real_sign_in_goes_through_xdg_open_and_recovers_from_a_failed_browser() {
         assert!(link.contains("redirect_uri="), "unexpected sign-in page");
     }
     app.quit();
+}
+
+#[test]
+fn a_second_launch_shows_the_open_window_and_a_later_launch_starts_again() {
+    let home = TestDir::new("ezerbot-relaunch");
+    let screen = Screen::start();
+    let fake = [("EZERBOT_FAKE_SIGNIN", "1")];
+    let app = App::start(shell_with_wrapper(), &screen, &home, &fake);
+    wait_for("the window stayed blank", || {
+        (screen.colours().len() >= 16).then_some(())
+    });
+    let (window, area) = screen.app_window();
+    let cover = screen.cover(area);
+    wait_for("the cover never went over the app", || {
+        (screen.top_window() == Some(cover)).then_some(())
+    });
+
+    let started = Instant::now();
+    let mut second = App::start(shell_with_wrapper(), &screen, &home, &fake);
+    let status = loop {
+        let status = second.exited();
+        if status.is_some() && screen.top_window() == Some(window) {
+            break status.unwrap();
+        }
+        assert!(
+            started.elapsed() < RELAUNCH_LIMIT,
+            "the relaunch did not show the open window in time"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success());
+    assert_eq!(screen.windows().len(), 2, "the relaunch opened a window");
+    app.quit();
+
+    let third = App::start(shell_with_wrapper(), &screen, &home, &fake);
+    wait_for("a launch after quitting opened nothing", || {
+        (screen.windows().len() == 2).then_some(())
+    });
+    third.quit();
 }

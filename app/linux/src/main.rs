@@ -66,8 +66,8 @@ mod linux {
         /// With the portal's activation token, when the portal sent one.
         OpenPanel(Option<String>),
         Hotkey(u32),
-        /// The portal ended the shortcut in force: the page binds its choice again.
-        ShortcutLost,
+        /// News of the shortcut the portal holds, for the page to show.
+        Shortcut(crate::portal::Notice),
         Configured(u64, Outcome, Option<String>),
         Command(View, Message),
         LinkFailed(url::Url),
@@ -419,8 +419,8 @@ mod linux {
             move |token| {
                 let _ = portal_proxy.send_event(ShellEvent::OpenPanel(token));
             },
-            move || {
-                let _ = lost_proxy.send_event(ShellEvent::ShortcutLost);
+            move |notice| {
+                let _ = lost_proxy.send_event(ShellEvent::Shortcut(notice));
             },
         );
         let mut shell = Some(Shell {
@@ -482,9 +482,9 @@ mod linux {
                 if let Some(shell) = shell.as_mut().filter(|shell| shell.hotkeys.fires(*id)) {
                     let _ = shell.show_panel(target, None);
                 }
-            } else if matches!(event, Event::UserEvent(ShellEvent::ShortcutLost)) {
+            } else if let Event::UserEvent(ShellEvent::Shortcut(notice)) = &event {
                 if let Some(webview) = shell.as_ref().and_then(|shell| shell.webview.as_ref()) {
-                    let _ = webview.evaluate_script("window.EzerbotFloatingMain?.shortcutLost?.()");
+                    let _ = webview.evaluate_script(&notice.script());
                 }
             } else if let Event::UserEvent(ShellEvent::OpenPanel(token)) = &event {
                 if let Some(shell) = shell.as_mut() {

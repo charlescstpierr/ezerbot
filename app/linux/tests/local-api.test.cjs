@@ -8,14 +8,14 @@ const vm = require('node:vm');
 const template = fs.readFileSync(path.join(__dirname, '../src/local-api.js'), 'utf8');
 const identity = 'synthetic-test-identity';
 
-function install(origin, originalFetch, location = `${origin}/`, frames = []) {
+function install(origin, originalFetch, location = `${origin}/`, frames = [], extra = {}) {
   class BrowserRequest extends Request {
     constructor(input, init) {
       super(typeof input === 'string' ? new URL(input, location) : input, init);
     }
   }
   const posted = [];
-  const window = {URL, Headers, Request: BrowserRequest, fetch: originalFetch, location: {href: location}, frames, ipc: {postMessage: raw => posted.push(JSON.parse(raw))}};
+  const window = {URL, Headers, Request: BrowserRequest, fetch: originalFetch, location: {href: location}, frames, ipc: {postMessage: raw => posted.push(JSON.parse(raw))}, ...extra};
   window.posted = posted;
   vm.runInNewContext(template.replace('__EZERBOT_PARAMETERS__', JSON.stringify([
     origin, origin.replace('http:', 'ezerbot-resource:'), identity,
@@ -140,7 +140,7 @@ test('the main window reports whether the conversation opened', async () => {
   assert.equal(window.posted.at(-1).body.opened, false);
 });
 
-test('the bridge refuses while a same-origin frame is open, not for a sandboxed one', async () => {
+test('the bridge refuses once a same-origin frame was reachable, even after it is gone', async () => {
   const sandboxed = {get document() { throw new Error('SecurityError'); }};
   const frames = [sandboxed];
   const window = install('http://127.0.0.1:32123', () => {}, undefined, frames);
@@ -148,8 +148,29 @@ test('the bridge refuses while a same-origin frame is open, not for a sandboxed 
   assert.equal(window.posted.length, 1, 'a sandboxed frame blocked the page');
   frames.push({document: {}});
   await assert.rejects(window.EzerbotShell.floating.postMessage({command: 'show'}), /refusée/);
-  assert.equal(window.posted.length, 1, 'a command went out with a same-origin frame open');
   frames.pop();
+  const again = window.EzerbotShell.floating.postMessage({command: 'show'});
+  assert.equal(window.posted.length, 1, 'the bridge served again once the frame was removed');
+  await assert.rejects(again, /refusée/);
+});
+
+test('a frame attached and removed between two calls revokes the bridge', async () => {
+  const element = (tagName, sandbox) => ({nodeType: 1, tagName,
+    hasAttribute: name => name === 'sandbox' && sandbox !== undefined,
+    getAttribute: () => sandbox, querySelectorAll: () => []});
+  let pending = [];
+  class MutationObserver {
+    constructor(callback) { this.callback = callback; }
+    observe(target, options) { assert.equal(options.subtree, true); }
+    takeRecords() { const taken = pending; pending = []; return taken; }
+  }
+  const window = install('http://127.0.0.1:32123', () => {}, undefined, [], {MutationObserver});
+  pending.push({type: 'childList', addedNodes: [element('IFRAME', 'allow-scripts')]});
   window.EzerbotShell.floating.postMessage({command: 'show'});
-  assert.equal(window.posted.length, 2);
+  assert.equal(window.posted.length, 1, 'an opaque sandboxed frame revoked the bridge');
+  // Attached then removed before any call: only the mutation record remains.
+  pending.push({type: 'childList', addedNodes: [element('IFRAME', 'allow-scripts allow-same-origin')]});
+  const late = window.EzerbotShell.floating.postMessage({command: 'show'});
+  assert.equal(window.posted.length, 1, 'a command went out after a same-origin frame came and went');
+  await assert.rejects(late, /refusée/);
 });

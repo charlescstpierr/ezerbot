@@ -32,6 +32,9 @@ Un raccourci déjà pris par une autre application est annoncé et l’ancien re
 Sous Wayland, Ezerbot passe par le portail `org.freedesktop.portal.GlobalShortcuts`.
 Sous Wayland, le bureau décide de la combinaison finale : Ezerbot affiche celle que le portail annonce, qui peut différer de celle demandée.
 Sans portail, le raccourci est annoncé indisponible et le menu reste disponible.
+Si la combinaison change dans les réglages du bureau, Ezerbot affiche la nouvelle.
+Si le portail retire le raccourci (redémarrage, session fermée), Ezerbot le réenregistre seul : tout de suite au retour du portail, sinon par essais espacés de 250 ms à 30 s pendant environ deux minutes, puis il demande de le choisir de nouveau.
+Le pont natif ne sert que la page principale : dès qu'un cadre de même origine a pu l'atteindre, il refuse tout jusqu'au rechargement de la page.
 Le premier plan dépend alors du compositeur : il n’est pas vérifié sous Wayland.
 Fermer la fenêtre principale quitte toujours Ezerbot, donc le raccourci s’arrête avec elle.
 

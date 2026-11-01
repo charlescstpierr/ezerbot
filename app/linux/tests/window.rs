@@ -849,7 +849,7 @@ fn scripted_page(view: &str, extra: &str) -> String {
 const view = "{view}";
 const record = (key, value) => fetch("/result", {{method: "POST", body: JSON.stringify([key, value])}});
 window.EzerbotFloating = {{open() {{ record("reopened", true); }}}};
-window.EzerbotFloatingMain = {{openConversation: async id => ({{opened: id === "present", reason: "Fil absent."}}), shortcutLost() {{ record("lost-" + Date.now() + Math.random(), true); }}}};
+window.EzerbotFloatingMain = {{openConversation: async id => ({{opened: id === "present", reason: "Fil absent."}}), shortcutLost() {{ record("lost-" + Date.now() + Math.random(), true); }}, shortcutBound(trigger) {{ record("bound-" + Date.now() + Math.random(), trigger); }}, shortcutAbandoned() {{ record("abandoned-" + Date.now() + Math.random(), true); }}}};
 (async () => {{
   for (;;) {{
     const line = await (await fetch("/next?view=" + view)).text();
@@ -873,7 +873,11 @@ bridge.postMessage(JSON.stringify({launch: "x", id: 2, body: {command: "show"}})
 parent.EzerbotShell.floating.postMessage({command: "configure", shortcut: "cmd+option+j"}).then(
   () => "accepted", error => String(error.message)).then(outcome =>
   fetch("/result", {method: "POST", body: JSON.stringify(["frame-via-parent", outcome])}))
-  .then(() => window.frameElement.remove());
+  .then(() => {
+    // Keep the page's bridge past this frame: the page's own timer calls it once the frame is gone.
+    parent.setTimeout(parent.EzerbotShell.floating.postMessage, 500, {command: "show"});
+    window.frameElement.remove();
+  });
 </script>"#;
 
 /// A shell on a scripted page, under a private session bus when given one.
@@ -954,6 +958,22 @@ impl Scripted {
                 .count();
             (told >= count).then_some(())
         });
+    }
+
+    /// What the shell told the main page, oldest first, for notices starting with `kind`.
+    fn notices(&self, kind: &str) -> Vec<serde_json::Value> {
+        self.results()
+            .into_iter()
+            .filter(|(key, _)| key.starts_with(kind))
+            .map(|(_, value)| value)
+            .collect()
+    }
+
+    fn wait_notices(&self, kind: &str, count: usize, what: &str) -> Vec<serde_json::Value> {
+        wait_for(what, || {
+            let notices = self.notices(kind);
+            (notices.len() >= count).then_some(notices)
+        })
     }
 
     fn wait_panel(&self, open: bool, what: &str) {
@@ -1248,6 +1268,31 @@ impl FakePortal {
             .unwrap();
     }
 
+    /// The desktop changing the combination of `shortcut` in `session`.
+    fn change(&self, session: &str, shortcut: &str, text: &str) {
+        let details = HashMap::from([("trigger_description".to_owned(), text.to_variant())]);
+        let parameters = (object_path(session), vec![(shortcut.to_owned(), details)]).to_variant();
+        self.connection
+            .emit_signal(
+                None,
+                PORTAL_PATH,
+                SHORTCUTS_INTERFACE,
+                "ShortcutsChanged",
+                Some(&parameters),
+            )
+            .unwrap();
+        self.connection
+            .flush_sync(None::<&gio::Cancellable>)
+            .unwrap();
+    }
+
+    fn sessions(&self) -> usize {
+        self.calls()
+            .iter()
+            .filter(|call| call.starts_with("CreateSession "))
+            .count()
+    }
+
     fn bus_name(&self, method: &str, parameters: Variant) {
         self.connection
             .call_sync(
@@ -1393,16 +1438,7 @@ fn the_portal_opens_the_panel_and_a_replacement_never_loses_the_shortcut() {
 }
 
 #[test]
-fn a_shortcut_the_portal_ended_is_bound_again_by_the_same_choice() {
-    // `Scripted::run` finds its answer by the body, so a repeat needs a new body.
-    let mut spaces = 0;
-    let mut again = || {
-        spaces += 1;
-        format!(
-            r#"{{"command":"configure",{}"shortcut":"cmd+option+j"}}"#,
-            " ".repeat(spaces)
-        )
-    };
+fn a_shortcut_the_portal_ended_is_bound_again_by_the_shell_even_after_a_slow_restart() {
     let home = TestDir::new("ezerbot-bus");
     let bus = Bus::start(&home);
     let portal = FakePortal::start(&bus.address);
@@ -1419,51 +1455,95 @@ fn a_shortcut_the_portal_ended_is_bound_again_by_the_same_choice() {
     );
     let first = portal.session(0);
 
+    // The portal ends the session: the shell binds the same choice again, unasked.
     portal.end(&first);
     shell.wait_lost(1, "the page never heard that the portal ended the shortcut");
-    // Same sender, so the shell sees this after the `Closed` above.
-    portal.activate(&first, "cmd+option+j");
-    shell.assert_no_panel_for(
-        Duration::from_secs(1),
-        "a session the portal ended still opened the panel",
-    );
-    assert_eq!(status(&shell.run("main", &again())), "registered");
+    let bound = shell.wait_notices("bound-", 1, "the shell never bound the shortcut again");
+    assert_eq!(bound[0], ASSIGNED);
     let second = portal.session(1);
     assert!(portal
         .calls()
         .last()
         .unwrap()
         .starts_with("BindShortcuts cmd+option+j "));
+    portal.activate(&first, "cmd+option+j");
+    shell.assert_no_panel_for(
+        Duration::from_secs(1),
+        "a session the portal ended still opened the panel",
+    );
     portal.activate(&second, "cmd+option+j");
     shell.wait_panel(true, "the shortcut bound again did not open the panel");
     shell.run("panel", r#"{"command":"close"}"#);
     shell.wait_panel(false, "the panel stayed open");
 
+    // The portal stays away long enough for several attempts to fail, then returns.
     portal.vanish();
-    portal.reappear();
     shell.wait_lost(2, "the page never heard that the portal went away");
-    // The bus delivered the owner change before this signal, and the shell
-    // handles them in that order, which `configure` alone does not promise.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(portal.sessions(), 2, "a portal that is away answered");
+    assert!(
+        shell.notices("abandoned-").is_empty(),
+        "the shell gave up within seconds"
+    );
     portal.activate(&second, "cmd+option+j");
     shell.assert_no_panel_for(
         Duration::from_secs(1),
         "a session of a portal that went away still opened the panel",
     );
-    assert_eq!(status(&shell.run("main", &again())), "registered");
+    portal.reappear();
+    shell.wait_notices(
+        "bound-",
+        2,
+        "the shell never bound the shortcut once the portal returned",
+    );
     let third = portal.session(2);
-    assert!(portal
-        .calls()
-        .last()
-        .unwrap()
-        .starts_with("BindShortcuts cmd+option+j "));
     portal.activate(&third, "cmd+option+j");
     shell.wait_panel(
         true,
-        "the shortcut bound after a portal restart did not open the panel",
+        "the shortcut bound after a slow portal restart did not open the panel",
     );
     shell.run("panel", r#"{"command":"close"}"#);
     shell.wait_panel(false, "the panel stayed open");
+    shell.app.quit();
+}
 
+#[test]
+fn a_combination_changed_from_the_desktop_is_what_the_page_shows() {
+    let home = TestDir::new("ezerbot-bus");
+    let bus = Bus::start(&home);
+    let portal = FakePortal::start(&bus.address);
+    let shell = Scripted::start(
+        "",
+        &[
+            ("DBUS_SESSION_BUS_ADDRESS", bus.address.as_str()),
+            ("WAYLAND_DISPLAY", "ezerbot-test-0"),
+        ],
+    );
+    let registered = shell.run("main", &configure("cmd+option+j"));
+    assert_eq!(registered["ok"]["trigger"], ASSIGNED);
+    let session = portal.session(0);
+
+    // Another session's change is not ours.
+    portal.change(
+        "/org/freedesktop/portal/desktop/session/other/x",
+        "cmd+option+j",
+        "Super F1",
+    );
+    portal.change(&session, "cmd+option+j", "Super Maj F2");
+    let bound = shell.wait_notices("bound-", 1, "the page never heard of the new combination");
+    assert_eq!(bound, [serde_json::json!("Super Maj F2")]);
+    // The answer to the same choice now gives the desktop's new combination.
+    let again = shell.run(
+        "main",
+        r#"{"command":"configure", "shortcut":"cmd+option+j"}"#,
+    );
+    assert_eq!(status(&again), "registered");
+    assert_eq!(again["ok"]["trigger"], "Super Maj F2");
+    assert_eq!(
+        portal.sessions(),
+        1,
+        "a changed combination bound a new session"
+    );
     shell.app.quit();
 }
 
@@ -1714,7 +1794,7 @@ fn a_close_request_hides_the_panel_and_quits_from_the_main_window() {
 }
 
 #[test]
-fn the_bridge_refuses_a_frame_without_the_token_and_a_command_of_the_other_view() {
+fn the_bridge_refuses_a_frame_even_after_its_removal() {
     let shell = Scripted::start(
         r#"<iframe src="/frame" style="width:100px;height:100px"></iframe>"#,
         &[],
@@ -1743,11 +1823,23 @@ fn the_bridge_refuses_a_frame_without_the_token_and_a_command_of_the_other_view(
         "a frame used the page's bridge: {via_parent}"
     );
     shell.screen.press(&SUPER_ALT_J);
+    // The frame removes itself; its kept reference fires 500 ms later and must not open the panel.
     shell.assert_no_panel_for(
-        Duration::from_secs(1),
-        "a frame without the token got through",
+        Duration::from_secs(2),
+        "a frame got through, without the token or by a reference kept past its removal",
     );
+    // A frame could reach the bridge: it stays refused to the page until the page reloads.
+    let refused = shell.run("main", &configure("cmd+option+j"));
+    assert!(
+        refused["error"].as_str().unwrap().contains("refusée"),
+        "the bridge still served after a frame could reach it: {refused}"
+    );
+    shell.app.quit();
+}
 
+#[test]
+fn the_bridge_refuses_a_command_of_the_other_view() {
+    let shell = Scripted::start("", &[]);
     let wrong = r#"{"command":"close"}"#;
     let refused = shell.run("main", wrong);
     assert!(

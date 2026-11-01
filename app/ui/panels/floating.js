@@ -28,14 +28,19 @@
     return granted;
   }
   window.EzerbotFloatingMain = {
-    // The desktop ended the shortcut (portal restarted or session closed): bind the saved choice again.
+    // The desktop ended the shortcut (portal restarted or session closed). The shell
+    // binds the same choice again on its own and reports the outcome below.
     shortcutLost() {
-      const shortcut = P.state.floating?.shortcut;
-      configured = undefined;
       if (status) status.textContent = "Le bureau a retiré le raccourci. Nouvel enregistrement…";
-      if (!shortcut) return;
-      configured = shortcut;
-      configure(shortcut).catch((error) => { status.textContent = error.message; configured = undefined; });
+    },
+    // Bound again, or changed in the desktop settings: show what the desktop assigned.
+    shortcutBound(trigger) {
+      if (!status) return;
+      status.textContent = typeof trigger === "string" && trigger ? `Raccourci attribué par le bureau : ${trigger}.` : "Raccourci rétabli par le bureau.";
+    },
+    shortcutAbandoned() {
+      configured = undefined;
+      if (status) status.textContent = "Le raccourci n’a pas pu être rétabli. Enregistrez-le de nouveau ou ouvrez le panneau depuis le menu Ezerbot.";
     },
     async openConversation(id) {
       try {

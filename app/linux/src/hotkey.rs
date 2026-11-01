@@ -229,11 +229,11 @@ impl Registrar {
         choice: Hotkeys,
         on_press: impl Fn(u32) + Send + Sync + 'static,
         on_portal: impl Fn(Option<String>) + 'static,
-        on_lost: impl Fn() + 'static,
+        on_notice: impl Fn(crate::portal::Notice) + 'static,
     ) -> Self {
         match choice {
             Hotkeys::X11 => Self::Slot(Slot::x11(on_press)),
-            Hotkeys::Portal => Self::Portal(Portal::new(on_portal, on_lost)),
+            Hotkeys::Portal => Self::Portal(Portal::new(on_portal, on_notice)),
             Hotkeys::Unavailable => Self::Slot(Slot::new(Box::new(Nothing))),
         }
     }

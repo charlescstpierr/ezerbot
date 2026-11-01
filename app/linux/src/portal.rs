@@ -21,6 +21,42 @@ const SESSION: &str = "org.freedesktop.portal.Session";
 const BUS: &str = "org.freedesktop.DBus";
 /// The portal may put a dialog in front of the user, so this is generous.
 const RESPONSE_LIMIT: Duration = Duration::from_secs(120);
+/// Binding a lost shortcut again stops after this many failed attempts.
+const RESTORE_ATTEMPTS: u32 = 10;
+
+/// What the page must hear about the shortcut the portal holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notice {
+    /// The portal ended it; Ezerbot is binding the same choice again.
+    Lost,
+    /// Bound again, or changed from the desktop: the portal's text for it.
+    Bound(Option<String>),
+    /// Every attempt to bind it again failed.
+    Abandoned,
+}
+
+impl Notice {
+    /// The call that tells the main page; the portal's text goes in as a JSON string.
+    pub fn script(&self) -> String {
+        match self {
+            Notice::Lost => "window.EzerbotFloatingMain?.shortcutLost?.()".into(),
+            Notice::Bound(trigger) => format!(
+                "window.EzerbotFloatingMain?.shortcutBound?.({})",
+                serde_json::Value::from(trigger.clone())
+            ),
+            Notice::Abandoned => "window.EzerbotFloatingMain?.shortcutAbandoned?.()".into(),
+        }
+    }
+}
+
+/// The wait before the next attempt to bind a lost shortcut again, doubling from
+/// 250 ms up to 30 s; `None` once the attempts are spent.
+fn retry_delay(failed: u32) -> Option<Duration> {
+    (failed < RESTORE_ATTEMPTS).then(|| {
+        Duration::from_millis(250u64.saturating_mul(1 << failed.min(16)))
+            .min(Duration::from_secs(30))
+    })
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum Plan {
@@ -92,6 +128,10 @@ struct State {
     held: Option<Held>,
     binding: bool,
     requests: u32,
+    /// A shortcut the portal ended, to bind again until it holds or the attempts run out.
+    wanted: Option<&'static Shortcut>,
+    failed: u32,
+    retry: Option<glib::SourceId>,
 }
 
 impl State {
@@ -100,31 +140,120 @@ impl State {
     /// True when a shortcut in force was lost: the page must hear it, or it keeps
     /// announcing a shortcut that no longer opens anything.
     fn forget(&mut self) -> bool {
-        let lost = self.held.take().is_some();
-        if lost {
-            self.chosen = None;
-        }
-        lost
+        let Some(held) = self.held.take() else {
+            return false;
+        };
+        self.chosen = None;
+        self.wanted = Some(held.shortcut);
+        self.failed = 0;
+        true
     }
+
+    /// A choice of the page replaces any restoration in progress.
+    fn stop_restoring(&mut self) {
+        self.wanted = None;
+        self.failed = 0;
+        if let Some(retry) = self.retry.take() {
+            retry.remove();
+        }
+    }
+}
+
+/// The new text of `name` in a `ShortcutsChanged` signal `(o a(sa{sv}))` for `session`.
+fn changed_trigger(parameters: &Variant, session: &str, name: &str) -> Option<Option<String>> {
+    let (path, list) = parameters.get::<(
+        glib::variant::ObjectPath,
+        Vec<(String, HashMap<String, Variant>)>,
+    )>()?;
+    if path.as_str() != session {
+        return None;
+    }
+    let (_, details) = list.into_iter().find(|(id, _)| id == name)?;
+    Some(
+        details
+            .get("trigger_description")
+            .and_then(|text| text.str().map(str::to_owned))
+            .filter(|text| !text.is_empty()),
+    )
 }
 
 #[derive(Clone)]
 pub struct Portal {
     state: Rc<RefCell<State>>,
     activated: Rc<dyn Fn(Option<String>)>,
-    lost: Rc<dyn Fn()>,
+    notice: Rc<dyn Fn(Notice)>,
 }
 
 impl Portal {
     /// `activated` receives the portal's `activation_token`, the only thing that lets
     /// a Wayland compositor hand the keyboard to the panel.
-    /// `lost` runs when the portal ends the shortcut in force on its own.
-    pub fn new(activated: impl Fn(Option<String>) + 'static, lost: impl Fn() + 'static) -> Self {
+    /// `notice` hears when the portal ends the shortcut in force on its own, when
+    /// Ezerbot binds it again, and when the desktop changes its combination.
+    pub fn new(
+        activated: impl Fn(Option<String>) + 'static,
+        notice: impl Fn(Notice) + 'static,
+    ) -> Self {
         Self {
             state: Rc::default(),
             activated: Rc::new(activated),
-            lost: Rc::new(lost),
+            notice: Rc::new(notice),
         }
+    }
+
+    /// The portal ended the shortcut in force: tell the page, then bind it again.
+    fn lost(&self) {
+        (self.notice)(Notice::Lost);
+        self.restore();
+    }
+
+    /// One attempt to bind the lost shortcut again; a failure waits longer each
+    /// time, and a portal that comes back starts a new series at once.
+    fn restore(&self) {
+        let next = {
+            let mut state = self.state.borrow_mut();
+            state.retry = None;
+            if state.binding || state.held.is_some() {
+                return;
+            }
+            let Some(next) = state.wanted else { return };
+            state.binding = true;
+            next
+        };
+        let portal = self.clone();
+        glib::spawn_future_local(async move {
+            let result = portal.bind(next).await;
+            let notice = {
+                let mut state = portal.state.borrow_mut();
+                state.binding = false;
+                if state.wanted != Some(next) {
+                    None
+                } else if let Ok(trigger) = result {
+                    state.stop_restoring();
+                    Some(Notice::Bound(trigger))
+                } else if result == Err(Outcome::Conflict) {
+                    // The portal answered and refused: asking again changes nothing.
+                    state.stop_restoring();
+                    Some(Notice::Abandoned)
+                } else {
+                    state.failed += 1;
+                    match retry_delay(state.failed - 1) {
+                        Some(delay) => {
+                            let again = portal.clone();
+                            state.retry =
+                                Some(glib::timeout_add_local_once(delay, move || again.restore()));
+                            None
+                        }
+                        None => {
+                            state.wanted = None;
+                            Some(Notice::Abandoned)
+                        }
+                    }
+                }
+            };
+            if let Some(notice) = notice {
+                (portal.notice)(notice);
+            }
+        });
     }
 
     /// A replacement is bound in a new session, and the old session closed
@@ -150,6 +279,7 @@ impl Portal {
             Plan::Disable => {
                 let (old, connection) = {
                     let mut state = self.state.borrow_mut();
+                    state.stop_restoring();
                     state.chosen = Some(DISABLED);
                     (state.held.take(), state.connection.clone())
                 };
@@ -159,7 +289,11 @@ impl Portal {
                 done(Outcome::Disabled, None);
             }
             Plan::Bind(next) => {
-                self.state.borrow_mut().binding = true;
+                {
+                    let mut state = self.state.borrow_mut();
+                    state.stop_restoring();
+                    state.binding = true;
+                }
                 let portal = self.clone();
                 glib::spawn_future_local(async move {
                     let (outcome, trigger) = match portal.bind(next).await {
@@ -205,13 +339,8 @@ impl Portal {
         let connection = gio::bus_get_future(gio::BusType::Session)
             .await
             .map_err(|_| Outcome::Unavailable)?;
-        let (state, closed, vanished) = (
-            Rc::clone(&self.state),
-            Rc::clone(&self.state),
-            Rc::clone(&self.state),
-        );
+        let state = Rc::clone(&self.state);
         let activated = Rc::clone(&self.activated);
-        let (closed_lost, vanished_lost) = (Rc::clone(&self.lost), Rc::clone(&self.lost));
         connection.signal_subscribe(
             Some(PORTAL),
             Some(SHORTCUTS),
@@ -233,8 +362,35 @@ impl Portal {
                 }
             },
         );
+        // The desktop may change the combination at any time; the page shows the new one.
+        let changed = self.clone();
+        connection.signal_subscribe(
+            Some(PORTAL),
+            Some(SHORTCUTS),
+            Some("ShortcutsChanged"),
+            Some(PATH),
+            None,
+            DBusSignalFlags::NONE,
+            move |_, _, _, _, _, parameters| {
+                let trigger = {
+                    let mut state = changed.state.borrow_mut();
+                    let Some(held) = state.held.as_mut() else {
+                        return;
+                    };
+                    let Some(trigger) =
+                        changed_trigger(parameters, &held.session, held.shortcut.name)
+                    else {
+                        return;
+                    };
+                    held.trigger = trigger.clone();
+                    trigger
+                };
+                (changed.notice)(Notice::Bound(trigger));
+            },
+        );
         // A session this client closed to replace it is no longer `held` when
         // its `Closed` arrives, so only the session in force is forgotten.
+        let closed = self.clone();
         connection.signal_subscribe(
             Some(PORTAL),
             Some(SESSION),
@@ -244,14 +400,16 @@ impl Portal {
             DBusSignalFlags::NONE,
             move |_, _, path, _, _, _| {
                 let lost = {
-                    let mut state = closed.borrow_mut();
+                    let mut state = closed.state.borrow_mut();
                     state.held.as_ref().is_some_and(|held| held.session == path) && state.forget()
                 };
                 if lost {
-                    closed_lost();
+                    closed.lost();
                 }
             },
         );
+        // The portal left: its sessions are gone. It came back: bind again at once.
+        let owner = self.clone();
         connection.signal_subscribe(
             Some(BUS),
             Some(BUS),
@@ -259,10 +417,29 @@ impl Portal {
             Some("/org/freedesktop/DBus"),
             Some(PORTAL),
             DBusSignalFlags::NONE,
-            move |_, _, _, _, _, _| {
-                let lost = vanished.borrow_mut().forget();
+            move |_, _, _, _, _, parameters| {
+                let lost = owner.state.borrow_mut().forget();
                 if lost {
-                    vanished_lost();
+                    owner.lost();
+                    return;
+                }
+                let back = parameters
+                    .try_child_value(2)
+                    .and_then(|name| name.str().map(|name| !name.is_empty()))
+                    .unwrap_or(false);
+                let restart = {
+                    let mut state = owner.state.borrow_mut();
+                    let waiting = back && state.wanted.is_some() && !state.binding;
+                    if waiting {
+                        state.failed = 0;
+                        if let Some(retry) = state.retry.take() {
+                            retry.remove();
+                        }
+                    }
+                    waiting
+                };
+                if restart {
+                    owner.restore();
                 }
             },
         );
@@ -490,6 +667,70 @@ mod tests {
         });
         state.forget();
         assert!(state.held.is_none() && state.chosen.is_none());
+        assert_eq!(state.wanted.map(|wanted| wanted.name), Some("cmd+option+j"));
+    }
+
+    #[test]
+    fn a_lost_shortcut_is_retried_with_a_bounded_growing_wait() {
+        let delays: Vec<_> = (0..RESTORE_ATTEMPTS)
+            .map(|failed| retry_delay(failed).unwrap())
+            .collect();
+        assert_eq!(delays[0], Duration::from_millis(250));
+        assert!(delays.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(*delays.last().unwrap(), Duration::from_secs(30));
+        assert_eq!(retry_delay(RESTORE_ATTEMPTS), None);
+        // About two minutes in all, then the page is told to choose again.
+        assert!(delays.iter().sum::<Duration>() < Duration::from_secs(125));
+    }
+
+    #[test]
+    fn the_page_hears_the_portal_text_as_a_json_string() {
+        assert_eq!(
+            Notice::Bound(Some("Ctrl+\"</script>".into())).script(),
+            r#"window.EzerbotFloatingMain?.shortcutBound?.("Ctrl+\"</script>")"#
+        );
+        assert_eq!(
+            Notice::Bound(None).script(),
+            "window.EzerbotFloatingMain?.shortcutBound?.(null)"
+        );
+    }
+
+    #[test]
+    fn a_choice_of_the_page_stops_the_restoration() {
+        let mut state = State {
+            wanted: Shortcut::find("cmd+option+j"),
+            failed: 3,
+            ..State::default()
+        };
+        state.stop_restoring();
+        assert!(state.wanted.is_none() && state.failed == 0 && state.retry.is_none());
+    }
+
+    #[test]
+    fn shortcuts_changed_gives_the_new_text_of_the_session_in_force() {
+        let signal = |session: &str, text: &str| {
+            let details: HashMap<String, Variant> =
+                HashMap::from([("trigger_description".to_string(), text.to_variant())]);
+            let path = glib::variant::ObjectPath::try_from(session.to_owned()).unwrap();
+            (path, vec![("cmd+option+j".to_string(), details)]).to_variant()
+        };
+        let ours = "/org/freedesktop/portal/desktop/session/1_1/ezerbot_session_1";
+        assert_eq!(
+            changed_trigger(&signal(ours, "Ctrl+Alt+K"), ours, "cmd+option+j"),
+            Some(Some("Ctrl+Alt+K".into()))
+        );
+        assert_eq!(
+            changed_trigger(&signal(ours, ""), ours, "cmd+option+j"),
+            Some(None)
+        );
+        assert_eq!(
+            changed_trigger(&signal("/other", "X"), ours, "cmd+option+j"),
+            None
+        );
+        assert_eq!(
+            changed_trigger(&signal(ours, "X"), ours, "ctrl+option+space"),
+            None
+        );
     }
 
     #[test]

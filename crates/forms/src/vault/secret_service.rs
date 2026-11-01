@@ -3,7 +3,7 @@
 //! There is no per-binary ACL here, so the macOS signature gate has no equivalent. The
 //! service is never unlocked. A refused or unanswered write fails closed and is not copied
 //! into the plaintext companion file. A read it refuses leaves out what only it holds, so
-//! redaction refuses too (`Vault::is_partial`) and only local renderings carry on.
+//! redaction refuses too (`Vault::is_partial`): nothing derived from history is served.
 use super::*;
 use grokbot_linux_desktop::{secrets::Collection, Bus};
 use sha2::{Digest, Sha256};

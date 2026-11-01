@@ -387,7 +387,7 @@ impl Vault {
         }
         Ok(Self::values_of(secrets))
     }
-    /// What can be read now, for a rendering shown on this machine only (`redact::rendering`).
+    /// What can be read now, partial or not: for the keyring migration only, never for masking.
     pub(crate) fn readable_values(&self) -> Result<Vec<String>> {
         let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;

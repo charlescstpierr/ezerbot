@@ -1453,7 +1453,7 @@ fn drive_owned(
 }
 /// Whether masking would refuse this turn because the keyring holds secrets and refuses access.
 /// A corrupt vault is not that case: masking refuses it on its own.
-fn keyring_locked(conn: &Connection) -> bool {
+pub(crate) fn keyring_locked(conn: &Connection) -> bool {
     conn.path().is_some_and(|path| {
         Vault::open_app(&Path::new(path).with_extension("secrets.json"))
             .is_ok_and(|vault| vault.is_partial())

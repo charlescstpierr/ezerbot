@@ -108,46 +108,63 @@ impl Fixture {
 fn a_turn_waits_for_the_keyring_and_never_leaves_unmasked() {
     let Some(phase) = support::keyring_phases(
         "a_turn_waits_for_the_keyring_and_never_leaves_unmasked",
-        2,
+        3,
         |phase, keyring| match phase {
-            0 => {
+            1 => {
                 keep_only_in_the_keyring(keyring);
                 keyring.lock();
             }
-            _ => keyring.unlock(),
+            2 => keyring.unlock(),
+            _ => {}
         },
     ) else {
         return;
     };
     let mut f = Fixture::new();
+    let saved = f.path.with_extension("chat");
     if phase == 0 {
+        let chat = f.chat();
+        std::fs::write(&saved, chat).unwrap();
+        return;
+    }
+    let chat = std::fs::read_to_string(&saved).unwrap();
+    if phase == 1 {
         let state = f.state();
         assert_eq!(state["forms"]["storage"]["backend"], "file_fallback");
-        let chat = f.chat();
-        f.post(
+        assert_eq!(state["vault"]["locked"], true);
+        // La réponse elle-même ne sert rien de l'historique : seul compte ce qui part.
+        let _ = f.app.api(
+            "POST",
             "/api/send",
-            json!({"conversation_id":chat,"message_id":"m","body":format!("Voici la clé : {SECRET}")}),
+            json!({"conversation_id":chat,"message_id":"m","body":format!("Voici la clé : {SECRET}")}).to_string().as_bytes(),
         );
-        wait("refus affiché ou envoi", || {
-            f.sent().contains("Voici la clé")
-                || f.messages(&chat)
-                    .iter()
-                    .any(|m| m["id"] == "reply-m" && m["error"].as_str().is_some())
+        wait("fin du tour refusé", || {
+            f.db()
+                .query_row(
+                    "SELECT count(*) FROM engine_runs JOIN wrapper_engine_runs USING(run_id) WHERE json_extract(input_json,'$.entry_id')='m'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                > 0
+                && !matches!(f.run_of("m").status, RunStatus::Running | RunStatus::Queued)
         });
         assert!(
             !f.sent().contains(SECRET),
             "the secret reached the provider"
         );
-        let reply = f.messages(&chat).pop().unwrap();
-        assert!(
-            reply["error"].as_str().unwrap().contains(MESSAGE),
-            "{reply}"
-        );
         assert_eq!(f.server.seen.lock().unwrap().bodies.len(), 0);
-        std::fs::write(f.path.with_extension("chat"), chat).unwrap();
     } else {
-        let chat = std::fs::read_to_string(f.path.with_extension("chat")).unwrap();
         assert_eq!(f.state()["forms"]["storage"]["backend"], "keychain");
+        let refused = f
+            .messages(&chat)
+            .into_iter()
+            .find(|m| m["id"] == "reply-m")
+            .unwrap();
+        assert!(
+            refused["error"].as_str().unwrap().contains(MESSAGE),
+            "{refused}"
+        );
         f.post(
             "/api/regenerate",
             json!({"conversation_id":chat,"message_id":"m"}),
@@ -164,15 +181,13 @@ fn a_turn_waits_for_the_keyring_and_never_leaves_unmasked() {
 }
 
 #[test]
-fn every_masking_refuses_a_partial_vault_and_only_a_rendering_reads_it() {
-    let Some(_) = support::keyring_phases(
-        "every_masking_refuses_a_partial_vault_and_only_a_rendering_reads_it",
-        1,
-        |_, keyring| {
+fn every_masking_refuses_a_partial_vault() {
+    let Some(_) =
+        support::keyring_phases("every_masking_refuses_a_partial_vault", 1, |_, keyring| {
             keep_only_in_the_keyring(keyring);
             keyring.lock();
-        },
-    ) else {
+        })
+    else {
         return;
     };
     let file = PathBuf::from(std::env::var_os("HOME").unwrap()).join("workspace.secrets.json");
@@ -191,9 +206,6 @@ fn every_masking_refuses_a_partial_vault_and_only_a_rendering_reads_it() {
             .unwrap_err(),
     );
     refused(vault.values_for_redaction().unwrap_err());
-    let _rendering = redact::rendering();
-    assert!(redact::redact(&vault, "texte").is_ok());
-    assert!(redact::app_patterns(&file).is_ok());
 }
 
 #[test]
@@ -333,18 +345,21 @@ fn a_tool_output_is_not_kept_or_sent_while_the_keyring_is_locked() {
     }
 }
 
-/// Un ancien message contient une valeur enregistrée ensuite comme secret. Après la migration
-/// vers le trousseau et un redémarrage verrouillé, l'iPhone ne reçoit jamais cette valeur.
+/// Un ancien message contient une valeur enregistrée ensuite comme secret. Trousseau verrouillé
+/// après un redémarrage : rien de l'historique n'est servi (ni ici ni à l'iPhone) ni recopié
+/// dans un fil. Une fois déverrouillé, le masquage ordinaire revient et rien n'a été stocké brut.
 #[test]
-fn a_locked_restart_never_serves_an_old_secret_to_the_iphone() {
+fn a_locked_keyring_serves_and_copies_nothing_from_history() {
     let Some(phase) = support::keyring_phases(
-        "a_locked_restart_never_serves_an_old_secret_to_the_iphone",
-        2,
-        |phase, keyring| {
-            if phase == 1 {
+        "a_locked_keyring_serves_and_copies_nothing_from_history",
+        3,
+        |phase, keyring| match phase {
+            1 => {
                 keep_only_in_the_keyring(keyring);
                 keyring.lock();
             }
+            2 => keyring.unlock(),
+            _ => {}
         },
     ) else {
         return;
@@ -360,9 +375,12 @@ fn a_locked_restart_never_serves_an_old_secret_to_the_iphone() {
         ApiResponse::Json(value) => value,
         _ => panic!("JSON attendu"),
     };
-    let token_file = f.path.with_extension("iphone-token");
+    let saved = f.path.with_extension("phase0");
     if phase == 0 {
-        let chat = f.chat();
+        let chat = f.post("/api/conversations", json!({"title": "Sujet"}))["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         f.post(
             "/api/send",
             json!({"conversation_id":chat,"message_id":"vieux","body":format!("Note : {SECRET}")}),
@@ -411,20 +429,78 @@ fn a_locked_restart_never_serves_an_old_secret_to_the_iphone() {
             json_of(remote(&mut f.app, "GET", "/api/state", json!({}), Some(&token)).unwrap());
         assert!(
             served.to_string().contains(SECRET),
-            "le témoin doit voir le message avant le secret"
+            "témoin : visible avant le secret"
         );
-        std::fs::write(&token_file, token).unwrap();
+        std::fs::write(&saved, json!({"token": token, "chat": chat}).to_string()).unwrap();
+        return;
+    }
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+    let (token, chat) = (
+        saved["token"].as_str().unwrap(),
+        saved["chat"].as_str().unwrap(),
+    );
+    if phase == 1 {
+        let local = f.state();
+        assert!(
+            !local.to_string().contains(SECRET),
+            "le secret est servi localement"
+        );
+        assert_eq!(local["vault"]["locked"], true, "{}", local["vault"]);
+        assert_eq!(
+            local["vault"]["message"],
+            MESSAGE.to_owned() + " pour continuer."
+        );
+        let listed = local["conversations"].as_array().unwrap();
+        assert!(listed.iter().any(|c| c["id"] == chat));
+        assert!(listed
+            .iter()
+            .all(|c| c["messages"].as_array().unwrap().is_empty()));
+        let phone =
+            json_of(remote(&mut f.app, "GET", "/api/state", Value::Null, Some(token)).unwrap());
+        assert!(
+            !phone.to_string().contains(SECRET),
+            "le secret a atteint l'iPhone"
+        );
+        assert_eq!(phone["vault"]["locked"], true);
+        let thread = f.app.api(
+            "POST",
+            "/api/messages/thread",
+            json!({"conversation_id":chat,"message_id":"reply-vieux"})
+                .to_string()
+                .as_bytes(),
+        );
+        let error = thread.expect_err("un fil copié depuis l'historique verrouillé");
+        assert!(error.to_string().contains(MESSAGE), "{error}");
     } else {
-        let token = std::fs::read_to_string(&token_file).unwrap();
-        match remote(&mut f.app, "GET", "/api/state", Value::Null, Some(&token)) {
-            Ok(ApiResponse::Json(value)) => {
-                assert!(
-                    !value.to_string().contains(SECRET),
-                    "le secret a atteint l'iPhone"
-                )
-            }
-            Ok(_) => panic!("JSON attendu"),
-            Err(error) => assert!(error.to_string().contains(MESSAGE), "{error}"),
+        let local = f.state();
+        assert_eq!(local["vault"]["locked"], false);
+        let text = local.to_string();
+        // Ce que l'utilisateur a tapé lui est rendu tel quel (comme avant ce correctif) ;
+        // tout le reste passe par le masquage ordinaire.
+        let mut others = local.clone();
+        for c in others["conversations"].as_array_mut().unwrap() {
+            c["messages"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|m| m["role"] != "user");
         }
+        assert!(others.to_string().contains("reply-vieux"));
+        assert!(
+            !others.to_string().contains(SECRET),
+            "le masquage ordinaire est revenu"
+        );
+        assert!(
+            text.contains("Note : "),
+            "l'historique est de nouveau lisible"
+        );
+        let raw: i64 = f
+            .db()
+            .query_row(
+                "SELECT (SELECT count(*) FROM wrapper_threads) + (SELECT count(*) FROM wrapper_conversations WHERE title LIKE 'Fil :%')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, 0, "un fil a été recopié pendant le verrouillage");
     }
 }

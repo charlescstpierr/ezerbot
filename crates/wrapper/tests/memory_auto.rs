@@ -1439,10 +1439,13 @@ fn a_secret_kept_in_secret_service_still_stops_automatic_memory() {
 fn a_secret_migrated_then_locked_across_a_restart_still_stops_automatic_memory() {
     use grokbot_forms::vault::Vault;
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    if support::keyring_phases(
+    let Some(phase) = support::keyring_phases(
         "a_secret_migrated_then_locked_across_a_restart_still_stops_automatic_memory",
-        1,
-        |_, keyring| {
+        2,
+        |phase, keyring| {
+            if phase == 0 {
+                return;
+            }
             let file = keyring.home().path().join("workspace.secrets.json");
             Vault::open(&file)
                 .unwrap()
@@ -1454,25 +1457,38 @@ fn a_secret_migrated_then_locked_across_a_restart_still_stops_automatic_memory()
                 .contains("porcelaine"));
             keyring.lock();
         },
-    )
-    .is_none()
-    {
+    ) else {
         return;
-    }
+    };
     let path = home.unwrap().join("workspace.sqlite");
     let mut f = Fixture::at(path, true, None);
+    let saved = f.path.with_extension("conv");
+    if phase == 0 {
+        let c = f.conv("grokbot");
+        std::fs::write(&saved, c).unwrap();
+        return;
+    }
+    let c = std::fs::read_to_string(&saved).unwrap();
     let vault = Vault::open_app(&f.path.with_extension("secrets.json")).unwrap();
     assert_eq!(vault.storage_status().backend, "file_fallback");
-    let c = f.conv("grokbot");
     f.script(json!([fact("Je préfère la porcelaine ambrée.", None)]));
-    f.post(
+    // Trousseau verrouillé : la réponse ne sert rien de l'historique, seul compte le refus.
+    let _ = f.app.api(
+        "POST",
         "/api/send",
-        json!({"conversation_id":c,"message_id":"m","body":"Je préfère la porcelaine ambrée."}),
+        json!({"conversation_id":c,"message_id":"m","body":"Je préfère la porcelaine ambrée."})
+            .to_string()
+            .as_bytes(),
     );
     wait("refus du tour", || {
-        f.messages(&c)
-            .iter()
-            .any(|m| m["id"] == "reply-m" && m["error_kind"] == "keyring")
+        f.db()
+            .query_row(
+                "SELECT count(*) FROM wrapper_engine_runs WHERE error_kind = 'keyring'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0
     });
     f.settle();
     assert_eq!(

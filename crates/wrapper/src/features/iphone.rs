@@ -181,8 +181,6 @@ pub fn remote(
     body: &[u8],
     headers: &[(String, String)],
 ) -> Result<ApiResponse, ApiError> {
-    // Le rendu local permissif (trousseau verrouillé) ne sort jamais de cette machine.
-    let _remote = grokbot_forms::redact::remote();
     if !enabled(app) {
         return Err(bad(403, ACCESS_DISABLED));
     }

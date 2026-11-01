@@ -931,7 +931,6 @@ impl App {
         if body.len() > body_limit(path) {
             return Err(too_large(path));
         }
-        let _rendering = (method == "GET").then(grokbot_forms::redact::rendering);
         deep_links::route(self, method, path, body)
             .or_else(|| features::routes(self, method, path, body))
             .unwrap_or_else(|| Err(ApiError::new(404, "Cette adresse n'existe pas.")))

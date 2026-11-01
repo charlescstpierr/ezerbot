@@ -1,3 +1,4 @@
+use crate::portal::Portal;
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
@@ -8,6 +9,7 @@ pub const DISABLED: &str = "disabled";
 
 /// One row per choice the wrapper stores, under the names it validates.
 /// `cmd` is Super and `option` is Alt.
+#[derive(Debug, PartialEq, Eq)]
 pub struct Shortcut {
     pub name: &'static str,
     /// The `preferred_trigger` the GlobalShortcuts portal is offered.
@@ -198,23 +200,49 @@ impl Grabs for Nothing {
 
 impl Slot {
     /// `on_press` runs on the grab thread with the id of the key pressed.
-    pub fn open(choice: Hotkeys, on_press: impl Fn(u32) + Send + Sync + 'static) -> Self {
-        let grabs: Box<dyn Grabs> = match choice {
-            // A dead grab thread would still answer `Ok`: only start it under X11.
-            Hotkeys::X11 => match GlobalHotKeyManager::new() {
-                Ok(manager) => {
-                    GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-                        if event.state() == HotKeyState::Pressed {
-                            on_press(event.id());
-                        }
-                    }));
-                    Box::new(X11 { manager })
-                }
-                Err(_) => Box::new(Nothing),
-            },
-            Hotkeys::Portal | Hotkeys::Unavailable => Box::new(Nothing),
+    fn x11(on_press: impl Fn(u32) + Send + Sync + 'static) -> Self {
+        // A dead grab thread would still answer `Ok`: only start it under X11.
+        let Ok(manager) = GlobalHotKeyManager::new() else {
+            return Self::new(Box::new(Nothing));
         };
-        Self::new(grabs)
+        GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+            if event.state() == HotKeyState::Pressed {
+                on_press(event.id());
+            }
+        }));
+        Self::new(Box::new(X11 { manager }))
+    }
+}
+
+/// Where the chosen backend keeps the shortcut in force.
+pub enum Registrar {
+    Slot(Slot),
+    Portal(Portal),
+}
+
+impl Registrar {
+    pub fn open(
+        choice: Hotkeys,
+        on_press: impl Fn(u32) + Send + Sync + 'static,
+        on_portal: impl Fn() + 'static,
+    ) -> Self {
+        match choice {
+            Hotkeys::X11 => Self::Slot(Slot::x11(on_press)),
+            Hotkeys::Portal => Self::Portal(Portal::new(on_portal)),
+            Hotkeys::Unavailable => Self::Slot(Slot::new(Box::new(Nothing))),
+        }
+    }
+
+    /// `done` runs at once for a grab, and after the portal answered for the portal.
+    pub fn configure(&mut self, name: &str, done: impl FnOnce(Outcome) + 'static) {
+        match self {
+            Self::Slot(slot) => done(slot.configure(name)),
+            Self::Portal(portal) => portal.configure(name, done),
+        }
+    }
+
+    pub fn fires(&self, id: u32) -> bool {
+        matches!(self, Self::Slot(slot) if slot.fires(id))
     }
 }
 

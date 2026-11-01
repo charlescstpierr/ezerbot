@@ -6,6 +6,8 @@ mod floating;
 mod hotkey;
 #[cfg(target_os = "linux")]
 mod local_api;
+#[cfg(target_os = "linux")]
+mod portal;
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -25,7 +27,7 @@ fn main() {
 mod linux {
     use crate::backend::{Backend, Instance};
     use crate::floating::{self, Command as PanelCommand, Message, Panel, View};
-    use crate::hotkey::{Hotkeys, Slot};
+    use crate::hotkey::{Hotkeys, Outcome, Registrar};
     use crate::local_api::LocalApi;
     use gtk::prelude::*;
     use serde_json::json;
@@ -63,6 +65,7 @@ mod linux {
         Show,
         OpenPanel,
         Hotkey(u32),
+        Configured(u64, Outcome),
         Command(View, Message),
         LinkFailed(url::Url),
     }
@@ -97,7 +100,7 @@ mod linux {
     }
 
     struct Shell {
-        hotkeys: Slot,
+        hotkeys: Registrar,
         panel: Option<Panel>,
         webview: Option<WebView>,
         instance: Option<Instance>,
@@ -172,7 +175,11 @@ mod linux {
             Some(match command {
                 PanelCommand::Show {} => self.show_panel(target).map(|()| json!(true)),
                 PanelCommand::Configure { shortcut } => {
-                    Ok(self.hotkeys.configure(&shortcut).reply())
+                    let proxy = self.proxy.clone();
+                    self.hotkeys.configure(&shortcut, move |outcome| {
+                        let _ = proxy.send_event(ShellEvent::Configured(id, outcome));
+                    });
+                    return None;
                 }
                 PanelCommand::ConversationOpened {
                     request,
@@ -396,11 +403,18 @@ mod linux {
             .build_gtk(vbox)
             .map_err(|_| "La vue Ezerbot n'a pas pu être créée.")?;
         let hotkey_proxy = Mutex::new(event_loop.create_proxy());
-        let hotkeys = Slot::open(Hotkeys::detect(), move |id| {
-            if let Ok(proxy) = hotkey_proxy.lock() {
-                let _ = proxy.send_event(ShellEvent::Hotkey(id));
-            }
-        });
+        let portal_proxy = event_loop.create_proxy();
+        let hotkeys = Registrar::open(
+            Hotkeys::detect(),
+            move |id| {
+                if let Ok(proxy) = hotkey_proxy.lock() {
+                    let _ = proxy.send_event(ShellEvent::Hotkey(id));
+                }
+            },
+            move || {
+                let _ = portal_proxy.send_event(ShellEvent::OpenPanel);
+            },
+        );
         let mut shell = Some(Shell {
             hotkeys,
             panel: None,
@@ -442,6 +456,10 @@ mod linux {
             } else if let Event::UserEvent(ShellEvent::Command(view, message)) = event {
                 if let Some(shell) = shell.as_mut() {
                     shell.command(target, &window, view, message);
+                }
+            } else if let Event::UserEvent(ShellEvent::Configured(id, outcome)) = &event {
+                if let Some(shell) = &shell {
+                    shell.settle(View::Main, *id, Ok(outcome.reply()));
                 }
             } else if let Event::UserEvent(ShellEvent::Hotkey(id)) = &event {
                 // A key pressed after `shell.take()` finds no shell and does nothing.

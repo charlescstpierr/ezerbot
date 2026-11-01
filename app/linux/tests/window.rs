@@ -1,13 +1,17 @@
 #![cfg(all(target_os = "linux", debug_assertions))]
 
 use grokbot_test_support::TestDir;
+use gtk::{
+    gio::{self, prelude::*},
+    glib::{self, Variant},
+};
 use nix::{
     sys::signal::{kill, Signal},
     unistd::Pid,
 };
 use rusqlite::{Connection, OpenFlags};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::CString,
     io::{BufRead, BufReader},
     os::raw::{c_int, c_uint},
@@ -16,6 +20,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     ptr,
     sync::OnceLock,
+    sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant},
 };
 use x11_dl::{
@@ -289,6 +294,7 @@ impl App {
             .env("DISPLAY", &screen.name)
             .env("GDK_BACKEND", "x11")
             .env_remove("WAYLAND_DISPLAY")
+            .env_remove("XDG_SESSION_TYPE")
             .env("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
             .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", home.join("config"))
@@ -588,4 +594,524 @@ fn a_second_launch_shows_the_open_window_and_a_later_launch_starts_again() {
         (screen.windows().len() == 2).then_some(())
     });
     third.quit();
+}
+
+/// Serves a page per view and runs, in each, the bridge commands the test
+/// appends to `commands-<view>`. Every outcome is posted back to `results`.
+const SCRIPTED_WRAPPER: &str = r#"#!/usr/bin/python3
+import http.server, json, os, sys, threading
+sys.stdin.buffer.read()
+root = os.path.dirname(os.path.abspath(__file__)) + "/.."
+pages = {"/": "main.html", "/floating": "panel.html", "/frame": "frame.html"}
+cursor = {"main": 0, "panel": 0}
+lock = threading.Lock()
+class Handler(http.server.BaseHTTPRequestHandler):
+    def reply(self, status, body=b"", kind="text/plain"):
+        self.send_response(status)
+        self.send_header("Content-Type", kind + "; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        path, _, query = self.path.partition("?")
+        if path in pages:
+            self.reply(200, open(root + "/" + pages[path], "rb").read(), "text/html")
+        elif path == "/next":
+            view = query.split("=")[-1]
+            try:
+                lines = open(root + "/commands-" + view).read().splitlines()
+            except FileNotFoundError:
+                lines = []
+            with lock:
+                line = lines[cursor[view]] if cursor[view] < len(lines) else ""
+                if line:
+                    cursor[view] += 1
+            self.reply(200, line.encode())
+        else:
+            self.reply(404)
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with lock, open(root + "/results", "ab") as results:
+            results.write(body + b"\n")
+        self.reply(204)
+    def log_message(self, *arguments):
+        pass
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+print(json.dumps({"url": f"http://127.0.0.1:{server.server_port}"}), flush=True)
+server.serve_forever()
+"#;
+
+fn scripted_page(view: &str, extra: &str) -> String {
+    format!(
+        r#"<!doctype html><body style="margin:0;background:#334"><h1 style="color:#fff">{view}</h1>{extra}<script>
+const view = "{view}";
+const record = (key, value) => fetch("/result", {{method: "POST", body: JSON.stringify([key, value])}});
+window.EzerbotFloating = {{open() {{ record("reopened", true); }}}};
+window.EzerbotFloatingMain = {{openConversation: async id => ({{opened: id === "present", reason: "Fil absent."}})}};
+(async () => {{
+  for (;;) {{
+    const line = await (await fetch("/next?view=" + view)).text();
+    if (!line) {{ await new Promise(resolve => setTimeout(resolve, 50)); continue; }}
+    EzerbotShell.floating.postMessage(JSON.parse(line)).then(
+      value => record(line, {{ok: value}}), error => record(line, {{error: String(error.message)}}));
+  }}
+}})();
+</script>"#
+    )
+}
+
+const FRAME_PAGE: &str = r#"<!doctype html><body><script>
+const bridge = window.webkit.messageHandlers.ipc;
+fetch("/result", {method: "POST", body: JSON.stringify(["frame", {
+  shell: typeof window.EzerbotShell, ipc: typeof bridge.postMessage,
+}])});
+bridge.postMessage(JSON.stringify({launch: "", id: 1, body: {command: "configure", shortcut: "cmd+option+j"}}));
+bridge.postMessage(JSON.stringify({launch: "x", id: 2, body: {command: "show"}}));
+</script>"#;
+
+/// A shell on a scripted page, under a private session bus when given one.
+struct Scripted {
+    home: TestDir,
+    screen: Screen,
+    app: App,
+}
+
+impl Scripted {
+    fn start(main_extra: &str, environment: &[(&str, &str)]) -> Self {
+        let home = TestDir::new("ezerbot-floating");
+        std::fs::create_dir(home.join("bin")).unwrap();
+        std::fs::write(home.join("main.html"), scripted_page("main", main_extra)).unwrap();
+        std::fs::write(home.join("panel.html"), scripted_page("panel", "")).unwrap();
+        std::fs::write(home.join("frame.html"), FRAME_PAGE).unwrap();
+        install(&home, "ezerbot-linux", Path::new(SHELL));
+        install_script(&home, "grokbot-wrapper", SCRIPTED_WRAPPER);
+        let screen = Screen::start();
+        let app = App::start(&home.join("bin/ezerbot-linux"), &screen, &home, environment);
+        wait_for("the scripted page stayed blank", || {
+            (screen.colours().len() >= 2).then_some(())
+        });
+        Self { home, screen, app }
+    }
+
+    fn command(&self, view: &str, body: &str) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.home.join(format!("commands-{view}")))
+            .unwrap();
+        writeln!(file, "{body}").unwrap();
+    }
+
+    fn results(&self) -> Vec<(String, serde_json::Value)> {
+        let text = std::fs::read_to_string(self.home.join("results")).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<(String, serde_json::Value)>(line).ok())
+            .collect()
+    }
+
+    /// Runs a command in a view and returns what its promise settled with.
+    fn run(&self, view: &str, body: &str) -> serde_json::Value {
+        self.command(view, body);
+        wait_for("the command never settled", || {
+            self.results()
+                .into_iter()
+                .find(|(key, _)| key == body)
+                .map(|(_, value)| value)
+        })
+    }
+
+    fn panel_open(&self) -> bool {
+        self.screen
+            .windows()
+            .iter()
+            .any(|(_, area)| area.width == 420 && area.height == 560)
+    }
+
+    fn wait_panel(&self, open: bool, what: &str) {
+        wait_for(what, || (self.panel_open() == open).then_some(()));
+    }
+
+    fn assert_no_panel_for(&self, span: Duration, what: &str) {
+        let until = Instant::now() + span;
+        while Instant::now() < until {
+            assert!(!self.panel_open(), "{what}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+struct Bus {
+    daemon: Child,
+    address: String,
+}
+
+impl Bus {
+    /// No service directory: a call to an absent portal fails instead of
+    /// starting the real one.
+    fn start(home: &TestDir) -> Self {
+        let config = home.join("bus.conf");
+        std::fs::write(
+            &config,
+            format!(
+                r#"<busconfig><type>session</type><listen>unix:tmpdir={}</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*" eavesdrop="true"/><allow eavesdrop="true"/><allow own="*"/></policy></busconfig>"#,
+                home.path().display()
+            ),
+        )
+        .unwrap();
+        let mut daemon = Command::new("dbus-daemon")
+            .args(["--nofork", "--print-address=1"])
+            .arg(format!("--config-file={}", config.display()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("dbus-daemon is required: sudo apt install dbus");
+        let mut address = String::new();
+        BufReader::new(daemon.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        Self {
+            daemon,
+            address: address.trim().to_owned(),
+        }
+    }
+}
+
+impl Drop for Bus {
+    fn drop(&mut self) {
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
+    }
+}
+
+const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+const SHORTCUTS_INTERFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
+
+const PORTAL_XML: &str = r#"<node><interface name="org.freedesktop.portal.GlobalShortcuts">
+<method name="CreateSession"><arg type="a{sv}" direction="in"/><arg type="o" direction="out"/></method>
+<method name="BindShortcuts"><arg type="o" direction="in"/><arg type="a(sa{sv})" direction="in"/><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="o" direction="out"/></method>
+</interface></node>"#;
+
+const SESSION_XML: &str = r#"<node><interface name="org.freedesktop.portal.Session">
+<method name="Close"/></interface></node>"#;
+
+#[derive(Default)]
+struct PortalState {
+    calls: Mutex<Vec<String>>,
+    taken: Mutex<Vec<String>>,
+}
+
+/// The GlobalShortcuts portal as the specification describes it, answering on
+/// its own thread with its own main loop.
+struct FakePortal {
+    state: Arc<PortalState>,
+    connection: gio::DBusConnection,
+    main_loop: glib::MainLoop,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+fn request_sender(sender: &str) -> String {
+    sender.trim_start_matches(':').replace('.', "_")
+}
+
+fn object_path(path: &str) -> glib::variant::ObjectPath {
+    glib::variant::ObjectPath::try_from(path.to_owned()).unwrap()
+}
+
+fn token(options: &Variant, key: &str) -> String {
+    glib::VariantDict::new(Some(options))
+        .lookup::<String>(key)
+        .unwrap()
+        .unwrap()
+}
+
+impl FakePortal {
+    fn start(address: &str) -> Self {
+        let state = Arc::new(PortalState::default());
+        let (ready, started) = mpsc::channel();
+        let context = glib::MainContext::new();
+        let main_loop = glib::MainLoop::new(Some(&context), false);
+        let (handler_state, address, quit) =
+            (Arc::clone(&state), address.to_owned(), main_loop.clone());
+        let thread = std::thread::spawn(move || {
+            let _ = context.with_thread_default(|| {
+                let connection = gio::DBusConnection::for_address_sync(
+                    &address,
+                    gio::DBusConnectionFlags::AUTHENTICATION_CLIENT
+                        | gio::DBusConnectionFlags::MESSAGE_BUS_CONNECTION,
+                    None,
+                    None::<&gio::Cancellable>,
+                )
+                .unwrap();
+                let node = gio::DBusNodeInfo::for_xml(PORTAL_XML).unwrap();
+                let interface = node.lookup_interface(SHORTCUTS_INTERFACE).unwrap();
+                connection
+                    .register_object(
+                        PORTAL_PATH,
+                        &interface,
+                        move |connection, sender, _, _, method, parameters, invocation| {
+                            Self::answer(
+                                &handler_state,
+                                &connection,
+                                sender,
+                                method,
+                                &parameters,
+                                invocation,
+                            );
+                        },
+                        |_, _, _, _, _| unreachable!(),
+                        |_, _, _, _, _, _| false,
+                    )
+                    .unwrap();
+                let acquired = ready.clone();
+                gio::bus_own_name_on_connection(
+                    &connection,
+                    "org.freedesktop.portal.Desktop",
+                    gio::BusNameOwnerFlags::NONE,
+                    move |_, _| {
+                        let _ = acquired.send(None);
+                    },
+                    |_, _| {},
+                );
+                ready.send(Some(connection)).unwrap();
+                quit.run();
+            });
+        });
+        let connection = started.recv().unwrap().expect("the connection comes first");
+        started.recv().unwrap();
+        Self {
+            state,
+            connection,
+            main_loop,
+            thread: Some(thread),
+        }
+    }
+
+    fn answer(
+        state: &Arc<PortalState>,
+        connection: &gio::DBusConnection,
+        sender: &str,
+        method: &str,
+        parameters: &Variant,
+        invocation: gio::DBusMethodInvocation,
+    ) {
+        let who = request_sender(sender);
+        let (options, mut results) = (
+            parameters.child_value(parameters.n_children() - 1),
+            HashMap::new(),
+        );
+        let request = format!(
+            "{PORTAL_PATH}/request/{who}/{}",
+            token(&options, "handle_token")
+        );
+        match method {
+            "CreateSession" => {
+                let session = format!(
+                    "{PORTAL_PATH}/session/{who}/{}",
+                    token(&options, "session_handle_token")
+                );
+                state
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("CreateSession {session}"));
+                let node = gio::DBusNodeInfo::for_xml(SESSION_XML).unwrap();
+                let interface = node
+                    .lookup_interface("org.freedesktop.portal.Session")
+                    .unwrap();
+                let closing = Arc::clone(state);
+                let path = session.clone();
+                connection
+                    .register_object(
+                        &session,
+                        &interface,
+                        move |_, _, _, _, _, _, invocation| {
+                            closing.calls.lock().unwrap().push(format!("Close {path}"));
+                            invocation.return_value(None);
+                        },
+                        |_, _, _, _, _| unreachable!(),
+                        |_, _, _, _, _, _| false,
+                    )
+                    .unwrap();
+                results.insert("session_handle".to_owned(), session.to_variant());
+            }
+            _ => {
+                let shortcuts: Vec<(String, HashMap<String, Variant>)> =
+                    parameters.child_value(1).get().unwrap();
+                let trigger: String = shortcuts[0].1["preferred_trigger"].get().unwrap();
+                let session = parameters.child_value(0).str().unwrap().to_owned();
+                state.calls.lock().unwrap().push(format!(
+                    "BindShortcuts {} {trigger} {session}",
+                    shortcuts[0].0
+                ));
+                let bound = if state.taken.lock().unwrap().contains(&trigger) {
+                    Vec::new()
+                } else {
+                    shortcuts
+                };
+                results.insert("shortcuts".to_owned(), bound.to_variant());
+            }
+        }
+        invocation.return_value(Some(&(object_path(&request),).to_variant()));
+        connection
+            .emit_signal(
+                Some(sender),
+                &request,
+                "org.freedesktop.portal.Request",
+                "Response",
+                Some(&(0u32, results).to_variant()),
+            )
+            .unwrap();
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.state.calls.lock().unwrap().clone()
+    }
+
+    /// The session the latest `CreateSession` returned.
+    fn session(&self, nth: usize) -> String {
+        self.calls()
+            .iter()
+            .filter_map(|call| call.strip_prefix("CreateSession "))
+            .nth(nth)
+            .unwrap()
+            .to_owned()
+    }
+
+    fn activate(&self, session: &str, shortcut: &str) {
+        let parameters = (
+            object_path(session),
+            shortcut.to_owned(),
+            0u64,
+            HashMap::<String, Variant>::new(),
+        )
+            .to_variant();
+        self.connection
+            .emit_signal(
+                None,
+                PORTAL_PATH,
+                SHORTCUTS_INTERFACE,
+                "Activated",
+                Some(&parameters),
+            )
+            .unwrap();
+    }
+}
+
+impl Drop for FakePortal {
+    fn drop(&mut self) {
+        self.main_loop.quit();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn status(outcome: &serde_json::Value) -> &str {
+    outcome["ok"]["status"].as_str().unwrap_or("")
+}
+
+fn configure(shortcut: &str) -> String {
+    format!(r#"{{"command":"configure","shortcut":"{shortcut}"}}"#)
+}
+
+#[test]
+fn the_portal_opens_the_panel_and_a_replacement_never_loses_the_shortcut() {
+    let home = TestDir::new("ezerbot-bus");
+    let bus = Bus::start(&home);
+    let portal = FakePortal::start(&bus.address);
+    let shell = Scripted::start(
+        "",
+        &[
+            ("DBUS_SESSION_BUS_ADDRESS", bus.address.as_str()),
+            ("WAYLAND_DISPLAY", "ezerbot-test-0"),
+        ],
+    );
+
+    assert_eq!(
+        status(&shell.run("main", &configure("cmd+option+j"))),
+        "registered"
+    );
+    let first = portal.session(0);
+    assert!(portal.calls()[1].starts_with("BindShortcuts cmd+option+j LOGO+ALT+j "));
+    portal.activate(&first, "cmd+option+j");
+    shell.wait_panel(true, "the portal's Activated did not open the panel");
+    shell.run("panel", r#"{"command":"close"}"#);
+    shell.wait_panel(false, "the panel stayed open");
+
+    assert_eq!(
+        status(&shell.run("main", &configure("ctrl+option+space"))),
+        "registered"
+    );
+    let second = portal.session(1);
+    let calls = portal.calls();
+    let position = |prefix: String| calls.iter().position(|call| call.starts_with(&prefix));
+    assert!(
+        position("BindShortcuts ctrl+option+space".into()) < position(format!("Close {first}")),
+        "the old session closed before the new one was bound: {calls:?}"
+    );
+    portal.activate(&first, "cmd+option+j");
+    shell.assert_no_panel_for(
+        Duration::from_secs(1),
+        "a closed session still opened the panel",
+    );
+    portal.activate(&second, "ctrl+option+space");
+    shell.wait_panel(true, "the replacement did not open the panel");
+    shell.run("panel", r#"{"command":"close"}"#);
+    shell.wait_panel(false, "the panel stayed open");
+
+    portal
+        .state
+        .taken
+        .lock()
+        .unwrap()
+        .push("LOGO+SHIFT+space".into());
+    assert_eq!(
+        status(&shell.run("main", &configure("cmd+shift+space"))),
+        "conflict"
+    );
+    let third = portal.session(2);
+    wait_for("the refused session was never closed", || {
+        portal
+            .calls()
+            .contains(&format!("Close {third}"))
+            .then_some(())
+    });
+    assert!(
+        !portal.calls().contains(&format!("Close {second}")),
+        "the shortcut in force was closed"
+    );
+    portal.activate(&third, "cmd+shift+space");
+    shell.assert_no_panel_for(
+        Duration::from_secs(1),
+        "the refused shortcut opened the panel",
+    );
+    portal.activate(&second, "ctrl+option+space");
+    shell.wait_panel(
+        true,
+        "the shortcut in force stopped working after a conflict",
+    );
+    shell.app.quit();
+}
+
+#[test]
+fn without_a_portal_the_shortcut_is_announced_unavailable() {
+    let home = TestDir::new("ezerbot-bus");
+    let bus = Bus::start(&home);
+    let shell = Scripted::start(
+        "",
+        &[
+            ("DBUS_SESSION_BUS_ADDRESS", bus.address.as_str()),
+            ("WAYLAND_DISPLAY", "ezerbot-test-0"),
+        ],
+    );
+    assert_eq!(
+        status(&shell.run("main", &configure("cmd+option+j"))),
+        "unavailable"
+    );
+    assert_eq!(
+        status(&shell.run("main", &configure("disabled"))),
+        "disabled"
+    );
+    shell.app.quit();
 }

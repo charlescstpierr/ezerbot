@@ -24,19 +24,24 @@ fn main() {
 #[cfg(target_os = "linux")]
 mod linux {
     use crate::backend::{Backend, Instance};
+    use crate::floating::{self, Command as PanelCommand, Message, Panel, View};
+    use crate::hotkey::{Hotkeys, Slot};
+    use crate::local_api::LocalApi;
     use gtk::prelude::*;
+    use serde_json::json;
     use signal_hook::{
         consts::{SIGINT, SIGTERM},
         iterator::{Handle, Signals},
     };
     use std::{
+        collections::HashMap,
         ffi::OsString,
         io::Cursor,
         path::PathBuf,
         process::{Command, Stdio},
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc,
+            Arc, Mutex,
         },
         thread::JoinHandle,
         time::{Duration, Instant},
@@ -44,18 +49,36 @@ mod linux {
     use tao::{
         dpi::LogicalSize,
         event::{Event, WindowEvent},
-        event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
+        event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget},
         platform::unix::WindowExtUnix,
-        window::WindowBuilder,
+        window::{Window, WindowBuilder},
     };
     use wry::{
-        NewWindowResponse, PermissionResponse, WebView, WebViewBuilder, WebViewBuilderExtUnix,
+        http::Request, NewWindowResponse, PermissionResponse, WebView, WebViewBuilder,
+        WebViewBuilderExtUnix,
     };
 
     enum ShellEvent {
         Quit,
         Show,
+        OpenPanel,
+        Hotkey(u32),
+        Command(View, Message),
         LinkFailed(url::Url),
+    }
+
+    /// Forwards what a page proved it may say, and nothing else.
+    fn bridge(
+        view: View,
+        api: Arc<LocalApi>,
+        proxy: EventLoopProxy<ShellEvent>,
+    ) -> impl Fn(Request<String>) + 'static {
+        move |request| {
+            let uri = request.uri().to_string();
+            if let Some(message) = Message::parse(view, &uri, request.body(), &api) {
+                let _ = proxy.send_event(ShellEvent::Command(view, message));
+            }
+        }
     }
 
     fn open_in_browser(url: url::Url, proxy: EventLoopProxy<ShellEvent>) {
@@ -74,18 +97,133 @@ mod linux {
     }
 
     struct Shell {
+        hotkeys: Slot,
+        panel: Option<Panel>,
         webview: Option<WebView>,
         instance: Option<Instance>,
         backend: Backend,
+        proxy: EventLoopProxy<ShellEvent>,
+        /// Panel requests waiting for the main window: its request, then the
+        /// panel message to settle.
+        opening: HashMap<u64, u64>,
+        requests: u64,
     }
 
     impl Drop for Shell {
         fn drop(&mut self) {
+            self.panel.take();
             self.webview.take();
             // A launch during the slow shutdown below starts afresh, and its
             // wrapper takes the engine once this one exits.
             self.instance.take();
             self.backend.shutdown();
+        }
+    }
+
+    impl Shell {
+        fn show_panel(
+            &mut self,
+            target: &EventLoopWindowTarget<ShellEvent>,
+        ) -> Result<(), &'static str> {
+            if let Some(panel) = &self.panel {
+                panel.reopen();
+                return Ok(());
+            }
+            let api = Arc::clone(&self.backend.api);
+            let ipc = bridge(View::Panel, Arc::clone(&api), self.proxy.clone());
+            self.panel = Some(Panel::open(target, &api, ipc)?);
+            Ok(())
+        }
+
+        fn settle(&self, view: View, id: u64, result: Result<serde_json::Value, &str>) {
+            let webview = match view {
+                View::Main => self.webview.as_ref(),
+                View::Panel => self.panel.as_ref().map(|panel| &panel.webview),
+            };
+            if let Some(webview) = webview {
+                floating::settle(webview, id, result);
+            }
+        }
+
+        fn command(
+            &mut self,
+            target: &EventLoopWindowTarget<ShellEvent>,
+            main: &Window,
+            view: View,
+            message: Message,
+        ) {
+            let reply = match message.command {
+                Ok(command) => self.run(target, main, message.id, command),
+                Err(error) => Some(Err(error)),
+            };
+            if let Some(reply) = reply {
+                self.settle(view, message.id, reply);
+            }
+        }
+
+        /// `None` is a command answered later.
+        fn run(
+            &mut self,
+            target: &EventLoopWindowTarget<ShellEvent>,
+            main: &Window,
+            id: u64,
+            command: PanelCommand,
+        ) -> Option<Result<serde_json::Value, &'static str>> {
+            Some(match command {
+                PanelCommand::Show {} => self.show_panel(target).map(|()| json!(true)),
+                PanelCommand::Configure { shortcut } => {
+                    Ok(self.hotkeys.configure(&shortcut).reply())
+                }
+                PanelCommand::ConversationOpened {
+                    request,
+                    opened,
+                    reason,
+                } => {
+                    let Some(panel_id) = self.opening.remove(&request) else {
+                        return Some(Err("Demande inconnue."));
+                    };
+                    if opened {
+                        if let Some(panel) = &self.panel {
+                            panel.hide();
+                        }
+                        main.gtk_window().present();
+                        self.settle(View::Panel, panel_id, Ok(json!(true)));
+                    } else {
+                        let reason = if reason.is_empty() {
+                            "Ce fil n’a pas pu être ouvert."
+                        } else {
+                            reason.as_str()
+                        };
+                        self.settle(View::Panel, panel_id, Err(reason));
+                    }
+                    Ok(json!(true))
+                }
+                PanelCommand::Close {} => {
+                    if let Some(panel) = &self.panel {
+                        panel.hide();
+                    }
+                    Ok(json!(true))
+                }
+                // The panel has no native chrome to theme.
+                PanelCommand::Appearance { .. } => Ok(json!(true)),
+                PanelCommand::Drag {} => {
+                    if let Some(panel) = &self.panel {
+                        let _ = panel.window.drag_window();
+                    }
+                    Ok(json!(true))
+                }
+                PanelCommand::OpenConversation { conversation_id } => {
+                    let Some(webview) = &self.webview else {
+                        return Some(Err("La fenêtre principale est indisponible."));
+                    };
+                    self.requests += 1;
+                    self.opening.insert(self.requests, id);
+                    let script =
+                        floating::open_conversation_script(self.requests, &conversation_id);
+                    let _ = webview.evaluate_script(&script);
+                    return None;
+                }
+            })
         }
     }
 
@@ -196,6 +334,7 @@ mod linux {
         let menubar = gtk::MenuBar::new();
         let application = gtk::MenuItem::with_label("Ezerbot");
         let menu = gtk::Menu::new();
+        let panel_item = gtk::MenuItem::with_label("Ouvrir le panneau flottant");
         let close = gtk::MenuItem::with_label("Quitter");
         let accelerators = gtk::AccelGroup::new();
         window.gtk_window().add_accel_group(&accelerators);
@@ -210,6 +349,11 @@ mod linux {
         close.connect_activate(move |_| {
             let _ = proxy.send_event(ShellEvent::Quit);
         });
+        let proxy = event_loop.create_proxy();
+        panel_item.connect_activate(move |_| {
+            let _ = proxy.send_event(ShellEvent::OpenPanel);
+        });
+        menu.append(&panel_item);
         menu.append(&close);
         application.set_submenu(Some(&menu));
         menubar.append(&application);
@@ -228,6 +372,11 @@ mod linux {
         let resource_api = Arc::clone(&api);
         let webview = WebViewBuilder::new()
             .with_initialization_script_for_main_only(api.initialization_script(), true)
+            .with_ipc_handler(bridge(
+                View::Main,
+                Arc::clone(&api),
+                event_loop.create_proxy(),
+            ))
             .with_asynchronous_custom_protocol(
                 "ezerbot-resource".into(),
                 move |_, request, responder| Arc::clone(&resource_api).serve(request, responder),
@@ -246,25 +395,37 @@ mod linux {
             .with_url(api.origin.as_str())
             .build_gtk(vbox)
             .map_err(|_| "La vue Ezerbot n'a pas pu être créée.")?;
+        let hotkey_proxy = Mutex::new(event_loop.create_proxy());
+        let hotkeys = Slot::open(Hotkeys::detect(), move |id| {
+            if let Ok(proxy) = hotkey_proxy.lock() {
+                let _ = proxy.send_event(ShellEvent::Hotkey(id));
+            }
+        });
         let mut shell = Some(Shell {
+            hotkeys,
+            panel: None,
             webview: Some(webview),
             instance: Some(instance),
             backend,
+            proxy: event_loop.create_proxy(),
+            opening: HashMap::new(),
+            requests: 0,
         });
         let failure_proxy = event_loop.create_proxy();
         let mut failure_dialog: Option<gtk::MessageDialog> = None;
-        event_loop.run(move |event, _, control_flow| {
+        event_loop.run(move |event, target, control_flow| {
             let _keep_alive = (&window, &signals);
             *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
-            let stopping = matches!(
-                event,
-                Event::UserEvent(ShellEvent::Quit)
-                    | Event::WindowEvent {
-                        event: WindowEvent::CloseRequested,
-                        ..
-                    }
-                    | Event::LoopDestroyed
-            );
+            // Only the main window's close quits: the panel just hides.
+            let stopping = match &event {
+                Event::UserEvent(ShellEvent::Quit) | Event::LoopDestroyed => true,
+                Event::WindowEvent {
+                    window_id,
+                    event: WindowEvent::CloseRequested,
+                    ..
+                } => *window_id == window.id(),
+                _ => false,
+            };
             if let Event::UserEvent(ShellEvent::LinkFailed(url)) = &event {
                 let dialog = gtk::MessageDialog::new(
                     Some(window.gtk_window()),
@@ -278,6 +439,29 @@ mod linux {
                 dialog.show_all();
             } else if matches!(event, Event::UserEvent(ShellEvent::Show)) {
                 window.gtk_window().present();
+            } else if let Event::UserEvent(ShellEvent::Command(view, message)) = event {
+                if let Some(shell) = shell.as_mut() {
+                    shell.command(target, &window, view, message);
+                }
+            } else if let Event::UserEvent(ShellEvent::Hotkey(id)) = &event {
+                // A key pressed after `shell.take()` finds no shell and does nothing.
+                if let Some(shell) = shell.as_mut().filter(|shell| shell.hotkeys.fires(*id)) {
+                    let _ = shell.show_panel(target);
+                }
+            } else if matches!(event, Event::UserEvent(ShellEvent::OpenPanel)) {
+                if let Some(shell) = shell.as_mut() {
+                    let _ = shell.show_panel(target);
+                }
+            } else if let Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } = &event
+            {
+                if !stopping {
+                    if let Some(panel) = shell.as_ref().and_then(|shell| shell.panel.as_ref()) {
+                        panel.hide();
+                    }
+                }
             } else if stopping {
                 if let Some(dialog) = failure_dialog.take() {
                     dialog.close();

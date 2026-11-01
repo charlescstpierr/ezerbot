@@ -1,6 +1,17 @@
 use crate::local_api::LocalApi;
+use gtk::prelude::*;
 use serde::Deserialize;
+use tao::{
+    dpi::{LogicalPosition, LogicalSize},
+    event_loop::EventLoopWindowTarget,
+    platform::unix::{WindowBuilderExtUnix, WindowExtUnix},
+    window::{Window, WindowBuilder},
+};
 use url::Url;
+use wry::{
+    http::Request, NewWindowResponse, PermissionResponse, WebView, WebViewBuilder,
+    WebViewBuilderExtUnix,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
@@ -121,6 +132,97 @@ impl Message {
     }
 }
 
+/// What the page's pending promise is settled with. Values only ever reach
+/// the page as JSON.
+pub fn settle_script(id: u64, result: Result<serde_json::Value, &str>) -> String {
+    let (value, error) = match result {
+        Ok(value) => (value, None),
+        Err(error) => (serde_json::Value::Null, Some(error)),
+    };
+    let error = serde_json::to_string(&error).unwrap_or_else(|_| "null".into());
+    format!("window.EzerbotShell?.settle({id},{value},{error})")
+}
+
+pub fn open_conversation_script(request: u64, conversation: &ConversationId) -> String {
+    let conversation = serde_json::to_string(conversation.as_str()).unwrap_or_default();
+    format!("window.EzerbotShell?.openConversation({request},{conversation})")
+}
+
+pub fn settle(webview: &WebView, id: u64, result: Result<serde_json::Value, &str>) {
+    let _ = webview.evaluate_script(&settle_script(id, result));
+}
+
+/// The compact window the global shortcut opens. It is hidden, never
+/// destroyed, so a draft survives closing it.
+pub struct Panel {
+    // The view goes before its window.
+    pub webview: WebView,
+    pub window: Window,
+}
+
+impl Panel {
+    pub fn open<T: 'static>(
+        target: &EventLoopWindowTarget<T>,
+        api: &LocalApi,
+        ipc: impl Fn(Request<String>) + 'static,
+    ) -> Result<Self, &'static str> {
+        const ERROR: &str = "Le panneau flottant n'a pas pu être créé.";
+        let window = WindowBuilder::new()
+            .with_title("Panneau · Ezerbot")
+            .with_inner_size(LogicalSize::new(420, 560))
+            .with_position(LogicalPosition::new(80, 80))
+            .with_decorations(false)
+            .with_always_on_top(true)
+            .with_resizable(false)
+            .with_skip_taskbar(true)
+            .with_visible_on_all_workspaces(true)
+            .build(target)
+            .map_err(|_| ERROR)?;
+        let vbox = window.default_vbox().ok_or(ERROR)?;
+        let origin = api.origin.clone();
+        let webview = WebViewBuilder::new()
+            .with_initialization_script_for_main_only(api.initialization_script(), true)
+            .with_ipc_handler(ipc)
+            .with_navigation_handler(move |url| origin.is_panel(&url))
+            .with_download_started_handler(|_, _| false)
+            .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
+            .with_permission_handler(|_| PermissionResponse::Deny)
+            .with_incognito(true)
+            .with_devtools(false)
+            .with_url(format!("{}/floating", api.origin.as_str()))
+            .build_gtk(vbox)
+            .map_err(|_| ERROR)?;
+        let panel = Self { webview, window };
+        panel.show();
+        Ok(panel)
+    }
+
+    pub fn show(&self) {
+        self.window.set_visible(true);
+        // Asked before the window manager has mapped it again, the focus goes
+        // to the window that held it.
+        let window = self.window.gtk_window().clone();
+        gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
+            window.present();
+        });
+        let _ = self.webview.focus();
+    }
+
+    pub fn reopen(&self) {
+        let _ = self
+            .webview
+            .evaluate_script("window.EzerbotFloating?.open()");
+        self.show();
+        // The window manager drops this state when the window is withdrawn,
+        // and GTK forgets it with it.
+        self.window.set_always_on_top(true);
+    }
+
+    pub fn hide(&self) {
+        self.window.set_visible(false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +242,27 @@ mod tests {
 
     fn parse(view: View, uri: &str, token: &str, body: serde_json::Value) -> Option<Message> {
         Message::parse(view, uri, &envelope(token, body), &api())
+    }
+
+    #[test]
+    fn page_values_reach_the_script_only_as_json() {
+        let hostile = "\"); alert(1); (\"</script>\u{2028}\n\\";
+        let script = settle_script(4, Err(hostile));
+        let argument = script
+            .strip_prefix("window.EzerbotShell?.settle(4,null,")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap();
+        assert_eq!(serde_json::from_str::<String>(argument).unwrap(), hostile);
+        assert!(!argument.contains('\n'));
+        assert_eq!(
+            settle_script(5, Ok(json!({"status": "conflict"}))),
+            r#"window.EzerbotShell?.settle(5,{"status":"conflict"},null)"#
+        );
+        let id: ConversationId = "a_b-9".to_owned().try_into().unwrap();
+        assert_eq!(
+            open_conversation_script(2, &id),
+            r#"window.EzerbotShell?.openConversation(2,"a_b-9")"#
+        );
     }
 
     #[test]

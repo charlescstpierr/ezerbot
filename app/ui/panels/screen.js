@@ -7,6 +7,7 @@
   // Sous Linux, le bot voit l'écran sans jamais agir : aucun geste, aucun réglage système, aucun Échap global.
   const linux = window.EzerbotShell?.platform === "linux";
   const screenName = linux ? "Partage d’écran" : "Écran du Mac";
+  const unprovenPause = "Partage en pause : bandeau non garanti visible";
   const node = (tag, text, cls) => { const el = document.createElement(tag); if (text) el.textContent = text; if (cls) el.className = cls; return el; };
   const button = (text, action, cls = "secondary-button") => { const b = node("button", text, cls); b.type = "button"; b.onclick = action; return b; };
   let data = {}, context = {}, section, signature = "", error = "", saving = false, expiryTimer;
@@ -110,7 +111,7 @@
   function renderOverlay() {
     overlay.replaceChildren();
     if (data.session) {
-      overlay.append(node("strong", linux ? (data.session.paused ? "Ezerbot en pause" : "Ezerbot voit l’écran") : data.session.paused ? "Ezerbot en pause — Vous avez repris la main" : "Ezerbot contrôle l’écran — Échap pour arrêter"));
+      overlay.append(node("strong", linux ? (data.session.unproven ? unprovenPause : data.session.paused ? "Ezerbot en pause" : "Ezerbot voit l’écran") : data.session.paused ? "Ezerbot en pause — Vous avez repris la main" : "Ezerbot contrôle l’écran — Échap pour arrêter"));
       if (data.session.paused) overlay.append(button("Reprendre", () => save("/api/screen/resume", { id: data.session.id })));
       overlay.append(button("Arrêter", stop));
     }
@@ -125,8 +126,8 @@
     if (data.fake) dialog.append(node("p", linux ? "Écran fictif · aucune capture réelle" : "Écran fictif · aucune action sur votre Mac", "screen-test-note"));
     if (data.session) {
       const s = data.session, bot = host.state.bots?.find(b => b.id === s.bot_id), chat = host.state.conversations?.find(c => c.id === s.conversation_id);
-      dialog.append(node("h3", linux ? (s.paused ? "En pause" : "Ezerbot voit l’écran") : s.paused ? "En pause — Vous avez la main" : "Ezerbot contrôle l’écran — Échap pour arrêter"), node("p", `${bot?.name || "Bot"} · ${chat?.title || "Conversation"} · jusqu’à ${new Date(s.expires_at).toLocaleTimeString("fr-CA", { hour: "2-digit", minute: "2-digit" })}`));
-      dialog.append(node("p", linux ? "Le bot voit l’écran et n’effectue aucun geste. Vous pouvez arrêter à tout moment, même si des captures attendent. Une capture déjà livrée reste dans le fil." : yoloBot(s.bot_id) ? "Mode YOLO : les gestes de cette session partent sans carte. Vous pouvez arrêter à tout moment ; les effets déjà livrés ne sont pas annulés." : "L’accord n’autorise aucune action sensible sans sa carte. Vous pouvez arrêter à tout moment, même si des actions attendent. Les effets déjà livrés ne sont pas annulés."));
+      dialog.append(node("h3", linux ? (s.unproven ? unprovenPause : s.paused ? "En pause" : "Ezerbot voit l’écran") : s.paused ? "En pause — Vous avez la main" : "Ezerbot contrôle l’écran — Échap pour arrêter"), node("p", `${bot?.name || "Bot"} · ${chat?.title || "Conversation"} · jusqu’à ${new Date(s.expires_at).toLocaleTimeString("fr-CA", { hour: "2-digit", minute: "2-digit" })}`));
+      dialog.append(node("p", linux ? (s.unproven ? "Aucune capture ne part tant que le bandeau n’est pas prouvé visible. Sous Wayland ou avec un compositeur, il ne peut pas l’être." : "Le bot voit l’écran et n’effectue aucun geste.") + " Vous pouvez arrêter à tout moment, même si des captures attendent. Une capture déjà livrée reste dans le fil." : yoloBot(s.bot_id) ? "Mode YOLO : les gestes de cette session partent sans carte. Vous pouvez arrêter à tout moment ; les effets déjà livrés ne sont pas annulés." : "L’accord n’autorise aucune action sensible sans sa carte. Vous pouvez arrêter à tout moment, même si des actions attendent. Les effets déjà livrés ne sont pas annulés."));
       const actions = node("div", null, "screen-actions");
       if (s.paused) actions.append(button("Reprendre le bot", () => save("/api/screen/resume", { id: s.id }), "primary-button"));
       actions.append(button("Révoquer maintenant", stop, "danger-button"));
@@ -134,7 +135,7 @@
       dialog.append(actions);
     } else {
       const chat = context.conversation, bot = context.bot;
-      dialog.append(node("p", linux ? "Le modèle pourra voir des captures de tout l’écran. Le bot n’effectue aucun geste. Les captures restent dans le fil et sont envoyées au fournisseur d’IA. Le partage se met en pause dès que son bandeau est couvert. Sous Wayland, sa visibilité ne peut pas être garantie : le partage y reste en pause. Fermez vos fenêtres privées avant de commencer." : "Le modèle pourra voir des captures de l’écran principal et proposer des gestes. Les captures et actions restent dans le fil et sont envoyées au fournisseur d’IA. Fermez vos fenêtres privées avant de commencer."));
+      dialog.append(node("p", linux ? "Le modèle pourra voir des captures de tout l’écran. Le bot n’effectue aucun geste. Les captures restent dans le fil et sont envoyées au fournisseur d’IA. Le partage se met en pause dès que son bandeau est couvert. Sous Wayland ou avec un compositeur, sa visibilité ne peut pas être garantie : le partage y reste en pause. Fermez vos fenêtres privées avant de commencer." : "Le modèle pourra voir des captures de l’écran principal et proposer des gestes. Les captures et actions restent dans le fil et sont envoyées au fournisseur d’IA. Fermez vos fenêtres privées avant de commencer."));
       const available = chat?.kind === "chat" && screenOpen(bot?.id);
       if (!available) dialog.append(node("p", `Activez d’abord ce bot dans Paramètres › ${screenName}, puis ouvrez un fil direct existant (envoyez un message pour créer le fil).`), button("Ouvrir Paramètres", () => { dialog.close(); document.getElementById("settings-button").click(); }));
       else {

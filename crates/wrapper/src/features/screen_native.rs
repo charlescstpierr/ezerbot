@@ -8,6 +8,7 @@ use std::{
     sync::mpsc::{self, Receiver},
     time::Instant,
 };
+const UNPROVEN: &str = "Partage en pause : bandeau non garanti visible.";
 fn executable() -> Result<PathBuf, ApiError> {
     Ok(std::env::current_exe()
         .map_err(|_| unavailable())?
@@ -40,7 +41,7 @@ pub fn permissions() -> Result<(), ApiError> {
         .map_err(|_| unavailable())?;
     if !status.success() {
         #[cfg(target_os = "linux")]
-        return Err(ApiError::new(403,"Aucune capture possible dans cette session. Sous Wayland, installez xdg-desktop-portal et le portail de votre bureau, puis réactivez ce bot."));
+        return Err(ApiError::new(403,"Aucune capture possible dans cette session. Le partage d’écran fonctionne sous X11 sans compositeur."));
         #[cfg(not(target_os = "linux"))]
         return Err(ApiError::new(403,"Autorisez Accessibilité, Enregistrement de l’écran et Surveillance de l’entrée dans Réglages Système, puis réactivez ce bot."));
     }
@@ -51,6 +52,7 @@ pub struct Client {
     child: Mutex<Child>,
     replies: Mutex<Receiver<Value>>,
     paused: Arc<AtomicBool>,
+    unproven: Arc<AtomicBool>,
     revoked: Arc<AtomicBool>,
     sequence: AtomicU64,
 }
@@ -78,9 +80,10 @@ impl Client {
         let input = child.stdin.take().ok_or_else(unavailable)?;
         let output = child.stdout.take().ok_or_else(unavailable)?;
         let paused = Arc::new(AtomicBool::new(false));
+        let unproven = Arc::new(AtomicBool::new(false));
         let revoked = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
-        let (p, r) = (paused.clone(), revoked.clone());
+        let (p, u, r) = (paused.clone(), unproven.clone(), revoked.clone());
         std::thread::spawn(move || {
             // The generation moves first, so a capture on its way to the COMMIT is
             // dropped. The permit then waits for a decision taken before the stop:
@@ -109,8 +112,14 @@ impl Client {
                     break;
                 };
                 match v["event"].as_str() {
-                    Some("paused") => halt(&p),
-                    Some("resumed") => p.store(false, Ordering::SeqCst),
+                    Some("paused") => {
+                        u.store(v["reason"] == "banner", Ordering::SeqCst);
+                        halt(&p);
+                    }
+                    Some("resumed") => {
+                        u.store(false, Ordering::SeqCst);
+                        p.store(false, Ordering::SeqCst);
+                    }
                     Some("revoked") => halt(&r),
                     _ => {
                         if tx.send(v).is_err() {
@@ -126,6 +135,7 @@ impl Client {
             child: Mutex::new(child),
             replies: Mutex::new(rx),
             paused,
+            unproven,
             revoked,
             sequence: AtomicU64::new(0),
         };
@@ -165,6 +175,9 @@ impl Client {
     pub fn paused(&self) -> bool {
         self.paused.load(Ordering::SeqCst) || self.revoked.load(Ordering::SeqCst)
     }
+    pub fn unproven(&self) -> bool {
+        self.unproven.load(Ordering::SeqCst)
+    }
     pub fn resume(&self) -> Result<(), ApiError> {
         // The native permit increments its generation on takeover. Only commands
         // sent after this explicit UI operation can use the new generation.
@@ -173,10 +186,12 @@ impl Client {
         while self.paused.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(1) {
             std::thread::sleep(Duration::from_millis(2));
         }
-        if self.paused() {
-            Err(ApiError::new(403, STOPPED))
-        } else {
+        if !self.paused() {
             Ok(())
+        } else if self.unproven() && self.live() {
+            Err(ApiError::new(403, UNPROVEN))
+        } else {
+            Err(ApiError::new(403, STOPPED))
         }
     }
     pub fn action(

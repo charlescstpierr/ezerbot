@@ -4,7 +4,7 @@
 
 Le rendu utilise le vrai wrapper, son interface compilée et un fournisseur factice local. Le manifeste identifie ce rendu comme un repli Chromium. Ces captures prouvent l'interface web servie sous Linux. Elles ne prouvent pas la fenêtre de la coque native Linux.
 
-Le pilote injecte `EzerbotShell` avant le chargement, avec la liste de `app/linux/src/local-api.js`. Les vues montrent donc les textes et les panneaux de Linux. `screen-overlay` lance le vrai `ezerbot-linux --screen-helper` de debug sur le même Xvfb. Sa capture vient de la fenêtre racine. Ce binaire ne contient aucune capture réelle.
+Le pilote injecte `EzerbotShell` avant le chargement, avec la liste de `app/linux/src/local-api.js`. Les vues montrent donc les textes et les panneaux de Linux. `screen-overlay` lance le vrai `ezerbot-linux --screen-helper` de debug sur le même Xvfb. Sa capture vient de la fenêtre racine. Ce binaire ne contient aucune capture réelle. `screen-overlay-unproven` exige `picom`.
 
 ## Prérequis
 
@@ -54,6 +54,7 @@ Le registre du pilote fournit ces vues, dans cet ordre. Le viewport est de 1440 
 | `conversation-tools-dark` | Tour actif après un vrai outil local : seulement la phrase du bot et « Réfléchit », sans aucune trace d'outil. |
 | `screen-consent-dark` | Carte d'accord du partage d'écran, ouverte dans la conversation synthétique. |
 | `screen-overlay` | Fenêtre racine de Xvfb avec la superposition du bail, au-dessus de Chromium. |
+| `screen-overlay-unproven` | La même fenêtre racine sous `picom` : le bail démarre en pause et le bandeau le dit. |
 
 ## Format du manifeste
 

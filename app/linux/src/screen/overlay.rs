@@ -7,6 +7,7 @@ use std::{cell::Cell, io::Stdout, rc::Rc, sync::Arc};
 const WIDTH: i32 = 560;
 const HEIGHT: i32 = 44;
 const LIVE: &str = "Ezerbot voit l’écran";
+const UNPROVEN: &str = "Partage en pause : bandeau non garanti visible";
 const BUTTON_WIDTH: i32 = 96;
 const STYLE: &str = "window { background-color: #1f2129; }
 label { color: #ffffff; font-weight: 600; }
@@ -100,7 +101,7 @@ fn button(text: &str, gate: &Arc<Gate<Stdout>>, stop: Stop) -> gtk::Button {
 impl Overlay {
     pub fn build(gate: &Arc<Gate<Stdout>>) -> Self {
         let window = gtk::Window::new(gtk::WindowType::Toplevel);
-        window.set_title(LIVE);
+        window.set_title("Partage d’écran");
         window.set_decorated(false);
         window.set_keep_above(true);
         window.stick();
@@ -149,21 +150,22 @@ impl Overlay {
         {
             window.move_(area.x() + (area.width() - WIDTH) / 2, area.y() + 8);
         }
-        label.set_text(LIVE);
+        label.set_text(UNPROVEN);
+        pause.set_sensitive(false);
         window.show_all();
         Self {
             window,
             label,
             pause,
-            shown: Cell::new(View::Live),
+            shown: Cell::new(View::Unproven),
         }
     }
 
     pub fn render(&self, view: View) {
-        // Minimizing paused the lease: the overlay cannot stay hidden once the
-        // bot sees the screen again, however quickly the app resumed.
+        // Minimizing paused the lease and nothing else can bring the banner back:
+        // it has no taskbar entry, and resuming needs it on screen.
         let minimized = |window: gdk::Window| window.state().contains(gdk::WindowState::ICONIFIED);
-        if view == View::Live && self.window.window().is_some_and(minimized) {
+        if view != View::Closed && self.window.window().is_some_and(minimized) {
             self.window.deiconify();
         }
         if self.shown.replace(view) == view {
@@ -175,6 +177,7 @@ impl Overlay {
             View::Paused => self
                 .label
                 .set_text("Ezerbot en pause. Reprenez dans l’application."),
+            View::Unproven => self.label.set_text(UNPROVEN),
             View::Closed => self.window.hide(),
         }
     }

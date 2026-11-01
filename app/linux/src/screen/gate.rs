@@ -43,6 +43,7 @@ pub enum Stop {
 pub enum View {
     Live,
     Paused,
+    Unproven,
     Closed,
 }
 
@@ -56,6 +57,11 @@ pub struct Ticket {
 pub enum Reply {
     Image(Encoded),
     Refused(String),
+}
+
+/// The app tells this pause from the person's own.
+fn unproven() -> Value {
+    json!({"event":"paused","reason":"banner"})
 }
 
 impl<W: Write> State<W> {
@@ -72,13 +78,21 @@ impl<W: Write> State<W> {
 
     fn pause(&mut self) {
         if let Self::Open {
-            phase, generation, ..
+            phase,
+            generation,
+            banner,
+            ..
         } = self
         {
             if *phase == Phase::Live {
+                let line = if *banner {
+                    json!({"event":"paused"})
+                } else {
+                    unproven()
+                };
                 *phase = Phase::Paused;
                 *generation += 1;
-                self.say(json!({"event":"paused"}));
+                self.say(line);
             }
         }
     }
@@ -144,9 +158,7 @@ impl<W: Write> Gate<W> {
                 banner: true,
                 ..
             } => Some(Ticket { id, generation }),
-            State::Open {
-                phase: Phase::Live, ..
-            } => {
+            State::Open { banner: false, .. } => {
                 state.say(json!({"id":id,"error":HIDDEN}));
                 None
             }
@@ -184,7 +196,7 @@ impl<W: Write> Gate<W> {
 
     /// What the overlay can prove about its banner. Losing it while live pauses the
     /// lease, like the Pause button: covered, minimized or unprovable, it fails closed.
-    /// Seeing it again resumes nothing; it only lets a resumed lease capture.
+    /// Seeing it again resumes nothing: only the person does, once it is back.
     pub fn banner(&self, visible: bool) {
         let mut state = self.state();
         let State::Open { banner, .. } = &mut *state else {
@@ -199,8 +211,13 @@ impl<W: Write> Gate<W> {
         matches!(*self.state(), State::Open { banner: true, .. })
     }
 
+    /// Without its banner a lease stays paused, so the app never reads it as live.
     pub fn resume(&self) {
         let mut state = self.state();
+        if matches!(*state, State::Open { banner: false, .. }) {
+            state.say(unproven());
+            return;
+        }
         if let State::Open {
             phase, generation, ..
         } = &mut *state
@@ -216,8 +233,11 @@ impl<W: Write> Gate<W> {
     pub fn tick(&self) -> View {
         match *self.state() {
             State::Open {
-                phase: Phase::Live, ..
+                phase: Phase::Live,
+                banner: true,
+                ..
             } => View::Live,
+            State::Open { banner: false, .. } => View::Unproven,
             State::Open { .. } => View::Paused,
             State::Closed => View::Closed,
         }

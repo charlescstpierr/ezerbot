@@ -615,3 +615,28 @@ fn a_helper_stop_reads_as_stopped_only_once_the_decision_in_flight_is_over() {
         std::thread::sleep(Duration::from_millis(1));
     }
 }
+
+#[test]
+fn a_resume_the_helper_refuses_names_the_banner_and_stays_paused() {
+    let guard = grokbot_test_support::TestDir::new("ezerbot-screen-unproven");
+    let go = guard.to_path_buf().join("go");
+    let client = native::Client::launch(
+        clicked_helper(
+            &go,
+            r#"echo '{"event":"paused","reason":"banner"}'; exec cat >/dev/null"#,
+        ),
+        Arc::default(),
+        Arc::default(),
+    )
+    .unwrap();
+    std::fs::write(&go, b"").unwrap();
+    let start = std::time::Instant::now();
+    while !client.paused() {
+        assert!(start.elapsed() < Duration::from_secs(5), "line never read");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(client.unproven());
+    let refusal = client.resume().unwrap_err();
+    assert!(refusal.message.contains("bandeau"), "{}", refusal.message);
+    assert!(client.paused());
+}

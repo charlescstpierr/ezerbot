@@ -16,6 +16,7 @@ const VIEWS = Object.freeze([
   { id: "conversation-tools-dark", label: "Conversation avec outils", action: "window.captureToolConversation()", ready: "window.captureToolRan?.() && document.getElementById('conversation-title')?.textContent === 'Ranger le dossier' && document.querySelector('.gb-thinking')?.textContent.includes('Réfléchit') && document.querySelector('.gb-conversation')?.textContent.includes('Je regarde ce qu’il y a dans le dossier.') && !document.querySelector('.gb-conversation [data-card-kind], .gb-conversation details, .gb-conversation-problem') && ![...document.querySelectorAll('.gb-conversation .gb-assistant')].some(element => /list_directory|\\/tmp/.test(element.textContent))" },
   { id: "screen-consent-dark", label: "Accord de partage d’écran", action: "window.captureScreenConsent()", ready: "document.querySelector('.screen-dialog')?.open && document.querySelector('.screen-consent')?.textContent.includes('n’effectue aucun geste')" },
   { id: "screen-overlay", label: "Superposition du partage d’écran", native: true },
+  { id: "screen-overlay-unproven", label: "Superposition en pause, bandeau non prouvé", native: true, compositor: true },
 ]);
 
 async function bounded(work, description, signal, timeoutMs = 20000) {
@@ -60,15 +61,27 @@ function linuxShell(source) {
   return `window.EzerbotShell = Object.freeze({ platform: "linux", unavailablePanels: Object.freeze([${panels}]) });`;
 }
 
-async function overlayCapture(binary, file, signal, cleanup) {
+async function overlayCapture(binary, file, signal, cleanup, compositor) {
+  if (compositor) {
+    const manager = spawn("picom", ["--backend", "xrender"], { stdio: "ignore" });
+    const stopped = once(manager, "exit").catch(() => {});
+    cleanup.push(async () => { manager.kill("SIGKILL"); await stopped; });
+    await new Promise(done => setTimeout(done, 1000));
+  }
   const helper = spawn(join(dirname(binary), "ezerbot-linux"), ["--screen-helper", "60000"], {
     stdio: ["pipe", "pipe", "ignore"],
     env: { ...process.env, GDK_BACKEND: "x11", NO_AT_BRIDGE: "1", DBUS_SESSION_BUS_ADDRESS: "disabled:" },
   });
   const exited = once(helper, "exit").catch(() => {});
   cleanup.push(async () => { helper.kill("SIGKILL"); await exited; });
-  const [line] = await bounded(once(createInterface({ input: helper.stdout }), "line"), "Screen helper", signal);
-  if (line !== '{"ready":true}') throw new Error("Screen helper refused the lease.");
+  const lines = createInterface({ input: helper.stdout })[Symbol.asyncIterator]();
+  const { value: ready } = await bounded(lines.next(), "Screen helper", signal);
+  if (ready !== '{"ready":true}') throw new Error("Screen helper refused the lease.");
+  if (compositor) {
+    const { value: paused } = await bounded(lines.next(), "Screen helper pause", signal);
+    if (paused !== '{"event":"paused","reason":"banner"}') throw new Error("The compositor did not pause the lease.");
+    await new Promise(done => setTimeout(done, 200));
+  }
   execFileSync("import", ["-window", "root", file]);
   helper.stdin.end();
   await bounded(exited, "Screen helper exit", signal);
@@ -158,7 +171,7 @@ async function capture(sha, binary, output, signal) {
       const file = `${view.id}.png`;
       if (view.native) {
         stage = `${view.id} helper`;
-        await overlayCapture(binary, join(output, file), cancelled.signal, cleanup);
+        await overlayCapture(binary, join(output, file), cancelled.signal, cleanup, view.compositor);
         views.push({ id: view.id, label: view.label, file, ...pngInfo(readFileSync(join(output, file))) });
         continue;
       }

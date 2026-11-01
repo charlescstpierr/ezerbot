@@ -154,6 +154,7 @@ fn helper(duration: Duration) -> i32 {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
+    overlay.render(gate.tick());
     while gtk::events_pending() {
         gtk::main_iteration();
     }
@@ -335,7 +336,7 @@ impl Refusal {
             Self::NoDisplay => "Aucun affichage disponible pour partager l’écran.",
             #[cfg(any(test, not(debug_assertions)))]
             Self::WaylandNeedsPortal => {
-                "Sous Wayland, le partage d’écran exige xdg-desktop-portal et le portail de votre bureau."
+                "Le partage d’écran fonctionne sous X11 sans compositeur, pas sous Wayland."
             }
             #[cfg(any(test, not(debug_assertions)))]
             Self::Portal => "Le portail du bureau n’a pas fourni de capture.",

@@ -92,6 +92,15 @@ impl Lease {
         #[cfg(not(debug_assertions))]
         self.native.stop();
     }
+    /// The pause comes from a banner the person cannot be proven to see.
+    #[cfg(not(debug_assertions))]
+    fn unproven(&self) -> bool {
+        self.native.unproven()
+    }
+    #[cfg(debug_assertions)]
+    fn unproven(&self) -> bool {
+        false
+    }
     fn paused(&self) -> bool {
         #[cfg(not(debug_assertions))]
         if self.native.paused() {
@@ -309,7 +318,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
             .collect()
     })()
     .unwrap_or_default();
-    let session = current(ctx.db_path).filter(|l|l.live()).map(|l|json!({"bot_id":l.bot,"conversation_id":l.conversation,"id":l.id,"expires_at":l.expires,"paused":l.paused()}));
+    let session = current(ctx.db_path).filter(|l|l.live()).map(|l|json!({"bot_id":l.bot,"conversation_id":l.conversation,"id":l.id,"expires_at":l.expires,"paused":l.paused(),"unproven":l.unproven()}));
     json!({"bots":bots,"session":session,"fake":cfg!(debug_assertions)})
 }
 #[derive(Deserialize)]

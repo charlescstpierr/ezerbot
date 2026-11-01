@@ -327,7 +327,8 @@ console.log(JSON.stringify(pointerTarget(el)));
         # Evaluates the driver's real `ready` expression against a fake page. The `hidden` selector is made
         # invisible to the user while its text stays in the DOM: display:none (`hidden`), covered by an
         # opaque panel (`covered`), clipped by an ancestor with overflow:hidden (`clipped`), or only partly
-        # exposed with the expected words in the clipped part (`partial`).
+        # exposed with the expected words in the clipped part (`partial`), or carried by a descendant with
+        # opacity:0 / visibility:hidden inside a visible container (`descendant`).
         script = r"""
 const [drive, view, page, hidden, how] = [require(process.argv[1]), process.argv[2], JSON.parse(process.argv[3]), process.argv[4], process.argv[5]];
 globalThis.innerWidth = 1440; globalThis.innerHeight = 900;
@@ -339,7 +340,8 @@ const node = (selector, text) => { const index = nodes.length; const masked = se
     parentElement: masked && (how === "clipped" || how === "partial") ? clipper : null, style: { overflowX: "visible", overflowY: "visible" },
     getBoundingClientRect: () => masked && how === "hidden" ? rect(0, 0, 0, 0) : masked && how === "partial" ? rect(10, 40, 100, 400) : rect(10, 100 + 25 * index, 100, 20), contains: other => other === self || other === self.text };
   // Text layout: inside the box, except `partial` where the matched words sit 400 px down, past the clip.
-  self.text = { data: self.innerText, owner: self, rects: () => masked && how === "hidden" ? [] : masked && how === "partial" ? [rect(10, 420, 80, 16)] : [self.getBoundingClientRect()] };
+  const carrier = { checkVisibility: () => !(masked && how === "descendant") };
+  self.text = { data: self.innerText, owner: self, parentElement: carrier, rects: () => masked && how === "hidden" ? [] : masked && how === "partial" ? [rect(10, 420, 80, 16)] : [self.getBoundingClientRect()] };
   self.covered = masked && how === "covered"; nodes.push(self); return self; };
 globalThis.getComputedStyle = element => element.style;
 globalThis.NodeFilter = { SHOW_TEXT: 4 };
@@ -360,7 +362,7 @@ console.log(JSON.stringify(Boolean(eval(found.ready))));
         cases = {"thread-reply": "#chat-scroll .gb-assistant", "conversation-dark": "#chat-scroll .gb-assistant", "settings-connectors": "#settings-dialog[open] [data-panel=mcp] h3", "home-dark": "#welcome"}
         for view, hidden in cases.items():
             self.assertTrue(self.ready(view, self.PAGES[view]), view)
-            for how in ("hidden", "covered", "clipped", "partial"):
+            for how in ("hidden", "covered", "clipped", "partial", "descendant"):
                 with self.subTest(view=view, how=how):
                     self.assertFalse(self.ready(view, self.PAGES[view], hidden, how), f"{view} prêt avec {hidden} {how}")
 

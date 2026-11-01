@@ -90,6 +90,10 @@ function findVisible(target, text = "") {
     for (let current = walker.nextNode(); current; current = walker.nextNode()) { pieces.push({ node: current, start: joined.length }); joined += current.data; }
     const at = joined.indexOf(text);
     if (at < 0) return false;
+    // Each element carrying the matched characters must itself be rendered and not transparent
+    // (checkVisibility also covers its ancestors' opacity and inherited visibility).
+    const carriers = pieces.filter(item => item.start < at + text.length && item.start + item.node.data.length > at).map(item => item.node.parentElement);
+    if (!carriers.every(element => element?.checkVisibility?.({ visibilityProperty: true, opacityProperty: true }))) return false;
     const locate = offset => { const piece = pieces.findLast(item => item.start <= offset); return [piece.node, offset - piece.start]; };
     const range = document.createRange();
     range.setStart(...locate(at));

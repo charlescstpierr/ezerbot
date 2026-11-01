@@ -128,15 +128,38 @@ fn resolve_mirrors_microphones_h() {
 
 #[test]
 fn recording_targets_the_server_flags() {
-    let (program, args) = Server::PipeWire.record(Some("fixture"));
+    let dir = TestDir::new("micro");
+    let bin = stub_tools(dir.path(), "[]");
+    let session = AudioSession::isolated(dir.path(), &[("PATH", bin.to_str().unwrap())]);
+    let (program, args) = Server::PipeWire.record(&session, Some("fixture")).unwrap();
     assert_eq!(program, "pw-record");
     assert_eq!(args.first().map(String::as_str), Some("--raw"));
     assert!(args.contains(&"--target=fixture".to_string()));
     assert_eq!(args.last().map(String::as_str), Some("-"));
-    let (program, args) = Server::PulseAudio.record(None);
+    let (program, args) = Server::PulseAudio.record(&session, None).unwrap();
     assert_eq!(program, "parec");
     assert!(!args.iter().any(|arg| arg.starts_with("--device")));
     assert!(args.contains(&"--format=s16le".to_string()));
+}
+
+#[test]
+fn a_pw_record_without_raw_is_not_given_the_flag_it_refuses() {
+    let dir = TestDir::new("micro");
+    let bin = stub_tools(dir.path(), "[]");
+    fs::write(bin.join("pw-record"), "#!/bin/sh\necho --target\n").unwrap();
+    let session = AudioSession::isolated(dir.path(), &[("PATH", bin.to_str().unwrap())]);
+    let (_, args) = Server::PipeWire.record(&session, None).unwrap();
+    assert!(!args.iter().any(|arg| arg == "--raw"));
+    assert_eq!(args.last().map(String::as_str), Some("-"));
+}
+
+#[test]
+fn a_pw_record_that_cannot_describe_itself_records_nothing() {
+    let dir = TestDir::new("micro");
+    let bin = stub_tools(dir.path(), "[]");
+    fs::write(bin.join("pw-record"), "#!/bin/sh\nexit 1\n").unwrap();
+    let session = AudioSession::isolated(dir.path(), &[("PATH", bin.to_str().unwrap())]);
+    assert!(Server::PipeWire.record(&session, None).is_err());
 }
 
 #[test]

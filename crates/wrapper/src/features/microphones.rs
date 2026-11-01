@@ -77,12 +77,7 @@ impl Server {
     fn list(self, session: &AudioSession) -> Option<Sources> {
         let end = Instant::now() + SERVER_DEADLINE;
         match self {
-            Server::PipeWire => {
-                // Without `--raw`, pw-record wraps the PCM in an AU header.
-                let help = session.run("pw-record", &["--help"], end)?;
-                help.contains("--raw").then_some(())?;
-                parse_pipewire(&session.run("pw-dump", &[], end)?)
-            }
+            Server::PipeWire => parse_pipewire(&session.run("pw-dump", &[], end)?),
             Server::PulseAudio => {
                 let list = session.run("pactl", &["-f", "json", "list", "sources"], end)?;
                 let default = session.run("pactl", &["get-default-source"], end);
@@ -91,16 +86,27 @@ impl Server {
         }
     }
 
-    fn record(self, target: Option<&str>) -> (&'static str, Vec<String>) {
+    fn record(
+        self,
+        session: &AudioSession,
+        target: Option<&str>,
+    ) -> io::Result<(&'static str, Vec<String>)> {
         let rate = SAMPLE_RATE;
-        match self {
+        Ok(match self {
             Server::PipeWire => {
-                let mut args = vec![
-                    "--raw".to_string(),
+                let end = Instant::now() + SERVER_DEADLINE;
+                let help = session
+                    .run("pw-record", &["--help"], end)
+                    .ok_or(io::ErrorKind::NotFound)?;
+                // PipeWire 1.0 writes bare PCM to `-` and refuses `--raw`. Later versions
+                // start `-` with an AU header unless they are given it.
+                let raw = help.contains("--raw").then(|| "--raw".to_string());
+                let mut args: Vec<String> = raw.into_iter().collect();
+                args.extend([
                     format!("--rate={rate}"),
                     "--channels=1".into(),
                     "--format=s16".into(),
-                ];
+                ]);
                 args.extend(target.map(|id| format!("--target={id}")));
                 args.push("-".into());
                 ("pw-record", args)
@@ -116,7 +122,7 @@ impl Server {
                 args.extend(target.map(|id| format!("--device={id}")));
                 ("parec", args)
             }
-        }
+        })
     }
 }
 
@@ -337,7 +343,7 @@ impl AudioSession {
     pub fn capture(&self, selection: &Selection) -> io::Result<Capture> {
         let target =
             (!selection.system && !selection.id.is_empty()).then_some(selection.id.as_str());
-        let (program, args) = selection.server.record(target);
+        let (program, args) = selection.server.record(self, target)?;
         let child = self.command(program, &args).spawn()?;
         Ok(Capture { child })
     }

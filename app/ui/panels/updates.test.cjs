@@ -45,9 +45,11 @@ class Element {
   get textContent() { return this.children.map((child) => child?.textContent ?? String(child)).join(""); }
 }
 
-function harness(api) {
+function harness(api, { lateHost = false } = {}) {
   const bottom = new Element("div");
-  bottom.className = "sidebar-bottom";
+  bottom.className = "rail-bottom";
+  const host = new Element("div");
+  let hostMounted = !lateHost;
   const button = new Element("button");
   button.className = "account-button";
   const icon = new Element("svg");
@@ -64,6 +66,7 @@ function harness(api) {
     getElementById: (id) => {
       if (id === "settings-button") return button;
       if (id === "settings-dialog") return dialog;
+      if (id === "sidebar-updates" && hostMounted) return host;
       return null;
     },
   };
@@ -72,7 +75,7 @@ function harness(api) {
   vm.runInContext(fs.readFileSync(`${__dirname}/updates.js`, "utf8"), context);
   const section = document.createElement("section");
   panels.panel.settingsSection(section);
-  return { panels, section, button, bottom, dialog, footer };
+  return { panels, section, button, bottom, host, dialog, footer, mountHost() { hostMounted = true; } };
 }
 
 const installed = {
@@ -96,7 +99,7 @@ function byClass(root, name) {
   return root.querySelectorAll().find((el) => el.className.split(" ").includes(name));
 }
 
-function cornerOf(ui) { return byClass(ui.bottom, "update-corner"); }
+function cornerOf(ui) { return byClass(ui.host, "update-corner"); }
 function actionOf(corner) { return byClass(corner, "update-corner-action"); }
 function labelOf(corner) { return byClass(corner, "update-corner-label").textContent; }
 function errorOf(corner) { return byClass(corner, "update-corner-error"); }
@@ -143,8 +146,8 @@ test("une compilation ratée s’affiche en rouge dans le coin et reste dans les
   assert.equal(labelOf(corner), "Mettre à jour");
   assert.equal(action.attributes["aria-label"], "Mettre à jour");
   assert.equal(corner.className.includes("is-running"), false);
-  assert.equal(ui.bottom.children[0], corner);
-  assert.equal(ui.bottom.children[1], ui.button);
+  assert.deepEqual(ui.bottom.children, [ui.button]);
+  assert.deepEqual(ui.host.children, [corner]);
 
   await action.listeners.click();
   assert.deepEqual(calls, ["/api/updates/hold", "/api/updates/apply"]);
@@ -261,4 +264,17 @@ test("le premier état de capture est toujours envoyé, même sans capture", asy
   const holds = calls.filter((call) => call.path === "/api/updates/hold");
   assert.equal(holds.length, 1);
   assert.equal(holds[0].body.active, false);
+});
+
+test("un hôte tardif reçoit une seule action sans déplacer Réglages", () => {
+  const ui = harness(async () => installed, { lateHost: true });
+  ui.panels.panel.onState({ updates: { ...installed, available: true, phase: "disponible" } });
+  assert.equal(cornerOf(ui), undefined);
+  ui.mountHost();
+  for (const phase of ["disponible", "telechargement", "erreur", "a_jour"]) {
+    ui.panels.panel.onState({ updates: { ...installed, available: phase !== "a_jour", phase, running: phase === "telechargement", message: phase === "erreur" ? failure : "" } });
+    assert.equal(ui.host.children.length, 1);
+    assert.deepEqual(ui.bottom.children, [ui.button]);
+  }
+  assert.equal(cornerOf(ui).hidden, true);
 });

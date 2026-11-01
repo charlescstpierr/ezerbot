@@ -266,6 +266,7 @@
   };
   host.register({
     id: "notifications",
+    openSidebar() { button.click(); },
     settingsSection(container) { section = container; section.className = "setting-section notifications-settings"; renderSettings(); },
     onState(_, ctx) { current = ctx.conversation; if (offer && current?.id !== offer.conversationId) dismissOffer(); },
   });

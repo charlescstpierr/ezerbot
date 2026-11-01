@@ -325,7 +325,7 @@ fn failed_run_notifies_and_protected_action_waits_for_app_without_execution() {
         json!({"bot_id":"grokbot","shell":true,"files":false}),
     );
     let id2 = f.routine(now() + 700);
-    f.fake.seen.lock().unwrap().responses.push_back(tool("run_shell",json!({"command":"touch forbidden-sentinel","cwd":f.root,"timeout_ms":5000,"output_limit":4096})));
+    f.fake.seen.lock().unwrap().responses.push_back(tool("run_shell",json!({"description":"Vérifier l’arrêt de la routine","command":"touch forbidden-sentinel","cwd":f.root,"timeout_ms":5000,"output_limit":4096})));
     f.stop();
     std::thread::sleep(Duration::from_millis(750));
     assert!(f.wake().status.success());
@@ -353,7 +353,7 @@ fn protected_action_does_not_block_a_routine_by_default_and_runs_nothing() {
     let id = f.routine(now() + 700);
     {
         let mut seen = f.fake.seen.lock().unwrap();
-        seen.responses.push_back(tool("run_shell",json!({"command":"touch forbidden-sentinel","cwd":f.root,"timeout_ms":5000,"output_limit":4096})));
+        seen.responses.push_back(tool("run_shell",json!({"description":"Vérifier l’arrêt de la routine","command":"touch forbidden-sentinel","cwd":f.root,"timeout_ms":5000,"output_limit":4096})));
         seen.responses.push_back(tool(
             "complete_task",
             json!({"summary":"Commande en attente de l'accord de Charles."}),

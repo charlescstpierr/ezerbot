@@ -18,6 +18,7 @@
   let botDialogInitial = "";
   const defaultWelcome = $("welcome-description").textContent;
   let favoriteOnly = false;
+  let sidebarSection = "conversations";
   let connected = false;
   let connectionStatus = "loading";
   let busy = false;
@@ -50,13 +51,33 @@
   const pendingStates = new Set(["queued", "dispatching", "unknown"]);
 
   const panels = new Map();
+  const unavailablePanels = new Set(window.EzerbotShell?.platform === "linux" ? window.EzerbotShell.unavailablePanels : []);
+  if (window.EzerbotShell?.platform === "linux") {
+    const notice = document.createElement("p");
+    notice.id = "linux-native-services";
+    notice.textContent = "Indisponibles sous Linux : dictée, microphone, appels et mode voix, enregistrement local de réunion, capture et contrôle de l’écran, démonstrations et fenêtre flottante.";
+    $("settings-extensions").before(notice);
+    for (const paragraph of document.querySelectorAll(".setting-info p")) {
+      paragraph.textContent = paragraph.textContent.replace("sur ce Mac", "sur cet ordinateur");
+    }
+    for (const row of $("settings-shortcuts").querySelectorAll("div")) {
+      if (row.textContent.includes("Dicter un message")) row.hidden = true;
+      const key = row.querySelector("kbd");
+      if (key) key.textContent = key.textContent.replace("⌘", "Ctrl");
+    }
+  }
   const panelFailed = Symbol("panel-failed");
   const botCleanups = [];
   // Keep the original extras until a queued submission settles, even if state refresh replaces its DTO.
   const pendingSends = new Map();
   const approvalFollow = window.GrokbotChat.createApprovalFollow();
   async function openRatings() {
-    const bridge = window.webkit?.messageHandlers?.ezerbotRatings;
+    const bridge = window.webkit?.messageHandlers?.ezerbotRatings || (window.EzerbotShell?.platform === "linux" ? {
+      // Le port change à chaque lancement : le stockage du navigateur ne survivrait pas.
+      postMessage: ({ command, value }) => command === "read"
+        ? api("/api/ratings").then((data) => data.value)
+        : api("/api/ratings", { value }),
+    } : null);
     if (bridge) return window.GrokbotChat.createNativeRatingTable(bridge);
     try { return window.GrokbotChat.createRatingTable?.(localStorage) || null; }
     catch { return null; }
@@ -64,7 +85,9 @@
   // Le démarrage n’attend pas le Mac : la table native remplace la table vide dès qu’elle est lue.
   const unavailable = () => { throw new Error("Notation indisponible."); };
   let ratings = { list() { return []; }, recordGood: unavailable, recordBad: unavailable, exportDocument() { return { notations: [] }; } };
-  const ratingsReady = openRatings().then((table) => { if (table) ratings = table; }, () => {});
+  let ratingsOpening = null;
+  const ratingsReady = () => ratingsOpening ??= openRatings().then((table) => { if (table) ratings = table; }, () => { ratingsOpening = null; });
+  ratingsReady();
   let pendingRating = null;
   let findState = { open: false, query: "", index: 0, matches: [], conversationId: null };
   let followAfterLayout = null;
@@ -175,6 +198,7 @@
         panelError(panel?.id, new Error("Duplicate or missing panel id"));
         return false;
       }
+      if (unavailablePanels.has(panel.id)) return false;
       if (window.EzerbotIPhone?.remote && !["iphone", "notifications", "forms", "attachments", "multibot", "engine", "delegation", "local"].includes(panel.id)) return false;
       panels.set(panel.id, panel);
       if (!window.EzerbotIPhone?.remote || ["iphone", "notifications", "forms"].includes(panel.id)) {
@@ -184,6 +208,7 @@
       panelCall(panel, panel.composer?.mount, $("composer-attachments"));
       panelCall(panel, panel.onState, state);
       updateComposer();
+      syncSidebarRail();
       schedulePoll();
       return true;
     },
@@ -372,6 +397,7 @@
   function botName(id) { const bot = botById(id); return bot ? `${bot.name}${bot.deleted ? " (supprimé)" : ""}` : "Bot inconnu"; }
   function provider() { return state.provider || { connected: false, signin: "idle", models: [] }; }
   function streamingMessage(conversation = currentConversation()) { return conversation?.messages.find((message) => window.GrokbotChat.isPendingReply(message, conversation.kind === "group")); }
+  function runningRun(conversation = currentConversation()) { return state.engine?.runs?.find((run) => run.conversation_id === conversation?.id && run.status === "running"); }
 
   function icon(name, className = "icon") {
     const element = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -602,7 +628,7 @@
     const blockedReason = blockingPanel && panelCall(blockingPanel, blockingPanel.composer?.blockedReason);
     // The task banner is the single cancellation control. The composer only sends follow-ups.
     const control = window.GrokbotChat.composerConnectionState({ offline: connectionStatus === "offline", busy, group,
-      live: !task && Boolean(streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments)) });
+      live: !task && Boolean(runningRun() || streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments)) });
     const live = control.live;
     const noMembers = group && !currentConversation().member_ids?.length;
     ui.send.disabled = control.offline || taskFinished || (live ? ((group || task) && (control.busy || !connected)) : control.busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
@@ -626,7 +652,23 @@
   }
 
   // Changer d’écran sans ouvrir de fil (un autre bot, l’accueil) ferme aussi la page d’un sujet.
-  function notifyNavigation() { for (const panel of panels.values()) panelCall(panel, panel.onNavigate); }
+  function notifyNavigation() {
+    sidebarSection = "conversations";
+    for (const panel of panels.values()) panelCall(panel, panel.onNavigate);
+    syncSidebarRail();
+  }
+
+  function syncSidebarRail() {
+    const active = document.querySelector(".routines-dialog[open]") ? "routines"
+      : document.querySelector(".notifications-dialog[open]") ? "notifications"
+      : $("settings-dialog").open ? "settings"
+      : document.querySelector(".main-panel").dataset.view === "topic" ? "topics" : sidebarSection;
+    for (const button of document.querySelectorAll("[data-sidebar-destination]")) {
+      const id = button.dataset.sidebarDestination;
+      button.setAttribute("aria-pressed", String(id === active));
+      if (id === "topics" || id === "routines") button.hidden = !panels.has(id);
+    }
+  }
 
   function selectConversation(id, focus = false) {
     navigationGeneration++;
@@ -679,10 +721,14 @@
     let previousGroup;
     const today = new Date().toDateString();
     const yesterday = new Date(Date.now() - 86400000).toDateString();
+    const weekStart = new Date();
+    weekStart.setHours(0, 0, 0, 0);
+    weekStart.setDate(weekStart.getDate() - (weekStart.getDay() + 6) % 7);
     for (const conversation of items) {
       const bot = botById(conversation.bot_id);
-      const date = timestamp(conversation.updated_at).toDateString();
-      const group = date === today ? "Aujourd’hui" : date === yesterday ? "Hier" : "Précédemment";
+      const updated = timestamp(conversation.updated_at);
+      const date = updated.toDateString();
+      const group = date === today ? "Aujourd’hui" : date === yesterday ? "Hier" : updated >= weekStart ? "Cette semaine" : "Précédemment";
       if (group !== previousGroup) { ui.list.append(element("p", "list-group-title", group)); previousGroup = group; }
       const button = element("button", `conversation-item${conversation.id === selectedId ? " active" : ""}`);
       button.type = "button";
@@ -1081,9 +1127,6 @@
     };
     const hasMessages = Boolean(conversation?.messages.length);
     ui.findOpen = findState.open;
-    const name = state.account.name || "Espace personnel";
-    $("account-name").textContent = name;
-    $("account-avatar").textContent = name.charAt(0).toLocaleUpperCase("fr");
     ui.title.textContent = conversation?.title || "Nouvelle conversation";
     const bot = currentBot();
     const label = $("workspace-label");
@@ -1115,7 +1158,7 @@
     // Les correspondances d’un autre fil ou d’une recherche fermée ne survivent pas ; le fil validé les recalcule.
     if (!searching || findState.conversationId !== (conversation?.id || null)) findState.matches = [];
     findState.conversationId = conversation?.id || null;
-    window.GrokbotChat.renderThread(ui.messages, { messages: visibleMessages, busy: busy && connected, engineConnected: connected, providerConnected: Boolean(provider().connected), botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, find: searching ? { query, index: findState.index } : null, onFindMatches, onRateGood: rateGood, onRateBad: rateBad, memoSpeed: state.voice?.bots?.[conversation?.bot_id]?.speed, ...thread });
+    window.GrokbotChat.renderThread(ui.messages, { messages: visibleMessages, runs: state.engine?.runs, requests: state.forms?.requests, conversationId: conversation?.id, busy: busy && connected, engineConnected: connected, providerConnected: Boolean(provider().connected), botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, find: searching ? { query, index: findState.index } : null, onFindMatches, onRateGood: rateGood, onRateBad: rateBad, memoSpeed: state.voice?.bots?.[conversation?.bot_id]?.speed, ...thread });
     paintFind();
     renderThreadBanner(conversation);
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
@@ -1126,6 +1169,7 @@
     renderProvider();
     for (const panel of panels.values()) panelCall(panel, panel.onState, state);
     updateComposer();
+    syncSidebarRail();
   }
 
   function pill(kind, label, value, enabled = true) {
@@ -1392,7 +1436,8 @@
   async function sendMessage(event) {
     event.preventDefault();
     const live = streamingMessage();
-    if (live && ui.send.dataset.mode === "stop") { await generation("/api/stop", currentConversation()?.kind === "group" ? "groupe" : live.id.replace(/^reply-/, "")); return; }
+    const run = runningRun();
+    if ((run || live) && ui.send.dataset.mode === "stop") { await generation("/api/stop", currentConversation()?.kind === "group" ? "groupe" : run?.run_id || live.id.replace(/^reply-/, "")); return; }
     if (ui.send.disabled) return;
     const submittedScrollGeneration = scrollGeneration;
     const submittedDraft = ui.input.value;
@@ -1684,7 +1729,7 @@
   }
 
   async function exportConversation() {
-    await ratingsReady;
+    await ratingsReady();
     const conversation = currentConversation();
     if (!conversation) return;
     const notations = ratings.list().filter((row) => row.conversation_id === conversation.id);
@@ -1694,7 +1739,7 @@
   }
 
   async function exportRatings() {
-    await ratingsReady;
+    await ratingsReady();
     downloadJson(ratings.exportDocument(), "ezerbot-notations.json");
     closeMenu();
   }
@@ -1753,7 +1798,7 @@
   async function rateGood(message) {
     const conversation = currentConversation();
     if (!conversation || !message?.id) return;
-    await ratingsReady;
+    await ratingsReady();
     try { await ratings.recordGood({ conversationId: conversation.id, messageId: message.id, runId: message.payload?.run_id || null }); }
     catch { notify("Impossible d’enregistrer la notation."); return; }
     notify("Bon résultat enregistré.");
@@ -1850,6 +1895,43 @@
   $("sidebar-close").addEventListener("click", closeSidebar);
   $("sidebar-scrim").addEventListener("click", closeSidebar);
   $("settings-button").addEventListener("click", () => { closeSidebar(); $("settings-dialog").showModal(); });
+  const sidebarActions = {
+    conversations() {
+      if (busy) return;
+      notifyNavigation();
+      render();
+      ui.list.scrollIntoView({ block: "start" });
+      ui.list.focus({ preventScroll: true });
+    },
+    topics() {
+      if (busy || !panels.has("topics")) return;
+      notifyNavigation();
+      render();
+      sidebarSection = "topics";
+      $("sidebar-topics").scrollIntoView({ block: "start" });
+      $("new-topic").focus({ preventScroll: true });
+    },
+    routines() {
+      const panel = panels.get("routines");
+      if (panel) panelCall(panel, panel.openSidebar);
+    },
+    notifications() {
+      const panel = panels.get("notifications");
+      if (panel) panelCall(panel, panel.openSidebar);
+    },
+  };
+  for (const button of document.querySelectorAll("[data-sidebar-destination]")) {
+    button.addEventListener("click", () => {
+      sidebarActions[button.dataset.sidebarDestination]?.();
+      syncSidebarRail();
+    });
+  }
+  document.addEventListener("click", syncSidebarRail);
+  document.addEventListener("toggle", syncSidebarRail, true);
+  document.addEventListener("close", syncSidebarRail, true);
+  if (typeof MutationObserver !== "undefined") {
+    new MutationObserver(syncSidebarRail).observe(document.querySelector(".main-panel"), { attributes: true, attributeFilter: ["data-view"] });
+  }
   document.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", () => button.closest("dialog").close()));
   function applyAccent(choice) {
     accentChoice = accents.includes(choice) ? choice : "citron";
@@ -1996,7 +2078,7 @@
   $("rating-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!pendingRating) return;
-    await ratingsReady;
+    await ratingsReady();
     const selected = [...$("rating-form").querySelectorAll('input[name="motif"]')].find((input) => input.checked);
     try { await ratings.recordBad({
       conversationId: pendingRating.conversationId,

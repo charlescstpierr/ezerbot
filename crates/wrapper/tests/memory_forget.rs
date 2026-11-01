@@ -944,7 +944,7 @@ fn forgotten_text_is_redacted_from_the_yolo_activity_log() {
         call(
             "echo",
             "run_shell",
-            json!({"command":format!("printf '{secret}'"),"cwd":std::env::temp_dir(),"timeout_ms":2000,"output_limit":1024}),
+            json!({"description":"Vérifier le masquage du texte","command":format!("printf '{secret}'"),"cwd":std::env::temp_dir(),"timeout_ms":2000,"output_limit":1024}),
         ),
         complete(),
     ]);
@@ -968,7 +968,7 @@ fn a_forgotten_fact_with_newlines_or_past_the_summary_cut_leaves_no_trace_in_the
         call(
             "multi",
             "run_shell",
-            json!({"command":format!("printf '{multiline}'"),"cwd":std::env::temp_dir(),"timeout_ms":2000,"output_limit":1024}),
+            json!({"description":"Vérifier le masquage du texte","command":format!("printf '{multiline}'"),"cwd":std::env::temp_dir(),"timeout_ms":2000,"output_limit":1024}),
         ),
         complete(),
     ]);
@@ -987,7 +987,7 @@ fn a_forgotten_fact_with_newlines_or_past_the_summary_cut_leaves_no_trace_in_the
         call(
             "long",
             "run_shell",
-            json!({"command":format!("printf '{padding} {long}'"),"cwd":std::env::temp_dir(),"timeout_ms":2000,"output_limit":1024}),
+            json!({"description":"Vérifier le masquage du texte","command":format!("printf '{padding} {long}'"),"cwd":std::env::temp_dir(),"timeout_ms":2000,"output_limit":1024}),
         ),
         complete(),
     ]);

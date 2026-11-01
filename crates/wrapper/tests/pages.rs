@@ -426,6 +426,7 @@ fn anchored_message_is_kept_and_the_bot_reads_the_cited_lines() {
     assert_eq!(
         f.page()["anchors"],
         json!([{
+            "conversation_id": chat,
             "message_id": "retouche",
             "passage": "Trois forfaits",
             "state": "open",
@@ -802,6 +803,133 @@ fn deleting_the_conversation_deletes_its_anchors() {
 }
 
 #[test]
+fn a_page_keeps_its_origin_after_deletion_and_links_comments_to_the_new_conversation() {
+    let mut f = after_first_page();
+    let page = f.page();
+    let original = f.chat.clone();
+    f.post("/api/conversations/delete", json!({"id": original}));
+    let chat = f.post(
+        "/api/conversations",
+        json!({"bot_id": "grokbot", "title": "Reprise des forfaits"}),
+    )["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.answer(None);
+    f.send_in(&chat, "reprise", Some(Fixture::anchor(&page, "Confort")))
+        .unwrap();
+    f.finish("reprise");
+
+    let current = f.page();
+    assert_eq!(current["conversation_id"], original);
+    assert_eq!(
+        current["anchors"],
+        json!([{
+            "conversation_id": chat,
+            "message_id": "reprise",
+            "passage": "Confort",
+            "state": "open",
+            "source_version": page["source_version"]
+        }])
+    );
+    assert!(f.has_message(&chat, "reprise"));
+}
+
+#[test]
+fn a_page_read_does_not_scan_other_pages_anchor_history() {
+    use rusqlite::{ffi, StatementStatus};
+    use std::{
+        os::raw::{c_int, c_uint, c_void},
+        sync::atomic::AtomicI64,
+    };
+
+    unsafe extern "C" fn count_steps(
+        _event: c_uint,
+        total: *mut c_void,
+        statement: *mut c_void,
+        _elapsed: *mut c_void,
+    ) -> c_int {
+        let steps = ffi::sqlite3_stmt_status(statement.cast(), StatementStatus::VmStep as c_int, 1);
+        (*total.cast::<AtomicI64>()).fetch_add(i64::from(steps), Ordering::Relaxed);
+        0
+    }
+
+    struct Steps {
+        db: *mut ffi::sqlite3,
+        total: Box<AtomicI64>,
+    }
+
+    impl Drop for Steps {
+        fn drop(&mut self) {
+            let code = unsafe { ffi::sqlite3_trace_v2(self.db, 0, None, std::ptr::null_mut()) };
+            if code != ffi::SQLITE_OK {
+                // SQLite must stop using the counter before its allocation is freed.
+                std::process::abort();
+            }
+        }
+    }
+
+    fn read_steps(app: &mut App, route: &str) -> (i64, Value) {
+        let meter = Steps {
+            db: unsafe { app.feature_context().connection.handle() },
+            total: Box::new(AtomicI64::new(0)),
+        };
+        let code = unsafe {
+            ffi::sqlite3_trace_v2(
+                meter.db,
+                ffi::SQLITE_TRACE_PROFILE as c_uint,
+                Some(count_steps),
+                &*meter.total as *const AtomicI64 as *mut c_void,
+            )
+        };
+        assert_eq!(code, ffi::SQLITE_OK);
+        app.api("GET", route, b"").unwrap();
+        meter.total.store(0, Ordering::Relaxed);
+        let response = app.api("GET", route, b"").unwrap();
+        (meter.total.load(Ordering::Relaxed), response)
+    }
+
+    let mut f = after_first_page();
+    let page = f.page();
+    let route = format!("/api/pages/{}", page["id"].as_str().unwrap());
+    let chat = f.chat.clone();
+    f.answer(None);
+    f.send_in(&chat, "ancre", Some(Fixture::anchor(&page, "Confort")))
+        .unwrap();
+    f.finish("ancre");
+    let history = f.db();
+    let insert_history = |start: usize, end: usize| {
+        let inserted = history
+            .execute(
+                "WITH RECURSIVE history(n) AS (
+                    VALUES (?1) UNION ALL SELECT n + 1 FROM history WHERE n < ?2
+                 )
+                 INSERT INTO wrapper_page_anchors
+                    (conversation_id, message_id, page_id, passage, source_version, state, created_at)
+                 SELECT 'ancien', 'message-' || n, 'autre-page', 'Ancien passage', 'v', 'open', n
+                 FROM history",
+                rusqlite::params![start, end],
+            )
+            .unwrap();
+        assert_eq!(inserted, end - start + 1);
+    };
+    insert_history(1, 1_000);
+    let (small, first) = read_steps(&mut f.app, &route);
+    insert_history(1_001, 10_000);
+    let (large, second) = read_steps(&mut f.app, &route);
+    assert_eq!(first, second);
+    assert_eq!(first["page"]["anchors"].as_array().unwrap().len(), 1);
+    assert_eq!(first["page"]["anchors"][0]["conversation_id"], chat);
+    assert_eq!(first["page"]["anchors"][0]["message_id"], "ancre");
+    eprintln!("VmStep GET /api/pages/:id, 1,000 other anchors {small}, 10,000 {large}");
+    assert!(small > 0);
+    assert!(
+        large <= 2 * small,
+        "ten times other Pages' anchor history must cost at most twice the SQLite instructions: {small} then {large}"
+    );
+}
+
+#[test]
 fn a_message_without_anchor_behaves_as_before() {
     let mut f = after_first_page();
     f.answer(None);
@@ -925,14 +1053,25 @@ fn the_same_message_id_in_another_conversation_is_a_first_send() {
         .to_owned();
     f.send_in(&other, "ancre", Some(Fixture::anchor(&page, "Famille")))
         .unwrap();
-    let mut passages: Vec<_> = f.page()["anchors"]
+    let mut targets: Vec<_> = f.page()["anchors"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|anchor| anchor["passage"].as_str().unwrap().to_owned())
+        .map(|anchor| {
+            (
+                anchor["conversation_id"].as_str().unwrap().to_owned(),
+                anchor["message_id"].as_str().unwrap().to_owned(),
+                anchor["passage"].as_str().unwrap().to_owned(),
+            )
+        })
         .collect();
-    passages.sort();
-    assert_eq!(passages, ["Confort", "Famille"]);
+    targets.sort();
+    let mut expected = [
+        (chat, "ancre".to_owned(), "Confort".to_owned()),
+        (other, "ancre".to_owned(), "Famille".to_owned()),
+    ];
+    expected.sort();
+    assert_eq!(targets, expected);
 }
 
 #[test]

@@ -1,0 +1,31 @@
+title: Garde anti-boucle sur les appels d'outils identiques
+
+scenario:
+  id: tools-loop-guard
+  surface: tools
+  coverage:
+    primary:
+      - tools.loop-guard
+  objective: Vérifier qu'un appel d'outil identique n'est pas exécuté une 3e fois de suite, et que le bot change d'approche ou explique ce qui bloque.
+  successCriteria:
+    - Aucun appel d'outil (même nom, mêmes arguments) n'est exécuté plus de 2 fois de suite.
+    - Après un blocage, l'appel suivant est différent ou le bot termine en disant ce qui bloque.
+    - Le tour ne s'épuise pas en appels répétés.
+  codeRefs:
+    - crates/engine/src/run_loop.rs
+  execution:
+    kind: flow
+    summary: Un faux connecteur renvoie toujours la même erreur « fichier introuvable » ; notation mécanique sur la trace.
+    providerMode: live-codex
+    timeoutMs: 180000
+    retryCount: 0
+    config:
+      fakeConnectors: [files]
+      fakeBehaviors:
+        files.read: always_not_found
+      messages:
+        - "Lis le fichier notes/rapport.txt et résume-le."
+      checks:
+        - max_consecutive_identical_tool_calls <= 2
+        - final_answer_mentions_blocker_or_tool_changed
+        - turn_end != budget_exhausted

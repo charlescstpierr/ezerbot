@@ -157,7 +157,7 @@ impl Fixture {
         );
     }
     fn shell(&self, command: &str) -> Value {
-        json!({"command":command,"cwd":self.root(),"timeout_ms":2000,"output_limit":1024})
+        json!({"description":"Vérifier la commande locale","command":command,"cwd":self.root(),"timeout_ms":2000,"output_limit":1024})
     }
     fn tool_outcomes(&self, id: &str) -> Vec<Value> {
         let db = self.db();

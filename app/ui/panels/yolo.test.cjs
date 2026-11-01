@@ -104,6 +104,14 @@ test('un refus du serveur reste visible dans le panneau, sans changer l’état 
   assert.match(alert.textContent, /Bot introuvable/);
 });
 
+test('sans bac à sable le message reste visible et le choix enregistré peut passer à Demander', async () => {
+  const { root, requests } = mount({ bots, yolo: yolo({ mode: 'ask', saved: 'yolo', unavailable: 'Installez bubblewrap.' }) });
+  const alert = all(root).find(e => e.attributes.role === 'alert' && !e.hidden);
+  assert.match(alert.textContent, /bubblewrap/);
+  await all(root).find(e => e.dataset.yoloMode === 'ask').listeners.click();
+  assert.deepEqual(plain(requests), [{ path: '/api/yolo/mode', body: { mode: 'ask' } }]);
+});
+
 test('sans action automatique le journal le dit, et un état indisponible ne plante pas', () => {
   const { root } = mount({ bots, yolo: yolo({ log: [] }) });
   assert.match(root.textContent, /Aucune action faite automatiquement pour l’instant/);

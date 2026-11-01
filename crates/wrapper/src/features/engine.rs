@@ -9,7 +9,7 @@ use grokbot_engine::contracts::{
     component_version, set_component_version, ApprovalCheck, ContextBlock, ContextBudget,
     ContextEstimate, ContextRequest, ContextSource, Error, HistoryItem, ImageInput, ModelEvent,
     ModelGateway, ModelRequest, Role, RunBudgets, RunEvent, RunEventKind, RunKind, Summary,
-    SuspendCause, TaskStatus, ToolItem, ToolOutcome, ToolSpec, Trigger, TurnEnd,
+    SuspendCause, TaskStatus, ToolCall, ToolItem, ToolOutcome, ToolSpec, Trigger, TurnEnd,
 };
 use grokbot_engine::{
     compaction, context as assembler,
@@ -80,7 +80,16 @@ struct ConnectionTest {
 struct Empty {}
 
 empty_hooks!(tools, call_tool, link_attachments);
-const BASE_INSTRUCTIONS: &str = "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$. Si tu ne peux vraiment pas avancer sans une réponse de Charles, pose ta question avec l'outil attendre_reponse ; sinon avance sans la poser.";
+const BASE_INSTRUCTIONS: &str = concat!(
+    "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$. Si tu ne peux vraiment pas avancer sans une réponse de Charles, pose ta question avec l'outil attendre_reponse ; sinon avance sans la poser.",
+    "\n\nAvant le premier appel d'outil, écris une courte phrase qui dit ce que tu vas faire. ",
+    "Entre les étapes importantes d'un travail à plusieurs outils, écris une courte mise à jour en mots humains, sans commenter chaque appel. ",
+    "Termine par une réponse courte, chaleureuse et claire qui dit ce qui a été fait ou trouvé. Fournis tout le contenu demandé. ",
+    "Si un outil échoue, essaie discrètement une autre approche raisonnable en respectant les refus et les approbations. ",
+    "Sinon, explique en une phrase simple ce qui n'a pas marché et le prochain pas possible, sans jargon, code d'erreur ni sortie brute. ",
+    "N'annonce jamais un succès que les résultats ne confirment pas. ",
+    "Ne recopie pas les commandes ou les chemins sauf demande explicite.",
+);
 const INTERRUPTED: &str = "La réponse a été interrompue avant la fin. Vous pouvez la relancer.";
 const CONTEXT_TOO_LARGE: &str = "Le texte et les pièces jointes dépassent ce que le modèle peut lire en un message. Raccourcissez le texte ou joignez moins de documents dans un nouveau message.";
 fn context_budget_failed(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<bool> {
@@ -1499,6 +1508,17 @@ impl<'a> Services<'a> {
     }
 }
 impl RunServices for Services<'_> {
+    fn is_wait_tool(&self, call: &ToolCall) -> bool {
+        matches!(
+            call.name.as_str(),
+            "attendre_reponse"
+                | "delegate"
+                | "request_form"
+                | "request_secret"
+                | "request_site_form"
+        )
+    }
+
     fn context(&mut self, run: &Run) -> grokbot_engine::contracts::Result<ModelRequest> {
         let mut input = run_input(self.connection, &run.run_id)?;
         let (model, effort, service_tier): (String, Option<String>, Option<String>) =
@@ -2764,7 +2784,12 @@ fn projected_parts_with(
 ) -> grokbot_engine::contracts::Result<Vec<ReplyPart>> {
     let completed: HashSet<_> = events
         .iter()
-        .filter(|e| matches!(e.kind, RunEventKind::ToolCall | RunEventKind::TurnEnded))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                RunEventKind::ToolCall | RunEventKind::TurnEnded | RunEventKind::ResponseCompleted
+            )
+        })
         .filter_map(|e| e.payload["response"].as_u64())
         .collect();
     let last = events
@@ -3002,6 +3027,7 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         )
         .unwrap_or_else(|_| run.bot_id.clone());
     let mut outcome = result.as_ref().map(|e| e.payload["outcome"].clone());
+    let mut code = result.as_ref().map(|e| e.payload["code"].clone());
     // A cancellation settles the engine call immediately, but the process owner
     // may finish draining its bounded output a few milliseconds later.
     if event.payload["name"]
@@ -3020,6 +3046,11 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
             .flatten();
         if let Some((stored, authority)) = stored {
             if let Some(value) = stored.and_then(|s| serde_json::from_str(&s).ok()) {
+                // The engine also journals its own "unknown" result: only a different
+                // outcome settles the call.
+                if outcome.as_ref() != Some(&value) {
+                    code = None;
+                }
                 outcome = Some(value);
             }
             if let Some(value) = authority.and_then(|s| serde_json::from_str(&s).ok()) {
@@ -3041,7 +3072,7 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         "tool",
         String::new(),
         json!({"run_id":run_id,"run_status":run.status,"call":display_call,"outcome":outcome.clone(),
-            "authorized_by":admission,"requesting_bot":requester,
+            "code":code,"authorized_by":admission,"requesting_bot":requester,
             "approval_status":super::forms::tool_approval_status(ctx,run_id,&call),
             "screen_image":screen_image,
             "connector":super::mcp::call_display(ctx,&call.name,&call.arguments)}),
@@ -3775,6 +3806,201 @@ mod projection_tests {
     }
 
     #[test]
+    fn suspending_tool_catalog_stays_exempt_from_repetition_guard() {
+        let f = Fixture::new(user_trigger("cards", "wait-contracts", 0));
+        let services = Services {
+            path: &f.app.db_path,
+            provider: &f.app.provider,
+            connection: &f.app.connection,
+            cancel: Arc::new(AtomicBool::new(false)),
+            bot_id: None,
+            host_mcp: false,
+        };
+        let mut names: Vec<_> = super::super::forms::tools()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+        names.extend(["attendre_reponse".into(), "delegate".into()]);
+        for name in names {
+            assert!(services.is_wait_tool(&ToolCall {
+                call_id: "wait-contract".into(),
+                name,
+                arguments: json!({}),
+            }));
+        }
+    }
+
+    #[test]
+    fn loop_guard_stop_is_visible_in_reloaded_run_reply_and_parts() {
+        struct Gateway;
+        impl ModelGateway for Gateway {
+            fn stream(
+                &self,
+                _: &ModelRequest,
+                emit: &mut dyn FnMut(ModelEvent) -> grokbot_engine::contracts::Result<()>,
+            ) -> grokbot_engine::contracts::Result<()> {
+                for n in 0..5 {
+                    emit(ModelEvent::ToolCall {
+                        call_id: format!("repeat-{n}"),
+                        name: "fixture_effect".into(),
+                        arguments: json!({}),
+                    })?;
+                }
+                emit(ModelEvent::Completed)
+            }
+        }
+        struct Effects<'a> {
+            host: Services<'a>,
+        }
+        impl RunServices for Effects<'_> {
+            fn context(&mut self, _: &Run) -> grokbot_engine::contracts::Result<ModelRequest> {
+                Ok(ModelRequest {
+                    model: "fixture".into(),
+                    instructions: String::new(),
+                    input: vec![],
+                    tools: vec![],
+                    effort: None,
+                    service_tier: None,
+                    prompt_cache_key: None,
+                })
+            }
+            fn tools(&self) -> Vec<ToolSpec> {
+                vec![ToolSpec {
+                    name: "fixture_effect".into(),
+                    description: String::new(),
+                    schema: json!({"type":"object"}),
+                    requires_approval: false,
+                }]
+            }
+            fn call_tool(
+                &mut self,
+                conn: &Connection,
+                _: &Run,
+                _: &ToolCall,
+            ) -> grokbot_engine::contracts::Result<ToolOutcome> {
+                conn.execute("INSERT INTO loop_projection_effects VALUES (1)", [])?;
+                Ok(ToolOutcome::Done {
+                    output: json!({"ok":true}),
+                })
+            }
+            fn check_approval(
+                &mut self,
+                _: &Connection,
+                _: &Run,
+                _: &ToolCall,
+            ) -> grokbot_engine::contracts::Result<ApprovalCheck> {
+                unreachable!()
+            }
+            fn request_approval(
+                &mut self,
+                _: &Connection,
+                _: &Run,
+                _: &ToolCall,
+            ) -> grokbot_engine::contracts::Result<SuspendCause> {
+                unreachable!()
+            }
+            fn is_cancelled(&self, _: &str) -> bool {
+                false
+            }
+            fn on_run_event(
+                &mut self,
+                conn: &Connection,
+                event: &RunEvent,
+            ) -> grokbot_engine::contracts::Result<()> {
+                self.host.on_run_event(conn, event)
+            }
+        }
+        let dir = grokbot_test_support::TestDir::new("loop-guard-reply");
+        let app = App::open(&dir.to_path_buf().join("workspace.sqlite")).unwrap();
+        app.connection
+            .execute_batch("CREATE TABLE loop_projection_effects(value INTEGER)")
+            .unwrap();
+        grokbot_engine::contracts::with_tx(&app.connection, |conn| -> grokbot_engine::contracts::Result<()> {
+            conn.execute("INSERT INTO wrapper_conversations(account_id,id,title,title_customized,created_at,updated_at,bot_id) VALUES (?1,'cards','Cards',0,1,1,?2)", params![ACCOUNT,DEFAULT_BOT.id])?;
+            model::start(conn, &Run {run_id:"loop-projection".into(),bot_id:DEFAULT_BOT.id.into(),conversation_id:"cards".into(),
+                trigger:user_trigger("cards","loop-message",0),kind:RunKind::Task,status:RunStatus::Queued,
+                task_status:Some(TaskStatus::Working),turn_end:None,budgets:RunBudgets::default(),started_at:1})?;
+            conn.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES ('loop-projection','{}',0,'simulated')", [])?;
+            Ok(())
+        }).unwrap();
+        let mut effects = Effects {
+            host: Services {
+                path: &app.db_path,
+                provider: &app.provider,
+                connection: &app.connection,
+                cancel: Arc::new(AtomicBool::new(false)),
+                bot_id: None,
+                host_mcp: false,
+            },
+        };
+        assert_eq!(
+            run_loop::run(&app.connection, &Gateway, &mut effects, "loop-projection").unwrap(),
+            run_loop::RunProgress::Ended(TurnEnd::Stopped)
+        );
+        let run = store::required(&app.connection, "loop-projection").unwrap();
+        let reply = run_reply(&app.connection, &run, "loop-reply".into()).unwrap();
+        let stopped = "Le bot tournait en rond (3 appels répétés bloqués).";
+        assert_eq!(reply.state, "stopped");
+        assert_eq!(reply.body, stopped);
+        assert_eq!(
+            reply.payload["parts"].as_array().unwrap().last().unwrap()["body"],
+            stopped
+        );
+        assert_eq!(
+            app.connection
+                .query_row("SELECT count(*) FROM loop_projection_effects", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            2
+        );
+        let events = store::events(&app.connection, "loop-projection", 0).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == RunEventKind::Cancelled)
+                .count(),
+            1
+        );
+        assert!(!events
+            .iter()
+            .any(|event| event.kind == RunEventKind::TurnEnded));
+        assert_eq!(
+            store::loop_guard_count(&app.connection, "loop-projection").unwrap(),
+            3
+        );
+        assert_eq!(app.connection.query_row(
+            "SELECT count(*) FROM wrapper_messages WHERE conversation_id='cards' AND kind='engine_task'",
+            [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+        super::super::turns::record(&app.connection, "loop-projection").unwrap();
+        let summary: String = app
+            .connection
+            .query_row(
+                "SELECT entry FROM wrapper_turn_log WHERE run_id='loop-projection'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let summary: Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(summary["model_calls"], 1);
+        assert_eq!(summary["tool_calls"], 5);
+        assert_eq!(summary["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            summary["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tool| tool["code"] == "not_executed")
+                .count(),
+            3
+        );
+        for public in [summary.to_string(), reply.payload.to_string()] {
+            assert!(!public.contains("effective_attempt"));
+            assert!(!public.contains("fingerprint"));
+        }
+    }
+
+    #[test]
     fn host_failure_reports_the_journaled_outcome_instead_of_a_down_service() {
         let guard = grokbot_test_support::TestDir::new("grokbot-host-fail");
         let dir = guard.to_path_buf();
@@ -3934,6 +4160,53 @@ mod projection_tests {
         assert_eq!(reply.body, "[...]");
         assert_eq!(reply.payload["parts"].as_array().unwrap().len(), 1);
         assert_eq!(reply.payload["parts"][0]["body"], "[...]");
+    }
+
+    #[test]
+    fn an_unknown_tool_result_is_projected_until_a_definitive_outcome_replaces_it() {
+        let mut f = Fixture::new(Trigger::Occurrence {
+            occurrence_id: "routine".into(),
+        });
+        let call = f.event(
+            RunEventKind::ToolCall,
+            json!({"call_id":"call","name":"run_shell","arguments":{}}),
+        );
+        f.event(
+            RunEventKind::ToolResult,
+            json!({"call_id":"call","code":"uncertain",
+                "outcome":{"status":"failed","reason":"Appel externe interrompu."}}),
+        );
+        f.app
+            .connection
+            .execute(
+                "INSERT INTO engine_external_tools(run_id,call_id) VALUES ('projection','call')",
+                [],
+            )
+            .unwrap();
+        let id = format!("projection:{call}");
+        let mut ctx = f.app.feature_context();
+        ctx.conversation_id = Some("cards");
+        let card = entry(&ctx, "engine_tool", &id).unwrap();
+        assert_eq!(card.payload["code"], "uncertain");
+
+        ctx.connection
+            .execute(
+                "UPDATE engine_external_tools SET outcome=?1 WHERE call_id='call'",
+                [r#"{"status":"failed","reason":"Appel externe interrompu."}"#],
+            )
+            .unwrap();
+        let card = entry(&ctx, "engine_tool", &id).unwrap();
+        assert_eq!(card.payload["code"], "uncertain");
+
+        ctx.connection
+            .execute(
+                "UPDATE engine_external_tools SET outcome=?1 WHERE call_id='call'",
+                [r#"{"status":"failed","reason":"Fin confirmée."}"#],
+            )
+            .unwrap();
+        let card = entry(&ctx, "engine_tool", &id).unwrap();
+        assert_eq!(card.payload["outcome"]["reason"], "Fin confirmée.");
+        assert!(card.payload["code"].is_null());
     }
 
     #[test]

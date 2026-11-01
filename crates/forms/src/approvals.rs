@@ -82,11 +82,19 @@ fn canonical(value: &Value) -> Value {
 
 /// SHA-256 of a canonical JSON tuple; tool name and argument boundaries are bound.
 /// Object order is irrelevant; array order and all JSON value types are retained.
+/// The shell description is display-only. Keep all other fields exactly as sent
+/// so persisted grants retain their digest, including explicit or absent defaults.
 pub fn args_digest(tool: &str, arguments: &Value) -> Result<String> {
     if tool.trim().is_empty() {
         return Err(invalid("approval tool name is required"));
     }
-    let bytes = serde_json::to_vec(&(tool, canonical(arguments)))?;
+    let mut arguments = canonical(arguments);
+    if tool == "run_shell" {
+        if let Value::Object(object) = &mut arguments {
+            object.remove("description");
+        }
+    }
+    let bytes = serde_json::to_vec(&(tool, arguments))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
@@ -536,6 +544,73 @@ mod approvals_tests {
             args_digest("tool", &json!([1, 2])).unwrap(),
             args_digest("tool", &json!([2, 1])).unwrap()
         );
+    }
+
+    #[test]
+    fn shell_description_preserves_historical_grants_and_subject_rules() {
+        for legacy in [
+            json!({"command":"printf oui","cwd":"/work"}),
+            json!({"command":"printf oui","cwd":"/work","timeout_ms":30000,"output_limit":131072,"background":false}),
+        ] {
+            let conn = database();
+            let old_bytes = serde_json::to_vec(&("run_shell", &legacy)).unwrap();
+            let old_digest = format!("{:x}", Sha256::digest(old_bytes));
+            let mut approval = request("a", "e");
+            approval.kind = InputKind::Approval {
+                tool: "run_shell".into(),
+                args_digest: old_digest.clone(),
+                expires_at: 100,
+            };
+            requests::create(&conn, &approval).unwrap();
+            with_tx(&conn, |conn| {
+                decide(
+                    conn,
+                    "a",
+                    "user",
+                    ApprovalDecision::AlwaysAllow {
+                        scope: RuleScope::Subject,
+                    },
+                    1,
+                )
+            })
+            .unwrap();
+            for description in ["Lire le résultat", "Consulter le résultat autrement"] {
+                let mut current = legacy.clone();
+                current["description"] = json!(description);
+                assert_eq!(args_digest("run_shell", &current).unwrap(), old_digest);
+                assert!(
+                    crate::rules::evaluate(&conn, &approval.route, "run_shell", &current)
+                        .unwrap()
+                        .unwrap()
+                        .0
+                );
+                for (field, value) in [
+                    ("command", json!("printf non")),
+                    ("cwd", json!("/other")),
+                    ("timeout_ms", json!(1000)),
+                    ("output_limit", json!(1024)),
+                    ("background", json!(true)),
+                ] {
+                    let mut changed = current.clone();
+                    changed[field] = value;
+                    assert_ne!(args_digest("run_shell", &changed).unwrap(), old_digest);
+                    assert!(consume_allow_once(&conn, "a", "run_shell", &changed, 2).is_err());
+                    assert!(
+                        crate::rules::evaluate(&conn, &approval.route, "run_shell", &changed)
+                            .unwrap()
+                            .is_none()
+                    );
+                }
+            }
+            let mut current = legacy.clone();
+            current["description"] = json!("Lire le résultat");
+            consume_allow_once(&conn, "a", "run_shell", &current, 2).unwrap();
+            assert!(consume_allow_once(&conn, "a", "run_shell", &current, 3).is_err());
+            assert_ne!(
+                args_digest("other_tool", &current).unwrap(),
+                args_digest("other_tool", &legacy).unwrap()
+            );
+        }
     }
 
     #[test]

@@ -16,6 +16,7 @@
     microphone_busy: "Une autre capture utilise déjà le microphone. Arrêtez-la avant de continuer.",
   };
   const fallbackPhrase = "Le microphone choisi n’est plus disponible. Ezerbot utilise le microphone par défaut.";
+  const listUnavailable = "La liste des microphones est indisponible. Rouvrez l’application pour réessayer.";
   const holdMs = 500;
   const linux = () => window.EzerbotShell?.platform === "linux";
   const node = (tag, cls, text) => { const el = document.createElement(tag); el.className = cls || ""; if (text) el.textContent = text; return el; };
@@ -237,12 +238,12 @@
       microphoneNotice.textContent = errors.unavailable; return;
     }
     microphonesLoaded = true;
-    if (microphoneNotice.textContent === errors.unavailable) microphoneNotice.textContent = "";
     try {
       const result = await bridge("microphones");
+      if ([errors.unavailable, listUnavailable].includes(microphoneNotice.textContent)) microphoneNotice.textContent = "";
       renderMicrophones(result.microphones || []);
       if (chosenMicrophone() && !(result.microphones || []).some((choice) => choice.id === chosenMicrophone())) await forgetMicrophone();
-    } catch { microphoneNotice.textContent = "La liste des microphones est indisponible. Rouvrez l’application pour réessayer."; }
+    } catch { microphoneNotice.textContent = listUnavailable; }
   }
   const panel = {
     id: "voice",

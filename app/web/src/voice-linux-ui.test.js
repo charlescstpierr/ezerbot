@@ -26,7 +26,8 @@ function fixture({ shell = { platform: "linux" }, route, chosen = "" } = {}) {
     async refresh() {},
     notify(text) { notices.push(text); },
   };
-  const document = { documentElement: { lang: "fr" }, createElement: tag => new Element(tag), getElementById: () => null, createTextNode: text => Object.assign(new Element("text"), { textContent: text }) };
+  const settingsButton = { addEventListener(_, listener) { window.settingsClick = listener; } };
+  const document = { documentElement: { lang: "fr" }, createElement: tag => new Element(tag), getElementById: id => id === "settings-button" ? settingsButton : null, createTextNode: text => Object.assign(new Element("text"), { textContent: text }) };
   const window = { GrokbotPanels: host, EzerbotShell: shell, addEventListener() {} };
   runInNewContext(readFileSync(new URL("../../ui/panels/voice.js", import.meta.url), "utf8"), { window, document, crypto: { randomUUID: () => "token" }, setTimeout() {}, clearTimeout() {} });
   const section = new Element("div");
@@ -76,6 +77,20 @@ test("an unreachable audio server keeps the choice and says the list is unavaila
   assert.ok(!f.texts().includes(phrase));
   assert.deepEqual(f.saved(), []);
   assert.equal(f.notices.length, 0);
+});
+
+test("the unavailable notice leaves as soon as the audio server answers again", async () => {
+  const unavailable = Object.assign(new Error("Aucun serveur audio ne répond."), { status: 503 });
+  let down = true;
+  const listing = route(listed);
+  const f = fixture({ chosen: "usb", route: async (path, body) => { if (down) throw unavailable; return listing(path, body); } });
+  await flush(); await flush();
+  assert.ok(f.texts().some(text => text.startsWith("La liste des microphones est indisponible")));
+  down = false;
+  f.window.settingsClick();
+  await flush(); await flush();
+  assert.deepEqual(f.options().map(el => el.dataset.id), ["", "systeme", "usb"]);
+  assert.ok(!f.texts().some(text => text.startsWith("La liste des microphones est indisponible")));
 });
 
 test("outside Linux the default row stays the Mac's and the route is never called", async () => {

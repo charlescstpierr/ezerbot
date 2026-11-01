@@ -290,10 +290,18 @@ impl AudioSession {
     }
 
     fn sources(&self) -> Result<(Server, Sources), Unavailable> {
-        Server::ALL
-            .into_iter()
-            .find_map(|server| Some((server, server.list(self)?)))
-            .ok_or(Unavailable)
+        // PipeWire can run for video only, next to a PulseAudio that holds the microphones.
+        let mut silent = None;
+        for server in Server::ALL {
+            let Some(sources) = server.list(self) else {
+                continue;
+            };
+            if !sources.inputs.is_empty() {
+                return Ok((server, sources));
+            }
+            silent.get_or_insert((server, sources));
+        }
+        silent.ok_or(Unavailable)
     }
 
     /// The input devices, the system default first.

@@ -149,6 +149,51 @@ fn no_server_is_unavailable_not_an_empty_list() {
     assert!(error.message.starts_with("Aucun serveur audio"));
 }
 
+/// A PATH where `pw-dump` answers `[]` and `pactl` lists `pulse_sources`.
+fn stub_tools(dir: &Path, pulse_sources: &str) -> PathBuf {
+    let bin = dir.join("bin");
+    fs::create_dir(&bin).unwrap();
+    for (name, body) in [
+        ("pw-record", "echo --raw".to_string()),
+        ("pw-dump", "echo '[]'".to_string()),
+        (
+            "pactl",
+            format!("[ \"$1\" = get-default-source ] && echo usb || echo '{pulse_sources}'"),
+        ),
+    ] {
+        let mut tool = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o755)
+            .open(bin.join(name))
+            .unwrap();
+        writeln!(tool, "#!/bin/sh\n{body}").unwrap();
+    }
+    bin
+}
+
+#[test]
+fn a_pipewire_without_audio_inputs_leaves_the_turn_to_pulseaudio() {
+    let dir = TempDir::new();
+    let bin = stub_tools(
+        dir.path(),
+        r#"[{"name":"usb","description":"Micro USB","monitor_source":""}]"#,
+    );
+    let session = AudioSession::isolated(dir.path(), &[("PATH", bin.to_str().unwrap())]);
+    assert_eq!(session.available().unwrap(), vec![mic("usb", "Micro USB")]);
+    let selection = session.resolve("usb").unwrap();
+    assert!(!selection.fallback);
+    assert_eq!(selection.server, Server::PulseAudio);
+}
+
+#[test]
+fn servers_that_answer_without_inputs_are_an_empty_list() {
+    let dir = TempDir::new();
+    let bin = stub_tools(dir.path(), "[]");
+    let session = AudioSession::isolated(dir.path(), &[("PATH", bin.to_str().unwrap())]);
+    assert_eq!(session.available(), Ok(Vec::new()));
+}
+
 #[test]
 fn a_hung_tool_is_killed_at_its_deadline() {
     let dir = TempDir::new();
@@ -586,6 +631,10 @@ fn scenario(headless: Option<Headless>, label: &str) {
         silence.len()
     );
     assert!(silence.len() >= wanted);
+    assert!(
+        samples(&silence).iter().all(|sample| *sample == 0),
+        "the silent system default was not the source recorded"
+    );
 }
 
 #[test]

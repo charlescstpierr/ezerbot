@@ -317,7 +317,7 @@ console.log(JSON.stringify(pointerTarget(el)));
         self.assertIn("| `parametres-connecteurs` | `settings-connectors-add` | `captures/settings-connectors-add.png` | ÉCHEC |", lines)
 
     PAGES = {
-        "home-dark": {"#conversation-title": ["Nouvelle conversation"], "#welcome": ["Bienvenue"], ".gb-editor": [""]},
+        "home-dark": {"#conversation-title": ["Nouvelle conversation"], "#welcome": ["Une idée en tête ?"], ".gb-editor": [""]},
         "conversation-dark": {"#conversation-title": ["Préparer la semaine"], "#chat-scroll .gb-user": ["Bonjour, prépare une courte liste pour organiser ma semaine."], "#chat-scroll .gb-assistant": ["Voici votre document."]},
         "thread-reply": {"#thread-banner-quote": ["Bonjour, prépare une courte liste"], "#chat-scroll .gb-user": ["Et en un mot ?"], "#chat-scroll .gb-assistant": ["Voici votre document."]},
         "settings-connectors": {"#settings-dialog[open] [data-panel=mcp] h3": ["Connecteurs"], "#settings-dialog[open] [data-panel=mcp]": ["Connecteurs"]},
@@ -326,21 +326,27 @@ console.log(JSON.stringify(pointerTarget(el)));
     def ready(self, view: str, page: dict, hidden: str | None = None, how: str = "hidden") -> bool:
         # Evaluates the driver's real `ready` expression against a fake page. The `hidden` selector is made
         # invisible to the user while its text stays in the DOM: display:none (`hidden`), covered by an
-        # opaque panel (`covered`) or clipped by an ancestor with overflow:hidden (`clipped`).
+        # opaque panel (`covered`), clipped by an ancestor with overflow:hidden (`clipped`), or only partly
+        # exposed with the expected words in the clipped part (`partial`).
         script = r"""
 const [drive, view, page, hidden, how] = [require(process.argv[1]), process.argv[2], JSON.parse(process.argv[3]), process.argv[4], process.argv[5]];
 globalThis.innerWidth = 1440; globalThis.innerHeight = 900;
 const nodes = []; const cover = { tag: "cover" };
 const rect = (left, top, width, height) => ({ left, top, width, height, right: left + width, bottom: top + height });
-const clipper = { parentElement: null, getBoundingClientRect: () => rect(0, 0, 1440, 5), style: { overflowX: "hidden", overflowY: "hidden" } };
+const clipper = { parentElement: null, getBoundingClientRect: () => rect(0, 0, 1440, how === "partial" ? 60 : 5), style: { overflowX: "hidden", overflowY: "hidden" } };
 const node = (selector, text) => { const index = nodes.length; const masked = selector === hidden;
   const self = { textContent: text, innerText: masked && how === "hidden" ? "" : text, checkVisibility: () => !(masked && how === "hidden"),
-    parentElement: masked && how === "clipped" ? clipper : null, style: { overflowX: "visible", overflowY: "visible" },
-    getBoundingClientRect: () => masked && how === "hidden" ? rect(0, 0, 0, 0) : rect(10, 40 + 30 * index, 100, 20), contains: other => other === self };
+    parentElement: masked && (how === "clipped" || how === "partial") ? clipper : null, style: { overflowX: "visible", overflowY: "visible" },
+    getBoundingClientRect: () => masked && how === "hidden" ? rect(0, 0, 0, 0) : masked && how === "partial" ? rect(10, 40, 100, 400) : rect(10, 100 + 25 * index, 100, 20), contains: other => other === self || other === self.text };
+  // Text layout: inside the box, except `partial` where the matched words sit 400 px down, past the clip.
+  self.text = { data: self.innerText, owner: self, rects: () => masked && how === "hidden" ? [] : masked && how === "partial" ? [rect(10, 420, 80, 16)] : [self.getBoundingClientRect()] };
   self.covered = masked && how === "covered"; nodes.push(self); return self; };
 globalThis.getComputedStyle = element => element.style;
+globalThis.NodeFilter = { SHOW_TEXT: 4 };
 globalThis.document = {
   querySelectorAll: selector => (page[selector] ?? []).map(text => node(selector, text)),
+  createTreeWalker: root => { let done = false; return { nextNode: () => done ? null : (done = true, root.text) }; },
+  createRange: () => { let owner = null; return { setStart: node => { owner = node; }, setEnd: () => {}, getClientRects: () => owner.rects() }; },
   elementFromPoint: (x, y) => { const found = [...nodes].reverse().find(item => { const box = item.getBoundingClientRect(); return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom; }); return found?.covered ? cover : found ?? null; },
 };
 globalThis.GrokbotPanels = { state: { conversations: [] } };
@@ -354,7 +360,7 @@ console.log(JSON.stringify(Boolean(eval(found.ready))));
         cases = {"thread-reply": "#chat-scroll .gb-assistant", "conversation-dark": "#chat-scroll .gb-assistant", "settings-connectors": "#settings-dialog[open] [data-panel=mcp] h3", "home-dark": "#welcome"}
         for view, hidden in cases.items():
             self.assertTrue(self.ready(view, self.PAGES[view]), view)
-            for how in ("hidden", "covered", "clipped"):
+            for how in ("hidden", "covered", "clipped", "partial"):
                 with self.subTest(view=view, how=how):
                     self.assertFalse(self.ready(view, self.PAGES[view], hidden, how), f"{view} prêt avec {hidden} {how}")
 

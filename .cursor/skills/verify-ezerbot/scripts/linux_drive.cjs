@@ -24,7 +24,7 @@ const notPending = `!GrokbotPanels.state.conversations.find(item => item.id === 
 // The nine views, in order: id, how it is reached, and what must be visible before the capture.
 const DRIVEN = Object.freeze([
   { id: "home-dark", label: "Accueil", action: "GrokbotPanels.leaveConversation()", visible: "findVisible('.gb-editor')",
-    ready: "expectVisibleText('#conversation-title', 'Nouvelle conversation') && expectVisibleText('#welcome') && expectVisibleText('.gb-editor')" },
+    ready: "expectVisibleText('#conversation-title', 'Nouvelle conversation') && expectVisibleText('#welcome', 'Une idée en tête') && expectVisibleText('.gb-editor')" },
   { id: "conversation-dark", label: "Conversation factice", action: "GrokbotPanels.openConversation(window.captureConversationId)", visible: "findVisible('#conversation-title')",
     ready: `expectVisibleText('#conversation-title', 'Préparer la semaine') && expectVisibleText('#chat-scroll .gb-user', ${q(QUESTION)}) && expectVisibleText('#chat-scroll .gb-assistant', ${q(REPLY)})` },
   { id: "thread-menu", label: "Menu du message", visible: REPLY_ITEM, click: `${QUESTION_MESSAGE}?.querySelector('button[aria-label="Actions du message"]')`,

@@ -80,7 +80,26 @@ function findVisible(target, text = "") {
     // Not covered: the topmost element at the centre of the exposed area belongs to the node.
     const hit = document.elementFromPoint((area.left + area.right) / 2, (area.top + area.bottom) / 2);
     if (!(hit && (hit === node || node.contains(hit)))) return false;
-    return String(node.innerText ?? "").includes(text);
+    if (!text) return true;
+    if (!String(node.innerText ?? "").includes(text)) return false;
+    // The text itself must be on screen, not only its container: every rectangle of the matched characters
+    // lies inside the exposed area and hit-tests to the node.
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+    const pieces = [];
+    let joined = "";
+    for (let current = walker.nextNode(); current; current = walker.nextNode()) { pieces.push({ node: current, start: joined.length }); joined += current.data; }
+    const at = joined.indexOf(text);
+    if (at < 0) return false;
+    const locate = offset => { const piece = pieces.findLast(item => item.start <= offset); return [piece.node, offset - piece.start]; };
+    const range = document.createRange();
+    range.setStart(...locate(at));
+    range.setEnd(...locate(at + text.length - 1).map((value, i) => i ? value + 1 : value));
+    const rects = [...range.getClientRects()].filter(item => item.width > 0 && item.height > 0);
+    return rects.length > 0 && rects.every(item => {
+      if (item.left < area.left - 1 || item.top < area.top - 1 || item.right > area.right + 1 || item.bottom > area.bottom + 1) return false;
+      const covering = document.elementFromPoint((item.left + item.right) / 2, (item.top + item.bottom) / 2);
+      return Boolean(covering && (covering === node || node.contains(covering)));
+    });
   }) ?? null;
 }
 

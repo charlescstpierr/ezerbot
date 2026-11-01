@@ -35,11 +35,11 @@ Une vue manquante ou cassée donne `FIX` : `result.json` nomme l’étape qui a 
 
 ### Ce que la preuve garantit / ne garantit pas
 
-Chaque vue n'est capturée que lorsque son contenu est **visible** pour l'utilisateur : élément rendu, non transparent, zone exposée non nulle après rognage par la fenêtre et par tout ancêtre qui masque son débordement, non recouvert (l'élément au centre de cette zone lui appartient), texte lu par `innerText` (jamais `textContent`). Toutes les assertions passent par `findVisible` / `expectVisibleText` ; les clics sont de vrais clics pointeur sur une cible visible.
+Chaque vue n'est capturée que lorsque son contenu est **visible** pour l'utilisateur : élément rendu, non transparent, zone exposée non nulle après rognage par la fenêtre et par tout ancêtre qui masque son débordement, non recouvert (l'élément au centre de cette zone lui appartient) ; le texte attendu lui-même (chaque rectangle de ses caractères) est dans cette zone et non recouvert, jamais via `textContent`. Toutes les assertions passent par `findVisible` / `expectVisibleText` ; les clics sont de vrais clics pointeur sur une cible visible.
 
 | Vue | Garantit |
 |---|---|
-| `home-dark` | titre « Nouvelle conversation », accueil et éditeur visibles |
+| `home-dark` | titre « Nouvelle conversation », accueil « Une idée en tête » et éditeur visibles |
 | `conversation-dark` | titre « Préparer la semaine », question de l'utilisateur et réponse « Voici votre document. » visibles |
 | `thread-menu` | clic réel sur « Actions du message » de la question ; « Répondre en fil » visible et cliquable |
 | `thread-open` | clic réel sur « Répondre en fil » ; citation de la question et titre « Fil » visibles ; aucun message visible |

@@ -1,11 +1,12 @@
 use super::*;
+use grokbot_test_support::TestDir;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -140,7 +141,7 @@ fn recording_targets_the_server_flags() {
 
 #[test]
 fn no_server_is_unavailable_not_an_empty_list() {
-    let dir = TempDir::new();
+    let dir = TestDir::new("micro");
     let session = AudioSession::isolated(dir.path(), &[("PULSE_SERVER", "unix:/ezerbot-absent")]);
     assert_eq!(session.available(), Err(Unavailable));
     assert!(session.resolve("fixture").is_err());
@@ -174,7 +175,7 @@ fn stub_tools(dir: &Path, pulse_sources: &str) -> PathBuf {
 
 #[test]
 fn a_pipewire_without_audio_inputs_leaves_the_turn_to_pulseaudio() {
-    let dir = TempDir::new();
+    let dir = TestDir::new("micro");
     let bin = stub_tools(
         dir.path(),
         r#"[{"name":"usb","description":"Micro USB","monitor_source":""}]"#,
@@ -188,7 +189,7 @@ fn a_pipewire_without_audio_inputs_leaves_the_turn_to_pulseaudio() {
 
 #[test]
 fn servers_that_answer_without_inputs_are_an_empty_list() {
-    let dir = TempDir::new();
+    let dir = TestDir::new("micro");
     let bin = stub_tools(dir.path(), "[]");
     let session = AudioSession::isolated(dir.path(), &[("PATH", bin.to_str().unwrap())]);
     assert_eq!(session.available(), Ok(Vec::new()));
@@ -196,7 +197,7 @@ fn servers_that_answer_without_inputs_are_an_empty_list() {
 
 #[test]
 fn an_empty_pipewire_next_to_a_failing_pulseaudio_is_unavailable_not_an_empty_list() {
-    let dir = TempDir::new();
+    let dir = TestDir::new("micro");
     let bin = stub_tools(dir.path(), "[]");
     fs::write(bin.join("pactl"), "#!/bin/sh\n[ \"$1\" = --version ]\n").unwrap();
     let session = AudioSession::isolated(dir.path(), &[("PATH", bin.to_str().unwrap())]);
@@ -205,7 +206,7 @@ fn an_empty_pipewire_next_to_a_failing_pulseaudio_is_unavailable_not_an_empty_li
 
 #[test]
 fn a_failing_pipewire_next_to_an_empty_pulseaudio_is_unavailable_not_an_empty_list() {
-    let dir = TempDir::new();
+    let dir = TestDir::new("micro");
     let bin = stub_tools(dir.path(), "[]");
     fs::write(bin.join("pw-dump"), "#!/bin/sh\n[ \"$1\" = --version ]\n").unwrap();
     let session = AudioSession::isolated(dir.path(), &[("PATH", bin.to_str().unwrap())]);
@@ -215,7 +216,7 @@ fn a_failing_pipewire_next_to_an_empty_pulseaudio_is_unavailable_not_an_empty_li
 
 #[test]
 fn an_empty_pipewire_without_pulseaudio_tools_is_an_empty_list() {
-    let dir = TempDir::new();
+    let dir = TestDir::new("micro");
     let bin = stub_tools(dir.path(), "[]");
     fs::remove_file(bin.join("pactl")).unwrap();
     let session = AudioSession::isolated(dir.path(), &[("PATH", bin.to_str().unwrap())]);
@@ -224,7 +225,7 @@ fn an_empty_pipewire_without_pulseaudio_tools_is_an_empty_list() {
 
 #[test]
 fn a_hung_tool_is_killed_at_its_deadline() {
-    let dir = TempDir::new();
+    let dir = TestDir::new("micro");
     let session = AudioSession::isolated(dir.path(), &[]);
     let started = Instant::now();
     let end = started + Duration::from_millis(300);
@@ -238,7 +239,7 @@ fn a_hung_tool_is_killed_at_its_deadline() {
     );
 }
 
-// Headless servers. Each scenario starts a private daemon in a short /tmp directory,
+// Headless servers. Each scenario starts a private daemon in its own directory,
 // feeds the fixture through a FIFO source and records it with the production code.
 
 const REQUIRE_AUDIO: &str = "EZERBOT_REQUIRE_AUDIO";
@@ -265,31 +266,6 @@ fn fixture_pcm() -> &'static [u8] {
     &include_bytes!("../../tests/fixtures/voice.wav")[44..]
 }
 
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        // Not $TMPDIR: a long path overflows sun_path.
-        static COUNT: AtomicU32 = AtomicU32::new(0);
-        let path = PathBuf::from(format!(
-            "/tmp/ezmic-{}-{}",
-            std::process::id(),
-            COUNT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        TempDir(path)
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 struct Process(Child);
 
 impl Drop for Process {
@@ -307,7 +283,7 @@ struct Headless {
     fifo: PathBuf,
     /// Dropped before `dir`, which they run in.
     _processes: Vec<Process>,
-    dir: TempDir,
+    dir: TestDir,
 }
 
 /// A missing audio tool fails the test where the scenario must run: on CI or on request.
@@ -375,7 +351,7 @@ impl Headless {
             return None;
         }
         let (system_name, fixture_name) = NAMES[0];
-        let dir = TempDir::new();
+        let dir = TestDir::new("micro");
         let path = dir.path().display().to_string();
         let socket = format!("unix:{path}/native");
         let processes = vec![daemon(
@@ -439,7 +415,7 @@ impl Headless {
             return None;
         }
         let (system_name, fixture_name) = NAMES[1];
-        let dir = TempDir::new();
+        let dir = TestDir::new("micro");
         let path = dir.path().display().to_string();
         let config = dir.path().join("cfg/pipewire/pipewire.conf.d");
         fs::create_dir_all(&config).unwrap();
@@ -453,29 +429,48 @@ context.modules = [ {{ name = libpipewire-module-pipe-tunnel args = {{ tunnel.mo
             ),
         )
         .unwrap();
-        let session_config = dir.path().join("cfg/wireplumber/wireplumber.conf.d");
-        fs::create_dir_all(&session_config).unwrap();
-        // The private directories do not hide /dev/snd: without this a real microphone joins the list.
-        fs::write(
-            session_config.join("fixture.conf"),
-            "wireplumber.profiles = { main = { hardware.audio = disabled hardware.bluetooth = disabled hardware.video-capture = disabled } }\n",
-        )
-        .unwrap();
+        // The private directories do not hide /dev/snd: without these a real microphone joins the
+        // list. WirePlumber 0.5 reads the first file, 0.4 (Ubuntu 24.04) the Lua ones.
+        for (file, content) in [
+            (
+                "wireplumber.conf.d/fixture.conf",
+                "wireplumber.profiles = { main = { hardware.audio = disabled hardware.bluetooth = disabled hardware.video-capture = disabled } }\n",
+            ),
+            (
+                "main.lua.d/51-fixture.lua",
+                concat!(
+                    "alsa_monitor.enabled = false\n",
+                    "v4l2_monitor.enabled = false\n",
+                    "libcamera_monitor.enabled = false\n",
+                    // WirePlumber 0.4 exits on this plugin when there is no session bus.
+                    "default_access.properties[\"enable-flatpak-portal\"] = false\n",
+                ),
+            ),
+            ("bluetooth.lua.d/51-fixture.lua", "bluez_monitor.enabled = false\n"),
+        ] {
+            let file = dir.path().join("cfg/wireplumber").join(file);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, content).unwrap();
+        }
         let env = [
             ("XDG_CONFIG_HOME", format!("{path}/cfg")),
             ("XDG_STATE_HOME", format!("{path}/state")),
         ];
         let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
         // A custom minimal config hung pw-dump: keep the stock one and add a drop-in.
-        let processes = vec![
-            daemon("pipewire", &[], dir.path(), &env),
-            daemon("wireplumber", &[], dir.path(), &env),
-        ];
+        let mut processes = vec![daemon("pipewire", &[], dir.path(), &env)];
         let session = AudioSession::isolated(dir.path(), &[]);
+        // WirePlumber exits at once when the server's socket is not there yet.
+        assert!(
+            wait_until(STARTUP, || Server::PipeWire.list(&session).is_some()),
+            "pipewire did not start"
+        );
+        processes.push(daemon("wireplumber", &[], dir.path(), &env));
         let fifo = dir.path().join("mic.fifo");
+        // The default comes from WirePlumber's metadata: without it nothing links a recording.
         let ready = || {
-            session.available().is_ok_and(|inputs| {
-                inputs.first().is_some_and(|first| first.id == "systeme") && inputs.len() == 2
+            Server::PipeWire.list(&session).is_some_and(|sources| {
+                sources.default.is_some_and(|mic| mic.id == "systeme") && sources.inputs.len() == 2
             })
         };
         assert!(

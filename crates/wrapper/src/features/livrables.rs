@@ -99,8 +99,8 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Registers a creation made by the tool call that has just succeeded. A call with no run
-/// (a hidden probe) has no thread card and makes no livrable.
+/// Registers a creation made by the tool call that has just succeeded, and says whether this
+/// card is new. A call with no run (a hidden probe) has no thread card and makes no livrable.
 pub fn record(
     conn: &Connection,
     ctx: &Context<'_>,
@@ -109,9 +109,9 @@ pub fn record(
     reference: &str,
     title: &str,
     open_url: &str,
-) -> Result<(), ApiError> {
+) -> Result<bool, ApiError> {
     if ctx.run_id.is_none() {
-        return Ok(());
+        return Ok(false);
     }
     let card = super::images::tool_message_id(ctx, call_id).map_err(|_| {
         ApiError::new(
@@ -135,7 +135,7 @@ pub fn record(
     if inserted > 0 {
         super::disclosure::stamp(conn, "creation", &card)?;
     }
-    Ok(())
+    Ok(inserted > 0)
 }
 
 /// Creation history is never scanned here. Deleted origins hide their creations.

@@ -123,10 +123,7 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
                     ctx.now_ms
                 ],
             )?;
-            if inserted > 0 {
-                super::disclosure::stamp(ctx.connection, "document", &file.id)?;
-            }
-            super::livrables::record(
+            let created = super::livrables::record(
                 ctx.connection,
                 ctx,
                 &call.call_id,
@@ -135,6 +132,9 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
                 &file.name,
                 &file.preview_url,
             )?;
+            if inserted > 0 || created {
+                super::disclosure::stamp(ctx.connection, "document", &file.id)?;
+            }
             Ok(json!(file))
         })();
         if stored.is_err() {
@@ -454,8 +454,8 @@ pub const SOURCE_CARD: &str =
 pub const SOURCE_CALL: &str = "SELECT json_extract(payload,'$.arguments') FROM engine_run_events WHERE run_id=?1 AND seq=?2 AND kind='tool_call'";
 /// Shown when the text a preview was drawn from is lost: nothing in it can be checked.
 const HIDDEN: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 320 144\"><rect width=\"320\" height=\"144\" fill=\"#fff\"/><text x=\"24\" y=\"76\" fill=\"#172033\" font-family=\"Arial,Helvetica,sans-serif\" font-size=\"14\">Aperçu indisponible</text></svg>";
-/// The stored preview is the bot's text once escaped, wrapped and cut: a secret the vault
-/// learned since no longer matches there. The text is masked first, then drawn again.
+/// The stored preview is the bot's text once decoded, escaped, wrapped and cut: a secret the
+/// vault learned since no longer matches there. Each text is masked as drawn, then redrawn.
 fn preview(conn: &Connection, file: &File) -> Result<String, ApiError> {
     super::disclosure::read(conn, |patterns| {
         if !patterns.covers_file(conn, &file.id)? {
@@ -464,25 +464,20 @@ fn preview(conn: &Connection, file: &File) -> Result<String, ApiError> {
         let Some(request) = source(conn, file)? else {
             return Ok(HIDDEN.into());
         };
-        let masked = match request.json() {
-            Some(decoded) => {
-                let masked = patterns.value(&decoded)?;
-                (masked != decoded).then(|| masked.to_string())
-            }
-            None => {
-                let masked = patterns.text(&request.content);
-                (masked != request.content).then_some(masked)
-            }
-        };
-        let Some(content) = masked else {
+        let mut found = false;
+        let masked = request.masked(|text| {
+            let masked = patterns.text(text);
+            found |= masked != text;
+            masked
+        });
+        if !found {
             return Ok(conn.query_row(
                 "SELECT preview FROM attachments_generated WHERE id=?1",
                 [&file.id],
                 |r| r.get(0),
             )?);
-        };
-        Ok(generation::generate(&Request { content, ..request })
-            .map_or_else(|_| HIDDEN.into(), |masked| masked.preview))
+        }
+        Ok(generation::generate(&masked).map_or_else(|_| HIDDEN.into(), |masked| masked.preview))
     })
 }
 /// What the bot wrote: the arguments of the call that created the file, or the bytes of a

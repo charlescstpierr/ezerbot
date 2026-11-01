@@ -705,6 +705,20 @@ fn the_preview_masks_a_secret_only_its_drawing_shows() {
 }
 
 #[test]
+fn the_preview_masks_a_secret_of_several_lines_in_a_cell() {
+    const SECRET: &str = "premiere-ligne-r13\nseconde-ligne-r13";
+    const DRAWN: &str = "premiere-ligne-r13 seconde-ligne-r13";
+    let content = json!([["Public"], [SECRET]]).to_string();
+    let (before, after) = previews("csv", &content, SECRET);
+    assert!(before.contains(DRAWN), "{before}");
+    assert!(!after.contains(DRAWN), "{after}");
+    assert!(
+        after.contains("Public") && after.contains("[...]"),
+        "{after}"
+    );
+}
+
+#[test]
 fn a_secret_absent_from_the_text_leaves_the_preview_untouched() {
     let (before, after) = previews("md", "Été à Québec", "font-family");
     assert!(before.contains("font-family="), "{before}");

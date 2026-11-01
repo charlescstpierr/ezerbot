@@ -17,6 +17,7 @@
   };
   const fallbackPhrase = "Le microphone choisi n’est plus disponible. Ezerbot utilise le microphone par défaut.";
   const holdMs = 500;
+  const linux = () => window.EzerbotShell?.platform === "linux";
   const node = (tag, cls, text) => { const el = document.createElement(tag); el.className = cls || ""; if (text) el.textContent = text; return el; };
   const key = (ctx) => ctx.conversation?.id || `new:${ctx.bot?.id || "grokbot"}`;
   let context, control, memoMode, mic, region, row, statusText, meter, timer, cancel, retry, settings, list;
@@ -54,6 +55,8 @@
     // This route and adapter do not exist in release builds. Never fall back to
     // getUserMedia or browser SpeechRecognition (including during QA).
     if (context?.state?.voice?.debug_fake) return panels.api("/api/voice/debug", body);
+    // The wrapper lists the audio inputs; the route answers the main frame at the loopback origin only.
+    if (linux() && command === "microphones") return panels.api("/api/voice/microphones");
     return { status: "unavailable" };
   }
   panels.voiceActive = live;
@@ -209,7 +212,7 @@
     microphoneChoices = choices;
     const chosen = chosenMicrophone();
     microphoneList.replaceChildren();
-    for (const choice of [{ id: "", name: "Microphone par défaut du Mac" }, ...choices]) {
+    for (const choice of [{ id: "", name: linux() ? "Microphone par défaut du système" : "Microphone par défaut du Mac" }, ...choices]) {
       const selected = choice.id === chosen;
       const option = node("label", "voice-microphone-option"); option.dataset.id = choice.id; option.dataset.selected = String(selected);
       const radio = node("input"); radio.type = "radio"; radio.name = "voice-microphone"; radio.checked = selected;
@@ -230,7 +233,7 @@
   }
   async function loadMicrophones() {
     if (!microphoneList) return;
-    if (!window.webkit?.messageHandlers?.ezerbotVoice && !context?.state?.voice?.debug_fake) {
+    if (!window.webkit?.messageHandlers?.ezerbotVoice && !context?.state?.voice?.debug_fake && !linux()) {
       microphoneNotice.textContent = errors.unavailable; return;
     }
     microphonesLoaded = true;
@@ -240,7 +243,7 @@
       if (chosenMicrophone() && !(result.microphones || []).some((choice) => choice.id === chosenMicrophone())) await forgetMicrophone();
     } catch { microphoneNotice.textContent = "La liste des microphones est indisponible. Rouvrez l’application pour réessayer."; }
   }
-  panels.register({
+  const panel = {
     id: "voice",
     settingsSection(container, ctx) {
       context = ctx; container.className = "setting-section voice-microphone-settings";
@@ -248,6 +251,7 @@
       microphoneList = node("div", "voice-microphone-list"); microphoneList.setAttribute("role", "radiogroup"); microphoneList.setAttribute("aria-label", "Microphone");
       microphoneNotice = node("p", "voice-settings-notice"); microphoneNotice.setAttribute("role", "status");
       container.append(microphoneList, microphoneNotice);
+      document.getElementById("settings-button")?.addEventListener?.("click", () => loadMicrophones());
       renderMicrophones(); loadMicrophones();
     },
     composer: {
@@ -299,7 +303,6 @@
           if (phase === "recording") { event.preventDefault(); event.stopImmediatePropagation(); stop(); }
           else if (!mic.disabled && !live()) { event.preventDefault(); event.stopImmediatePropagation(); start(); }
         }, true);
-        document.getElementById("settings-button")?.addEventListener?.("click", () => loadMicrophones());
         window.addEventListener("beforeunload", reset);
         window.addEventListener("grokbot:meeting-change", render);
         window.addEventListener("grokbot:voice-call-change", render);
@@ -319,5 +322,8 @@
       render();
     },
     sendExtras: () => ({ attachments: memoItems.map((m) => m.id) }),
-  });
+  };
+  // Dictation needs speech recognition, which Linux does not have yet (#607). The setting works without it.
+  if (linux()) delete panel.composer;
+  panels.register(panel);
 })();

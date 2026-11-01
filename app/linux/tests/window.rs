@@ -466,3 +466,55 @@ fn new_window_requests_open_only_web_pages_in_the_default_browser() {
     });
     app.quit();
 }
+
+const SIGN_IN_BUTTON: (i32, i32) = (998, 424);
+
+/// Fails once, as `xdg-open` does on a desktop without a default browser.
+const BROWSER_FAILING_ONCE: &str = r#"#!/bin/sh
+opened="$(dirname "$0")/../opened"
+[ -e "$opened" ]
+status=$?
+printf '%s\n' "$1" >> "$opened"
+exit "$status"
+"#;
+
+#[test]
+fn the_real_sign_in_goes_through_xdg_open_and_recovers_from_a_failed_browser() {
+    let home = TestDir::new("ezerbot-signin");
+    std::fs::create_dir(home.join("bin")).unwrap();
+    install_script(&home, "xdg-open", BROWSER_FAILING_ONCE);
+    let screen = Screen::start();
+    let path = format!(
+        "{}:{}",
+        home.join("bin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let app = App::start(
+        shell_with_wrapper(),
+        &screen,
+        &home,
+        &[("PATH", path.as_str())],
+    );
+    wait_for("the window stayed blank", || {
+        (screen.colours().len() >= 16).then_some(())
+    });
+    let (_, window) = screen.app_window();
+    let opened = || std::fs::read_to_string(home.join("opened")).unwrap_or_default();
+    let attempt = |count: usize, failure: &str| {
+        wait_for(failure, || {
+            screen.click(window.x + SIGN_IN_BUTTON.0, window.y + SIGN_IN_BUTTON.1);
+            std::thread::sleep(Duration::from_millis(400));
+            (opened().lines().count() >= count).then_some(())
+        })
+    };
+    attempt(1, "the sign-in page never reached xdg-open");
+    attempt(2, "a failed browser left the sign-in pending");
+    for link in opened().lines() {
+        assert!(
+            link.starts_with("https://auth.openai.com/oauth/authorize?"),
+            "unexpected sign-in page"
+        );
+        assert!(link.contains("redirect_uri="), "unexpected sign-in page");
+    }
+    app.quit();
+}

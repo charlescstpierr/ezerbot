@@ -646,7 +646,7 @@ fn a_link_reaches_the_open_window_and_the_window_it_starts() {
     });
 
     notification(&database, "reply:open");
-    let link = "ezerbot://app/v1/notification?id=reply%3Aopen";
+    let link = "EZERBOT://app/v1/notification?id=reply%3Aopen";
     let mut second = App::open(shell_with_wrapper(), &screen, &home, &fake, &[link]);
     wait_for("the second launch did not leave", || second.exited());
     wait_for("the open window did not follow the link", || {

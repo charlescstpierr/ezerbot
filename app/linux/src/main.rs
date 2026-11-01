@@ -382,11 +382,13 @@ mod linux {
                 options.data_dir.unwrap(),
                 PathBuf::from("/tmp/Ezerbot isolated")
             );
-            let options = Options::parse(["ezerbot://app/v1/thread?id=a"].map(OsString::from));
-            assert_eq!(
-                options.unwrap().link.as_deref(),
-                Some("ezerbot://app/v1/thread?id=a")
-            );
+            for link in [
+                "ezerbot://app/v1/thread?id=a",
+                "EZERBOT://app/v1/thread?id=a",
+            ] {
+                let options = Options::parse([link].map(OsString::from));
+                assert_eq!(options.unwrap().link.as_deref(), Some(link));
+            }
             let long = format!("ezerbot://{}", "a".repeat(2048));
             assert!(Options::parse([OsString::from(long)]).is_err());
         }

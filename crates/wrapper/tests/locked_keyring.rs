@@ -186,6 +186,31 @@ fn every_masking_refuses_a_partial_vault_and_only_a_rendering_reads_it() {
 }
 
 #[test]
+fn deleting_the_last_secret_leaves_nothing_for_a_locked_keyring_to_hide() {
+    if support::keyring_phases(
+        "deleting_the_last_secret_leaves_nothing_for_a_locked_keyring_to_hide",
+        1,
+        |_, keyring| {
+            keep_only_in_the_keyring(keyring);
+            let file = keyring.home().path().join("workspace.secrets.json");
+            Vault::open_test_keychain(&file, keyring.address())
+                .unwrap()
+                .remove("PORCELAINE")
+                .unwrap();
+            keyring.lock();
+        },
+    )
+    .is_none()
+    {
+        return;
+    }
+    let file = PathBuf::from(std::env::var_os("HOME").unwrap()).join("workspace.secrets.json");
+    let vault = Vault::open_app(&file).unwrap();
+    assert_eq!(vault.storage_status().backend, "file_fallback");
+    assert!(!vault.is_partial());
+}
+
+#[test]
 fn a_keyring_that_holds_nothing_of_this_vault_stops_no_turn() {
     let Some(phase) = support::keyring_phases(
         "a_keyring_that_holds_nothing_of_this_vault_stops_no_turn",

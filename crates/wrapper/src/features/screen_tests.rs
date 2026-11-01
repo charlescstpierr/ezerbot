@@ -378,3 +378,15 @@ fn a_yolo_gesture_admitted_under_one_session_never_acts_in_its_replacement() {
     startup(&path);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn a_see_only_lease_offers_the_model_nothing_but_the_screenshot() {
+    let names = |see_only| {
+        offered(see_only)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(true), ["computer_screenshot"]);
+    assert_eq!(names(false).len(), 6);
+}

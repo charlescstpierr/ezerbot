@@ -2,6 +2,8 @@
 mod backend;
 #[cfg(target_os = "linux")]
 mod local_api;
+#[cfg(all(test, target_os = "linux"))]
+mod screen;
 
 #[cfg(not(target_os = "linux"))]
 fn main() {

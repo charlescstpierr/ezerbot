@@ -1876,3 +1876,110 @@ fn a_return_model_waits_for_its_own_child_and_resumes_with_both_result_origins()
         assert_eq!(scenario.return_calls.load(Ordering::SeqCst), 2);
     }
 }
+
+#[test]
+fn deleting_a_background_member_stops_a_queued_return_child_before_launch() {
+    for action in ["delete-thread", "delete-bot"] {
+        let mut f = Fixture::new(true);
+        let scenario = f.scenario(
+            vec![(
+                "initial-background".into(),
+                args("child", Some("background")),
+            )],
+            vec![SUMMARY.into()],
+        );
+        let router = scenario.clone();
+        f.server.seen.lock().unwrap().reply_for = Some(Arc::new(move |request| {
+            let instructions = request["instructions"].as_str().unwrap_or_default();
+            if instructions.contains("Summarize these background task outcomes briefly") {
+                router.return_calls.fetch_add(1, Ordering::SeqCst);
+                let mut selected = args("other", Some("wait"));
+                selected["selected_context"]["texts"] = json!(["CONTEXTE_ENFANT_DU_RETOUR"]);
+                return ScriptedResponse::events(&[
+                    call("return-wait", "delegate", selected),
+                    completed(),
+                ]);
+            }
+            router.reply(request)
+        }));
+        let c = f.conversation();
+        let parent = f.start(&c, "return-child-queued");
+        let initial = f.children(&parent).remove(0);
+        let trigger = Trigger::DelegationReturn {
+            parent_run_id: parent.run_id.clone(),
+        };
+        let return_run = |f: &Fixture| store::latest_run_for_trigger(&f.db(), &trigger).unwrap();
+        wait("retour suspendu sur son approbation", || {
+            f.tick();
+            return_run(&f).is_some_and(|run| run.status == RunStatus::AwaitingApproval)
+        });
+        let card = f.approval();
+        f.resolve(&card, "allow_once");
+        wait("retour suspendu sur son enfant wait", || {
+            f.app.tick_suspended(now_ms());
+            return_run(&f).is_some_and(|run| run.status == RunStatus::AwaitingChildren)
+        });
+        let returned = return_run(&f).unwrap();
+        {
+            let db = f.db();
+            delegation::tick(&f.context(&db, &returned));
+        }
+        let own = f.children(&returned).remove(0);
+        assert_eq!(f.status(&own), DelegationStatus::Running);
+        let child_run = own.child_run_id.clone().unwrap();
+        assert_eq!(
+            store::required(&f.db(), &child_run).unwrap().status,
+            RunStatus::Queued
+        );
+
+        if action == "delete-thread" {
+            f.post(
+                "/api/conversations/delete",
+                json!({"id":initial.conversation_id}),
+            );
+        } else {
+            f.post("/api/bots/delete", json!({"id":initial.child_bot}));
+        }
+        // Reconciliation runs in delegation's later tick, so only launch's own gate
+        // can keep this tick's child from reaching the provider.
+        {
+            let db = f.db();
+            features::engine::tick(&f.context(&db, &returned));
+        }
+        wait("enfant du retour réglé par le tick moteur", || {
+            store::required(&f.db(), &child_run).unwrap().status != RunStatus::Queued
+                && f.provider.status()["titling"] == false
+        });
+
+        assert_eq!(scenario.child_calls.load(Ordering::SeqCst), 1, "{action}");
+        assert!(
+            !f.server
+                .seen
+                .lock()
+                .unwrap()
+                .bodies
+                .iter()
+                .any(|body| body.to_string().contains("CONTEXTE_ENFANT_DU_RETOUR")),
+            "{action}"
+        );
+        f.tick();
+        assert_eq!(f.status(&own), DelegationStatus::Cancelled);
+        assert_eq!(
+            store::required(&f.db(), &child_run).unwrap().status,
+            RunStatus::Cancelled
+        );
+        assert_eq!(
+            store::required(&f.db(), &returned.run_id).unwrap().status,
+            RunStatus::Cancelled
+        );
+        let state: String = f
+            .db()
+            .query_row(
+                "SELECT state FROM wrapper_delegation_returns WHERE parent_run_id=?1",
+                [&parent.run_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "cancelled", "{action}");
+    }
+}

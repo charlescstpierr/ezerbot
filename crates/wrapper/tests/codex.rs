@@ -1561,6 +1561,14 @@ fn retry_relaunches_the_probe_then_returns_the_complete_default_model_reply() {
             .iter()
             .any(|m| m["body"] == "premier envoi" && m["state"] == "echoed")
     });
+    // The background title call shares the scripted queue: let it pass first.
+    wait("titre du premier échange", || {
+        f.server.seen.lock().unwrap().bodies.iter().any(|body| {
+            body["instructions"]
+                .as_str()
+                .is_some_and(|instructions| instructions.contains("Tu écris le titre"))
+        })
+    });
     let before = f.server.seen.lock().unwrap().probe_bodies.len();
     f.server.seen.lock().unwrap().fail_probe = false;
     let complete = "Voici la réponse complète.\n\n1. Première explication détaillée.\n2. Deuxième explication détaillée.\n3. Conclusion demandée.";

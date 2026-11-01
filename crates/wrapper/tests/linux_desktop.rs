@@ -1,6 +1,7 @@
 //! The wrapper against real freedesktop services on a throwaway bus and HOME: the `ezerbot://`
 //! registration, `xdg-open`, and the notification bridge.
-#![cfg(all(target_os = "linux", debug_assertions))]
+// Every build profile, release included: none may reach the session bus by itself.
+#![cfg(target_os = "linux")]
 #[path = "support/launch_identity.rs"]
 mod launch_identity;
 #[path = "support/linux_host.rs"]

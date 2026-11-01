@@ -8,7 +8,8 @@ mod bus;
 pub mod notifications;
 pub mod open;
 pub mod scheme;
-#[cfg(all(feature = "test-support", debug_assertions))]
+pub mod secrets;
+#[cfg(feature = "test-support")]
 pub mod testing;
 
-pub use bus::{Bus, Unavailable, APPLICATION_ID};
+pub use bus::{Bus, Unavailable, APPLICATION_ID, DESKTOP_SESSION};

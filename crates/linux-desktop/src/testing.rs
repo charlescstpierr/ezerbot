@@ -15,13 +15,15 @@ use std::{
 
 use grokbot_test_support::TestDir;
 use zbus::{
-    blocking::{connection::Builder, Connection},
+    blocking::{connection::Builder, Connection, Proxy},
     message::Header,
-    zvariant::OwnedValue,
+    zvariant::{ObjectPath, OwnedObjectPath, OwnedValue},
 };
 
 use crate::Bus;
 
+const KEYRING_PASSWORD: &str = "ezerbot-throwaway-test-991";
+const SECRETS: &str = "org.freedesktop.secrets";
 const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 
@@ -178,6 +180,102 @@ impl PrivateBus {
 
     pub fn connection(&self) -> Connection {
         self.bus().connect().unwrap()
+    }
+}
+
+/// A real `gnome-keyring-daemon` with an unlocked `login` collection, on its own bus.
+pub struct Keyring {
+    daemon: Option<Process>,
+    bus: PrivateBus,
+    home: Home,
+}
+
+impl Keyring {
+    pub fn start() -> Self {
+        tools(&["dbus-daemon", "gnome-keyring-daemon"]);
+        let home = Home::new("ezk");
+        let bus = PrivateBus::new(&home);
+        let mut keyring = Self {
+            daemon: None,
+            bus,
+            home,
+        };
+        keyring.unlock();
+        keyring
+    }
+
+    pub fn bus(&self) -> Bus {
+        self.bus.bus()
+    }
+
+    pub fn address(&self) -> &str {
+        self.bus.address()
+    }
+
+    pub fn home(&self) -> &Home {
+        &self.home
+    }
+
+    fn service(&self) -> Proxy<'static> {
+        Proxy::new(
+            &self.bus.connection(),
+            SECRETS,
+            "/org/freedesktop/secrets",
+            "org.freedesktop.Secret.Service",
+        )
+        .unwrap()
+    }
+
+    fn collection(&self) -> Option<OwnedObjectPath> {
+        let path: OwnedObjectPath = self.service().call("ReadAlias", &"default").ok()?;
+        (path.as_str() != "/").then_some(path)
+    }
+
+    fn locked(&self) -> Option<bool> {
+        let path = self.collection()?;
+        Proxy::new(
+            &self.bus.connection(),
+            SECRETS,
+            path,
+            "org.freedesktop.Secret.Collection",
+        )
+        .ok()?
+        .get_property("Locked")
+        .ok()
+    }
+    pub fn lock(&self) {
+        let path = self.collection().unwrap();
+        let _: (Vec<OwnedObjectPath>, OwnedObjectPath) = self
+            .service()
+            .call("Lock", &(vec![ObjectPath::from(&path)],))
+            .unwrap();
+        assert_eq!(self.locked(), Some(true));
+    }
+
+    /// Restarts the daemon with the password: the `login` keyring file persists.
+    pub fn unlock(&mut self) {
+        self.stop();
+        let mut daemon = Command::new("gnome-keyring-daemon");
+        self.home
+            .env(&mut daemon)
+            .env("DBUS_SESSION_BUS_ADDRESS", self.bus.address())
+            .args(["--foreground", "--unlock", "--components=secrets"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut daemon = daemon.spawn().unwrap();
+        {
+            use std::io::Write;
+            let mut input = daemon.stdin.take().unwrap();
+            input.write_all(KEYRING_PASSWORD.as_bytes()).unwrap();
+        }
+        self.daemon = Some(Process(daemon));
+        wait_for("the unlocked login collection", || {
+            self.locked() == Some(false)
+        });
+    }
+    pub fn stop(&mut self) {
+        self.daemon = None;
     }
 }
 

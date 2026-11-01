@@ -105,10 +105,19 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             let provider = app.provider.status();
             let resolved = app.resolved_model()?;
             let fast = app.model_preferences()?.2;
+            // Trousseau verrouillé : le coffre n'est lu qu'en partie, donc rien de l'historique
+            // ne peut être masqué. Aucun contenu n'est servi, ni ici ni à l'iPhone.
+            let locked = super::engine::keyring_locked(&app.connection);
+            let conversations = if locked {
+                app.locked_conversations()?
+            } else {
+                app.conversations()?
+            };
             let mut state = json!({
                 "account": {"id": ACCOUNT, "name": "Espace local"},
                 "mode": if provider["connected"] == true { "chatgpt" } else { "simulated" },
-                "conversations": app.conversations()?, "bots": app.bots()?,
+                "conversations": conversations, "bots": app.bots()?,
+                "vault": {"locked": locked, "message": locked.then_some(grokbot_forms::vault::KEYRING_LOCKED)},
                 "preferences": { "theme": theme, "accent": accent, "fast": fast,
                     "model": resolved.as_ref().map(|(model, _, _)| model),
                     "effort": resolved.as_ref().and_then(|(_, effort, _)| effort.as_ref()), },
@@ -382,6 +391,41 @@ impl App {
             .conversations_settled(Some(id), &mut || {})?
             .into_iter()
             .next())
+    }
+
+    /// The list without anything taken from history (no title, description, avatar or
+    /// message): what a locked keyring still lets the app show, since nothing can be masked.
+    pub(crate) fn locked_conversations(&self) -> Result<Vec<Conversation>, ApiError> {
+        let mut statement = self.connection.prepare("SELECT id, favorite, updated_at, bot_id, kind, parent_id FROM wrapper_conversations WHERE account_id = ?1 AND deleted = 0 ORDER BY updated_at DESC")?;
+        let rows = statement
+            .query_map([ACCOUNT], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(id, favorite, updated_at, bot_id, kind, parent_id)| {
+                Ok(Conversation {
+                    member_ids: super::multibot::members(&self.connection, &id)?,
+                    id,
+                    bot_id,
+                    title: "Conversation verrouillée".into(),
+                    favorite,
+                    updated_at,
+                    kind,
+                    parent_id,
+                    description: String::new(),
+                    avatar: None,
+                    messages: Vec::new(),
+                })
+            })
+            .collect()
     }
 
     /// Every output of the projection is masked with one content of the vault (#377): a

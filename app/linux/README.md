@@ -65,4 +65,7 @@ de WebKit sans export de buffers graphiques. Le lanceur ne force pas cette optio
 `cargo test -p ezerbot-linux` construit le wrapper puis ouvre la vraie fenêtre dans son propre Xvfb.
 `tests/window.rs` constate l’affichage, fait un échange avec le faux fournisseur et clique des liens.
 Il vérifie aussi la vraie connexion jusqu’à `xdg-open` et la relance de l’application déjà ouverte.
-Le test échoue si `Xvfb` manque et il ne couvre que les builds de développement.
+Les tests du panneau lancent aussi `openbox` et un `dbus-daemon` privé avec un faux portail GlobalShortcuts.
+Ils envoient le raccourci, vérifient `_NET_WM_STATE_ABOVE` et prennent la touche avec un second client X.
+Le test échoue si `Xvfb`, `openbox` ou `dbus-daemon` manque, sauf le test du panneau sur GitHub Actions, qui annonce son saut sans `openbox`.
+Ils ne couvrent que les builds de développement.

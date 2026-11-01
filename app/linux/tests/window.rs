@@ -63,10 +63,18 @@ struct Rectangle {
 
 struct Screen {
     server: Child,
+    manager: Option<Child>,
     name: String,
     xlib: Xlib,
     xtest: Xtst,
     display: *mut xlib::Display,
+}
+
+/// What a window manager lists for a window it manages.
+struct Client {
+    window: xlib::Window,
+    name: String,
+    above: bool,
 }
 
 impl Screen {
@@ -93,11 +101,144 @@ impl Screen {
         assert!(!display.is_null(), "Xvfb refused the connection");
         Self {
             server,
+            manager: None,
             name,
             xlib,
             xtest,
             display,
         }
+    }
+
+    fn start_with_openbox(home: &TestDir) -> Self {
+        let mut screen = Self::start();
+        let manager = Command::new("openbox")
+            .env("DISPLAY", &screen.name)
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("openbox is required: sudo apt install openbox");
+        screen.manager = Some(manager);
+        // Its first seconds drop a window mapped meanwhile: map a probe until it is managed.
+        let probe = screen.cover(Rectangle {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        });
+        wait_for("openbox never managed a window", || {
+            unsafe { (screen.xlib.XMapWindow)(screen.display, probe) };
+            std::thread::sleep(Duration::from_millis(300));
+            screen.stacking(probe).map(|_| ())
+        });
+        unsafe { (screen.xlib.XDestroyWindow)(screen.display, probe) };
+        screen
+    }
+
+    fn atom(&self, name: &str) -> xlib::Atom {
+        let name = CString::new(name).unwrap();
+        unsafe { (self.xlib.XInternAtom)(self.display, name.as_ptr(), xlib::False) }
+    }
+
+    fn property(&self, window: xlib::Window, name: &str) -> (c_int, Vec<u8>) {
+        unsafe {
+            let (mut kind, mut format, mut items, mut after) = (0, 0, 0, 0);
+            let mut data = ptr::null_mut();
+            let status = (self.xlib.XGetWindowProperty)(
+                self.display,
+                window,
+                self.atom(name),
+                0,
+                4096,
+                xlib::False,
+                xlib::AnyPropertyType as std::os::raw::c_ulong,
+                &mut kind,
+                &mut format,
+                &mut items,
+                &mut after,
+                &mut data,
+            );
+            if status != 0 || data.is_null() {
+                return (0, Vec::new());
+            }
+            let width = match format {
+                8 => 1,
+                16 => 2,
+                _ => std::mem::size_of::<std::os::raw::c_long>(),
+            };
+            let bytes = std::slice::from_raw_parts(data, items as usize * width).to_vec();
+            (self.xlib.XFree)(data.cast());
+            (format, bytes)
+        }
+    }
+
+    fn longs(&self, window: xlib::Window, name: &str) -> Vec<std::os::raw::c_ulong> {
+        let (format, bytes) = self.property(window, name);
+        if format != 32 {
+            return Vec::new();
+        }
+        bytes
+            .as_chunks::<{ std::mem::size_of::<std::os::raw::c_ulong>() }>()
+            .0
+            .iter()
+            .map(|chunk| std::os::raw::c_ulong::from_ne_bytes(*chunk))
+            .collect()
+    }
+
+    /// The managed windows, lowest first.
+    fn clients(&self) -> Vec<Client> {
+        let root = unsafe { (self.xlib.XDefaultRootWindow)(self.display) };
+        let above = self.atom("_NET_WM_STATE_ABOVE");
+        self.longs(root, "_NET_CLIENT_LIST_STACKING")
+            .into_iter()
+            .map(|window| Client {
+                window,
+                name: String::from_utf8_lossy(&self.property(window, "_NET_WM_NAME").1)
+                    .into_owned(),
+                above: self.longs(window, "_NET_WM_STATE").contains(&above),
+            })
+            .collect()
+    }
+
+    fn client(&self, name: &str) -> Option<Client> {
+        self.clients()
+            .into_iter()
+            .find(|client| client.name == name)
+    }
+
+    fn stacking(&self, window: xlib::Window) -> Option<usize> {
+        self.clients()
+            .iter()
+            .position(|client| client.window == window)
+    }
+
+    /// Takes a key for this client alone, as another application would.
+    fn grab(&self, modifiers: c_uint, key: &str) {
+        unsafe {
+            (self.xlib.XGrabKey)(
+                self.display,
+                self.keycode(key) as c_int,
+                modifiers,
+                (self.xlib.XDefaultRootWindow)(self.display),
+                xlib::False,
+                xlib::GrabModeAsync,
+                xlib::GrabModeAsync,
+            );
+            (self.xlib.XSync)(self.display, xlib::False);
+        }
+    }
+
+    fn grabbed_presses(&self) -> usize {
+        let mut presses = 0;
+        unsafe {
+            while (self.xlib.XPending)(self.display) > 0 {
+                let mut event: xlib::XEvent = std::mem::zeroed();
+                (self.xlib.XNextEvent)(self.display, &mut event);
+                presses += usize::from(event.get_type() == xlib::KeyPress);
+            }
+        }
+        presses
     }
 
     fn windows(&self) -> Vec<(xlib::Window, Rectangle)> {
@@ -279,6 +420,10 @@ impl Screen {
 impl Drop for Screen {
     fn drop(&mut self) {
         unsafe { (self.xlib.XCloseDisplay)(self.display) };
+        if let Some(manager) = &mut self.manager {
+            let _ = manager.kill();
+            let _ = manager.wait();
+        }
         let _ = self.server.kill();
         let _ = self.server.wait();
     }
@@ -671,9 +816,10 @@ bridge.postMessage(JSON.stringify({launch: "x", id: 2, body: {command: "show"}})
 
 /// A shell on a scripted page, under a private session bus when given one.
 struct Scripted {
-    home: TestDir,
-    screen: Screen,
+    // Dropped first: the shell leaves its screen and its files alone.
     app: App,
+    screen: Screen,
+    home: TestDir,
 }
 
 impl Scripted {
@@ -1112,6 +1258,195 @@ fn without_a_portal_the_shortcut_is_announced_unavailable() {
     assert_eq!(
         status(&shell.run("main", &configure("disabled"))),
         "disabled"
+    );
+    shell.app.quit();
+}
+
+const SUPER_ALT_J: [&str; 3] = ["Super_L", "Alt_L", "j"];
+const PANEL: &str = "Panneau · Ezerbot";
+
+fn tool_present(tool: &str) -> bool {
+    Command::new(tool).arg("--version").output().is_ok()
+}
+
+#[test]
+fn the_shortcut_opens_an_always_on_top_panel_that_takes_the_typing() {
+    if std::env::var_os("GITHUB_ACTIONS").is_some() && !tool_present("openbox") {
+        eprintln!("skipped: openbox is missing on this runner; add it to the apt-get install of linux-pr.yml and linux-shell.yml");
+        return;
+    }
+    let home = TestDir::new("ezerbot-panel");
+    let screen = Screen::start_with_openbox(&home);
+    let app = App::start(
+        shell_with_wrapper(),
+        &screen,
+        &home,
+        &[("EZERBOT_FAKE_SIGNIN", "1")],
+    );
+    wait_for("the window stayed blank", || {
+        (screen.colours().len() >= 16).then_some(())
+    });
+    let main = screen
+        .client("Ezerbot")
+        .expect("the main window is managed");
+    // The shortcut is acquired once the main page has loaded: press until it opens.
+    let open_panel = || {
+        wait_for("the shortcut never opened the panel", || {
+            if screen.client(PANEL).is_none() {
+                screen.press(&SUPER_ALT_J);
+                std::thread::sleep(Duration::from_millis(600));
+            }
+            screen.client(PANEL)
+        })
+    };
+    let panel = open_panel();
+    assert!(panel.above, "the panel is not above other windows");
+
+    let text = "bonjour depuis le panneau";
+    wait_for("the panel never drew its content", || {
+        let area = screen
+            .windows()
+            .into_iter()
+            .find(|(_, area)| area.width == 420 && area.height == 560)?
+            .1;
+        (screen
+            .pixels(area)
+            .into_iter()
+            .collect::<HashSet<_>>()
+            .len()
+            >= 16)
+            .then_some(())
+    });
+    // Keys sent before the page focused its field are lost: type again until one lands.
+    let mut typed = Instant::now() - Duration::from_secs(60);
+    wait_for("the exchange typed in the panel was not persisted", || {
+        if typed.elapsed() > Duration::from_secs(8) {
+            screen.type_text(text);
+            screen.press(&["Return"]);
+            typed = Instant::now();
+        }
+        exchange_persisted(&home.join("state/ezerbot.sqlite"), text).then_some(())
+    });
+
+    screen.press(&["Escape"]);
+    wait_for("Escape did not close the panel", || {
+        screen.client(PANEL).is_none().then_some(())
+    });
+    let cover = screen.cover(Rectangle {
+        x: 700,
+        y: 300,
+        width: 200,
+        height: 200,
+    });
+    wait_for("the first window never went over the app", || {
+        screen.stacking(cover).map(|_| ())
+    });
+    let reopened = open_panel();
+    assert!(
+        reopened.above,
+        "the reopened panel lost its place above other windows"
+    );
+    let second = screen.cover(Rectangle {
+        x: 760,
+        y: 340,
+        width: 200,
+        height: 200,
+    });
+    wait_for("the second window never went over the app", || {
+        screen.stacking(second).map(|_| ())
+    });
+    let order = |window| screen.stacking(window).unwrap();
+    assert!(
+        order(reopened.window) > order(second),
+        "a window opened later covers the panel"
+    );
+    assert!(
+        order(reopened.window) > order(cover),
+        "a window covers the panel"
+    );
+    assert!(
+        order(main.window) < order(cover),
+        "the shortcut brought the main window back"
+    );
+    app.quit();
+}
+
+#[test]
+fn a_shortcut_another_client_holds_is_a_conflict_and_the_old_one_stays_in_force() {
+    let shell = Scripted::start("", &[]);
+    assert_eq!(
+        status(&shell.run("main", &configure("cmd+option+j"))),
+        "registered"
+    );
+    shell
+        .screen
+        .grab(xlib::ControlMask | xlib::Mod1Mask, "space");
+    assert_eq!(
+        status(&shell.run("main", &configure("ctrl+option+space"))),
+        "conflict"
+    );
+
+    shell.screen.press(&["Control_L", "Alt_L", "space"]);
+    wait_for("the other client lost its own key", || {
+        (shell.screen.grabbed_presses() > 0).then_some(())
+    });
+    shell.assert_no_panel_for(
+        Duration::from_secs(1),
+        "the refused shortcut opened the panel",
+    );
+    shell.screen.press(&SUPER_ALT_J);
+    shell.wait_panel(true, "the old shortcut stopped working after the conflict");
+    shell.app.quit();
+}
+
+#[test]
+fn the_bridge_refuses_a_frame_without_the_token_and_a_command_of_the_other_view() {
+    let shell = Scripted::start(
+        r#"<iframe src="/frame" style="width:100px;height:100px"></iframe>"#,
+        &[],
+    );
+    let frame = wait_for("the frame never reported", || {
+        shell
+            .results()
+            .into_iter()
+            .find(|(key, _)| key == "frame")
+            .map(|(_, value)| value)
+    });
+    // The frame reaches the handler the way the page does, but holds no token.
+    assert_eq!(
+        frame,
+        serde_json::json!({"shell": "undefined", "ipc": "function"})
+    );
+    shell.screen.press(&SUPER_ALT_J);
+    shell.assert_no_panel_for(
+        Duration::from_secs(1),
+        "a frame without the token got through",
+    );
+
+    let wrong = r#"{"command":"close"}"#;
+    let refused = shell.run("main", wrong);
+    assert!(
+        refused["error"].as_str().unwrap().contains("refusée"),
+        "{refused}"
+    );
+    assert_eq!(
+        status(&shell.run("main", &configure("cmd+option+j"))),
+        "registered"
+    );
+    shell.screen.press(&SUPER_ALT_J);
+    shell.wait_panel(
+        true,
+        "the shortcut registered by the page did not open the panel",
+    );
+    let refused = shell.run("panel", &configure("disabled"));
+    assert!(
+        refused["error"].as_str().unwrap().contains("refusée"),
+        "{refused}"
+    );
+    let refused = shell.run("panel", r#"{"command":"show"}"#);
+    assert!(
+        refused["error"].as_str().unwrap().contains("refusée"),
+        "{refused}"
     );
     shell.app.quit();
 }

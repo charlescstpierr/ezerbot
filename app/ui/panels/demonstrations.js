@@ -1,5 +1,6 @@
 "use strict";
 (() => {
+  if (window.EzerbotShell?.unavailablePanels?.includes("demonstrations")) return;
   const host = window.GrokbotPanels;
   const node = (tag, text, cls) => { const el = document.createElement(tag); if (text) el.textContent = text; if (cls) el.className = cls; return el; };
   const button = (text, action, cls = "secondary-button") => { const el = node("button", text, cls); el.type = "button"; el.onclick = action; return el; };

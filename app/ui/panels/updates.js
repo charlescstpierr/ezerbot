@@ -69,8 +69,7 @@
 
   function ensureCorner() {
     if (corner) return;
-    const account = document.getElementById("settings-button");
-    const host = account?.parentElement;
+    const host = document.getElementById("sidebar-updates");
     if (!host) return;
     corner = node("div", "update-corner");
     corner.hidden = true;
@@ -94,7 +93,7 @@
     dismiss.setAttribute("aria-label", "Fermer");
     cornerError.append(cornerErrorText, dismiss);
     corner.append(cornerAction, cornerError);
-    host.insertBefore(corner, account);
+    host.append(corner);
   }
 
   function paint(data) {

@@ -65,16 +65,12 @@ export function Card({ message, busy = false, onAction }) {
   const captures = status === "done" && Array.isArray(edge.status.captures) ? edge.status.captures : [];
   const result = status === "done" ? edge.status.result : ["failed", "refused"].includes(status) ? edge.status.reason : null;
   return (
-    <article className="gb-message rounded-xl border border-border bg-card p-4 text-foreground" data-message-id={message.id} data-card-kind={kind} data-delegation-status={known ? status : "unknown"}>
+    <article className="gb-message gb-delegation-followup" data-message-id={message.id} data-card-kind={kind} data-delegation-status={known ? status : "unknown"}>
       <header className="gb-meta"><strong>Sous-tâche · {child}</strong></header>
       {typeof edge.objective === "string" && edge.objective && <p className="mt-2 text-sm whitespace-pre-wrap break-words">{edge.objective}</p>}
       <p className="my-2 text-sm" role="status" aria-live="polite">{known ? labels[status] : "État indisponible"}</p>
       {status === "queued" && <p className="mb-2 text-xs text-muted-foreground">La sous-tâche attend une place disponible.</p>}
-      {typeof result === "string" && result && <details className="mb-3 text-sm">
-        <summary>{status === "done" ? "Résultat de la sous-tâche" : "Motif"}</summary>
-        {/* Server-redacted external data stays plain text, never HTML/Markdown. */}
-        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words font-sans text-sm">{result}</pre>
-      </details>}
+      {typeof result === "string" && result && <p className="gb-delegation-result" data-find-body>{result}</p>}
       {captures.length > 0 && <Captures captures={captures} />}
       {hasThread ? <>
         <button type="button" className="gb-retry" disabled={busy || !available || !onAction} onClick={() => onAction?.("delegation.open")}>Ouvrir le fil de tâche</button>

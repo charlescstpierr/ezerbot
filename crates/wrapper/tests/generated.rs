@@ -498,6 +498,26 @@ fn model_saves_keep_the_format_and_respect_the_file_write_switch() {
         f.app.tick(now());
         copy.exists()
     });
+    // No model speaks in this run: the thread acknowledges it from these fields.
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let conversation = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|conversation| conversation["id"] == f.chat)
+        .unwrap();
+    let saved = conversation["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["kind"] == "tool" && message["payload"]["run_id"] == run_id)
+        .unwrap();
+    assert!(run_id.starts_with("mcp-host-"), "{run_id}");
+    assert_eq!(saved["payload"]["outcome"]["status"], "done");
+    assert_eq!(
+        saved["payload"]["outcome"]["output"]["message"],
+        "Copie enregistrée."
+    );
     // Free model text saved as .md must not become a launcher script.
     f.allow_files();
     let launcher = f.root().join("lanceur.command");

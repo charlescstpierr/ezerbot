@@ -52,6 +52,7 @@ struct Hints {
     mentions: Option<HashMap<Key, String>>,
     /// `(ordinal, created_at)` of a submission.
     submissions: Option<HashMap<Key, (i64, u64)>>,
+    page_anchors: Option<HashMap<Key, Value>>,
     demonstrations: Option<HashSet<Key>>,
     /// Messages with a staged image, a document, a voice memo or a meeting.
     attachments: Option<HashSet<Key>>,
@@ -186,6 +187,12 @@ const SQL_SUBMISSIONS: &str = of_conversations!(
     "wrapper_messages",
     " AND t.account_id = ?1 AND t.kind = 'submission'"
 );
+const SQL_PAGE_ANCHORS: &str =
+    "SELECT a.page_id, a.passage, p.title, a.source_version, a.conversation_id, a.message_id
+     FROM wrapper_conversations c
+     CROSS JOIN wrapper_page_anchors a ON a.conversation_id = c.id
+     CROSS JOIN bot_pages p ON p.id = a.page_id
+     WHERE c.account_id = ?1 AND c.deleted = 0";
 const SQL_DEMONSTRATIONS: &str = of_conversations!(
     "t.conversation_id, t.message_id",
     "wrapper_demonstrations",
@@ -305,6 +312,21 @@ pub(crate) fn hold(connection: &Connection) -> Held {
             |row| Ok((row.get(2)?, row.get(3)?)),
         )
         .map(|rows| rows.into_iter().collect()),
+        page_anchors: rows(
+            connection,
+            SQL_PAGE_ANCHORS,
+            ACCOUNT_ONLY,
+            |row| Ok((row.get(4)?, row.get(5)?)),
+            |row| {
+                Ok(serde_json::json!({
+                    "page_id": row.get::<_, String>(0)?,
+                    "passage": row.get::<_, String>(1)?,
+                    "title": row.get::<_, String>(2)?,
+                    "source_version": row.get::<_, String>(3)?,
+                }))
+            },
+        )
+        .map(|rows| rows.into_iter().collect()),
         demonstrations: pairs(connection, SQL_DEMONSTRATIONS),
         meetings: pairs(connection, SQL_MEETINGS),
         attachments: attachments(connection),
@@ -400,6 +422,10 @@ pub(crate) fn mentions(conversation: &str, message: &str) -> Known<String> {
 /// `(ordinal, created_at)` of a submission.
 pub(crate) fn submission(conversation: &str, message: &str) -> Known<(i64, u64)> {
     held(|h| of_message(h, &h.submissions, conversation, message)).unwrap_or(Known::Unknown)
+}
+
+pub(crate) fn page_anchor(conversation: &str, message: &str) -> Known<Value> {
+    held(|h| of_message(h, &h.page_anchors, conversation, message)).unwrap_or(Known::Unknown)
 }
 
 /// The message is known to have no demonstration.
@@ -499,6 +525,7 @@ mod tests {
             SQL_RUNS,
             SQL_MENTIONS,
             SQL_SUBMISSIONS,
+            SQL_PAGE_ANCHORS,
             SQL_DEMONSTRATIONS,
             SQL_MEETINGS,
             SQL_ATTACHMENTS[0],

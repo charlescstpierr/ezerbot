@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import json
 import struct
-import zlib
 import sys
 from pathlib import Path
 
@@ -69,27 +68,14 @@ def safe_verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | N
         return tool_error(sha, f"Preuves illisibles ({type(error).__name__}) ; verdict impossible.", patch)
 
 
-def png_complete(path: Path) -> None:
-    """Raise ValueError unless the file is a whole PNG: valid chunks and CRCs, IDAT that inflates, IEND."""
-    data = path.read_bytes()
-    if data[:8] != b"\x89PNG\r\n\x1a\n":
-        raise ValueError("signature PNG absente")
-    offset, idat, ended = 8, b"", False
-    while offset + 12 <= len(data):
-        length, kind = struct.unpack(">I4s", data[offset:offset + 8])
-        body = data[offset + 8:offset + 8 + length]
-        crc = data[offset + 8 + length:offset + 12 + length]
-        if len(body) != length or len(crc) != 4 or zlib.crc32(kind + body) != struct.unpack(">I", crc)[0]:
-            raise ValueError("bloc PNG tronqué ou corrompu")
-        if kind == b"IDAT":
-            idat += body
-        offset += 12 + length
-        if kind == b"IEND":
-            ended = True
-            break
-    if not ended or not idat:
-        raise ValueError("PNG sans données d’image ou sans fin")
-    zlib.decompress(idat)
+def png_decodes(path: Path) -> None:
+    """Decode every pixel with Pillow; any decoder error (truncated, empty IDAT, bad filter) raises."""
+    from PIL import Image  # noqa: PLC0415 - checked by doctor.py --prerequisites
+
+    with Image.open(path) as image:
+        if image.format != "PNG":
+            raise ValueError("pas un PNG")
+        image.load()
 
 
 def write_report(path: Path, lines: list[str]) -> bytes:
@@ -147,8 +133,8 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
         if passed:
             try:
                 png_size(shot)
-                png_complete(shot)
-            except (OSError, ValueError, struct.error, zlib.error) as error:
+                png_decodes(shot)
+            except Exception as error:  # noqa: BLE001 - any decoder failure is a tool error
                 problems.append(f"`captures/{view}.png` illisible ({type(error).__name__}).")
                 passed = False
         if passed:

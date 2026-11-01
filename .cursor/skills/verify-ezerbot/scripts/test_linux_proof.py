@@ -23,11 +23,12 @@ SCRIPTS = Path(__file__).resolve().parent
 SHA = "a" * 40
 
 
-def png(width: int = 4, height: int = 3) -> bytes:
+def png(width: int = 4, height: int = 3, raw: bytes | None = None) -> bytes:
     def chunk(kind: bytes, data: bytes) -> bytes:
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
 
-    raw = b"".join(b"\x00" + b"\x00" * width * 3 for _ in range(height))
+    if raw is None:
+        raw = b"".join(b"\x00" + b"\x00" * width * 3 for _ in range(height))
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
 
@@ -170,7 +171,7 @@ class VerdictTests(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest))
         status, lines = linux_verdict.verdict(evidence, SHA)
         self.assertEqual(status, "FIX")
-        self.assertIn("`captures/home-dark.png` illisible (ValueError).", lines)
+        self.assertTrue(any(line.startswith("`captures/home-dark.png` illisible (") for line in lines), lines)
 
     def test_pathological_json_is_a_tool_error_fix(self) -> None:
         for text in ('{"sha": ' + "9" * 5000 + "}", "[" * 10000 + "]" * 10000):
@@ -190,6 +191,26 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(status, "FIX")
         written = linux_verdict.write_report(evidence / "report.md", lines).decode("utf-8")
         self.assertTrue(written.rstrip().endswith(f"FIX {SHA}"))
+
+    def assert_bad_png_is_fix(self, data: bytes) -> None:
+        evidence = self.evidence()
+        shot = evidence / "captures" / "home-dark.png"
+        shot.write_bytes(data)
+        manifest_path = evidence / "captures" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        for view in manifest["views"]:
+            if view["file"] == "home-dark.png":
+                view["sha256"] = hashlib.sha256(data).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertTrue(any(line.startswith("`captures/home-dark.png` illisible (") for line in lines), lines)
+
+    def test_png_with_empty_idat_is_fix(self) -> None:
+        self.assert_bad_png_is_fix(png(raw=b""))
+
+    def test_png_with_bad_row_filter_is_fix(self) -> None:
+        self.assert_bad_png_is_fix(png(raw=b"".join(b"\x09" + b"\x00" * 4 * 3 for _ in range(3))))
 
     def test_tampered_capture_is_fix(self) -> None:
         evidence = self.evidence()

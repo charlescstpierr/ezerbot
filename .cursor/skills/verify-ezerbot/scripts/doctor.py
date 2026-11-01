@@ -160,6 +160,8 @@ def linux_prerequisites(repo: Path | None = None) -> list[str]:
         version = subprocess.run(["node", "--version"], capture_output=True, text=True).stdout.strip()
         node_ok, node_detail = probe.returncode == 0, f"{version} WebSocket {'présent' if probe.returncode == 0 else 'absent'}"
     results.append(check("node-websocket", node_ok, node_detail))
+    pillow = subprocess.run([sys.executable, "-c", "import PIL; print(PIL.__version__)"], capture_output=True, text=True)
+    results.append(check("pillow", pillow.returncode == 0, f"Pillow {pillow.stdout.strip()}" if pillow.returncode == 0 else "Pillow absent (décodage des captures)"))
     cargo = Path(os.environ.get("EZERBOT_VERIFY_CARGO", Path.home() / ".cargo/bin/cargo")).expanduser()
     results.append(check("cargo", cargo.is_file() and os.access(cargo, os.X_OK), str(cargo)))
     free = shutil.disk_usage(repo).free

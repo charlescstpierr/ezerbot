@@ -11,7 +11,7 @@ Deux instances peuvent tourner ensemble si chacune a son port, son `HOME`, sa ba
 
 ## Preuve sous Linux (plateforme principale)
 
-Une seule commande, depuis la racine d’un checkout propre (sources compilées commitées) ; `--sphere accueil|reponse-fil|parametres-connecteurs|all` est accepté et joue les trois entrées, une autre sphère garde le substitut headless. `--patch <id>` ou `EZERBOT_VERIFY_PATCH_ID` (40 hexadécimaux minuscules) restent sur ce chemin et ajoutent `patch=<id>` à la ligne de verdict :
+Une seule commande, depuis la racine d’un checkout propre (sources compilées commitées). Sous Linux, sans `--sphere`, elle vaut `--sphere linux` (les trois entrées ci-dessous) ; toute autre sphère, `all` compris, garde le parcours `prove.py` d’avant. `--patch <id>` ou `EZERBOT_VERIFY_PATCH_ID` (40 hexadécimaux minuscules) ajoutent `patch=<id>` à la ligne de verdict :
 
 ```bash
 bash .cursor/skills/verify-ezerbot/scripts/prove.sh --evidence <dossier-neuf-hors-dépôt>

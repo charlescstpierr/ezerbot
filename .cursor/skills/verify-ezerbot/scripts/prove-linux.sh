@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Preuve Linux : build du commit extrait, wrapper isolé sous Xvfb privé (xvfb-run -a), trois entrées
 # de la carte (accueil, réponse dans un fil, paramètres), captures, verdict PASS/FIX, nettoyage.
-# Usage : bash .cursor/skills/verify-ezerbot/scripts/prove-linux.sh [--evidence <dossier-neuf>] [--sphere <entrée>] [--patch <patch-id>]
+# Usage : bash .cursor/skills/verify-ezerbot/scripts/prove-linux.sh [--evidence <dossier-neuf>] [--sphere linux] [--patch <patch-id>]
 set -euo pipefail
 umask 077
 
@@ -14,8 +14,8 @@ patch=${EZERBOT_VERIFY_PATCH_ID:-}
 while (($#)); do
   case $1 in
     --evidence) [[ $# -ge 2 ]] || fail '--evidence exige un dossier.'; evidence=$2; shift 2 ;;
-    # Les trois entrées sont toujours jouées ensemble ; une autre sphère passe par le substitut headless.
-    --sphere) [[ $# -ge 2 && $2 =~ ^(all|accueil|reponse-fil|parametres-connecteurs)$ ]] || fail "--sphere : accueil, reponse-fil, parametres-connecteurs ou all ; sinon EZERBOT_VERIFY_BROWSER=chrome-headless."; shift 2 ;;
+    # `linux` nomme les trois entrées jouées ensemble ; les autres sphères passent par prove.py.
+    --sphere) [[ $# -ge 2 && $2 == linux ]] || fail "--sphere : seul « linux » passe par ce chemin ; les autres sphères (dont all) passent par prove.sh."; shift 2 ;;
     --patch) [[ $# -ge 2 ]] || fail '--patch exige un patch-id.'; patch=$2; shift 2 ;;
     *) fail "argument inconnu : $1" ;;
   esac

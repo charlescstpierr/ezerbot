@@ -157,18 +157,32 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("hors du dépôt", result.stderr)
 
-    def test_prove_sh_keeps_sphere_and_dispatches_covered_spheres_to_xvfb(self) -> None:
+    def test_all_and_named_spheres_keep_the_prove_py_path(self) -> None:
+        # `all` (and every existing sphere) must behave as on main: prove.py, not the Xvfb subset.
         env = {key: value for key, value in os.environ.items() if key != "EZERBOT_VERIFY_BROWSER"}
-        for sphere in ("accueil", "reponse-fil", "parametres-connecteurs", "all"):
+        env["EZERBOT_VERIFY_CARGO"] = "/nonexistent/cargo"
+        for sphere in ("all", "accueil"):
             with self.subTest(sphere=sphere):
-                result = subprocess.run(["bash", str(SCRIPTS / "prove.sh"), "--sphere", sphere, "--evidence", str(SCRIPTS.parents[3] / "inside")], env=env, capture_output=True, text=True)
+                scratch = Path(tempfile.mkdtemp(prefix="linux-all-"))
+                self.addCleanup(lambda path=scratch: subprocess.run(["rm", "-rf", str(path)], check=True))
+                result = subprocess.run(["bash", str(SCRIPTS / "prove.sh"), "--sphere", sphere, "--evidence", str(scratch / "ev")], env=env, capture_output=True, text=True, timeout=120)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("cargo introuvable: /nonexistent/cargo", result.stdout + result.stderr)
+                self.assertTrue((scratch / "ev" / "stand-in.md").is_file())
+
+    def test_sphere_linux_and_default_use_the_xvfb_path(self) -> None:
+        env = {key: value for key, value in os.environ.items() if key != "EZERBOT_VERIFY_BROWSER"}
+        for extra in (["--sphere", "linux"], []):
+            with self.subTest(extra=extra):
+                result = subprocess.run(["bash", str(SCRIPTS / "prove.sh"), *extra, "--evidence", str(SCRIPTS.parents[3] / "inside")], env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("hors du dépôt", result.stderr)
 
     def test_uncovered_sphere_is_refused_by_the_xvfb_path(self) -> None:
-        result = subprocess.run(["bash", str(SCRIPTS / "prove-linux.sh"), "--sphere", "modeles"], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("chrome-headless", result.stderr)
+        for sphere in ("modeles", "all"):
+            result = subprocess.run(["bash", str(SCRIPTS / "prove-linux.sh"), "--sphere", sphere], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("seul « linux »", result.stderr)
 
     def test_explicit_patch_uses_the_linux_path(self) -> None:
         env = {key: value for key, value in os.environ.items() if key != "EZERBOT_VERIFY_BROWSER"}

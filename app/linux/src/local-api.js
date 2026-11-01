@@ -32,12 +32,39 @@
   Object.defineProperty(window, 'EzerbotLocal', {
     value: Object.freeze({resourceURL}), writable: false, configurable: false,
   });
+  const ipc = window.ipc;
+  const pending = new Map();
+  let sequence = 0;
+  const post = body => new Promise((resolve, reject) => {
+    const id = ++sequence;
+    pending.set(id, {resolve, reject});
+    try { ipc.postMessage(JSON.stringify({launch, id, body})); }
+    catch (error) { pending.delete(id); reject(error); }
+  });
+  const settle = (id, value, error) => {
+    const call = pending.get(id);
+    if (!call) return;
+    pending.delete(id);
+    if (error) call.reject(new Error(error)); else call.resolve(value);
+  };
+  const openConversation = (request, id) => Promise.resolve()
+    .then(() => window.EzerbotFloatingMain.openConversation(id))
+    .catch(() => ({opened: false}))
+    .then(result => {
+      post({
+        command: 'conversationOpened', request, opened: result?.opened === true,
+        reason: typeof result?.reason === 'string' ? result.reason : '',
+      }).catch(() => {});
+    });
   Object.defineProperty(window, 'EzerbotShell', {
     value: Object.freeze({
       platform: 'linux',
       unavailablePanels: Object.freeze([
-        'voice', 'voice-conversation', 'voice-call', 'meetings', 'screen', 'demonstrations', 'floating',
+        'voice', 'voice-conversation', 'voice-call', 'meetings', 'screen', 'demonstrations',
       ]),
+      floating: Object.freeze({postMessage: post}),
+      settle,
+      openConversation,
     }),
     writable: false, configurable: false,
   });

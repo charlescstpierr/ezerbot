@@ -81,7 +81,22 @@ pub struct XDisplay(CString);
 impl BusAddress {
     #[cfg(not(debug_assertions))]
     fn session() -> Option<Self> {
-        std::env::var("DBUS_SESSION_BUS_ADDRESS").ok().map(Self)
+        let runtime = std::env::var("XDG_RUNTIME_DIR").ok();
+        Self::of_session(std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(), runtime)
+    }
+
+    /// The same order as libdbus: a session started by systemd may leave only
+    /// its socket, and a missing address must not read as a missing portal.
+    fn of_session(listed: Option<String>, runtime: Option<String>) -> Option<Self> {
+        let socket = || {
+            let path = std::path::Path::new(&runtime?).join("bus");
+            path.exists()
+                .then(|| format!("unix:path={}", path.display()))
+        };
+        listed
+            .filter(|address| !address.is_empty())
+            .or_else(socket)
+            .map(Self)
     }
 
     #[cfg(test)]
@@ -471,6 +486,27 @@ mod tests {
         ] {
             assert_eq!(Display::of_session(wayland, kind, x11), expected);
         }
+    }
+
+    #[test]
+    fn the_bus_falls_back_to_the_runtime_socket_like_libdbus() {
+        let found = |listed: Option<&str>, runtime: Option<&std::path::Path>| {
+            let runtime = runtime.map(|path| path.display().to_string());
+            BusAddress::of_session(listed.map(str::to_owned), runtime).map(|bus| bus.0)
+        };
+        let directory = std::env::temp_dir().join(format!("ezbus-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        assert_eq!(
+            found(Some("unix:path=/x"), None).as_deref(),
+            Some("unix:path=/x")
+        );
+        assert_eq!(found(None, Some(&directory)), None);
+        assert_eq!(found(Some(""), None), None);
+        std::fs::write(directory.join("bus"), "").unwrap();
+        let socket = format!("unix:path={}", directory.join("bus").display());
+        assert_eq!(found(None, Some(&directory)), Some(socket.clone()));
+        assert_eq!(found(Some(""), Some(&directory)), Some(socket));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

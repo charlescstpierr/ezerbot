@@ -4,6 +4,8 @@
 
 Le rendu utilise le vrai wrapper, son interface compilée et un fournisseur factice local. Le manifeste identifie ce rendu comme un repli Chromium. Ces captures prouvent l'interface web servie sous Linux. Elles ne prouvent pas une coque native Linux, absente lors de l'ajout de cet outil.
 
+La skill `verify-ezerbot` réutilise ce pilote pour sa preuve Linux (`prove-linux.sh`, trois vues et un verdict `PASS`/`FIX`).
+
 ## Prérequis
 
 La commande exige Linux, Git, Bash, Node avec WebSocket, npm, Rust, Chrome ou Chromium, Xvfb et xauth. Elle utilise aussi `flock` et `setsid`. Sur la box, Node 20 active WebSocket avec `--experimental-websocket`. Rust doit respecter `rust-toolchain.toml`. Sur la box, placez `/home/box/.cargo/bin` avant `/usr/bin` dans `PATH` pour utiliser rustup et Rust 1.99.1.
@@ -57,6 +59,6 @@ Le registre du pilote fournit ces vues, dans cet ordre. Le viewport est de 1440 
 
 `platform` vaut `linux`. `renderer` vaut `chromium-web-fallback`. `chrome_version` indique la version réellement interrogée. `viewport` contient `width`, `height` et `device_scale_factor`.
 
-`views` est un tableau ordonné. Chaque entrée contient `id`, `label`, `file`, `sha256`, `width` et `height`. `file` est le nom relatif du PNG dans le même dossier. `sha256` est l'empreinte hexadécimale SHA-256 des octets du fichier. Une preuve complète contient exactement les vues documentées et tous leurs PNG valides.
+`views` est un tableau ordonné. Chaque entrée contient `id`, `label`, `file`, `sha256`, `size`, `width` et `height`. L'étape de capture calcule `sha256` et `size` sur les octets qu'elle écrit. `file` est le nom relatif du PNG dans le même dossier. `sha256` est l'empreinte hexadécimale SHA-256 des octets du fichier. Une preuve complète contient exactement les vues documentées et tous leurs PNG valides.
 
 Le script vérifie le SHA annoncé par le wrapper compilé. Il ne publie le nouveau manifeste qu'après la réussite de toutes les vues. Une nouvelle exécution peut avoir une autre date de capture. L'acceptation exige les mêmes vues. Elle ne suppose pas que des versions différentes de Chrome produisent les mêmes pixels.

@@ -73,12 +73,10 @@ step "$root" env CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_
 binary="$target/debug/grokbot-wrapper"
 [[ -x $binary ]] || build_failed "cargo build (binaire absent)" 1
 
-chrome=''
-for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
-  if chrome=$(command -v "$candidate"); then break; fi
-done
+# Même résolution que le doctor : EZERBOT_VERIFY_CHROME, puis CHROME_BIN, puis le PATH.
+chrome=$(python3 "$DIR/doctor.py" --chrome) || fail 'Chrome introuvable (voir doctor.txt).'
 drive=0
-step "$root" "${iso[@]}" CHROME_BIN="$(realpath "$chrome")" \
+step "$root" "${iso[@]}" CHROME_BIN="$chrome" \
   xvfb-run -a -s '-screen 0 1440x900x24 -nolisten tcp' \
   node --experimental-websocket "$DIR/linux_drive.cjs" "$sha" "$binary" "$evidence/captures" || drive=$?
 python3 "$DIR/linux_verdict.py" --evidence "$evidence" --sha "$sha" --drive-status "$drive" "${patch_args[@]}"

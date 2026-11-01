@@ -24,22 +24,11 @@ interface publique, et elle est vide hors Linux.
 - `testing` (fonctionnalité `test-support`) : HOME isolé, `dbus-daemon` sans activation, vrai
   `gnome-keyring-daemon`, faux serveur de notifications.
 
-## Branchement dans la coque (#605)
+## Branchement dans la coque
 
-1. Dépendre de la crate : `grokbot-linux-desktop = { workspace = true }` sous
-   `[target.'cfg(target_os = "linux")'.dependencies]`.
-2. Au démarrage, `application::deep_links(std::env::args_os().skip(1))` puis
-   `Instance::claim(&Bus::for_app()?)`. `Secondary(remote)` : `remote.open(&liens)` (ou
-   `remote.activate()` sans lien) puis sortir. `Primary(inbox)` : lire `inbox.try_recv()` et appeler
-   `window.EzerbotDeepLinks.receive(url)` quand l’interface est prête ; `Received::Activate` ramène
-   la fenêtre au premier plan.
-3. Dans `tools/build-app-linux.sh`, une ligne :
-   `grokbot-wrapper --register-url-handler /chemin/vers/l-executable [/chemin/icone.png]`. Elle écrit
-   `ca.ezerbot.Ezerbot.desktop` dans `$XDG_DATA_HOME/applications` et vérifie le résultat.
-4. Dans `local-api.js`, un shim qui transmet `window.webkit.messageHandlers.ezerbotNotifications`
-   à `POST /api/notifications/native` (`status`, `authorize`, `presence`, `deliver`). Réponse
-   `disabled` si aucun bus n’est permis, `granted` ou `error`, puis `delivered` ou `error`.
-5. Ouvrir les liens externes et les documents avec `open::launch(cible)`.
-6. Paquets que le CI doit installer : `dbus-daemon gnome-keyring xdg-utils` (`desktop-file-utils`
-   est facultatif). S’il en manque un, les tests concernés échouent en nommant le paquet, sous CI
-   comme ailleurs.
+La coque garde son instance unique sur `shell.fifo`, sans `application`, qu'elle pourra remplacer.
+Un lien reçu en argument passe par ce fichier jusqu'à `window.EzerbotDeepLinks.receive`. La coque
+transmet les notifications à `POST /api/notifications/native` par `EzerbotShell.notifications`.
+`tools/build-app-linux.sh` enregistre `ezerbot-linux` pour `ezerbot://`. Le CI installe
+`dbus-daemon gnome-keyring xdg-utils` (`desktop-file-utils` est facultatif) : s'il en manque un, les
+tests concernés échouent en nommant le paquet.

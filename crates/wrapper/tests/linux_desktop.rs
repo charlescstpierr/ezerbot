@@ -312,6 +312,29 @@ fn quitting_closes_the_notifications_whose_click_would_reach_nobody() {
 }
 
 #[test]
+fn a_slow_notification_server_never_holds_the_exit_past_the_shell_deadline() {
+    let desk = Desk::new();
+    desk.add_notification("reply:two");
+    let server = FakeNotifications::new(&desk.bus);
+    let mut host = desk.host(true);
+    for event in ["reply:one", "reply:two", "reply:one"] {
+        desk.deliver(&host, event);
+    }
+    server.slow_close(std::time::Duration::from_secs(1));
+    let started = std::time::Instant::now();
+    assert!(host.quit().success());
+    let elapsed = started.elapsed();
+    // The shell sends SIGKILL 1 250 ms after SIGTERM.
+    assert!(
+        elapsed < std::time::Duration::from_millis(1250),
+        "{elapsed:?}"
+    );
+    wait_for("every close request to reach the server", || {
+        server.closed() == [1, 2, 3]
+    });
+}
+
+#[test]
 fn past_the_limit_the_oldest_notification_is_closed_and_every_other_click_still_works() {
     let desk = Desk::new();
     let log = desk.home.path().join("clicked.log");

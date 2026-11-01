@@ -78,13 +78,28 @@ fn deliver(bus: &Bus, title: &str, event: &str) -> Result<(), Unavailable> {
     })
 }
 
+/// The shell kills the wrapper 1 250 ms after asking it to leave: closing must fit well within.
+const CLOSE_LIMIT: std::time::Duration = std::time::Duration::from_millis(800);
+
 /// Our notifications die with this process: a click on one left on the desktop would reach
-/// nobody. A crash leaves them there.
+/// nobody. A crash leaves them there. Bounded as a whole: a slow server or a delivery still
+/// holding the connection cannot keep the process past the shell's deadline.
 pub fn close_all() {
-    if let Some(notifier) = live().as_ref() {
-        for (shown, _) in targets().drain(..) {
-            let _ = notifier.close(&shown);
+    let deadline = std::time::Instant::now() + CLOSE_LIMIT;
+    let live = loop {
+        match LIVE.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return,
         }
+    };
+    if let Some(notifier) = live.as_ref() {
+        let shown = targets().drain(..).map(|(shown, _)| shown).collect();
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let _ = notifier.close_all_within(shown, left);
     }
 }
 

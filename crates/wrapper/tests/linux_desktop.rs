@@ -299,6 +299,19 @@ fn after_the_bus_restarts_the_next_delivery_reconnects_and_forgets_the_old_desti
 }
 
 #[test]
+fn quitting_closes_the_notifications_whose_click_would_reach_nobody() {
+    let desk = Desk::new();
+    desk.add_notification("reply:two");
+    let server = FakeNotifications::new(&desk.bus);
+    let mut host = desk.host(true);
+    desk.deliver(&host, "reply:one");
+    desk.deliver(&host, "reply:two");
+    assert_eq!(server.closed(), [] as [u32; 0]);
+    assert!(host.quit().success());
+    assert_eq!(server.closed(), [1, 2]);
+}
+
+#[test]
 fn past_the_limit_the_oldest_notification_is_closed_and_every_other_click_still_works() {
     let desk = Desk::new();
     let log = desk.home.path().join("clicked.log");

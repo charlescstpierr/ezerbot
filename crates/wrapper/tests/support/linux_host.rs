@@ -104,6 +104,15 @@ impl Host {
         self.try_post("/api/secrets/delete", serde_json::json!({"name":name}))
             .unwrap()
     }
+    /// What the shell does when the window closes: SIGTERM, then the process leaves by itself.
+    pub fn quit(&mut self) -> std::process::ExitStatus {
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(self.child.id() as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        )
+        .unwrap();
+        self.child.wait().unwrap()
+    }
     pub fn output(&self) -> String {
         fs::read_to_string(&self.log).unwrap() + &fs::read_to_string(&self.errors).unwrap()
     }

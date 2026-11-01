@@ -21,6 +21,19 @@ Relancer Ezerbot sur le même dossier de données montre la fenêtre déjà ouve
 Les liens qui demandent une nouvelle fenêtre s’ouvrent dans le navigateur par défaut avec `xdg-open`.
 Seules les pages web hors du wrapper sortent de la coque. Un échec du navigateur s’affiche dans une boîte de dialogue.
 
+## Panneau flottant
+
+Le menu **Ezerbot** propose **Ouvrir le panneau flottant**. Les réglages choisissent le raccourci global.
+Le panneau reste au premier plan, sans décoration. On le déplace par son en-tête, et Échap le masque.
+Il garde son brouillon tant qu’Ezerbot reste ouvert.
+
+Sous X11, Ezerbot réserve la touche avec `XGrabKey`, sans surveiller le clavier.
+Un raccourci déjà pris par une autre application est annoncé et l’ancien reste actif.
+Sous Wayland, Ezerbot passe par le portail `org.freedesktop.portal.GlobalShortcuts`.
+Sans portail, le raccourci est annoncé indisponible et le menu reste disponible.
+Le premier plan dépend alors du compositeur : il n’est pas vérifié sous Wayland.
+Fermer la fenêtre principale quitte toujours Ezerbot, donc le raccourci s’arrête avec elle.
+
 ## Fonctions natives non portées
 
 Ces fonctions restent indisponibles sous Linux et leurs commandes sont masquées.
@@ -35,7 +48,6 @@ L’inventaire de #598 renvoie vers les mêmes tickets.
 | Capture de l’écran | Permissions et services du bureau | #608 |
 | Contrôle de l’écran | Actions d’entrée par le portail RemoteDesktop | Optionnel dans #608, à cadrer |
 | Démonstrations | Capture des gestes et de l’écran | Dépend de #608 |
-| Fenêtre flottante | Fenêtre et raccourci global Linux | #609 |
 
 Le bac à sable YOLO est suivi dans #528.
 Les services de #598 comprennent Secret Service, les notifications D-Bus,

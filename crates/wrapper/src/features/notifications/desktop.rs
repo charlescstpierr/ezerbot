@@ -78,6 +78,16 @@ fn deliver(bus: &Bus, title: &str, event: &str) -> Result<(), Unavailable> {
     })
 }
 
+/// Our notifications die with this process: a click on one left on the desktop would reach
+/// nobody. A crash leaves them there.
+pub fn close_all() {
+    if let Some(notifier) = live().as_ref() {
+        for (shown, _) in targets().drain(..) {
+            let _ = notifier.close(&shown);
+        }
+    }
+}
+
 #[cfg(not(debug_assertions))]
 pub(super) fn background(title: &str, event: &str) -> Result<(), ApiError> {
     let bus = Bus::for_app()

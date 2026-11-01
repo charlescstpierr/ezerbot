@@ -10,6 +10,8 @@ use serde_json::{json, Value};
 
 #[cfg(target_os = "linux")]
 mod desktop;
+#[cfg(target_os = "linux")]
+pub use desktop::close_all as close_delivered;
 
 empty_hooks!(
     tools,

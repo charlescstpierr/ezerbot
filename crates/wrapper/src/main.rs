@@ -622,6 +622,8 @@ fn leave_on_quit(db: PathBuf) {
                 .unwrap_or_default()
                 .as_millis() as i64;
             grokbot_wrapper::features::routines::depart_database(&db, now);
+            #[cfg(target_os = "linux")]
+            grokbot_wrapper::features::notifications::close_delivered();
             std::process::exit(0);
         }
     });

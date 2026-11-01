@@ -25,6 +25,11 @@ const HELPER: &str = env!("CARGO_BIN_EXE_ezerbot-linux");
 const WAIT: Duration = Duration::from_secs(20);
 const OVERLAY_WIDTH: u32 = 560;
 
+/// A pause the app must not mistake for the person's own.
+fn hidden() -> Value {
+    json!({"event":"paused","reason":"banner"})
+}
+
 fn command(display: &str, arguments: &[&str]) -> Command {
     let mut command = Command::new(HELPER);
     command
@@ -78,8 +83,21 @@ impl Helper {
     /// Started where the banner cannot be proven visible: it announces a pause.
     fn start_paused(display: &str) -> Self {
         let mut helper = Self::start(display, 60_000, None);
-        assert_eq!(helper.line(), json!({"event":"paused"}));
+        assert_eq!(helper.line(), hidden());
         helper
+    }
+
+    /// The overlay reports the banner a moment after its pixels are back.
+    fn resume_once_seen(&mut self) {
+        let start = Instant::now();
+        loop {
+            self.send(json!({"command":"resume"}));
+            if self.line() == json!({"event":"resumed"}) {
+                return;
+            }
+            assert!(start.elapsed() < WAIT, "the banner never came back");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn line(&mut self) -> Value {
@@ -495,27 +513,12 @@ fn minimizing_the_overlay_pauses_and_resuming_shows_it_again() {
     let mut helper = Helper::start(&server.name, 60_000, None);
     viewer.visible_overlay();
     viewer.minimize();
-    assert_eq!(helper.line(), json!({"event":"paused"}));
-    assert_eq!(viewer.overlay(), None);
-    helper.send(json!({"command":"resume"}));
-    assert_eq!(helper.line(), json!({"event":"resumed"}));
-    // The banner is still on its way back: a capture asked now must not happen.
-    let early = helper.screenshot(1);
-    assert!(
-        early.get("image").is_none() && early["error"].as_str().unwrap().contains("bandeau"),
-        "{early}"
-    );
+    assert_eq!(helper.line(), hidden());
+    assert!(helper.screenshot(1).get("image").is_none());
     viewer.visible_overlay();
-    let start = Instant::now();
-    let mut id = 2;
-    while helper.screenshot(id).get("image").is_none() {
-        assert!(
-            start.elapsed() < WAIT,
-            "the banner came back but no capture"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-        id += 1;
-    }
+    assert!(helper.screenshot(2).get("image").is_none(), "still paused");
+    helper.resume_once_seen();
+    assert!(helper.screenshot(3)["image"].is_string());
 }
 
 #[test]
@@ -526,26 +529,18 @@ fn a_window_over_the_banner_pauses_and_nothing_is_captured_until_it_is_seen_agai
     let area = viewer.visible_overlay();
     assert!(helper.screenshot(1)["image"].is_string());
     let cover = viewer.cover(area);
-    assert_eq!(helper.line(), json!({"event":"paused"}));
+    assert_eq!(helper.line(), hidden());
     assert!(helper.screenshot(2).get("image").is_none());
     helper.send(json!({"command":"resume"}));
-    assert_eq!(helper.line(), json!({"event":"resumed"}));
+    assert_eq!(helper.line(), hidden(), "resuming is refused");
     let hidden = helper.screenshot(3);
     assert!(
         hidden["error"].as_str().unwrap().contains("bandeau"),
         "{hidden}"
     );
     viewer.uncover(cover);
-    let start = Instant::now();
-    let mut id = 4;
-    while helper.screenshot(id).get("image").is_none() {
-        assert!(
-            start.elapsed() < WAIT,
-            "the banner was seen again but no capture"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-        id += 1;
-    }
+    helper.resume_once_seen();
+    assert!(helper.screenshot(4)["image"].is_string());
 }
 
 #[test]
@@ -570,7 +565,7 @@ fn under_a_compositing_manager_the_lease_starts_paused_and_captures_nothing() {
     viewer.visible_overlay();
     assert!(helper.screenshot(1).get("image").is_none());
     helper.send(json!({"command":"resume"}));
-    assert_eq!(helper.line(), json!({"event":"resumed"}));
+    assert_eq!(helper.line(), hidden(), "never announced as live");
     let refused = helper.screenshot(2);
     assert!(
         refused["error"].as_str().unwrap().contains("bandeau"),

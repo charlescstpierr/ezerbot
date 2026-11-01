@@ -164,6 +164,31 @@ test("the Linux share panel names what it does and promises nothing it cannot ke
   assert.ok(!settings.buttons().length || settings.buttons().every(button => !/Ouvrir/.test(button.text)));
 });
 
+test("a Linux session whose banner is not proven never claims the bot sees the screen", () => {
+  const { open } = screenPanel({ platform: "linux", unavailablePanels: unavailable });
+  const session = { id: 9, bot_id: "b", conversation_id: "c", expires_at: Date.now() + 60000, paused: true, unproven: true };
+  const { banner, dialog } = open(session);
+  for (const text of [banner.text, dialog.text]) {
+    assert.match(text, /Partage en pause : bandeau non garanti visible/);
+    assert.doesNotMatch(text, /voit l’écran/);
+  }
+  assert.ok(dialog.buttons().some(button => button.text.includes("Reprendre")));
+  assert.ok(dialog.buttons().some(button => button.text.includes("Révoquer")));
+});
+
+test("a Linux session the person paused says so without blaming the banner", () => {
+  const { open } = screenPanel({ platform: "linux", unavailablePanels: unavailable });
+  const session = { id: 9, bot_id: "b", conversation_id: "c", expires_at: Date.now() + 60000, paused: true, unproven: false };
+  const { banner } = open(session);
+  assert.match(banner.text, /Ezerbot en pause/);
+  assert.doesNotMatch(banner.text, /bandeau/);
+});
+
+test("the Linux consent card names both sessions where the share stays paused", () => {
+  const { open } = screenPanel({ platform: "linux", unavailablePanels: unavailable });
+  assert.match(open().dialog.text, /Sous Wayland ou avec un compositeur.*reste en pause/);
+});
+
 test("a live Linux session shows what the bot does and keeps the stop control", () => {
   const { open, posted } = screenPanel({ platform: "linux", unavailablePanels: unavailable });
   const session = { id: 9, bot_id: "b", conversation_id: "c", expires_at: Date.now() + 60000, paused: false };

@@ -301,9 +301,14 @@ mod tests {
         gate.ready();
         assert_eq!(
             sink.lines(),
-            [json!({"ready":true}), json!({"event":"paused"})]
+            [
+                json!({"ready":true}),
+                json!({"event":"paused","reason":"banner"})
+            ]
         );
+        assert_eq!(gate.tick(), View::Unproven);
         gate.banner(true);
+        assert_eq!(gate.tick(), View::Paused);
         assert!(gate.admit(1).is_none(), "paused until the person resumes");
         gate.resume();
         assert!(gate.admit(2).is_some());
@@ -326,7 +331,7 @@ mod tests {
         gate.banner(false);
         gate.deliver(ticket, image());
         assert_eq!(images(&sink), 0);
-        assert_eq!(sink.lines()[0], json!({"event":"paused"}));
+        assert_eq!(sink.lines()[0], json!({"event":"paused","reason":"banner"}));
         gate.banner(true);
         assert!(
             gate.admit(2).is_none(),
@@ -336,16 +341,19 @@ mod tests {
     }
 
     #[test]
-    fn after_a_resume_nothing_is_captured_until_the_banner_is_back() {
+    fn a_resume_without_the_banner_is_refused_and_never_announced() {
         let (gate, sink) = gate();
         gate.banner(false);
         gate.resume();
+        assert_eq!(gate.tick(), View::Unproven);
         assert!(gate.admit(1).is_none());
         assert_eq!(refused(&sink, 1), HIDDEN);
+        assert!(sink.lines().iter().all(|line| line["event"] != "resumed"));
         gate.banner(true);
-        let ticket = gate.admit(2).unwrap();
-        gate.deliver(ticket, image());
-        assert_eq!(images(&sink), 1);
+        assert!(gate.admit(2).is_none(), "the refused resume stays refused");
+        gate.resume();
+        assert_eq!(gate.tick(), View::Live);
+        assert!(gate.admit(3).is_some());
     }
 
     #[test]

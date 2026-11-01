@@ -466,24 +466,31 @@ fn a_bus_without_a_portal_refuses_on_wayland_and_uses_the_root_on_x11() {
 }
 
 #[test]
-fn a_bus_with_a_portal_wins_on_x11_and_serves_wayland() {
+fn a_bus_with_a_portal_serves_wayland_and_leaves_x11_on_its_root() {
     let bus = Bus::start();
     let (_, uri) = bus.picture();
     let _fake = FakePortal::serve(&bus, Script::answering(Order::SignalFirst, uri));
-    for display in [Display::Wayland, Display::X11] {
-        bus.picture();
-        let env = Env {
-            display,
-            bus: Some(bus.client()),
-            x: None,
-        };
-        let mut source = open(&env).unwrap();
-        let Source::Portal(portal) = &mut source else {
-            panic!("the portal must win");
-        };
-        portal.captures = vec![bus.directory.to_path_buf()];
-        assert_eq!(source.shot(&|| false).unwrap().pixbuf.width(), 1280);
-    }
+    let wayland = Env {
+        display: Display::Wayland,
+        bus: Some(bus.client()),
+        x: None,
+    };
+    let mut source = open(&wayland).unwrap();
+    let Source::Portal(portal) = &mut source else {
+        panic!("Wayland has only the portal");
+    };
+    portal.captures = vec![bus.directory.to_path_buf()];
+    assert_eq!(source.shot(&|| false).unwrap().pixbuf.width(), 1280);
+
+    let (picture, _) = bus.picture();
+    let server = Xvfb::start("320x200x24");
+    let x11 = Env {
+        display: Display::X11,
+        bus: Some(bus.client()),
+        x: Some(XDisplay::private(&server.name)),
+    };
+    assert!(matches!(open(&x11).unwrap(), Source::X11(_)));
+    assert!(picture.exists(), "X11 leaves the person's folders alone");
 }
 
 #[test]

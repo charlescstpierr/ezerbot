@@ -46,7 +46,7 @@ les liens profonds et l’ouverture par `xdg-open`.
 Le bot voit l’écran le temps d’un bail, pour un fil et une durée. Il n’effectue aucun geste.
 Le partage fonctionne seulement sous X11 sans compositeur. Sous Wayland ou sous X11 avec un compositeur, il reste en pause et aucune capture ne part. La suite est dans #632.
 Le wrapper lance `ezerbot-linux --screen-helper <ms>`. Son parent doit être le `grokbot-wrapper` voisin.
-Sous X11, le portail `org.freedesktop.portal.Screenshot` passe d’abord, sinon `XGetImage` sur la fenêtre racine.
+Sous X11, l’image vient de `XGetImage` sur la fenêtre racine, sans portail.
 Sans portail, Wayland refuse le bail.
 Le fichier écrit par le portail est retiré dès sa lecture.
 

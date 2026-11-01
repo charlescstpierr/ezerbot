@@ -66,13 +66,14 @@ pub enum Route {
     X11Root,
 }
 
-/// XWayland's root shows only X clients, so Wayland never falls back to it: the
-/// model would receive a false desktop.
+/// X11 needs no portal, and no portal file to read and remove from the person's
+/// folders. XWayland's root shows only X clients, so Wayland never falls back to
+/// it: the model would receive a false desktop.
 pub fn route(display: Display, portal: bool) -> Result<Route, Refusal> {
     match (display, portal) {
         (Display::None, _) => Err(Refusal::NoDisplay),
-        (_, true) => Ok(Route::Portal),
-        (Display::X11, false) => Ok(Route::X11Root),
+        (Display::X11, _) => Ok(Route::X11Root),
+        (Display::Wayland, true) => Ok(Route::Portal),
         (Display::Wayland, false) => Err(Refusal::WaylandNeedsPortal),
     }
 }
@@ -606,7 +607,7 @@ mod tests {
     #[test]
     fn the_route_never_shows_a_false_desktop() {
         assert_eq!(route(Display::Wayland, true), Ok(Route::Portal));
-        assert_eq!(route(Display::X11, true), Ok(Route::Portal));
+        assert_eq!(route(Display::X11, true), Ok(Route::X11Root));
         assert_eq!(route(Display::X11, false), Ok(Route::X11Root));
         assert_eq!(
             route(Display::Wayland, false),

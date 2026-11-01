@@ -59,7 +59,7 @@
           const environment = status.textContent;
           await P.api("/api/floating/settings", { shortcut });
           chosen = null; await P.refresh();
-          status.textContent = `Raccourci enregistré : ${granted || names.find(([value]) => value === shortcut)?.[1] || shortcut}. ${environment}`;
+          status.textContent = granted ? environment : `Raccourci enregistré : ${names.find(([value]) => value === shortcut)?.[1] || shortcut}. ${environment}`;
         } catch (error) {
           try { await configure(previous); } catch { /* Keep the actionable error below. */ }
           status.textContent = error.message;

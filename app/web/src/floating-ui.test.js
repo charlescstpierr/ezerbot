@@ -75,9 +75,7 @@ test("on Linux the combination the desktop assigned is shown instead of the one 
   const f = fixture(null, {}, { status: "registered", trigger: "Ctrl Alt K" }); f.select.value = "cmd+option+j";
   await f.save.events.click();
   assert.equal(f.requests[0].body.shortcut, "cmd+option+j");
-  assert.match(f.status.textContent, /Raccourci enregistré : Ctrl Alt K\./);
-  assert.match(f.status.textContent, /Raccourci attribué par le bureau : Ctrl Alt K\./);
-  assert.doesNotMatch(f.status.textContent, /Super Alt J/);
+  assert.equal(f.status.textContent, "Raccourci attribué par le bureau : Ctrl Alt K.");
 });
 
 test("on Linux an unavailable shortcut is announced and never persisted", async () => {

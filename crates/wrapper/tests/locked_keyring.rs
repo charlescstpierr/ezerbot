@@ -35,6 +35,17 @@ struct Fixture {
     server: FakeOpenAi,
     path: PathBuf,
 }
+/// Attend les fils de fond du fournisseur avant que le faux serveur et le dossier ne partent,
+/// y compris pendant l'unwinding d'une assertion qui échoue (CODING_STANDARDS.md).
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        match self.provider.wait_for_background_work() {
+            Ok(()) => {}
+            Err(message) if std::thread::panicking() => eprintln!("{message}"),
+            Err(message) => panic!("{message}"),
+        }
+    }
+}
 impl Fixture {
     fn new() -> Self {
         let path = PathBuf::from(std::env::var_os("HOME").unwrap()).join("workspace.sqlite");

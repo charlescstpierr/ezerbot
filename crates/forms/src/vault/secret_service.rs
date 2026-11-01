@@ -61,7 +61,15 @@ fn holds_secrets(vault_path: &Path) -> PathBuf {
 fn note_secrets_in_service(vault: &Vault) -> Result<()> {
     let marker = holds_secrets(&vault.path);
     if !marker.exists() {
-        fs::write(marker, "")?;
+        // Durable before any native write: a power cut must not keep a secret in the
+        // keyring and lose the marker, or a locked restart would mask with a partial list.
+        let temporary = marker.with_extension("keyring.tmp");
+        let file = fs::File::create(&temporary)?;
+        file.sync_all()?;
+        fs::rename(&temporary, &marker)?;
+        fs::File::open(marker.parent().unwrap())?.sync_all()?;
+        #[cfg(test)]
+        tests::STEPS.with(|steps| steps.borrow_mut().push("marqueur durable".into()));
     }
     Ok(())
 }
@@ -204,6 +212,9 @@ pub(super) fn remove(vault: &Vault, target: &Target, name: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+    std::thread_local! {
+        pub(super) static STEPS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
     struct Fake {
         secrets: RefCell<Secrets>,
         writes: Cell<usize>,
@@ -214,6 +225,7 @@ mod tests {
             Ok(self.secrets.borrow().clone())
         }
         fn put_verified(&self, name: &str, secret: &StoredSecret) -> Result<()> {
+            STEPS.with(|steps| steps.borrow_mut().push(format!("trousseau:{name}")));
             self.writes.set(self.writes.get() + 1);
             self.secrets
                 .borrow_mut()
@@ -247,5 +259,25 @@ mod tests {
         let all = migrate(&test.vault, &fake, &mut State::default()).unwrap();
         assert_eq!(all.len(), 2);
         assert!(test.vault.read_file().unwrap().is_empty());
+    }
+    #[test]
+    fn the_marker_is_durable_on_disk_before_the_first_keyring_write() {
+        let test = test_support::TestVault::new();
+        test.vault.set("FIRST", "premier", "private-first").unwrap();
+        let marker = holds_secrets(test.vault.path());
+        assert!(!marker.exists());
+        let fake = Fake {
+            secrets: RefCell::default(),
+            writes: Cell::new(0),
+            fail_at: 0,
+        };
+        STEPS.with(|steps| steps.borrow_mut().clear());
+        let _guard = access(test.vault.path());
+        let _lock = test.vault.lock_file(true).unwrap();
+        migrate(&test.vault, &fake, &mut State::default()).unwrap();
+        let steps = STEPS.with(|steps| steps.borrow().clone());
+        assert_eq!(steps, ["marqueur durable", "trousseau:FIRST"]);
+        assert!(marker.exists());
+        assert!(!marker.with_extension("keyring.tmp").exists());
     }
 }

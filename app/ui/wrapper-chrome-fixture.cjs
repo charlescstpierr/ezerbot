@@ -18,7 +18,9 @@ function sleep(ms) {
 
 // The scripted model. A user message "create_document:{json}" or "write_page:{json}" calls that tool with the
 // JSON as arguments; once the tool output is back (or for anything else: titles, memory) it
-// answers with one short text. The tool call and the catalogue follow the shapes the real
+// answers with one short text. A user message "Regarde le dossier <path>" says one
+// sentence, lists that path with the real local tool, then leaves the run open: the follow-up
+// request never gets an answer. The tool call and the catalogue follow the shapes the real
 // provider parses, as in crates/wrapper/tests/support and .cursor/skills/verify-ezerbot.
 const MODELS = {
   models: [{
@@ -51,6 +53,16 @@ function scriptedReply(raw) {
   const lastUser = [...input].reverse().find((item) => item?.role === "user");
   const toolName = ["create_document", "write_page"].find((name) => strings(lastUser).some((text) => text.startsWith(`${name}:`)));
   const request = strings(lastUser).find((text) => toolName && text.startsWith(`${toolName}:`));
+  const held = strings(lastUser).map((text) => /^Regarde le dossier (\S+)$/.exec(text)?.[1]).find(Boolean);
+  if (held && answered) return null;
+  if (held) {
+    return sse([
+      { type: "response.created" },
+      { type: "response.output_text.delta", delta: "Je regarde ce qu’il y a dans le dossier." },
+      { type: "response.output_item.done", item: { id: "fc-held", type: "function_call", status: "completed", call_id: "fixture-held", name: "list_directory", arguments: JSON.stringify({ path: held }) } },
+      { type: "response.completed" },
+    ]);
+  }
   const offered = (payload.tools || []).some((tool) => tool?.name === toolName);
   if (request && offered && !answered) {
     const call = {
@@ -83,7 +95,10 @@ function startFakeOpenAi() {
       if (request.method === "GET" && (path === "/v1/models" || path === "/backend-api/codex/models")) send(200, "application/json", JSON.stringify(MODELS));
       else if (request.method === "GET" && path === "/jwks") send(200, "application/json", '{"keys":[]}');
       else if (request.method === "GET") send(200, "application/json", "{}");
-      else if (path === "/v1/responses" || path === "/backend-api/codex/responses") send(200, "text/event-stream", scriptedReply(Buffer.concat(chunks).toString("utf8")));
+      else if (path === "/v1/responses" || path === "/backend-api/codex/responses") {
+        const reply = scriptedReply(Buffer.concat(chunks).toString("utf8"));
+        if (reply !== null) send(200, "text/event-stream", reply);
+      }
       else if (path === "/token") send(200, "application/json", JSON.stringify({ access_token: "fake-access", refresh_token: "fake-refresh", token_type: "Bearer", expires_in: 3600 }));
       else send(200, "application/json", "{}");
     });

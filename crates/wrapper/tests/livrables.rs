@@ -673,6 +673,35 @@ fn the_preview_masks_a_secret_cut_by_the_cell_width() {
 }
 
 #[test]
+fn the_preview_masks_a_secret_only_the_decoded_json_shows() {
+    const ESCAPED: &str = "catalogue-r10-jeton";
+    let escaped = format!("\\u0063{}", &ESCAPED[1..]);
+    const QUOTED: &str = "jeton\"r10-guillemet";
+    let table = |cell: &str| format!(r#"[["Public"],["{cell}"]]"#);
+    let graph = |node: &str| format!(r#"{{"nodes":["Public","{node}"],"edges":[[0,1]]}}"#);
+    for (format, content, secret, drawn) in [
+        ("csv", table(&escaped), ESCAPED, ESCAPED),
+        ("xlsx", table(&escaped), ESCAPED, ESCAPED),
+        ("svg", graph(&escaped), ESCAPED, ESCAPED),
+        (
+            "csv",
+            table(r#"jeton\"r10-guillemet"#),
+            QUOTED,
+            "jeton&quot;r10-guillemet",
+        ),
+    ] {
+        assert!(!content.contains(secret), "{format} : {content}");
+        let (before, after) = previews(format, &content, secret);
+        assert!(before.contains(drawn), "{format} : {before}");
+        assert!(!after.contains(drawn), "{format} : {after}");
+        assert!(
+            after.contains("Public") && after.contains("[...]"),
+            "{format} : {after}"
+        );
+    }
+}
+
+#[test]
 fn a_secret_absent_from_the_text_leaves_the_preview_untouched() {
     let (before, after) = previews("md", "Été à Québec", "font-family");
     assert!(before.contains("font-family="), "{before}");

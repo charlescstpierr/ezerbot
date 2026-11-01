@@ -3,6 +3,8 @@ mod backend;
 #[cfg(target_os = "linux")]
 mod floating;
 #[cfg(target_os = "linux")]
+mod hotkey;
+#[cfg(target_os = "linux")]
 mod local_api;
 
 #[cfg(not(target_os = "linux"))]

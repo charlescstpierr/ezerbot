@@ -58,7 +58,7 @@ test("the Linux shell has no dictation controls and the panel survives state and
   f.window.EzerbotDictation.refresh();
   f.window.EzerbotDictation.cancel();
   assert.equal(f.window.EzerbotDictation.active(), false);
-  assert.deepEqual(f.registration.sendExtras().attachments.length, 0);
+  assert.equal(f.registration.sendExtras, undefined);
 });
 
 test("a chosen microphone that disappeared is forgotten with the fallback phrase", async () => {

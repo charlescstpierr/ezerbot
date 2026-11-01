@@ -326,6 +326,7 @@
     sendExtras: () => ({ attachments: memoItems.map((m) => m.id) }),
   };
   // Dictation needs speech recognition, which Linux does not have yet (#607). The setting works without it.
-  if (linux()) delete panel.composer;
+  // A memo drafted on another machine stays out of the message: nothing here could show or remove it.
+  if (linux()) { delete panel.composer; delete panel.sendExtras; }
   panels.register(panel);
 })();

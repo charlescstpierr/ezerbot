@@ -67,6 +67,13 @@ pub const SAMPLE_RATE: u32 = 16_000;
 impl Server {
     const ALL: [Server; 2] = [Server::PipeWire, Server::PulseAudio];
 
+    fn tool(self) -> &'static str {
+        match self {
+            Server::PipeWire => "pw-dump",
+            Server::PulseAudio => "pactl",
+        }
+    }
+
     fn list(self, session: &AudioSession) -> Option<Sources> {
         let end = Instant::now() + SERVER_DEADLINE;
         match self {
@@ -289,11 +296,20 @@ impl AudioSession {
         String::from_utf8(output).ok()
     }
 
+    fn installed(&self, server: Server) -> bool {
+        let end = Instant::now() + SERVER_DEADLINE;
+        self.run(server.tool(), &["--version"], end).is_some()
+    }
+
     fn sources(&self) -> Result<(Server, Sources), Unavailable> {
         // PipeWire can run for video only, next to a PulseAudio that holds the microphones.
         let mut silent = None;
         for server in Server::ALL {
             let Some(sources) = server.list(self) else {
+                // The microphones may be on the server that failed, so emptiness proves nothing.
+                if silent.is_some() && self.installed(server) {
+                    return Err(Unavailable);
+                }
                 continue;
             };
             if !sources.inputs.is_empty() {

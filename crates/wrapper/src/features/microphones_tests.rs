@@ -195,6 +195,24 @@ fn servers_that_answer_without_inputs_are_an_empty_list() {
 }
 
 #[test]
+fn an_empty_pipewire_next_to_a_failing_pulseaudio_is_unavailable_not_an_empty_list() {
+    let dir = TempDir::new();
+    let bin = stub_tools(dir.path(), "[]");
+    fs::write(bin.join("pactl"), "#!/bin/sh\n[ \"$1\" = --version ]\n").unwrap();
+    let session = AudioSession::isolated(dir.path(), &[("PATH", bin.to_str().unwrap())]);
+    assert_eq!(session.available(), Err(Unavailable));
+}
+
+#[test]
+fn an_empty_pipewire_without_pulseaudio_tools_is_an_empty_list() {
+    let dir = TempDir::new();
+    let bin = stub_tools(dir.path(), "[]");
+    fs::remove_file(bin.join("pactl")).unwrap();
+    let session = AudioSession::isolated(dir.path(), &[("PATH", bin.to_str().unwrap())]);
+    assert_eq!(session.available(), Ok(Vec::new()));
+}
+
+#[test]
 fn a_hung_tool_is_killed_at_its_deadline() {
     let dir = TempDir::new();
     let session = AudioSession::isolated(dir.path(), &[]);
@@ -405,6 +423,14 @@ context.objects = [ {{ factory = adapter args = {{ factory.name = support.null-a
 context.modules = [ {{ name = libpipewire-module-pipe-tunnel args = {{ tunnel.mode = source pipe.filename = "{path}/mic.fifo" audio.format = S16LE audio.rate = 16000 audio.channels = 1 audio.position = [ MONO ] stream.props = {{ node.driver = true node.name = fixture node.description = "{fixture_name}" media.class = Audio/Source }} }} }} ]
 "#
             ),
+        )
+        .unwrap();
+        let session_config = dir.path().join("cfg/wireplumber/wireplumber.conf.d");
+        fs::create_dir_all(&session_config).unwrap();
+        // The private directories do not hide /dev/snd: without this a real microphone joins the list.
+        fs::write(
+            session_config.join("fixture.conf"),
+            "wireplumber.profiles = { main = { hardware.audio = disabled hardware.bluetooth = disabled hardware.video-capture = disabled } }\n",
         )
         .unwrap();
         let env = [

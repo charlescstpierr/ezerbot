@@ -14,6 +14,34 @@ use wry::{
     WebViewBuilderExtUnix,
 };
 
+/// No document ever loads into a frame of an Ezerbot view. A frame of the same
+/// origin reaches the page's objects, the bridge included, and no script can
+/// fence that off; WebKitGTK does not say which frame sent a message either.
+/// So the response of any frame's document is ignored natively: only the main
+/// frame's own page loads. Pages may still build `about:blank` or `srcdoc`
+/// frames themselves; those hold only what the page itself wrote.
+pub fn refuse_framed_documents(webview: &WebView) {
+    use webkit2gtk::{
+        PolicyDecisionExt, PolicyDecisionType, ResponsePolicyDecision, ResponsePolicyDecisionExt,
+        WebViewExt,
+    };
+    use wry::WebViewExtUnix;
+    webview
+        .webview()
+        .connect_decide_policy(|_, decision, kind| {
+            if kind != PolicyDecisionType::Response {
+                return false;
+            }
+            match decision.downcast_ref::<ResponsePolicyDecision>() {
+                Some(response) if !response.is_main_frame_main_resource() => {
+                    decision.ignore();
+                    true
+                }
+                _ => false,
+            }
+        });
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
     Main,
@@ -73,17 +101,12 @@ pub enum Command {
     OpenConversation {
         conversation_id: ConversationId,
     },
-    /// The main page stopped serving its bridge: a frame could reach it.
-    Revoked {},
 }
 
 impl Command {
     fn view(&self) -> View {
         match self {
-            Self::Show {}
-            | Self::Configure { .. }
-            | Self::ConversationOpened { .. }
-            | Self::Revoked {} => View::Main,
+            Self::Show {} | Self::Configure { .. } | Self::ConversationOpened { .. } => View::Main,
             Self::Close {}
             | Self::Appearance { .. }
             | Self::Drag {}
@@ -202,6 +225,7 @@ impl Panel {
             .with_url(format!("{}/floating", api.origin.as_str()))
             .build_gtk(vbox)
             .map_err(|_| ERROR)?;
+        refuse_framed_documents(&webview);
         let panel = Self {
             webview,
             window,
@@ -231,7 +255,8 @@ impl Panel {
     }
 
     pub fn reopen(&self, token: Option<String>) {
-        if let Some(at) = self.left_at.get() {
+        // Taken: the position only matters once, when the hidden panel comes back.
+        if let Some(at) = self.left_at.take() {
             self.window.set_outer_position(at);
         }
         let _ = self
@@ -324,12 +349,6 @@ mod tests {
                     opened: false,
                     reason: "non".into(),
                 },
-            ),
-            (
-                View::Main,
-                &main,
-                json!({"command": "revoked"}),
-                Command::Revoked {},
             ),
             (
                 View::Panel,

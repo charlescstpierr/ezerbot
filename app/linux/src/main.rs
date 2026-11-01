@@ -111,11 +111,7 @@ mod linux {
         /// panel message to settle.
         opening: HashMap<u64, u64>,
         requests: u64,
-        /// The main page refuses its bridge until reloaded: it cannot answer a panel.
-        main_revoked: bool,
     }
-
-    const MAIN_REVOKED: &str = "La fenêtre principale a bloqué son pont après l’ouverture d’un cadre. Rechargez Ezerbot pour ouvrir ce fil.";
 
     impl Drop for Shell {
         fn drop(&mut self) {
@@ -146,7 +142,6 @@ mod linux {
 
         /// The page that was asked to open a thread is gone: its answer will never come.
         fn main_loading(&mut self) {
-            self.main_revoked = false;
             for (_, panel_id) in std::mem::take(&mut self.opening) {
                 self.settle(
                     View::Panel,
@@ -237,17 +232,7 @@ mod linux {
                     }
                     Ok(json!(true))
                 }
-                PanelCommand::Revoked {} => {
-                    self.main_revoked = true;
-                    for (_, panel_id) in std::mem::take(&mut self.opening) {
-                        self.settle(View::Panel, panel_id, Err(MAIN_REVOKED));
-                    }
-                    Ok(json!(true))
-                }
                 PanelCommand::OpenConversation { conversation_id } => {
-                    if self.main_revoked {
-                        return Some(Err(MAIN_REVOKED));
-                    }
                     let Some(webview) = &self.webview else {
                         return Some(Err("La fenêtre principale est indisponible."));
                     };
@@ -436,6 +421,7 @@ mod linux {
             .with_url(api.origin.as_str())
             .build_gtk(vbox)
             .map_err(|_| "La vue Ezerbot n'a pas pu être créée.")?;
+        floating::refuse_framed_documents(&webview);
         let hotkey_proxy = Mutex::new(event_loop.create_proxy());
         let hotkeys = Registrar::open(Hotkeys::detect(), move |id| {
             if let Ok(proxy) = hotkey_proxy.lock() {
@@ -450,7 +436,6 @@ mod linux {
             backend,
             proxy: event_loop.create_proxy(),
             opening: HashMap::new(),
-            main_revoked: false,
             requests: 0,
         });
         let failure_proxy = event_loop.create_proxy();

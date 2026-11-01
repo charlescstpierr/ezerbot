@@ -33,7 +33,7 @@ Sous Wayland, aucun raccourci global pour l'instant : aucune application ne peut
 Sans X11 ni Wayland, le raccourci est annoncé indisponible et le menu reste disponible.
 Sous Wayland, le premier plan dépend du compositeur : il n’est pas vérifié sous Wayland.
 Fermer la fenêtre principale quitte toujours Ezerbot, donc le raccourci s’arrête avec elle.
-Le pont natif ne sert que la page principale : dès qu'un cadre de même origine a pu l'atteindre, il refuse tout jusqu'au rechargement de la page, et le panneau qui demande d'ouvrir un fil reçoit aussitôt un message d'erreur.
+Le pont natif ne sert que la page principale. Aucune page ne se charge dans un cadre : la coque ignore nativement toute réponse qui n'est pas la page du cadre principal. Aucun script d'un autre document ne peut donc atteindre le pont.
 
 ## Fonctions natives non portées
 

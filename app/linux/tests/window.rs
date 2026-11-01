@@ -800,7 +800,7 @@ import http.server, json, os, sys, threading
 sys.stdin.buffer.read()
 root = os.path.dirname(os.path.abspath(__file__)) + "/.."
 pages = {"/": "main.html", "/floating": "panel.html", "/frame": "frame.html"}
-cursor = {"main": 0, "panel": 0, "frame": 0}
+cursor = {"main": 0, "panel": 0}
 lock = threading.Lock()
 class Handler(http.server.BaseHTTPRequestHandler):
     def reply(self, status, body=b"", kind="text/plain"):
@@ -857,22 +857,18 @@ window.EzerbotFloatingMain = {{openConversation: async id => ({{opened: id === "
     )
 }
 
+/// What a framed page would do with the bridge: none of it may ever run.
 const FRAME_PAGE: &str = r#"<!doctype html><body><script>
-const bridge = window.webkit.messageHandlers.ipc;
-fetch("/result", {method: "POST", body: JSON.stringify(["frame", {
-  shell: typeof window.EzerbotShell, ipc: typeof bridge.postMessage,
-}])});
-bridge.postMessage(JSON.stringify({launch: "", id: 1, body: {command: "configure", shortcut: "cmd+option+j"}}));
-bridge.postMessage(JSON.stringify({launch: "x", id: 2, body: {command: "show"}}));
-// The page's own bridge, reached from here, must refuse too: it would add the token.
-parent.EzerbotShell.floating.postMessage({command: "configure", shortcut: "cmd+option+j"}).then(
-  () => "accepted", error => String(error.message)).then(outcome =>
-  fetch("/result", {method: "POST", body: JSON.stringify(["frame-via-parent", outcome])}))
-  .then(() => {
-    // Keep the page's bridge past this frame: the page's own timer calls it once the frame is gone.
-    parent.setTimeout(parent.EzerbotShell.floating.postMessage, 500, {command: "show"});
-    window.frameElement.remove();
-  });
+fetch("/result", {method: "POST", body: JSON.stringify(["frame-ran", location.search])});
+const kept = parent.EzerbotShell?.floating?.postMessage;
+if (kept) {
+  parent.setTimeout(kept, 500, {command: "show"});
+  kept({command: "configure", shortcut: "cmd+option+j"}).then(
+    () => "accepted", error => String(error.message)).then(outcome =>
+    fetch("/result", {method: "POST", body: JSON.stringify(["frame-via-parent", outcome])}));
+}
+const ipc = window.webkit?.messageHandlers?.ipc;
+if (ipc) ipc.postMessage(JSON.stringify({launch: "", id: 1, body: {command: "show"}}));
 </script>"#;
 
 /// A shell on a scripted page, under a private session bus when given one.
@@ -954,62 +950,6 @@ impl Scripted {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
-}
-
-/// Adds the frame of `FRAME_PAGE` once the test appends a line to `commands-frame`.
-const FRAME_ON_DEMAND: &str = r#"<script>(async () => {
-  for (;;) {
-    if (await (await fetch("/next?view=frame")).text()) {
-      document.body.insertAdjacentHTML("beforeend", '<iframe src="/frame"></iframe>');
-      return;
-    }
-    await new Promise(resolve => setTimeout(resolve, 50));
-  }
-})();</script>"#;
-
-#[test]
-fn a_thread_asked_from_the_panel_fails_at_once_when_the_main_page_revoked_its_bridge() {
-    let shell = Scripted::start(FRAME_ON_DEMAND, &[]);
-    assert_eq!(
-        status(&shell.run("main", &configure("cmd+option+j"))),
-        "registered"
-    );
-    shell.screen.press(&SUPER_ALT_J);
-    shell.wait_panel(true, "the shortcut did not open the panel");
-    let open = r#"{"command":"openConversation","conversation_id":"present"}"#;
-    assert_eq!(
-        shell.run("panel", open)["ok"],
-        true,
-        "a thread did not open before"
-    );
-
-    shell.command("frame", "go");
-    let via_parent = wait_for("the frame never used the page's bridge", || {
-        shell
-            .results()
-            .into_iter()
-            .find(|(key, _)| key == "frame-via-parent")
-            .map(|(_, value)| value)
-    });
-    assert!(
-        via_parent.as_str().unwrap().contains("refusée"),
-        "{via_parent}"
-    );
-    shell.screen.press(&SUPER_ALT_J);
-    shell.wait_panel(true, "the shortcut did not open the panel again");
-    let asked = Instant::now();
-    let again = r#"{"command":"openConversation", "conversation_id":"present"}"#;
-    let refused = shell.run("panel", again);
-    assert!(
-        asked.elapsed() < Duration::from_secs(5),
-        "the panel waited {:?} for a page that cannot answer",
-        asked.elapsed()
-    );
-    assert!(
-        refused["error"].as_str().unwrap().contains("Rechargez"),
-        "{refused}"
-    );
-    shell.app.quit();
 }
 
 fn status(outcome: &serde_json::Value) -> &str {
@@ -1181,6 +1121,23 @@ fn the_shortcut_opens_an_always_on_top_panel_that_takes_the_typing() {
         "the panel did not reopen where it was left"
     );
 
+    // Moved again while visible, the shortcut keeps it where it now is.
+    let (x, y) = moved;
+    screen.drag((x + 260, y + 40), (x + 160, y + 140));
+    let again = wait_for("dragging the reopened panel did not move it", || {
+        panel_area().filter(|at| *at != moved)
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    let again = panel_area().unwrap_or(again);
+    screen.press(&SUPER_ALT_J);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(
+        panel_area(),
+        Some(again),
+        "the shortcut moved a visible panel back to an old position"
+    );
+    let moved = again;
+
     // The window manager's own close hides the panel, never the application.
     screen.press(&["Alt_L", "F4"]);
     wait_for("Alt+F4 did not close the panel", || {
@@ -1269,47 +1226,42 @@ fn a_close_request_hides_the_panel_and_quits_from_the_main_window() {
     assert!(status.success(), "{status}");
 }
 
+/// A frame in the page, a frame in a container, and the bypass the review
+/// found: a container whose same-origin frame is removed with it in the same
+/// turn. The shell refuses every framed document natively, so none ever runs.
+const FRAMES: &str = r#"<iframe src="/frame?direct" style="width:100px;height:100px"></iframe>
+<script>
+const box = document.createElement("div");
+box.innerHTML = '<iframe src="/frame?container"></iframe>';
+document.body.append(box);
+const quick = document.createElement("div");
+quick.innerHTML = '<iframe src="/frame?removed"></iframe>';
+document.body.append(quick);
+quick.firstChild.remove();
+quick.remove();
+</script>"#;
+
 #[test]
-fn the_bridge_refuses_a_frame_even_after_its_removal() {
-    let shell = Scripted::start(
-        r#"<iframe src="/frame" style="width:100px;height:100px"></iframe>"#,
-        &[],
-    );
-    let frame = wait_for("the frame never reported", || {
-        shell
-            .results()
-            .into_iter()
-            .find(|(key, _)| key == "frame")
-            .map(|(_, value)| value)
-    });
-    // The frame reaches the handler the way the page does, but holds no token.
+fn no_framed_document_ever_runs_so_no_frame_reaches_the_bridge() {
+    let shell = Scripted::start(FRAMES, &[]);
+    // The page's own loop is running once a command settles.
     assert_eq!(
-        frame,
-        serde_json::json!({"shell": "undefined", "ipc": "function"})
+        status(&shell.run("main", &configure("cmd+option+j"))),
+        "registered"
     );
-    let via_parent = wait_for("the frame never used the page's bridge", || {
-        shell
-            .results()
-            .into_iter()
-            .find(|(key, _)| key == "frame-via-parent")
-            .map(|(_, value)| value)
-    });
-    assert!(
-        via_parent.as_str().unwrap().contains("refusée"),
-        "a frame used the page's bridge: {via_parent}"
-    );
-    shell.screen.press(&SUPER_ALT_J);
-    // The frame removes itself; its kept reference fires 500 ms later and must not open the panel.
     shell.assert_no_panel_for(
-        Duration::from_secs(2),
-        "a frame got through, without the token or by a reference kept past its removal",
+        Duration::from_secs(3),
+        "a framed page reached the bridge and opened the panel",
     );
-    // A frame could reach the bridge: it stays refused to the page until the page reloads.
-    let refused = shell.run("main", &configure("cmd+option+j"));
-    assert!(
-        refused["error"].as_str().unwrap().contains("refusée"),
-        "the bridge still served after a frame could reach it: {refused}"
-    );
+    let ran: Vec<_> = shell
+        .results()
+        .into_iter()
+        .filter(|(key, _)| key.starts_with("frame"))
+        .collect();
+    assert!(ran.is_empty(), "a framed document ran: {ran:?}");
+    // Nothing to revoke: the page keeps its bridge.
+    shell.screen.press(&SUPER_ALT_J);
+    shell.wait_panel(true, "the page's own shortcut stopped working");
     shell.app.quit();
 }
 

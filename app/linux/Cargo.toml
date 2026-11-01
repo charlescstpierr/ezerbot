@@ -19,6 +19,8 @@ tao = "=0.37.2"
 ureq = { version = "2", default-features = false }
 url = "2"
 wry = "=0.57.1"
+# The same WebKitGTK binding wry uses, for the frame policy only.
+webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
 [dev-dependencies]
 grokbot-test-support.workspace = true

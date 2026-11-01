@@ -619,6 +619,7 @@ dependencies = [
  "tao",
  "ureq",
  "url",
+ "webkit2gtk",
  "wry",
  "x11-dl",
 ]

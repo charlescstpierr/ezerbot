@@ -1397,30 +1397,43 @@ fn known_vault_values_are_excluded_even_without_secret_keywords() {
     assert!(f.facts("grokbot").is_empty());
 }
 
-/// The vault backend and the bus are per process, so the scenario runs in its own, on a real
-/// keyring: the secret lives there and no longer in the file that sits next to the database.
+/// The vault backend and the bus are per process, so a scenario runs in its own, on a real
+/// keyring. Returns true there; the outer process has already checked its result.
+#[cfg(all(target_os = "linux", debug_assertions))]
+fn in_its_own_process_on_a_keyring(name: &str, locked: bool) -> bool {
+    if std::env::var_os("GROKBOT_TEST_SESSION_BUS").is_some() {
+        grokbot_forms::vault::enable_os_vault(true);
+        return true;
+    }
+    let keyring = grokbot_linux_desktop::testing::Keyring::start();
+    if locked {
+        keyring.lock();
+    }
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    keyring
+        .home()
+        .env(&mut command)
+        .env("GROKBOT_TEST_SESSION_BUS", keyring.address())
+        .args(["--exact", name, "--nocapture"]);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    false
+}
+
 #[cfg(all(target_os = "linux", debug_assertions))]
 #[test]
 fn a_secret_kept_in_secret_service_still_stops_automatic_memory() {
-    const NAME: &str = "a_secret_kept_in_secret_service_still_stops_automatic_memory";
-    if std::env::var_os("GROKBOT_TEST_SESSION_BUS").is_none() {
-        let keyring = grokbot_linux_desktop::testing::Keyring::start();
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        keyring
-            .home()
-            .env(&mut command)
-            .env("GROKBOT_TEST_SESSION_BUS", keyring.address())
-            .args(["--exact", NAME, "--nocapture"]);
-        let output = command.output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    if !in_its_own_process_on_a_keyring(
+        "a_secret_kept_in_secret_service_still_stops_automatic_memory",
+        false,
+    ) {
         return;
     }
-    grokbot_forms::vault::enable_os_vault(true);
     let mut f = Fixture::new();
     let file = f.path.with_extension("secrets.json");
     let vault = grokbot_forms::vault::Vault::open_app(&file).unwrap();
@@ -1439,6 +1452,28 @@ fn a_secret_kept_in_secret_service_still_stops_automatic_memory() {
         f.calls().len(),
         0,
         "the secret reached the extraction model"
+    );
+    assert!(f.facts("grokbot").is_empty());
+}
+
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[test]
+fn a_locked_secret_service_stops_automatic_memory_because_its_secrets_are_unknown() {
+    if !in_its_own_process_on_a_keyring(
+        "a_locked_secret_service_stops_automatic_memory_because_its_secrets_are_unknown",
+        true,
+    ) {
+        return;
+    }
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    f.script(json!([fact("Je préfère le thé vert.", None)]));
+    f.send(&c, "m", "Je préfère le thé vert.");
+    f.settle();
+    assert_eq!(
+        f.calls().len(),
+        0,
+        "extraction ran without knowing the secrets"
     );
     assert!(f.facts("grokbot").is_empty());
 }

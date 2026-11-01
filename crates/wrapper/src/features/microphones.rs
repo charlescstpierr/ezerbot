@@ -303,19 +303,21 @@ impl AudioSession {
 
     fn sources(&self) -> Result<(Server, Sources), Unavailable> {
         // PipeWire can run for video only, next to a PulseAudio that holds the microphones.
+        // An empty answer is only trusted when no installed server failed: the microphones
+        // may be on the one that failed, whatever the order.
         let mut silent = None;
+        let mut failed = false;
         for server in Server::ALL {
-            let Some(sources) = server.list(self) else {
-                // The microphones may be on the server that failed, so emptiness proves nothing.
-                if silent.is_some() && self.installed(server) {
-                    return Err(Unavailable);
+            match server.list(self) {
+                Some(sources) if !sources.inputs.is_empty() => return Ok((server, sources)),
+                Some(sources) => {
+                    silent.get_or_insert((server, sources));
                 }
-                continue;
-            };
-            if !sources.inputs.is_empty() {
-                return Ok((server, sources));
+                None => failed |= self.installed(server),
             }
-            silent.get_or_insert((server, sources));
+        }
+        if failed {
+            return Err(Unavailable);
         }
         silent.ok_or(Unavailable)
     }

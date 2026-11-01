@@ -204,6 +204,16 @@ fn an_empty_pipewire_next_to_a_failing_pulseaudio_is_unavailable_not_an_empty_li
 }
 
 #[test]
+fn a_failing_pipewire_next_to_an_empty_pulseaudio_is_unavailable_not_an_empty_list() {
+    let dir = TempDir::new();
+    let bin = stub_tools(dir.path(), "[]");
+    fs::write(bin.join("pw-dump"), "#!/bin/sh\n[ \"$1\" = --version ]\n").unwrap();
+    let session = AudioSession::isolated(dir.path(), &[("PATH", bin.to_str().unwrap())]);
+    assert_eq!(session.available(), Err(Unavailable));
+    assert_eq!(session.resolve("usb").map(|_| ()), Err(Unavailable));
+}
+
+#[test]
 fn an_empty_pipewire_without_pulseaudio_tools_is_an_empty_list() {
     let dir = TempDir::new();
     let bin = stub_tools(dir.path(), "[]");
@@ -300,13 +310,31 @@ struct Headless {
     dir: TempDir,
 }
 
+/// A missing audio tool fails the test where the scenario must run: on CI or on request.
+fn audio_required(require_audio: Option<&str>, ci: Option<&str>) -> bool {
+    require_audio == Some("1") || ci.is_some_and(|ci| ci.eq_ignore_ascii_case("true"))
+}
+
+#[test]
+fn missing_audio_tools_fail_on_ci_or_on_request() {
+    assert!(audio_required(Some("1"), None));
+    assert!(audio_required(None, Some("true")));
+    assert!(audio_required(None, Some("TRUE")));
+    assert!(!audio_required(None, None));
+    assert!(!audio_required(Some("0"), Some("false")));
+}
+
 fn present(binaries: &[&str]) -> bool {
     let path = std::env::var_os("PATH").unwrap_or_default();
+    let required = audio_required(
+        std::env::var(REQUIRE_AUDIO).ok().as_deref(),
+        std::env::var("CI").ok().as_deref(),
+    );
     for binary in binaries {
         if !std::env::split_paths(&path).any(|dir| dir.join(binary).is_file()) {
             assert!(
-                std::env::var(REQUIRE_AUDIO).as_deref() != Ok("1"),
-                "audio-headless: {binary} absent et {REQUIRE_AUDIO}=1"
+                !required,
+                "audio-headless: {binary} absent alors que {REQUIRE_AUDIO}=1 ou CI=true"
             );
             println!("audio-headless: {binary} absent, test non exécuté");
             return false;

@@ -943,6 +943,9 @@ mod contracts_tests {
             let conn = Connection::open(self.0.join("test.sqlite")).unwrap();
             conn.busy_timeout(std::time::Duration::from_secs(5))
                 .unwrap();
+            // SQLite's busy handler polls unfairly: with an fsync per commit,
+            // the writers on a loaded disk starve one another past busy_timeout.
+            conn.pragma_update(None, "synchronous", "OFF").unwrap();
             conn
         }
     }

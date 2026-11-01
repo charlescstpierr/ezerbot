@@ -211,7 +211,10 @@ impl Panel {
         // to the window that held it.
         let window = self.window.gtk_window().clone();
         gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
-            window.present();
+            // Hidden meanwhile, it must stay hidden.
+            if window.is_visible() {
+                window.present();
+            }
         });
         let _ = self.webview.focus();
     }

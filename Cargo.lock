@@ -603,6 +603,7 @@ dependencies = [
 name = "ezerbot-linux"
 version = "0.1.0"
 dependencies = [
+ "dbus",
  "getrandom",
  "grokbot-test-support",
  "gtk",

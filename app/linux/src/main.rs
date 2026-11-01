@@ -2,6 +2,8 @@
 mod backend;
 #[cfg(target_os = "linux")]
 mod local_api;
+#[cfg(target_os = "linux")]
+mod screen;
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -11,6 +13,9 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn main() {
+    if let Some(invocation) = screen::Invocation::parse(std::env::args_os().skip(1)) {
+        std::process::exit(screen::run(invocation));
+    }
     if let Err(error) = linux::run() {
         eprintln!("Ezerbot. {error}");
         std::process::exit(1);

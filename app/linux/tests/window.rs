@@ -9,7 +9,6 @@ use rusqlite::{Connection, OpenFlags};
 use std::{
     collections::HashSet,
     ffi::CString,
-    io::{BufRead, BufReader},
     os::raw::{c_int, c_uint},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -22,6 +21,10 @@ use x11_dl::{
     xlib::{self, Xlib},
     xtest::Xf86vmode as Xtst,
 };
+
+#[path = "support/xvfb.rs"]
+mod xvfb;
+use xvfb::Xvfb;
 
 const SHELL: &str = env!("CARGO_BIN_EXE_ezerbot-linux");
 const MENU_HEIGHT: i32 = 40;
@@ -57,7 +60,7 @@ struct Rectangle {
 }
 
 struct Screen {
-    server: Child,
+    _server: Xvfb,
     name: String,
     xlib: Xlib,
     xtest: Xtst,
@@ -66,18 +69,8 @@ struct Screen {
 
 impl Screen {
     fn start() -> Self {
-        let mut server = Command::new("Xvfb")
-            .args(["-displayfd", "1", "-screen", "0", "1280x900x24"])
-            .args(["-nolisten", "tcp"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("Xvfb is required: sudo apt install xvfb");
-        let mut number = String::new();
-        BufReader::new(server.stdout.take().unwrap())
-            .read_line(&mut number)
-            .unwrap();
-        let name = format!(":{}", number.trim());
+        let server = Xvfb::start("1280x900x24");
+        let name = server.name.clone();
         let address = CString::new(name.as_str()).unwrap();
         let xlib = Xlib::open().unwrap();
         let xtest = Xtst::open().unwrap();
@@ -87,7 +80,7 @@ impl Screen {
         };
         assert!(!display.is_null(), "Xvfb refused the connection");
         Self {
-            server,
+            _server: server,
             name,
             xlib,
             xtest,
@@ -274,8 +267,6 @@ impl Screen {
 impl Drop for Screen {
     fn drop(&mut self) {
         unsafe { (self.xlib.XCloseDisplay)(self.display) };
-        let _ = self.server.kill();
-        let _ = self.server.wait();
     }
 }
 

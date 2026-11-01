@@ -36,7 +36,7 @@
     value: Object.freeze({
       platform: 'linux',
       unavailablePanels: Object.freeze([
-        'voice', 'voice-conversation', 'voice-call', 'meetings', 'screen', 'demonstrations', 'floating',
+        'voice', 'voice-conversation', 'voice-call', 'meetings', 'demonstrations', 'floating',
       ]),
     }),
     writable: false, configurable: false,

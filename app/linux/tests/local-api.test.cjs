@@ -60,7 +60,7 @@ test('installs immutable Linux capabilities and resource helpers only in the bac
     assert.equal(window.EzerbotLocal.resourceURL(raw), raw);
   }
   assert.equal(window.EzerbotShell.platform, 'linux');
-  assert.deepEqual(Array.from(window.EzerbotShell.unavailablePanels), ['voice', 'voice-conversation', 'voice-call', 'meetings', 'screen', 'demonstrations', 'floating']);
+  assert.deepEqual(Array.from(window.EzerbotShell.unavailablePanels), ['voice', 'voice-conversation', 'voice-call', 'meetings', 'demonstrations', 'floating']);
   assert.ok(Object.isFrozen(window.EzerbotShell));
   assert.ok(Object.isFrozen(window.EzerbotShell.unavailablePanels));
   assert.equal(Object.getOwnPropertyDescriptor(window, 'EzerbotShell').writable, false);

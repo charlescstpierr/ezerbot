@@ -2,11 +2,13 @@
 
 `tools/linux-captures.sh <sha>` reconstruit un commit dans un worktree détaché et capture son interface sous Xvfb. Le répertoire de sortie est `artifacts/captures-linux/<sha40>/` dans le checkout qui lance la commande.
 
-Le rendu utilise le vrai wrapper, son interface compilée et un fournisseur factice local. Le manifeste identifie ce rendu comme un repli Chromium. Ces captures prouvent l'interface web servie sous Linux. Elles ne prouvent pas une coque native Linux, absente lors de l'ajout de cet outil.
+Le rendu utilise le vrai wrapper, son interface compilée et un fournisseur factice local. Le manifeste identifie ce rendu comme un repli Chromium. Ces captures prouvent l'interface web servie sous Linux. Elles ne prouvent pas la fenêtre de la coque native Linux.
+
+Le pilote injecte `EzerbotShell` avant le chargement, avec la liste de `app/linux/src/local-api.js`. Les vues montrent donc les textes et les panneaux de Linux. `screen-overlay` lance le vrai `ezerbot-linux --screen-helper` de debug sur le même Xvfb. Sa capture vient de la fenêtre racine. Ce binaire ne contient aucune capture réelle. `screen-overlay-unproven` exige `picom`.
 
 ## Prérequis
 
-La commande exige Linux, Git, Bash, Node avec WebSocket, npm, Rust, Chrome ou Chromium, Xvfb et xauth. Elle utilise aussi `flock` et `setsid`. Sur la box, Node 20 active WebSocket avec `--experimental-websocket`. Rust doit respecter `rust-toolchain.toml`. Sur la box, placez `/home/box/.cargo/bin` avant `/usr/bin` dans `PATH` pour utiliser rustup et Rust 1.99.1.
+La commande exige Linux, Git, Bash, Node avec WebSocket, npm, Rust, Chrome ou Chromium, Xvfb, xauth et `import` d'ImageMagick. Elle utilise aussi `flock` et `setsid`. Sur la box, Node 20 active WebSocket avec `--experimental-websocket`. Rust doit respecter `rust-toolchain.toml`. Sur la box, placez `/home/box/.cargo/bin` avant `/usr/bin` dans `PATH` pour utiliser rustup et Rust 1.99.1.
 
 Le commit demandé doit contenir le pilote de capture et la fixture attendue. Un ancien commit incompatible provoque un refus avant le build. Le checkout qui lance la commande peut avoir des modifications locales. Le worktree détaché ne les reprend pas.
 
@@ -50,6 +52,9 @@ Le registre du pilote fournit ces vues, dans cet ordre. Le viewport est de 1440 
 | `routines-dark` | Dialogue des routines ouvert. |
 | `notifications-dark` | Dialogue ouvert avec la notification de la réponse synthétique. |
 | `conversation-tools-dark` | Tour actif après un vrai outil local : seulement la phrase du bot et « Réfléchit », sans aucune trace d'outil. |
+| `screen-consent-dark` | Carte d'accord du partage d'écran, ouverte dans la conversation synthétique. |
+| `screen-overlay` | Fenêtre racine de Xvfb avec la superposition du bail, au-dessus de Chromium. |
+| `screen-overlay-unproven` | La même fenêtre racine sous `picom` : le bail démarre en pause et le bandeau le dit. |
 
 ## Format du manifeste
 

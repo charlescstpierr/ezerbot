@@ -387,6 +387,10 @@ fn is_app_data(ctx: &Context<'_>, path: &Path) -> Result<bool, ApiError> {
 // Only multiply-linked ordinary files need the walk. An incomplete/oversized
 // walk fails closed to a human card rather than granting uncertain authority.
 fn protected_identity(ctx: &Context<'_>, metadata: &fs::Metadata) -> Result<bool, ApiError> {
+    linked_into(&[data_dir(ctx)?], metadata)
+}
+
+fn linked_into(folders: &[PathBuf], metadata: &fs::Metadata) -> Result<bool, ApiError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -394,7 +398,8 @@ fn protected_identity(ctx: &Context<'_>, metadata: &fs::Metadata) -> Result<bool
             return Ok(false);
         }
         let identity = (metadata.dev(), metadata.ino());
-        let mut directories = vec![(data_dir(ctx)?, 0)];
+        let mut directories: Vec<(PathBuf, usize)> =
+            folders.iter().map(|folder| (folder.clone(), 0)).collect();
         let mut visited = 0;
         while let Some((directory, depth)) = directories.pop() {
             let Ok(entries) = fs::read_dir(directory) else {
@@ -428,7 +433,7 @@ fn protected_identity(ctx: &Context<'_>, metadata: &fs::Metadata) -> Result<bool
 /// Le Mode YOLO n'ouvre jamais les données d'Ezerbot (dossier de la base, coffre,
 /// jetons, trousseau). Un fichier est jugé par son chemin réel et son inode ; une
 /// commande, par ce qu'elle nomme ; ce qu'elle atteint sans le nommer, le
-/// sandbox du shell YOLO le refuse.
+/// sandbox du shell YOLO le refuse (`sandbox-exec` sous macOS, bubblewrap sous Linux).
 pub(super) fn touches_app_data(ctx: &Context<'_>, call: &ToolCall) -> Result<bool, ApiError> {
     touches_app_data_at(
         ctx,
@@ -439,7 +444,9 @@ pub(super) fn touches_app_data(ctx: &Context<'_>, call: &ToolCall) -> Result<boo
 
 /// Les racines que le Mode YOLO refuse aux outils, shell comme fichiers : le dossier de
 /// la base, l'installation habituelle (`~/Library/Application Support/Grokbot`, où
-/// vivent les jetons même quand la base courante est ailleurs) et les trousseaux.
+/// vivent les jetons même quand la base courante est ailleurs) et les trousseaux. Sous
+/// Linux, le trousseau est le Secret Service : ses fichiers et le bus de session qui y mène.
+/// La même liste sert aux outils fichiers et, sous Linux, au bac à sable du shell.
 fn protected_roots(ctx: &Context<'_>, home: Option<&Path>) -> Result<Vec<PathBuf>, ApiError> {
     let mut roots = vec![data_dir(ctx)?, PathBuf::from("/Library/Keychains")];
     if let Some(home) = home {
@@ -447,6 +454,34 @@ fn protected_roots(ctx: &Context<'_>, home: Option<&Path>) -> Result<Vec<PathBuf
             let root = home.join(sub);
             roots.push(root.canonicalize().unwrap_or(root));
         }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // `ezerbot` : le dossier de données par défaut, où vivent les jetons même quand
+        // la base courante est ailleurs.
+        let shares = home
+            .map(|home| home.join(".local/share"))
+            .into_iter()
+            .chain(std::env::var_os("XDG_DATA_HOME").map(PathBuf::from));
+        for share in shares {
+            for sub in ["ezerbot", "keyrings", "kwalletd"] {
+                let root = share.join(sub);
+                roots.push(root.canonicalize().unwrap_or(root));
+            }
+        }
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(format!(
+                    "/run/user/{}",
+                    nix::unistd::Uid::current().as_raw()
+                ))
+            });
+        for sub in ["bus", "keyring"] {
+            let root = runtime.join(sub);
+            roots.push(root.canonicalize().unwrap_or(root));
+        }
+        roots = super::yolo::sandbox::with_link_targets(roots)?;
     }
     Ok(roots)
 }
@@ -457,8 +492,27 @@ fn yolo_protected(ctx: &Context<'_>, path: &Path, home: Option<&Path>) -> Result
     if is_app_data(ctx, path)? {
         return Ok(true);
     }
+    let roots = protected_roots(ctx, home)?;
+    #[cfg(target_os = "linux")]
+    {
+        if super::yolo::sandbox::shows_protected(path, &roots) {
+            return Ok(true);
+        }
+        if let Ok(metadata) = fs::metadata(path) {
+            use std::os::unix::fs::MetadataExt;
+            let (folders, files): (Vec<PathBuf>, Vec<PathBuf>) =
+                roots.iter().cloned().partition(|r| r.is_dir());
+            let same = |file: &PathBuf| {
+                fs::metadata(file)
+                    .is_ok_and(|m| (m.dev(), m.ino()) == (metadata.dev(), metadata.ino()))
+            };
+            if files.iter().any(same) || linked_into(&folders, &metadata)? {
+                return Ok(true);
+            }
+        }
+    }
     let shown = path.to_string_lossy().to_lowercase();
-    Ok(protected_roots(ctx, home)?.iter().any(|root| {
+    Ok(roots.iter().any(|root| {
         let root = root.to_string_lossy().to_lowercase();
         shown == root || shown.starts_with(&format!("{}/", root.trim_end_matches('/')))
     }))
@@ -1500,6 +1554,11 @@ fn shell(
             ))
             .arg("/bin/sh");
     }
+    #[cfg(target_os = "linux")]
+    if yolo {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        command = super::yolo::sandbox::command(&protected_roots(ctx, home.as_deref())?, &cwd)?;
+    }
     command
         .arg("-c")
         .arg(&a.command)
@@ -1524,7 +1583,15 @@ fn shell(
             command.env(key, value);
         }
     }
-    let mut child = command.spawn().map_err(io_error)?;
+    #[cfg(target_os = "linux")]
+    let spawned = if yolo {
+        super::yolo::sandbox::spawn(&mut command)
+    } else {
+        command.spawn()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let spawned = command.spawn();
+    let mut child = spawned.map_err(io_error)?;
     drop(command); // Close the parent's copies of the child-side descriptors.
                    // The host's end of the pipe never blocks: a program that stopped reading
                    // refuses the line instead of freezing the app. (The program's end is a
@@ -2213,6 +2280,158 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn file_tools_refuse_a_bind_mount_of_the_data_and_of_the_keyring() {
+        const INSIDE: &str = "EZERBOT_TEST_VUES_OUTILS";
+        if let Some(root) = std::env::var_os(INSIDE) {
+            let root = PathBuf::from(root);
+            let home = root.join("home");
+            let data = root.join("donnees");
+            let keyrings = home.join(".local/share/keyrings");
+            for (source, view) in [(&keyrings, "vue-trousseau"), (&data, "vue-donnees")] {
+                let bound = std::process::Command::new("mount")
+                    .arg("--bind")
+                    .arg(source)
+                    .arg(root.join(view))
+                    .status()
+                    .unwrap();
+                assert!(bound.success(), "{view}");
+            }
+            let app = crate::App::open(&data.join("workspace.sqlite")).unwrap();
+            let ctx = app.feature_context();
+            let call = |name: &str, path: &Path| ToolCall {
+                call_id: "c".into(),
+                name: name.into(),
+                arguments: if name == "write_file" {
+                    json!({"path": path, "content": "x", "expected_sha256": null})
+                } else {
+                    json!({"path": path})
+                },
+            };
+            for (name, path) in [
+                ("read_file", root.join("vue-trousseau/login")),
+                ("list_directory", root.join("vue-trousseau")),
+                ("write_file", root.join("vue-trousseau/intrus.txt")),
+                ("read_file", root.join("vue-donnees/jeton.json")),
+                ("write_file", root.join("vue-donnees/intrus.txt")),
+            ] {
+                assert!(
+                    touches_app_data_at(&ctx, &call(name, &path), Some(&home)).unwrap(),
+                    "{name} {}",
+                    path.display()
+                );
+            }
+            let keyring = root.join("runtime-reel/keyring");
+            for (name, path) in [
+                ("read_file", keyring.join("note.txt")),
+                ("list_directory", keyring.clone()),
+                ("write_file", keyring.join("intrus.txt")),
+            ] {
+                assert!(
+                    touches_app_data_at(&ctx, &call(name, &path), Some(&home)).unwrap(),
+                    "{name} {}",
+                    path.display()
+                );
+            }
+            assert!(!touches_app_data_at(
+                &ctx,
+                &call("read_file", &root.join("ordinaire.txt")),
+                Some(&home)
+            )
+            .unwrap());
+            println!("refus-vu");
+            return;
+        }
+        let guard = grokbot_test_support::TestDir::new("ezerbot-vues");
+        let root = guard.to_path_buf();
+        let keyrings = root.join("home/.local/share/keyrings");
+        fs::create_dir_all(&keyrings).unwrap();
+        fs::write(keyrings.join("login"), "trousseau").unwrap();
+        fs::create_dir_all(root.join("donnees")).unwrap();
+        fs::write(root.join("donnees/jeton.json"), "jeton").unwrap();
+        fs::write(root.join("ordinaire.txt"), "utile").unwrap();
+        for view in ["vue-trousseau", "vue-donnees"] {
+            fs::create_dir(root.join(view)).unwrap();
+        }
+        fs::create_dir_all(root.join("runtime-reel/keyring")).unwrap();
+        fs::write(root.join("runtime-reel/keyring/note.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(root.join("runtime-reel"), root.join("lien-runtime")).unwrap();
+        let out = std::process::Command::new("/usr/bin/unshare")
+            .args(["--user", "--map-root-user", "--mount"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "features::local::tests::file_tools_refuse_a_bind_mount_of_the_data_and_of_the_keyring",
+                "--nocapture",
+            ])
+            .env(INSIDE, &root)
+            .env("XDG_RUNTIME_DIR", root.join("lien-runtime"))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("refus-vu"),
+            "{out:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn file_tools_refuse_the_default_linux_data_folder_even_when_the_database_is_elsewhere() {
+        let guard = grokbot_test_support::TestDir::new("ezerbot-linux-default");
+        let root = guard.to_path_buf();
+        let home = root.join("home");
+        let default = home.join(".local/share/ezerbot");
+        let elsewhere = root.join("ailleurs");
+        for dir in [&default, &elsewhere] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(default.join("workspace.codex-auth.json"), "jeton").unwrap();
+        // Lancé avec un autre dossier de données : la base courante est ailleurs.
+        let app = crate::App::open(&elsewhere.join("workspace.sqlite")).unwrap();
+        let ctx = app.feature_context();
+        let home = home.canonicalize().unwrap();
+        for (name, path) in [
+            ("read_file", default.join("workspace.codex-auth.json")),
+            ("list_directory", default.clone()),
+        ] {
+            let call = ToolCall {
+                call_id: "c".into(),
+                name: name.into(),
+                arguments: json!({"path": path}),
+            };
+            assert!(
+                touches_app_data_at(&ctx, &call, Some(&home)).unwrap(),
+                "{name} {}",
+                path.display()
+            );
+        }
+        // Le shell YOLO, par le même bac à sable, ne lit pas non plus le jeton, mais lit
+        // un fichier ordinaire voisin (le refus ne vient pas d'un dossier invisible).
+        let ordinary = home.join("notes.txt");
+        fs::write(&ordinary, "ordinaire").unwrap();
+        if super::super::yolo::sandbox::available() {
+            let out = super::super::yolo::sandbox::command(
+                &protected_roots(&ctx, Some(&home)).unwrap(),
+                &home,
+            )
+            .unwrap()
+            .arg("-c")
+            .arg(format!(
+                "cat {} {}",
+                ordinary.display(),
+                default.join("workspace.codex-auth.json").display()
+            ))
+            .output()
+            .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("ordinaire") && !stdout.contains("jeton"),
+                "{out:?}"
+            );
+        }
+    }
+
+    #[test]
     fn file_tools_refuse_the_install_and_keychain_roots_even_when_the_database_is_elsewhere() {
         let guard = grokbot_test_support::TestDir::new("ezerbot-roots");
         let root = guard.to_path_buf();
@@ -2251,6 +2470,44 @@ mod tests {
                 "{name} {}",
                 path.display()
             );
+        }
+        #[cfg(target_os = "linux")]
+        for wallet in [".local/share/keyrings", ".local/share/kwalletd"] {
+            let wallet = home.join(wallet);
+            fs::create_dir_all(&wallet).unwrap();
+            fs::write(wallet.join("login"), "trousseau").unwrap();
+            assert!(
+                touches_app_data_at(&ctx, &call("read_file", &wallet.join("login")), Some(&home))
+                    .unwrap(),
+                "{}",
+                wallet.display()
+            );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let moved = root.join("coffre-ailleurs");
+            fs::create_dir_all(&moved).unwrap();
+            fs::write(moved.join("login"), "trousseau").unwrap();
+            let keyrings = home.join(".local/share/keyrings");
+            fs::remove_dir_all(&keyrings).unwrap();
+            std::os::unix::fs::symlink(&moved, &keyrings).unwrap();
+            assert!(
+                touches_app_data_at(
+                    &ctx,
+                    &call("read_file", &keyrings.join("login")),
+                    Some(&home)
+                )
+                .unwrap(),
+                "un lien vers le trousseau reste protégé"
+            );
+            let alias = root.join("portefeuille-copie");
+            fs::hard_link(home.join(".local/share/kwalletd/login"), &alias).unwrap();
+            for name in ["read_file", "write_file"] {
+                assert!(
+                    touches_app_data_at(&ctx, &call(name, &alias), Some(&home)).unwrap(),
+                    "{name} : un lien dur vers le trousseau reste protégé"
+                );
+            }
         }
         // Un fichier ordinaire, lui, reste lisible.
         assert!(!touches_app_data_at(

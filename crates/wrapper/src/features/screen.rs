@@ -522,9 +522,9 @@ pub(crate) fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: Arc<AtomicBool
         if !lease.live() || lease.paused() || cancel.load(Ordering::SeqCst) {
             return Err(ApiError::new(403, STOPPED));
         }
+        let generation = lease.generation.load(Ordering::SeqCst);
         #[cfg(debug_assertions)]
         let output = {
-            let generation = lease.generation.load(Ordering::SeqCst);
             // Fixture-only delay allows deterministic cancellation/queue tests.
             if let Ok(ms) = std::env::var("GROKBOT_SCREEN_FAKE_DELAY_MS") {
                 for _ in 0..ms.parse::<u64>().unwrap_or(0).min(2000) / 10 {
@@ -569,14 +569,16 @@ pub(crate) fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: Arc<AtomicBool
                 ms.parse::<u64>().unwrap_or(0).min(2000),
             ));
         }
-        // An image line can reach us just before `revoked`. Lease::stop takes
-        // the same permit, so storing is ordered against the person's revocation.
-        // live and paused also read the helper: its own buttons stop it directly.
+        // An image line can reach us just before `revoked`. Waiting for the
+        // database can last seconds, so the permit and the check come after it:
+        // a stop never waits on SQLite. live and paused also read the helper, whose
+        // buttons stop it directly, and the generation rejects a pause since resumed.
+        let tx = write_transaction(ctx.connection)?;
         let _permit = lease.permit.lock().unwrap_or_else(|e| e.into_inner());
-        if !lease.live() || lease.paused() {
+        if !lease.live() || lease.paused() || lease.generation.load(Ordering::SeqCst) != generation
+        {
             return Err(ApiError::new(403, STOPPED));
         }
-        let tx = write_transaction(ctx.connection)?;
         tx.execute(
             "INSERT OR IGNORE INTO wrapper_screen_shots VALUES (?1,?2,?3,?4)",
             params![id, lease.conversation, ctx.run_id, image],

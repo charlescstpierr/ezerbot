@@ -397,7 +397,39 @@ fn screen_consent_approval_takeover_revocation_restart_and_vision() {
     std::env::remove_var("GROKBOT_SCREEN_FAKE_STORE_DELAY_MS");
     assert_eq!(f.shots(), before);
     assert_eq!(f.outcome("paused-store")["status"], "failed");
+    // A pause already resumed still discards the capture it interrupted.
+    f.post("/api/screen/resume", json!({"id":session}));
+    std::env::set_var("GROKBOT_SCREEN_FAKE_STORE_DELAY_MS", "1000");
+    f.send("resumed-store", "computer_screenshot", json!({}));
+    let r = f.request("resumed-store");
+    f.decide(&r, json!("allow_once"));
+    f.claimed("resumed-store");
+    std::thread::sleep(Duration::from_millis(200));
+    f.post("/api/screen/fake-input", json!({"id":session}));
+    f.post("/api/screen/resume", json!({"id":session}));
+    f.finish("resumed-store");
+    std::env::remove_var("GROKBOT_SCREEN_FAKE_STORE_DELAY_MS");
+    assert_eq!(f.shots(), before);
+    assert_eq!(f.outcome("resumed-store")["status"], "failed");
+    // A stop during the wait for the database does not wait for it either.
+    std::env::set_var("GROKBOT_SCREEN_FAKE_STORE_DELAY_MS", "300");
+    f.send("locked-store", "computer_screenshot", json!({}));
+    let r = f.request("locked-store");
+    f.decide(&r, json!("allow_once"));
+    f.claimed("locked-store");
+    let writer = f.db();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        writer.execute_batch("COMMIT").unwrap();
+    });
     f.revoke(session);
+    release.join().unwrap();
+    f.finish("locked-store");
+    std::env::remove_var("GROKBOT_SCREEN_FAKE_STORE_DELAY_MS");
+    assert_eq!(f.shots(), before);
+    assert_eq!(f.outcome("locked-store")["status"], "failed");
     session = f.grant();
     std::env::set_var("GROKBOT_SCREEN_FAKE_PERMISSION", "denied");
     f.send("permission", "computer_screenshot", json!({}));

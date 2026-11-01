@@ -37,7 +37,14 @@ def main() -> None:
         action="store_true",
         help="Linux : vérifie Xvfb, Chrome, Node, cargo, disque, sans lancer d'instance",
     )
+    parser.add_argument("--chrome", action="store_true", help="Linux : imprime le Chrome retenu")
     args = parser.parse_args()
+    if args.chrome:
+        chrome = linux_chrome()
+        if not chrome:
+            raise SystemExit("chrome introuvable")
+        print(chrome)
+        raise SystemExit(0)
     if args.prerequisites:
         failed = [item for item in linux_prerequisites() if item]
         print("doctor: echec" if failed else "doctor: ok")
@@ -110,6 +117,24 @@ def main() -> None:
 MIN_FREE_BYTES = 25 * 1024**3
 
 
+def linux_chrome() -> str | None:
+    """Single Chrome lookup for the Linux path: EZERBOT_VERIFY_CHROME, then CHROME_BIN, then PATH.
+
+    An explicit variable that is not an executable is an error, never a silent fallback.
+    """
+    import os
+    import shutil
+
+    for variable in ("EZERBOT_VERIFY_CHROME", "CHROME_BIN"):
+        value = os.environ.get(variable)
+        if value:
+            return os.path.realpath(value) if os.path.isfile(value) and os.access(value, os.X_OK) else None
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        if found := shutil.which(name):
+            return os.path.realpath(found)
+    return None
+
+
 def linux_prerequisites(repo: Path | None = None) -> list[str]:
     """Read-only checks for the Xvfb path; each failing check returns its name."""
     import os
@@ -123,11 +148,8 @@ def linux_prerequisites(repo: Path | None = None) -> list[str]:
     for tool in ("git", "xvfb-run", "Xvfb", "xauth", "flock", "setsid", "nice", "node", "npm"):
         found = shutil.which(tool)
         results.append(check(tool, bool(found), found or "absent du PATH"))
-    chrome = next(
-        (found for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser") if (found := shutil.which(name))),
-        None,
-    )
-    results.append(check("chrome", bool(chrome), os.path.realpath(chrome) if chrome else "google-chrome ou chromium absent"))
+    chrome = linux_chrome()
+    results.append(check("chrome", bool(chrome), chrome or "EZERBOT_VERIFY_CHROME/CHROME_BIN invalide, ou google-chrome/chromium absent du PATH"))
     node_ok, node_detail = False, "node absent"
     if shutil.which("node"):
         probe = subprocess.run(

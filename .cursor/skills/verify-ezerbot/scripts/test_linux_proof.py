@@ -146,6 +146,22 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         self.assertNotIn("/Users", text)
         self.assertNotIn("/Applications", text)
 
+    def test_explicit_chrome_is_honored(self) -> None:
+        scratch = Path(tempfile.mkdtemp(prefix="linux-chrome-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(scratch)], check=True))
+        chrome = scratch / "mon-chrome"
+        chrome.write_text("#!/bin/sh\n")
+        chrome.chmod(0o755)
+        for variable in ("EZERBOT_VERIFY_CHROME", "CHROME_BIN"):
+            with self.subTest(variable=variable):
+                env = {key: value for key, value in os.environ.items() if key not in ("EZERBOT_VERIFY_CHROME", "CHROME_BIN")}
+                env[variable] = str(chrome)
+                result = subprocess.run([sys.executable, str(SCRIPTS / "doctor.py"), "--chrome"], env=env, capture_output=True, text=True)
+                self.assertEqual(result.stdout.strip(), str(chrome))
+                env[variable] = str(scratch / "absent")
+                result = subprocess.run([sys.executable, str(SCRIPTS / "doctor.py"), "--prerequisites"], env=env, capture_output=True, text=True)
+                self.assertIn("echec  chrome:", result.stdout)
+
     def test_doctor_lists_prerequisites(self) -> None:
         names = {line.split(":")[0].split()[-1] for line in subprocess.run(
             [sys.executable, str(SCRIPTS / "doctor.py"), "--prerequisites"], capture_output=True, text=True

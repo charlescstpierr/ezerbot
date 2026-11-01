@@ -898,6 +898,46 @@ fn cross_origin_and_rebinding_requests_are_rejected() {
 }
 
 #[test]
+fn ratings_survive_restart_and_two_windows_keep_each_others_votes() {
+    fn write(app: &mut App, rows: &serde_json::Value) {
+        let body = json!({"value": rows.to_string()}).to_string();
+        app.api("POST", "/api/ratings", body.as_bytes()).unwrap();
+    }
+    fn read(app: &mut App) -> serde_json::Value {
+        let value = app.api("GET", "/api/ratings", b"").unwrap();
+        serde_json::from_str(value["value"].as_str().unwrap()).unwrap()
+    }
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    assert_eq!(read(&mut app), json!([]));
+    let first = json!({"id":"note-1","vote":"bon"});
+    let second = json!({"id":"note-2","vote":"mauvais"});
+    write(&mut app, &json!([first]));
+    // The second window opened before the first vote, so its copy lacks it.
+    write(&mut app, &json!([second]));
+    write(&mut app, &json!([first]));
+    drop(app);
+    let mut app = App::open(&db.0).unwrap();
+    assert_eq!(read(&mut app), json!([first, second]));
+    for invalid in [r#"{"notations":[]}"#, "pas du json", r#"[{"vote":"bon"}]"#] {
+        let body = json!({"value": invalid}).to_string();
+        assert_eq!(
+            app.api("POST", "/api/ratings", body.as_bytes())
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+    assert_eq!(read(&mut app), json!([first, second]));
+    let many: Vec<serde_json::Value> = (0..3000)
+        .map(|index| json!({"id": format!("many-{index}"), "details": "x".repeat(40)}))
+        .collect();
+    assert!(json!(many).to_string().len() > crate::BODY_LIMIT);
+    write(&mut app, &json!(many));
+    assert_eq!(read(&mut app).as_array().unwrap().len(), 3002);
+}
+
+#[test]
 fn theme_preference_is_account_scoped_and_survives_restart() {
     let db = Database::new();
     let mut app = App::open(&db.0).unwrap();

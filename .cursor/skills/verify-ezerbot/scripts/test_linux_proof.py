@@ -117,6 +117,35 @@ class VerdictTests(unittest.TestCase):
         status, lines = linux_verdict.verdict(self.evidence(), SHA, patch="c" * 40)
         self.assertEqual(lines[-1], f"PASS {SHA} patch={'c' * 40}")
 
+    def rewrite_result(self, evidence: Path, change) -> None:
+        path = evidence / "captures" / "result.json"
+        data = json.loads(path.read_text())
+        change(data["features"][0])
+        path.write_text(json.dumps(data))
+
+    def test_feature_without_status_is_a_tool_error_fix(self) -> None:
+        evidence = self.evidence()
+        self.rewrite_result(evidence, lambda item: item.pop("status"))
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertIn("`result.json` : liste `features` invalide.", lines)
+
+    def test_non_string_identifier_is_a_tool_error_fix(self) -> None:
+        for key in ("feature", "view"):
+            with self.subTest(key=key):
+                evidence = self.evidence()
+                self.rewrite_result(evidence, lambda item: item.__setitem__(key, ["accueil"]))
+                status, lines = linux_verdict.verdict(evidence, SHA)
+                self.assertEqual(status, "FIX")
+                self.assertIn("## Erreur d’outil", lines)
+
+    def test_invalid_png_is_a_tool_error_fix(self) -> None:
+        evidence = self.evidence()
+        (evidence / "captures" / "home-dark.png").write_bytes(b"pas un png")
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertIn("`captures/home-dark.png` illisible (ValueError).", lines)
+
     def test_tampered_capture_is_fix(self) -> None:
         evidence = self.evidence()
         (evidence / "captures" / "home-dark.png").write_bytes(png(5, 3))

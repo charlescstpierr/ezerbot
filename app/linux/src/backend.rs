@@ -1,12 +1,16 @@
 use crate::local_api::{BackendOrigin, LocalApi};
 use nix::{
+    errno::Errno,
     fcntl::{fcntl, FcntlArg, OFlag},
-    sys::signal::{kill, Signal},
-    unistd::Pid,
+    sys::{
+        signal::{kill, Signal},
+        stat::Mode,
+    },
+    unistd::{mkfifo, Pid},
 };
 use serde::Deserialize;
 use std::{
-    fs::{self, DirBuilder},
+    fs::{self, DirBuilder, File, OpenOptions, TryLockError},
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt},
     path::Path,
@@ -21,6 +25,75 @@ use std::{
 
 const START_ERROR: &str = "Le service local Ezerbot n'a pas pu démarrer.";
 const READY_LIMIT: usize = 4096;
+
+fn prepare_directory(directory: &Path) -> Result<(), &'static str> {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+        .map_err(|_| START_ERROR)?;
+    let metadata = fs::symlink_metadata(directory).map_err(|_| START_ERROR)?;
+    if !metadata.is_dir()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err("Le dossier de données Ezerbot doit être privé et vous appartenir.");
+    }
+    Ok(())
+}
+
+/// Makes this process the one shell of a data directory until it is dropped.
+/// The lock and the show requests share `shell.fifo`, so a request cannot
+/// outlive every shell that could answer it.
+pub struct Instance(File);
+
+impl Instance {
+    /// `None` means a shell already holds the directory and was asked to show
+    /// its window. Its wrapper owns the engine: a second one would wait 210 s
+    /// for that lock and then fail.
+    pub fn claim(directory: &Path) -> Result<Option<Self>, &'static str> {
+        prepare_directory(directory)?;
+        let path = directory.join("shell.fifo");
+        match mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR) {
+            Ok(()) | Err(Errno::EEXIST) => {}
+            Err(_) => return Err(START_ERROR),
+        }
+        // Opened for both, a FIFO needs no peer: `open` does not block and a
+        // request waits in the pipe while the owner is still starting.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|_| START_ERROR)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self(file))),
+            Err(TryLockError::WouldBlock) => {
+                file.write_all(b"\n").map_err(|_| START_ERROR)?;
+                Ok(None)
+            }
+            Err(TryLockError::Error(_)) => Err(START_ERROR),
+        }
+    }
+
+    /// Calls `show` for each later launch until the process exits.
+    pub fn watch(&self, show: impl Fn() + Send + 'static) -> Result<(), &'static str> {
+        let mut requests = self.0.try_clone().map_err(|_| START_ERROR)?;
+        thread::spawn(move || {
+            let mut request = [0u8; 64];
+            while requests.read(&mut request).is_ok_and(|length| length > 0) {
+                show();
+            }
+        });
+        Ok(())
+    }
+}
+
+impl Drop for Instance {
+    /// The clone in `watch` would otherwise keep the lock until exit.
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
 
 pub struct Backend {
     child: ChildGuard,
@@ -42,18 +115,7 @@ impl Backend {
         quit: &AtomicBool,
         timeout: Duration,
     ) -> Result<Self, &'static str> {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(directory)
-            .map_err(|_| START_ERROR)?;
-        let metadata = fs::symlink_metadata(directory).map_err(|_| START_ERROR)?;
-        if !metadata.is_dir()
-            || metadata.uid() != nix::unistd::geteuid().as_raw()
-            || metadata.mode() & 0o077 != 0
-        {
-            return Err("Le dossier de données Ezerbot doit être privé et vous appartenir.");
-        }
+        prepare_directory(directory)?;
         let mut bytes = [0u8; 32];
         getrandom::getrandom(&mut bytes).map_err(|_| START_ERROR)?;
         let spawned = Command::new(wrapper)

@@ -17,6 +17,7 @@ Le script respecte `CARGO` et le dossier de compilation effectif de Cargo.
 Les conversations et les notations restent dans le dossier de données XDG d’Ezerbot.
 L’option `--data-dir /chemin/isolé` permet un lancement avec des données séparées.
 Le menu **Quitter Ezerbot**, Ctrl+Q et la fermeture de la fenêtre arrêtent aussi le wrapper.
+Relancer Ezerbot sur le même dossier de données montre la fenêtre déjà ouverte.
 Les liens qui demandent une nouvelle fenêtre s’ouvrent dans le navigateur par défaut avec `xdg-open`.
 Seules les pages web hors du wrapper sortent de la coque. Un échec du navigateur s’affiche dans une boîte de dialogue.
 
@@ -51,4 +52,5 @@ de WebKit sans export de buffers graphiques. Le lanceur ne force pas cette optio
 
 `cargo test -p ezerbot-linux` construit le wrapper puis ouvre la vraie fenêtre dans son propre Xvfb.
 `tests/window.rs` constate l’affichage, fait un échange avec le faux fournisseur et clique des liens.
+Il vérifie aussi la vraie connexion jusqu’à `xdg-open` et la relance de l’application déjà ouverte.
 Le test échoue si `Xvfb` manque et il ne couvre que les builds de développement.

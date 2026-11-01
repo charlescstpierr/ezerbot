@@ -19,7 +19,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use crate::backend::Backend;
+    use crate::backend::{Backend, Instance};
     use gtk::prelude::*;
     use signal_hook::{
         consts::{SIGINT, SIGTERM},
@@ -50,6 +50,7 @@ mod linux {
 
     enum ShellEvent {
         Quit,
+        Show,
         LinkFailed(url::Url),
     }
 
@@ -70,12 +71,16 @@ mod linux {
 
     struct Shell {
         webview: Option<WebView>,
+        instance: Option<Instance>,
         backend: Backend,
     }
 
     impl Drop for Shell {
         fn drop(&mut self) {
             self.webview.take();
+            // A launch during the slow shutdown below starts afresh, and its
+            // wrapper takes the engine once this one exits.
+            self.instance.take();
             self.backend.shutdown();
         }
     }
@@ -164,6 +169,13 @@ mod linux {
         let event_loop = EventLoopBuilder::<ShellEvent>::with_user_event().build();
         let quit = Arc::new(AtomicBool::new(false));
         let signals = SignalGuard::register(event_loop.create_proxy(), Arc::clone(&quit))?;
+        let Some(instance) = Instance::claim(&directory)? else {
+            return Ok(());
+        };
+        let show_proxy = event_loop.create_proxy();
+        instance.watch(move || {
+            let _ = show_proxy.send_event(ShellEvent::Show);
+        })?;
         let backend = Backend::start(&wrapper, &directory, &quit)?;
         if quit.load(Ordering::SeqCst) {
             return Ok(());
@@ -232,6 +244,7 @@ mod linux {
             .map_err(|_| "La vue Ezerbot n'a pas pu être créée.")?;
         let mut shell = Some(Shell {
             webview: Some(webview),
+            instance: Some(instance),
             backend,
         });
         let failure_proxy = event_loop.create_proxy();
@@ -259,6 +272,8 @@ mod linux {
                 dialog.set_secondary_text(Some(url.as_str()));
                 dialog.connect_response(|dialog, _| dialog.close());
                 dialog.show_all();
+            } else if matches!(event, Event::UserEvent(ShellEvent::Show)) {
+                window.gtk_window().present();
             } else if stopping {
                 if let Some(dialog) = failure_dialog.take() {
                     dialog.close();

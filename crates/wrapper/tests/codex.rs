@@ -1328,7 +1328,11 @@ fn connected_requires_a_real_openai_call_and_a_failed_probe_still_sends() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|message| message["id"] == "reply-q2" && message["body"] == "bonjour quand même")
+            .any(|message| {
+                message["id"] == "reply-q2"
+                    && message["body"] == "bonjour quand même"
+                    && message["state"] != "streaming"
+            })
     });
     let sent = app.api("GET", "/api/state", b"").unwrap();
     let reply = sent["conversations"][0]["messages"]

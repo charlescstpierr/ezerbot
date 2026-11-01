@@ -139,6 +139,17 @@ class VerdictTests(unittest.TestCase):
                 self.assertEqual(status, "FIX")
                 self.assertIn("## Erreur d’outil", lines)
 
+    def test_missing_or_mistyped_sha_is_a_tool_error_fix(self) -> None:
+        for change in (lambda data: data.pop("sha"), lambda data: data.__setitem__("sha", None), lambda data: data.__setitem__("sha", [])):
+            evidence = self.evidence()
+            path = evidence / "captures" / "result.json"
+            data = json.loads(path.read_text())
+            change(data)
+            path.write_text(json.dumps(data))
+            status, lines = linux_verdict.verdict(evidence, SHA)
+            self.assertEqual(status, "FIX")
+            self.assertIn("`result.json` : `sha` absent ou invalide.", lines)
+
     def test_invalid_png_is_a_tool_error_fix(self) -> None:
         evidence = self.evidence()
         (evidence / "captures" / "home-dark.png").write_bytes(b"pas un png")

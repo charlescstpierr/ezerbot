@@ -67,7 +67,10 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
     captures = evidence / "captures"
     problems: list[str] = []
     result = read_json(captures / "result.json", problems)
-    if result is not None and result.get("sha") != sha:
+    if result is not None and not (isinstance(result.get("sha"), str) and PATCH_ID.fullmatch(result["sha"])):
+        problems.append("`result.json` : `sha` absent ou invalide.")
+        result = None
+    if result is not None and result["sha"] != sha:
         raise SystemExit("result.json ne correspond pas au commit demandé")
     manifest = read_json(captures / "manifest.json", problems)
     views = manifest.get("views") if manifest else []

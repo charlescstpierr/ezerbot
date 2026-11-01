@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Preuve Linux : build du commit extrait, wrapper isolé sous Xvfb privé (xvfb-run -a), trois entrées
 # de la carte (accueil, réponse dans un fil, paramètres), captures, verdict PASS/FIX, nettoyage.
-# Usage : bash .cursor/skills/verify-ezerbot/scripts/prove-linux.sh [--evidence <dossier-neuf>]
+# Usage : bash .cursor/skills/verify-ezerbot/scripts/prove-linux.sh [--evidence <dossier-neuf>] [--sphere <entrée>] [--patch <patch-id>]
 set -euo pipefail
 umask 077
 
@@ -10,15 +10,20 @@ fail() { printf 'verify-ezerbot: %s\n' "$*" >&2; exit 2; }
 DIR=$(cd "$(dirname -- "$0")" && pwd)
 root=$(git -C "$DIR" rev-parse --show-toplevel)
 evidence=${EZERBOT_VERIFY_EVIDENCE_DIR:-}
+patch=${EZERBOT_VERIFY_PATCH_ID:-}
 while (($#)); do
   case $1 in
     --evidence) [[ $# -ge 2 ]] || fail '--evidence exige un dossier.'; evidence=$2; shift 2 ;;
     # Les trois entrées sont toujours jouées ensemble ; une autre sphère passe par le substitut headless.
     --sphere) [[ $# -ge 2 && $2 =~ ^(all|accueil|reponse-fil|parametres-connecteurs)$ ]] || fail "--sphere : accueil, reponse-fil, parametres-connecteurs ou all ; sinon EZERBOT_VERIFY_BROWSER=chrome-headless."; shift 2 ;;
+    --patch) [[ $# -ge 2 ]] || fail '--patch exige un patch-id.'; patch=$2; shift 2 ;;
     *) fail "argument inconnu : $1" ;;
   esac
 done
 
+[[ -z $patch || $patch =~ ^[0-9a-f]{40}$ ]] || fail 'patch-id invalide : 40 hexadécimaux minuscules attendus.'
+patch_args=()
+[[ -z $patch ]] || patch_args=(--patch "$patch")
 sha=$(git -C "$root" rev-parse --verify 'HEAD^{commit}')
 unix=$(git -C "$root" show -s --format=%ct "$sha")
 [[ -n $evidence ]] || evidence="${TMPDIR:-/tmp}/verify-ezerbot-evidence-${sha:0:12}-$(date +%Y%m%dT%H%M%S)-$$"
@@ -50,14 +55,23 @@ mkdir -p "$target"
 # Le verrou reste tenu jusqu'à la fin du run (fermé par la sortie du script).
 exec 8>"$target/.verify-build.lock"
 flock 8
-step "$root/app/web" "${iso[@]}" npm_config_cache="$run/cache/npm" nice -n 10 npm ci --no-audit --no-fund --loglevel=error
-step "$root/app/web" "${iso[@]}" nice -n 10 npm run build --silent
+# Un échec de build écrit quand même report.md et une ligne FIX (erreur d'outil), puis sort avec 1.
+build_failed() {
+  local name=$1 code=$2
+  python3 "$DIR/linux_verdict.py" --evidence "$evidence" --sha "$sha" --build-failed "$name" --build-status "$code" "${patch_args[@]}" >"$evidence/verdict.txt" || true
+  cat "$evidence/verdict.txt"
+  exit 1
+}
+step "$root/app/web" "${iso[@]}" npm_config_cache="$run/cache/npm" nice -n 10 npm ci --no-audit --no-fund --loglevel=error || build_failed "npm ci" $?
+step "$root/app/web" "${iso[@]}" nice -n 10 npm run build --silent || build_failed "npm run build" $?
 rm -f -- "$target/debug/grokbot-wrapper"
+code=0
 step "$root" env CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" PATH="$PATH" \
   TMPDIR="$run/tmp" CARGO_TARGET_DIR="$target" CARGO_BUILD_JOBS=3 EZERBOT_GIT_COMMIT="$sha" EZERBOT_GIT_COMMIT_UNIX="$unix" \
-  nice -n 10 "$cargo" build -p grokbot-wrapper --locked
+  nice -n 10 "$cargo" build -p grokbot-wrapper --locked || code=$?
+(( code == 0 )) || build_failed "cargo build" "$code"
 binary="$target/debug/grokbot-wrapper"
-[[ -x $binary ]] || fail 'le build n’a pas produit grokbot-wrapper.'
+[[ -x $binary ]] || build_failed "cargo build (binaire absent)" 1
 
 chrome=''
 for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
@@ -67,4 +81,4 @@ drive=0
 step "$root" "${iso[@]}" CHROME_BIN="$(realpath "$chrome")" \
   xvfb-run -a -s '-screen 0 1440x900x24 -nolisten tcp' \
   node --experimental-websocket "$DIR/linux_drive.cjs" "$sha" "$binary" "$evidence/captures" || drive=$?
-python3 "$DIR/linux_verdict.py" --evidence "$evidence" --sha "$sha" --drive-status "$drive"
+python3 "$DIR/linux_verdict.py" --evidence "$evidence" --sha "$sha" --drive-status "$drive" "${patch_args[@]}"

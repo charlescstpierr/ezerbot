@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from verify_lib import commit_exists, png_size, repo_root
+from verify_lib import PATCH_ID, commit_exists, png_size, repo_root
 
 FEATURES_DIR = Path(__file__).resolve().parent.parent / "features"
 # Same registry as FEATURES in linux_drive.cjs (a test keeps both equal): every view is required.
@@ -28,26 +28,65 @@ EXPECTED: tuple[tuple[str, str], ...] = (
 )
 
 
-def verdict(evidence: Path, sha: str, drive_status: int = 0) -> tuple[str, list[str]]:
-    """PASS only when this run's driver exited 0 and every mapped view has its PNG in the manifest."""
-    captures = evidence / "captures"
-    result_path = captures / "result.json"
-    result = json.loads(result_path.read_text()) if result_path.is_file() else None
-    if result is not None and result.get("sha") != sha:
-        raise SystemExit("result.json ne correspond pas au commit demandé")
-    manifest_path = captures / "manifest.json"
-    manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else None
-    hashes = {view["file"]: view["sha256"] for view in (manifest or {}).get("views", [])}
+def read_json(path: Path, problems: list[str]) -> dict | None:
+    """Absent -> None; unreadable, truncated or not an object -> None plus a tool-error line."""
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        problems.append(f"`{path.name}` illisible ({type(error).__name__}).")
+        return None
+    if not isinstance(value, dict):
+        problems.append(f"`{path.name}` n’est pas un objet JSON.")
+        return None
+    return value
+
+
+def build_failure(sha: str, step: str, code: int, patch: str | None = None) -> tuple[str, list[str]]:
+    """A build step failed before any capture: FIX with a tool error, never a silent exit."""
     lines = [
         "# verify-ezerbot (Linux, Xvfb)",
         "",
         f"Commit : `{sha}`",
-        f"Rendu : {manifest['renderer']} {manifest['chrome_version']}" if manifest else "Rendu : manifeste absent",
+        "",
+        "## Erreur d’outil",
+        "",
+        f"L’étape `{step}` a échoué (code {code}) ; aucune vue n’a été pilotée.",
+    ]
+    return "FIX", lines + ["", verdict_line("FIX", sha, patch)]
+
+
+def verdict_line(status: str, sha: str, patch: str | None) -> str:
+    return f"{status} {sha}" + (f" patch={patch}" if patch else "")
+
+
+def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None = None) -> tuple[str, list[str]]:
+    """PASS only when this run's driver exited 0 and every mapped view has its PNG in the manifest."""
+    captures = evidence / "captures"
+    problems: list[str] = []
+    result = read_json(captures / "result.json", problems)
+    if result is not None and result.get("sha") != sha:
+        raise SystemExit("result.json ne correspond pas au commit demandé")
+    manifest = read_json(captures / "manifest.json", problems)
+    views = manifest.get("views") if manifest else []
+    if manifest is not None and not (isinstance(views, list) and all(isinstance(view, dict) and isinstance(view.get("file"), str) and isinstance(view.get("sha256"), str) for view in views)):
+        problems.append("`manifest.json` : liste `views` invalide.")
+        manifest, views = None, []
+    if result is not None and not (isinstance(result.get("features"), list) and all(isinstance(item, dict) for item in result["features"])):
+        problems.append("`result.json` : liste `features` invalide.")
+        result = None
+    hashes = {view["file"]: view["sha256"] for view in views}
+    lines = [
+        "# verify-ezerbot (Linux, Xvfb)",
+        "",
+        f"Commit : `{sha}`",
+        f"Rendu : {manifest.get('renderer')} {manifest.get('chrome_version')}" if manifest else "Rendu : manifeste absent",
         "",
         "| Entrée de la carte | Vue | Capture | Résultat |",
         "|---|---|---|---|",
     ]
-    ok = drive_status == 0 and result is not None and result.get("error") is None
+    ok = not problems and drive_status == 0 and result is not None and result.get("error") is None
     ok = ok and manifest is not None and manifest.get("sha") == sha
     entries: dict[str, bool] = {}
     reported = {(item.get("feature"), item.get("view")): item for item in (result or {}).get("features", [])}
@@ -71,14 +110,16 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0) -> tuple[str, list[
     if lines_extra:
         lines += ["", "Vues inattendues ou manquantes dans result.json : " + ", ".join(f"`{name}`" for name in lines_extra)]
     lines += ["", "Entrées : " + (", ".join(f"`{name}` {'ok' if good else 'ÉCHEC'}" for name, good in entries.items()) or "aucune")]
-    if result is None:
+    if problems:
+        lines += ["", "## Erreur d’outil", "", *problems]
+    elif result is None:
         lines += ["", "## Erreur d’outil", "", f"Le pilote n’a écrit aucun résultat (code {drive_status})."]
     elif result.get("error"):
         lines += ["", "## Échec", "", f"`{result['error']}`"]
     elif drive_status:
         lines += ["", "## Erreur d’outil", "", f"Le pilote a quitté avec le code {drive_status}."]
     status = "PASS" if ok else "FIX"
-    lines += ["", f"{status} {sha}"]
+    lines += ["", verdict_line(status, sha, patch)]
     return status, lines
 
 
@@ -87,10 +128,18 @@ def main() -> None:
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--sha", required=True)
     parser.add_argument("--drive-status", type=int, default=1)
+    parser.add_argument("--patch", help="patch-id git (40 hexadécimaux minuscules), recopié en patch=<id>")
+    parser.add_argument("--build-failed", metavar="ÉTAPE", help="étape de build en échec : FIX sans pilotage")
+    parser.add_argument("--build-status", type=int, default=1)
     args = parser.parse_args()
     if not commit_exists(repo_root(), args.sha):
         raise SystemExit(f"commit introuvable : {args.sha}")
-    status, lines = verdict(args.evidence, args.sha, args.drive_status)
+    if args.patch is not None and not PATCH_ID.fullmatch(args.patch):
+        raise SystemExit("patch-id invalide : 40 hexadécimaux minuscules attendus")
+    if args.build_failed:
+        status, lines = build_failure(args.sha, args.build_failed, args.build_status, args.patch)
+    else:
+        status, lines = verdict(args.evidence, args.sha, args.drive_status, args.patch)
     (args.evidence / "report.md").write_text("\n".join(lines) + "\n")
     print(f"preuves: {args.evidence}")
     print("\n".join(lines))

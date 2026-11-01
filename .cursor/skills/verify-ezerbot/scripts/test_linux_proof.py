@@ -93,6 +93,30 @@ class VerdictTests(unittest.TestCase):
         )
         self.assertEqual([tuple(item) for item in json.loads(listed.stdout)], list(linux_verdict.EXPECTED))
 
+    def test_truncated_result_is_a_tool_error_fix(self) -> None:
+        evidence = self.evidence()
+        (evidence / "captures" / "result.json").write_text('{"sha": "' + SHA[:10])
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertIn("## Erreur d’outil", lines)
+        self.assertIn("`result.json` illisible (JSONDecodeError).", lines)
+
+    def test_truncated_manifest_is_a_tool_error_fix(self) -> None:
+        evidence = self.evidence()
+        (evidence / "captures" / "manifest.json").write_text('{"views": [')
+        status, lines = linux_verdict.verdict(evidence, SHA)
+        self.assertEqual(status, "FIX")
+        self.assertIn("`manifest.json` illisible (JSONDecodeError).", lines)
+
+    def test_malformed_manifest_views_is_a_tool_error_fix(self) -> None:
+        evidence = self.evidence()
+        (evidence / "captures" / "manifest.json").write_text(json.dumps({"sha": SHA, "views": [1]}))
+        self.assertEqual(linux_verdict.verdict(evidence, SHA)[0], "FIX")
+
+    def test_patch_is_copied_on_the_verdict_line(self) -> None:
+        status, lines = linux_verdict.verdict(self.evidence(), SHA, patch="c" * 40)
+        self.assertEqual(lines[-1], f"PASS {SHA} patch={'c' * 40}")
+
     def test_tampered_capture_is_fix(self) -> None:
         evidence = self.evidence()
         (evidence / "captures" / "home-dark.png").write_bytes(png(5, 3))
@@ -145,6 +169,57 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         result = subprocess.run(["bash", str(SCRIPTS / "prove-linux.sh"), "--sphere", "modeles"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn("chrome-headless", result.stderr)
+
+    def test_explicit_patch_uses_the_linux_path(self) -> None:
+        env = {key: value for key, value in os.environ.items() if key != "EZERBOT_VERIFY_BROWSER"}
+        result = subprocess.run(["bash", str(SCRIPTS / "prove.sh"), "--patch", "d" * 40, "--evidence", str(SCRIPTS.parents[3] / "inside")], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("hors du dépôt", result.stderr)
+
+    def test_patch_from_environment_is_honored(self) -> None:
+        env = {key: value for key, value in os.environ.items() if key != "EZERBOT_VERIFY_BROWSER"}
+        env["EZERBOT_VERIFY_PATCH_ID"] = "pas-un-patch"
+        result = subprocess.run(["bash", str(SCRIPTS / "prove.sh")], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("patch-id invalide", result.stderr)
+
+    def failing_build(self, tool: str, extra_env: dict[str, str]) -> tuple[subprocess.CompletedProcess[str], Path]:
+        repo = SCRIPTS.parents[3]
+        dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", "crates", "app/ui", "app/web", "Cargo.toml", "Cargo.lock", "vendor", "tools/linux-captures.cjs", ".cursor/skills/verify-ezerbot/scripts"], capture_output=True, text=True, check=True).stdout
+        if dirty:
+            self.skipTest("checkout modifié : prove-linux.sh refuse avant le build")
+        scratch = Path(tempfile.mkdtemp(prefix="linux-build-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(scratch)], check=True))
+        fake = scratch / "bin"
+        fake.mkdir()
+        (fake / tool).write_text("#!/bin/sh\nexit 7\n")
+        (fake / tool).chmod(0o755)
+        env = {key: value for key, value in os.environ.items() if key != "EZERBOT_VERIFY_BROWSER"}
+        env.update(extra_env)
+        env["PATH"] = f"{fake}:{env['PATH']}"
+        evidence = scratch / "evidence"
+        result = subprocess.run(["bash", str(SCRIPTS / "prove.sh"), "--evidence", str(evidence)], env=env, capture_output=True, text=True, timeout=600)
+        return result, evidence
+
+    def test_failed_web_build_writes_a_fix_report_with_the_patch(self) -> None:
+        result, evidence = self.failing_build("npm", {"EZERBOT_VERIFY_PATCH_ID": "e" * 40})
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = (evidence / "report.md").read_text().splitlines()
+        sha = subprocess.run(["git", "-C", str(SCRIPTS), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(report[-1], f"FIX {sha} patch={'e' * 40}")
+        self.assertIn("L’étape `npm ci` a échoué (code 7) ; aucune vue n’a été pilotée.", report)
+
+    def test_failed_cargo_build_writes_a_fix_report(self) -> None:
+        scratch = Path(tempfile.mkdtemp(prefix="linux-cargo-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(scratch)], check=True))
+        cargo = scratch / "cargo"
+        cargo.write_text("#!/bin/sh\nexit 9\n")
+        cargo.chmod(0o755)
+        result, evidence = self.failing_build("unused-tool", {"EZERBOT_VERIFY_CARGO": str(cargo)})
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = (evidence / "report.md").read_text().splitlines()
+        self.assertTrue(report[-1].startswith("FIX "))
+        self.assertIn("L’étape `cargo build` a échoué (code 9) ; aucune vue n’a été pilotée.", report)
 
     def test_used_evidence_folder_is_refused(self) -> None:
         used = Path(tempfile.mkdtemp(prefix="linux-used-"))

@@ -377,13 +377,40 @@ impl Screen {
         }
     }
 
-    fn click(&self, x: i32, y: i32) {
+    fn motion(&self, x: i32, y: i32) {
         unsafe {
             (self.xtest.XTestFakeMotionEvent)(self.display, -1, x, y, 0);
-            (self.xtest.XTestFakeButtonEvent)(self.display, 1, xlib::True, 50);
-            (self.xtest.XTestFakeButtonEvent)(self.display, 1, xlib::False, 50);
             (self.xlib.XSync)(self.display, xlib::False);
         }
+    }
+
+    fn button(&self, pressed: bool) {
+        let state = if pressed { xlib::True } else { xlib::False };
+        unsafe {
+            (self.xtest.XTestFakeButtonEvent)(self.display, 1, state, 50);
+            (self.xlib.XSync)(self.display, xlib::False);
+        }
+    }
+
+    fn click(&self, x: i32, y: i32) {
+        self.motion(x, y);
+        self.button(true);
+        self.button(false);
+    }
+
+    /// Holds the first button down at `from` and releases it at `to`, in steps
+    /// the window manager follows.
+    fn drag(&self, from: (i32, i32), to: (i32, i32)) {
+        self.motion(from.0, from.1);
+        self.button(true);
+        // The page hands the drag to the window manager once it has the press.
+        std::thread::sleep(Duration::from_millis(500));
+        for step in 1..=10 {
+            let at = |start: i32, end: i32| start + (end - start) * step / 10;
+            self.motion(at(from.0, to.0), at(from.1, to.1));
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        self.button(false);
     }
 
     fn keycode(&self, name: &str) -> c_uint {
@@ -1277,7 +1304,7 @@ fn the_shortcut_opens_an_always_on_top_panel_that_takes_the_typing() {
     }
     let home = TestDir::new("ezerbot-panel");
     let screen = Screen::start_with_openbox(&home);
-    let app = App::start(
+    let mut app = App::start(
         shell_with_wrapper(),
         &screen,
         &home,
@@ -1367,6 +1394,47 @@ fn the_shortcut_opens_an_always_on_top_panel_that_takes_the_typing() {
     assert!(
         order(main.window) < order(cover),
         "the shortcut brought the main window back"
+    );
+
+    let panel_area = || {
+        screen
+            .windows()
+            .into_iter()
+            .find(|(_, area)| area.width == 420 && area.height == 560)
+            .map(|(_, area)| (area.x, area.y))
+    };
+    let (x, y) = panel_area().expect("the reopened panel has a geometry");
+    screen.drag((x + 260, y + 40), (x + 560, y - 60));
+    let moved = wait_for("dragging the header did not move the panel", || {
+        panel_area().filter(|at| *at != (x, y))
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    let moved = panel_area().unwrap_or(moved);
+    screen.press(&["Escape"]);
+    wait_for("Escape did not close the moved panel", || {
+        screen.client(PANEL).is_none().then_some(())
+    });
+    open_panel();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        panel_area(),
+        Some(moved),
+        "the panel did not reopen where it was left"
+    );
+
+    // The window manager's own close hides the panel, never the application.
+    screen.press(&["Alt_L", "F4"]);
+    wait_for("Alt+F4 did not close the panel", || {
+        screen.client(PANEL).is_none().then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(app.exited().is_none(), "closing the panel quit the app");
+    open_panel();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        panel_area(),
+        Some(moved),
+        "the panel closed by the window manager did not reopen where it was"
     );
     app.quit();
 }

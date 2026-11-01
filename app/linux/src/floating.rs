@@ -1,8 +1,9 @@
 use crate::local_api::LocalApi;
 use gtk::prelude::*;
 use serde::Deserialize;
+use std::cell::Cell;
 use tao::{
-    dpi::{LogicalPosition, LogicalSize},
+    dpi::{LogicalPosition, LogicalSize, PhysicalPosition},
     event_loop::EventLoopWindowTarget,
     platform::unix::{WindowBuilderExtUnix, WindowExtUnix},
     window::{Window, WindowBuilder},
@@ -158,6 +159,9 @@ pub struct Panel {
     // The view goes before its window.
     pub webview: WebView,
     pub window: Window,
+    // Where it was last left. The window manager places a mapped window again
+    // on its own terms, so the reopening has to say where.
+    left_at: Cell<Option<PhysicalPosition<i32>>>,
 }
 
 impl Panel {
@@ -192,7 +196,11 @@ impl Panel {
             .with_url(format!("{}/floating", api.origin.as_str()))
             .build_gtk(vbox)
             .map_err(|_| ERROR)?;
-        let panel = Self { webview, window };
+        let panel = Self {
+            webview,
+            window,
+            left_at: Cell::new(None),
+        };
         panel.show();
         Ok(panel)
     }
@@ -209,6 +217,9 @@ impl Panel {
     }
 
     pub fn reopen(&self) {
+        if let Some(at) = self.left_at.get() {
+            self.window.set_outer_position(at);
+        }
         let _ = self
             .webview
             .evaluate_script("window.EzerbotFloating?.open()");
@@ -219,6 +230,12 @@ impl Panel {
     }
 
     pub fn hide(&self) {
+        // A window that is already hidden has no position worth keeping.
+        if self.window.is_visible() {
+            if let Ok(at) = self.window.outer_position() {
+                self.left_at.set(Some(at));
+            }
+        }
         self.window.set_visible(false);
     }
 }

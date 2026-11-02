@@ -167,19 +167,7 @@
       await panels.refresh();
       // Never pull someone back from a conversation/bot selected in the meantime.
       if (active(group) && !context.conversation && context.bot?.id === group.bot) {
-        const draft = panels.draft();
-        // If storage is unavailable, do not switch and erase a nonempty draft.
-        if (draft) {
-          localStorage.setItem(`grokbot.draft.${group.conversation}`, draft);
-          localStorage.setItem(`grokbot.draft.${group.conversation}.document`, JSON.stringify(panels.draftDocument()));
-        }
-        if (!panels.openConversation(group.conversation)) throw new Error("Ouvrez la conversation créée pour préparer l’image.");
-        // The shell re-saved this handed-off draft under the new-chat key;
-        // ownership has moved to the conversation, so home must start empty.
-        try {
-          localStorage.removeItem("grokbot.draft.new");
-          localStorage.removeItem("grokbot.draft.new.document");
-        } catch { /* Already saved under the conversation key. */ }
+        if (!await panels.openWithDraft(group.conversation)) throw new Error("Ouvrez la conversation créée pour préparer l’image.");
       }
       if (buckets.get(group.key) === group) buckets.delete(group.key);
       group.key = group.conversation;

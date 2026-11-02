@@ -246,7 +246,7 @@ function parsePage(document) {
   }
 }
 
-function boot() {
+function boot(server = null, initialStorage = []) {
   const document = {
     ids: new Map(),
     listeners: {},
@@ -275,7 +275,7 @@ function boot() {
     removeAllRanges() { this.rangeCount = 0; this.isCollapsed = true; this.text = ""; this.range = null; this.fire(); },
     fire() { for (const handler of document.listeners.selectionchange || []) handler(); },
   };
-  const storage = new Map();
+  const storage = new Map(initialStorage);
   const localStorage = {
     getItem: (key) => storage.has(key) ? storage.get(key) : null,
     setItem: (key, value) => storage.set(key, String(value)),
@@ -287,7 +287,7 @@ function boot() {
     { id: "qa-long", name: "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN", color: "cyan", shape: "galet", description: "", instructions: "" },
   ];
   const state = {
-    account: { name: "Espace personnel" }, mode: "simulated", conversations: [], bots,
+    account: { name: "Espace personnel" }, mode: "simulated", conversations: server?.conversations || [], bots,
     preferences: { theme: "dark", accent: "citron" },
     provider: { connected: false, signin: "idle", backend: "sharing", models: [], connections: {} },
     state_revision: 1,
@@ -304,8 +304,10 @@ function boot() {
   let conversationSerial = 0;
   const realSetTimeout = setTimeout;
   const realClearTimeout = clearTimeout;
+  let heartbeat;
   function relaxedTimeout(handler, delay, ...args) {
     const timer = realSetTimeout(handler, delay, ...args);
+    if (delay === 5000) heartbeat = { timer, handler, args };
     timer.unref?.();
     return timer;
   }
@@ -316,6 +318,18 @@ function boot() {
   async function fetch(path, options = {}) {
     const url = String(path);
     const body = options.body ? JSON.parse(options.body) : undefined;
+    if (url === "/api/drafts") {
+      await server?.readGate;
+      if (server?.readError) return json({ error: "Lecture brouillon refusée" }, 503);
+      if (body) {
+        (server.writes ||= []).push(structuredClone(body));
+        await server?.writeGate;
+        if (server?.writeError) return json({ error: "Écriture brouillon refusée" }, 503);
+        server.drafts.set(body.conversation_id, structuredClone(body));
+      }
+      return json({ drafts: [...server.drafts.values()].filter((draft) => draft.text) });
+    }
+    if (url === "/api/ratings") return json({ value: "[]" });
     if (url === "/api/state") return json(state);
     if (url === `/api/pages/${pageDetail?.id}`) return json({ page: pageDetail });
     if (url === "/api/ping") return json({ revision: state.state_revision });
@@ -350,6 +364,7 @@ function boot() {
 
   let composer = null;
   const window = {
+    ...(server ? { webkit: { messageHandlers: { ezerbotRatings: {} } } } : {}),
     GrokbotMascot: {
       shapes: { galet: { label: "Galet" }, etoile: { label: "Étoile" } },
       create: () => document.createElement("span"),
@@ -413,10 +428,17 @@ function boot() {
   vm.runInContext(appSource, context);
   return {
     window, document, storage, state, sent, context,
+    blockStorage() { localStorage.setItem = localStorage.removeItem = () => { throw new Error("Storage unavailable"); }; },
     servePage(detail) { pageDetail = detail; },
     refuseSend(status) { sendStatus = status; },
     thread: () => threadOptions,
     composer: () => composer,
+    async heartbeat() {
+      assert.ok(heartbeat, "the idle heartbeat must be scheduled");
+      const next = heartbeat;
+      realClearTimeout(next.timer);
+      await next.handler(...next.args);
+    },
     type(text) { composer.api.value = text; composer.onInput(); },
     cmdN() {
       document.body.dispatchEvent({ type: "keydown", key: "n", metaKey: true, ctrlKey: false, altKey: false, preventDefault() {} });
@@ -834,4 +856,128 @@ for (const passage of [null, "Confort", "Con"]) test(`r12 citation ${passage ?? 
     page_id: "page_forfaits", source_version: "c".repeat(64), passage,
   } : undefined, "le réessai utilise la nouvelle citation, jamais l’ancienne");
   assert.equal(chip.hidden, true);
+});
+
+function draftServer() { return { drafts: new Map(), conversations: [] }; }
+
+test("an idle heartbeat retries a failed first draft read without a state change", async () => {
+  const server = draftServer();
+  server.readError = true;
+  server.drafts.set(null, { conversation_id: null, text: "déjà sauvé", document: docOf("déjà sauvé") });
+  const app = boot(server);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(app.document.getElementById("composer-hint").textContent, /non lus/);
+  server.readError = false;
+  await app.heartbeat();
+  assert.equal(app.composer().api.value, "déjà sauvé");
+  assert.doesNotMatch(app.document.getElementById("composer-hint").textContent, /non lus/);
+});
+
+test("a deleted saved selection restores the welcome draft without overwriting it", async () => {
+  const app = boot(null, [
+    ["grokbot.selected", "deleted"],
+    ["grokbot.draft.deleted", "ancien fil"],
+    ["grokbot.draft.new", "accueil à garder"],
+    ["grokbot.draft.new.document", JSON.stringify(docOf("accueil à garder"))],
+  ]);
+  await ready(app);
+  assert.equal(app.composer().api.value, "accueil à garder");
+  app.cmdN();
+  assert.equal(stored(app, "grokbot.draft.new"), "accueil à garder");
+  assert.equal(JSON.stringify(app.composer().api.document), JSON.stringify(docOf("accueil à garder")));
+});
+
+test("native drafts reopen with fresh browser storage, text and document per target", async () => {
+  const server = draftServer();
+  const first = boot(server); await ready(first);
+  first.type("sur le fil");
+  await first.document.getElementById("composer-form").requestSubmit();
+  first.type("brouillon fil");
+  const threadDocument = JSON.stringify(first.composer().api.document);
+  assert.equal(first.storage.get("grokbot.selected"), "conv-1");
+  assert.equal(first.composer().api.value, "brouillon fil");
+  first.cmdN();
+  assert.equal(first.composer().api.value, "");
+  first.type("brouillon accueil");
+  await ready(first);
+  assert.equal(server.drafts.get("conv-1")?.text, "brouillon fil", JSON.stringify([...server.drafts]));
+  const second = boot(server); await ready(second);
+  assert.equal(second.storage.size > 0, true);
+  assert.equal(second.composer().api.value, "brouillon accueil");
+  assert.equal(JSON.stringify(second.composer().api.document), JSON.stringify(docOf("brouillon accueil")));
+  assert.equal(second.window.GrokbotPanels.openConversation("conv-1"), true);
+  assert.equal(second.composer().api.value, "brouillon fil");
+  assert.equal(JSON.stringify(second.composer().api.document), threadDocument);
+});
+
+test("a native draft cannot overwrite disk before its first successful read", async () => {
+  const server = draftServer();
+  server.drafts.set(null, { conversation_id: null, text: "déjà sauvé", document: docOf("déjà sauvé") });
+  let release; server.readGate = new Promise((resolve) => { release = resolve; });
+  const app = boot(server);
+  app.type("trop tôt");
+  assert.equal(server.drafts.get(null).text, "déjà sauvé");
+  release(); await ready(app);
+  assert.equal(app.composer().api.value, "déjà sauvé");
+});
+
+test("native draft read and write failures stay visible", async () => {
+  const server = draftServer(); server.readError = true;
+  const app = boot(server);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(app.document.getElementById("composer-hint").textContent, /brouillon/i);
+  server.readError = false; await ready(app);
+  server.writeError = true; app.type("à garder"); await ready(app);
+  assert.match(app.document.getElementById("composer-hint").textContent, /brouillon/i);
+  assert.equal(app.composer().api.value, "à garder");
+});
+
+
+test("native writes coalesce behind one acknowledgement and retry a failed transfer", async () => {
+  const server = draftServer();
+  const app = boot(server); await ready(app);
+  let release; server.writeGate = new Promise(resolve => { release = resolve; });
+  app.type("première frappe"); app.type("deuxième frappe"); app.type("dernière frappe");
+  await ready(app);
+  assert.equal(server.writes.length, 1);
+  release(); await ready(app);
+  assert.equal(server.writes.length, 2);
+  assert.equal(server.drafts.get(null).text, "dernière frappe");
+  server.conversations.push({ id: "destination", bot_id: "grokbot", messages: [], kind: "direct" });
+  await ready(app);
+  server.writeError = true;
+  await assert.rejects(app.window.GrokbotPanels.openWithDraft("destination"));
+  assert.equal(server.drafts.get(null).text, "dernière frappe");
+  assert.equal(app.composer().api.value, "dernière frappe");
+  server.writeError = false;
+  assert.equal(await app.window.GrokbotPanels.openWithDraft("destination"), true);
+  const reopened = boot(server); await ready(reopened);
+  assert.equal(reopened.composer().api.value, "");
+  assert.equal(reopened.window.GrokbotPanels.openConversation("destination"), true);
+  assert.equal(reopened.composer().api.value, "dernière frappe");
+});
+
+
+test("a failed draft on a removed thread does not mask the saved welcome draft", async () => {
+  const server = draftServer();
+  server.conversations.push({ id: "removed", bot_id: "grokbot", messages: [], kind: "direct" });
+  const app = boot(server); await ready(app);
+  assert.equal(app.window.GrokbotPanels.openConversation("removed"), true);
+  server.writeError = true; app.type("sur le fil"); await ready(app);
+  assert.match(app.document.getElementById("composer-hint").textContent, /non sauvegardé/);
+  server.conversations.splice(0); server.writeError = false;
+  await app.window.GrokbotPanels.refresh();
+  app.type("accueil sauvé"); await ready(app);
+  assert.equal(server.drafts.get(null).text, "accueil sauvé");
+  assert.doesNotMatch(app.document.getElementById("composer-hint").textContent, /non sauvegardé/);
+});
+
+test("browser storage failure preserves the in-memory draft and allows sending", async () => {
+  const app = boot(); await ready(app);
+  app.blockStorage();
+  app.type("message malgré le stockage indisponible");
+  app.cmdN();
+  assert.equal(app.composer().api.value, "message malgré le stockage indisponible");
+  await app.document.getElementById("composer-form").requestSubmit();
+  assert.equal(app.sent.at(-1)?.body, "message malgré le stockage indisponible");
 });

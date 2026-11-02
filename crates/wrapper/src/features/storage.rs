@@ -34,7 +34,9 @@ empty_hooks!(
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS wrapper_storage_drafts (
+        "CREATE TABLE IF NOT EXISTS wrapper_composer_drafts (
+        target TEXT PRIMARY KEY, text TEXT NOT NULL CHECK(text <> ''), document TEXT);
+        CREATE TABLE IF NOT EXISTS wrapper_storage_drafts (
         draft_id TEXT NOT NULL, attachment_id TEXT NOT NULL, name TEXT,
         PRIMARY KEY(draft_id, attachment_id));
         CREATE TABLE IF NOT EXISTS wrapper_storage_uploads (
@@ -425,6 +427,10 @@ pub(super) fn require_draft(conn: &Connection, draft: &str) -> Result<(), ApiErr
 
 pub(super) fn discard_conversation_draft(conn: &Connection, draft: &str) -> Result<(), ApiError> {
     conn.execute(
+        "DELETE FROM wrapper_composer_drafts WHERE target=?1",
+        [draft],
+    )?;
+    conn.execute(
         "UPDATE wrapper_storage_uploads SET cancelled=1,created_at=?2 WHERE draft_id=?1",
         params![draft, crate::now() as i64],
     )?;
@@ -469,6 +475,7 @@ pub(super) fn discard_conversation_images(
 }
 
 fn prune_invalid_drafts(conn: &Connection) -> Result<(), ApiError> {
+    conn.execute("DELETE FROM wrapper_composer_drafts WHERE target<>'' AND NOT EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=target AND c.deleted=0)", [ACCOUNT])?;
     conn.execute("UPDATE wrapper_storage_uploads SET cancelled=1,created_at=?2 WHERE cancelled=0 AND NOT EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=wrapper_storage_uploads.draft_id AND c.deleted=0)",params![ACCOUNT,crate::now() as i64])?;
     conn.execute("DELETE FROM wrapper_storage_drafts WHERE NOT EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=wrapper_storage_drafts.draft_id AND c.deleted=0)",[ACCOUNT])?;
     Ok(())
@@ -710,12 +717,61 @@ pub fn startup(conn: &Connection, base: &Path, now: i64) -> Result<(), ApiError>
     Ok(())
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComposerDraft {
+    conversation_id: Option<String>,
+    text: String,
+    document: Option<Value>,
+}
+
+fn composer_drafts(conn: &Connection, method: &str, body: &[u8]) -> Result<Value, ApiError> {
+    if method == "GET" {
+        let mut statement = conn.prepare("SELECT target,text,document FROM wrapper_composer_drafts WHERE target='' OR EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=target AND c.deleted=0) ORDER BY target")?;
+        let drafts = statement.query_map([ACCOUNT], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })?.map(|row| {
+            let (target, text, document) = row?;
+            let document = document.map(|value| serde_json::from_str::<Value>(&value)).transpose()
+                .map_err(|_| ApiError::new(500, "Document du brouillon illisible."))?;
+            Ok(json!({"conversation_id": if target.is_empty() { None } else { Some(target) }, "text":text, "document":document}))
+        }).collect::<Result<Vec<_>, ApiError>>()?;
+        return Ok(json!({"drafts":drafts}));
+    }
+    let input: ComposerDraft = parse(body)?;
+    if input.document.as_ref().is_some_and(|doc| !doc.is_object()) {
+        return Err(ApiError::new(400, "Document du brouillon invalide."));
+    }
+    let tx = write_transaction(conn)?;
+    if let Some(id) = &input.conversation_id {
+        require_draft(&tx, id)?;
+    }
+    let target = input.conversation_id.as_deref().unwrap_or("");
+    if input.text.is_empty() {
+        tx.execute(
+            "DELETE FROM wrapper_composer_drafts WHERE target=?1",
+            [target],
+        )?;
+    } else {
+        tx.execute("INSERT INTO wrapper_composer_drafts(target,text,document) VALUES (?1,?2,?3) ON CONFLICT(target) DO UPDATE SET text=excluded.text,document=excluded.document",
+            params![target, input.text, input.document.map(|doc| doc.to_string())])?;
+    }
+    tx.commit()?;
+    Ok(json!({"ok":true}))
+}
+
 pub fn routes(
     app: &mut App,
     method: &str,
     path: &str,
     body: &[u8],
 ) -> Option<Result<ApiResponse, ApiError>> {
+    if path == "/api/drafts" && matches!(method, "GET" | "POST") {
+        let before = app.connection.total_changes();
+        let result = composer_drafts(&app.connection, method, body);
+        app.composer_draft_changes += app.connection.total_changes() - before;
+        return Some(result.map(ApiResponse::Json));
+    }
     if !matches!(
         (method, path),
         ("GET", "/api/storage")

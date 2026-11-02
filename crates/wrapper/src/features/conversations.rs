@@ -82,13 +82,14 @@ fn ratings(app: &mut App, method: &str, body: &[u8]) -> Result<Value, ApiError> 
 fn state_revision(
     connection: &rusqlite::Connection,
     path: &std::path::Path,
+    composer_draft_changes: u64,
 ) -> Result<String, ApiError> {
     let external: u64 = connection.pragma_query_value(None, "data_version", |row| row.get(0))?;
     Ok(format!(
         "{}.{}.{}.{}.{}",
         std::process::id(),
         external,
-        connection.total_changes(),
+        connection.total_changes() - composer_draft_changes,
         super::screen::revision(path),
         super::updates::revision(),
     ))
@@ -96,11 +97,14 @@ fn state_revision(
 
 fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     match path {
-        "/api/ping" => Ok(json!({"revision": state_revision(&app.connection, &app.db_path)?})),
+        "/api/ping" => Ok(
+            json!({"revision": state_revision(&app.connection, &app.db_path, app.composer_draft_changes)?}),
+        ),
         "/api/state" => {
             // Capture before reading: a concurrent write during serialization
             // must cause another refresh, never be mistaken for observed data.
-            let revision = state_revision(&app.connection, &app.db_path)?;
+            let revision =
+                state_revision(&app.connection, &app.db_path, app.composer_draft_changes)?;
             let (theme, accent) = app.preferences()?;
             let provider = app.provider.status();
             let resolved = app.resolved_model()?;

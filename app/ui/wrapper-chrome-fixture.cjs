@@ -1,9 +1,9 @@
 // Fixture for the tests that need a real page: a debug grokbot-wrapper on a throwaway database,
 // answered by a scripted OpenAI on 127.0.0.1, seeded through the public HTTP API, and an isolated
 // headless Chrome (own profile, own debugging port) driven over CDP. Nothing is shared with the
-// person's apps: everything lives under one temporary directory and `launchFixture` registers its
-// own cleanup on the test context, so the processes stop when the test ends for any reason,
-// including a failed assertion or the test timeout.
+// person's apps: each launch owns a temporary profile and process cleanup on the test context.
+// An optional `databaseDirectory` belongs to the caller and survives fixture cleanup so a second
+// launch can reopen it. The caller must remove that directory after the last fixture stops.
 const { spawn } = require("node:child_process");
 const { LaunchIdentity, connectCdp } = require("./local-api-client.cjs");
 const { createServer } = require("node:http");
@@ -205,10 +205,11 @@ async function untilTrue(read, message, ms = 20000) {
 // `documents` ({ title, name, format, content }) through /api/conversations and /api/send and
 // waits for each create_document result; opens the app in Chrome. Resolves with the app's URL
 // and `evaluate(source)`, which runs `source` (an expression, usually a function) in the page.
-async function launchFixture(t, { documents = [], viewport, headless = true, navigate = true, binary = join(__dirname, "../../target/debug/grokbot-wrapper") }) {
+// `databaseDirectory` shares only the caller-owned database directory across launches.
+async function launchFixture(t, { documents = [], databaseDirectory, viewport, headless = true, navigate = true, binary = join(__dirname, "../../target/debug/grokbot-wrapper") }) {
   const root = mkdtempSync(join(tmpdir(), "grokbot-fixture-"));
-  const dbDir = join(root, "db");
-  mkdirSync(dbDir);
+  const dbDir = databaseDirectory || join(root, "db");
+  mkdirSync(dbDir, { recursive: true });
   const privateEnv = { PATH: process.env.PATH, LANG: "C.UTF-8", TZ: "UTC" };
   for (const [key, directory] of Object.entries({ HOME: "home", XDG_CONFIG_HOME: "config", XDG_CACHE_HOME: "cache", XDG_DATA_HOME: "data", XDG_RUNTIME_DIR: "runtime", TMPDIR: "tmp" })) {
     privateEnv[key] = join(root, directory);

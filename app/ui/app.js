@@ -10,7 +10,7 @@
     banner: $("connection-banner"), bannerText: $("connection-message"), toast: $("toast"),
   };
   let state = { account: { name: "Espace personnel" }, mode: "simulated", conversations: [], bots: [], threads: {} };
-  let selectedId = readPreference("grokbot.selected", null);
+  let selectedId = readPreference("grokbot.selected", null) || null;
   let chosenBotId = readPreference("grokbot.bot", "grokbot");
   // Le bot ouvert dans le dialogue; `null` pour une création, dont l'identifiant reste stable entre deux essais.
   let editingBotId = null;
@@ -28,6 +28,7 @@
   let simulateLoss = false;
   let deepLinksBootReady = false;
   let linkDrafts = null;
+  const drafts = createDraftStore();
   let navigationGeneration = 0;
   const deepLinks = window.GrokbotChat.createDeepLinkQueue({
     resolve: async (url) => { await refresh(); return api("/api/deep-links/resolve", { url }); },
@@ -213,7 +214,7 @@
       return true;
     },
     openConversation(id, messageId) {
-      if (busy || !state.conversations.some((conversation) => conversation.id === id)) return false;
+      if (!drafts.ready || busy || !state.conversations.some((conversation) => conversation.id === id)) return false;
       selectConversation(id, !messageId);
       if (messageId) {
         let attempts = 0;
@@ -246,6 +247,22 @@
       selectConversation(null);
       return true;
     },
+    async openWithDraft(id) {
+      if (!drafts.ready || busy || !state.conversations.some((item) => item.id === id)) return false;
+      if (id === selectedId) return true;
+      const source = selectedId;
+      const generation = navigationGeneration;
+      do {
+        const text = ui.input.value, document = ui.input.document;
+        await drafts.put(id, { text, document });
+        if (busy || source !== selectedId || generation !== navigationGeneration) return false;
+        if (text === ui.input.value && JSON.stringify(document) === JSON.stringify(ui.input.document)) break;
+      } while (true);
+      selectConversation(id, true);
+      await drafts.put(source, null);
+      return true;
+    },
+    hasDraft: (id) => Boolean(drafts.get(id)?.text.trim()),
     draft: () => ui.input?.value || "",
     draftDocument: () => ui.input?.document,
     appendDraft(text) { ui.input?.appendText(text); saveDraft(); updateComposer(); },
@@ -353,7 +370,7 @@
     } else if (kind === "compose") {
       if (agent && (!botById(agent) || botById(agent).deleted)) throw new Error("Ce bot est introuvable ou inaccessible sur ce Mac.");
       if (stagedOnEmptyThread() || sendExtras().attachments?.length) throw new Error("Retirez les pièces jointes en cours ou envoyez-les vous-même avant de rouvrir ce lien. Rien n’a été envoyé.");
-      const newDraftText = selectedId ? readPreference(draftKey(null), "") : ui.input.value;
+      const newDraftText = selectedId ? (drafts.get(null)?.text || "") : ui.input.value;
       if (previousLinkDrafts().length >= 16 && newDraftText) throw new Error("Reprenez d’abord un brouillon précédent avant d’ouvrir un autre lien contenant du texte.");
       selectConversation(null);
       if (ui.input.value) {
@@ -386,7 +403,71 @@
     try { localStorage.removeItem(key); } catch { /* SQLite remains the source of conversation history. */ }
   }
 
-  function draftKey(id = selectedId) { return `grokbot.draft.${id || "new"}`; }
+  function createDraftStore() {
+    const native = !window.EzerbotIPhone?.remote && (Boolean(window.webkit?.messageHandlers?.ezerbotRatings) || window.EzerbotShell?.platform === "linux");
+    const values = new Map(), pending = new Map(), failures = new Map();
+    let loaded = !native, loading = null, readError = "";
+    const key = (id) => `grokbot.draft.${id || "new"}`;
+    return {
+      forget(id) { values.delete(id); failures.delete(id); if (!native) { removePreference(key(id)); removePreference(`${key(id)}.document`); } },
+      get ready() { return loaded; },
+      get error() { return readError || failures.get(selectedId) || ""; },
+      async load() {
+        if (loaded) return false;
+        if (!loading) loading = api("/api/drafts").then(({ drafts }) => {
+          for (const draft of drafts) values.set(draft.conversation_id, draft);
+          loaded = true; readError = ""; return true;
+        }).catch((error) => {
+          readError = `Brouillons non lus : ${error.message}`;
+          notify(readError); return false;
+        }).finally(() => { loading = null; });
+        return loading;
+      },
+      get(id = selectedId) {
+        if (native || values.has(id)) return values.get(id);
+        const text = readPreference(key(id), "");
+        if (!text) { removePreference(`${key(id)}.document`); return null; }
+        let document = null;
+        try { document = JSON.parse(readPreference(`${key(id)}.document`, "null")); } catch {}
+        return { text, document };
+      },
+      put(id, draft) {
+        if (!loaded) return Promise.resolve();
+        const value = { text: draft?.text || "", document: draft?.document || null };
+        if (!native) {
+          try {
+            if (value.text) {
+              localStorage.setItem(key(id), value.text);
+              localStorage.setItem(`${key(id)}.document`, JSON.stringify(value.document));
+            } else {
+              localStorage.removeItem(key(id)); localStorage.removeItem(`${key(id)}.document`);
+            }
+            values.delete(id);
+            return Promise.resolve();
+          } catch { values.set(id, value); return Promise.resolve(); }
+        }
+        const previous = values.get(id);
+        values.set(id, value);
+        if (pending.has(id)) { pending.get(id).value = value; return pending.get(id).promise; }
+        if (!failures.has(id) && JSON.stringify(previous) === JSON.stringify(value)) return Promise.resolve();
+        const work = { value };
+        pending.set(id, work);
+        work.promise = (async () => {
+          try {
+            while (work.value) {
+              const next = work.value; work.value = null;
+              await api("/api/drafts", { conversation_id: id, ...next });
+            }
+            failures.delete(id);
+          } catch (error) {
+            failures.set(id, `Brouillon non sauvegardé : ${error.message}`);
+            throw error;
+          } finally { pending.delete(id); updateComposer(); }
+        })();
+        return work.promise;
+      },
+    };
+  }
   function currentConversation() { return state.conversations.find((item) => item.id === selectedId); }
   function botById(id) { return state.bots.find((bot) => bot.id === id); }
   // Les bots supprimés restent dans l'état pour que leurs conversations gardent nom et couleur.
@@ -511,8 +592,13 @@
     connectionStatus = "online";
     ui.banner.hidden = true;
     for (const panel of panels.values()) panelCall(panel, panel.onConnection, true);
-    if (selectedId && !state.conversations.some((item) => item.id === selectedId)) selectedId = null;
+    const resetSelection = Boolean(selectedId && !state.conversations.some((item) => item.id === selectedId));
+    if (resetSelection) selectedId = null;
     writePreference("grokbot.selected", selectedId || "");
+    if (await drafts.load() || resetSelection) {
+      setComposerText(drafts.get()?.text || "");
+      restoreDraftDocument();
+    }
     const pinned = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90;
     const current = currentConversation();
     // A terminal error (or a one-chunk success) may never have a streaming DOM
@@ -533,7 +619,7 @@
     pollTimer = setTimeout(async () => {
       if (busy) { schedulePoll(); return; }
       try {
-        if (live || waiting || !connected) await refresh();
+        if (live || waiting || !connected || !drafts.ready) await refresh();
         else {
           // Idle liveness must not serialize/repaint the entire workspace.
           const ping = await api("/api/ping");
@@ -588,22 +674,11 @@
   }
 
   function saveDraft() {
-    if (ui.input.value) {
-      writePreference(draftKey(), ui.input.value);
-      writePreference(`${draftKey()}.document`, JSON.stringify(ui.input.document));
-    } else {
-      removePreference(draftKey());
-      removePreference(`${draftKey()}.document`);
-    }
+    drafts.put(selectedId, { text: ui.input.value, document: ui.input.document }).catch((error) => notify(error.message));
   }
   function restoreDraftDocument() {
-    try {
-      const text = readPreference(draftKey(), null);
-      // A rich document without its text twin is an orphan from an earlier transfer.
-      if (text === null) { removePreference(`${draftKey()}.document`); return; }
-      const document = JSON.parse(readPreference(`${draftKey()}.document`, "null"));
-      if (document && text === ui.input.value) ui.input.document = document;
-    } catch { /* Plain text remains usable when an older draft has no rich document. */ }
+    const draft = drafts.get();
+    if (draft?.document && draft.text === ui.input.value) ui.input.document = draft.document;
   }
 
   function updateComposer() {
@@ -612,12 +687,13 @@
     const group = currentConversation()?.kind === "group";
     const task = currentConversation()?.kind === "task";
     const taskFinished = task && !window.GrokbotDelegation?.canFollowUp(currentConversation().id);
-    ui.input.setReadOnly(taskFinished);
+    ui.input.setReadOnly(taskFinished || !drafts.ready);
     ui.input.setPlaceholder(task ? "Écrire un suivi pour cette sous-tâche…" : "Qu’avez-vous en tête ?");
     if (taskFinished) {
-      if (ui.input.value) setComposerText("");
-      removePreference(draftKey());
-      removePreference(`${draftKey()}.document`);
+      if (ui.input.value || drafts.get()?.text) {
+        setComposerText("");
+        drafts.put(selectedId, null).catch((error) => notify(error.message));
+      }
       for (const panel of panels.values()) panelCall(panel, panel.composer?.discard);
       if (document.activeElement?.closest?.(".composer-area")) document.querySelector(".gb-delegation-bar p")?.focus();
     }
@@ -631,17 +707,17 @@
       live: !task && Boolean(runningRun() || streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments)) });
     const live = control.live;
     const noMembers = group && !currentConversation().member_ids?.length;
-    ui.send.disabled = control.offline || taskFinished || (live ? ((group || task) && (control.busy || !connected)) : control.busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
+    ui.send.disabled = !drafts.ready || control.offline || taskFinished || (live ? ((group || task) && (control.busy || !connected)) : control.busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
     ui.send.dataset.mode = control.mode;
     ui.send.title = control.title;
     ui.send.setAttribute("aria-label", control.label);
     ui.send.querySelector("use").setAttribute("href", control.icon);
     ui.input.setInvalid(tooLong);
-    ui.hint.dataset.alert = String(Boolean(pending || tooLong || blockedReason));
-    ui.hint.textContent = taskFinished ? "Cette tâche est terminée ; poursuivez dans la conversation principale." : noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : typeof blockedReason === "string" ? blockedReason : task ? "Suivi réservé à cette sous-tâche · Entrée pour envoyer" : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
+    ui.hint.dataset.alert = String(Boolean(drafts.error || pending || tooLong || blockedReason));
+    ui.hint.textContent = drafts.error || (!drafts.ready ? "Lecture des brouillons…" : "") || (taskFinished ? "Cette tâche est terminée ; poursuivez dans la conversation principale." : noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : typeof blockedReason === "string" ? blockedReason : task ? "Suivi réservé à cette sous-tâche · Entrée pour envoyer" : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne");
     $("new-chat").disabled = busy;
     ui.menuButton.disabled = busy || !currentConversation();
-    deepLinks.setReady(deepLinksBootReady && connected && !busy);
+    deepLinks.setReady(deepLinksBootReady && drafts.ready && connected && !busy);
     $("restore-link-draft").hidden = Boolean(selectedId) || previousLinkDrafts().length === 0;
     const learn = $("learn-skill-button");
     learn.hidden = ["task", "routine"].includes(currentConversation()?.kind);
@@ -671,13 +747,14 @@
   }
 
   function selectConversation(id, focus = false) {
+    if (!drafts.ready) return;
     navigationGeneration++;
     notifyNavigation();
     approvalFollow.cancel();
     saveDraft();
     selectedId = id;
     writePreference("grokbot.selected", id || "");
-    setComposerText(readPreference(draftKey(), ""));
+    setComposerText(drafts.get()?.text || "");
     restoreDraftDocument();
     closeMenu();
     closeSidebar();
@@ -1452,7 +1529,7 @@
     updateComposer();
     let messageId;
     let delivered = false;
-    const previousDraftKey = draftKey();
+    const previousDraftId = selectedId;
     const restoreDraft = async () => {
       const remainder = ui.input.value;
       const remainderDocument = ui.input.document;
@@ -1473,8 +1550,7 @@
     try {
       // Consume only the submitted text, before creation can yield to another edit.
       setComposerText("");
-      removePreference(previousDraftKey);
-      removePreference(`${previousDraftKey}.document`);
+      await drafts.put(previousDraftId, null);
       if (!conversation) {
         const created = await api("/api/conversations", { bot_id: chosenBot()?.id });
         upsertConversation(created.conversation);
@@ -1486,9 +1562,8 @@
       messageId = crypto.randomUUID();
       pendingSends.set(messageId, { extras, captured, consumed: false });
       conversation.messages.push({ ...extras, ...(conversation.kind === "task" ? { payload: { source: "follow_up" } } : {}), id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
-      removePreference(previousDraftKey);
-      removePreference(`${previousDraftKey}.document`);
-      saveDraft(); // Keep any text typed while conversation creation was in flight.
+      await drafts.put(selectedId, { text: ui.input.value, document: ui.input.document });
+      if (previousDraftId !== selectedId) await drafts.put(previousDraftId, null);
       render(scrollGeneration === submittedScrollGeneration);
       const response = await sendRequest(conversation, messageId, body, extras, simulateLoss);
       simulateLoss = false;
@@ -2152,11 +2227,12 @@
     try {
       await api("/api/conversations/delete", { id: conversation.id });
       state.conversations = state.conversations.filter((item) => item.id !== conversation.id);
-      removePreference(draftKey(conversation.id));
+      drafts.forget(conversation.id);
       setComposerText("");
       selectedId = null;
       writePreference("grokbot.selected", "");
-      setComposerText(readPreference(draftKey(), ""));
+      setComposerText(drafts.get()?.text || "");
+      restoreDraftDocument();
       $("delete-dialog").close();
       render();
       notify("Conversation supprimée.");
@@ -2200,11 +2276,10 @@
 
   applyTheme(themeChoice);
   applyAccent(accentChoice);
-  setComposerText(readPreference(draftKey(), ""));
+  setComposerText(drafts.get()?.text || "");
+  restoreDraftDocument();
   render();
   refresh().then(() => {
-    setComposerText(readPreference(draftKey(), ""));
-    restoreDraftDocument();
     updateComposer();
     scrollToLatest();
   }).catch(showConnectionError).finally(() => {

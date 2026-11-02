@@ -107,7 +107,7 @@
     catch (error) { phase = pending?.partial ? "ready" : "failed"; render(); panels.notify(error.message); }
     finally { requestBusy = false; }
   }
-  const hasDraft = (conversation) => context?.conversation?.id === conversation ? !!panels.draft().trim() : !!localStorage.getItem(`grokbot.draft.${conversation}`)?.trim();
+  const hasDraft = (conversation) => context?.conversation?.id === conversation ? !!panels.draft().trim() : panels.hasDraft(conversation);
   async function cancelCapture() {
     if (!session) { phase = "idle"; render(); return; }
     if (!emptyCapture() && !await confirmDelete("Supprimer la capture ?", "L’audio et la transcription de cette capture seront supprimés. Une conversation créée uniquement pour elle sera retirée si elle est toujours vide.", "Supprimer la capture")) return;
@@ -126,17 +126,12 @@
     if (panels.voiceActive?.()) { panels.notify("Une dictée est en cours. Arrêtez-la avant d’enregistrer une réunion."); return; }
     begin.disabled = true; dialogError.textContent = "";
     try {
-      const welcome = !context.conversation, draft = panels.draft();
+      const welcome = !context.conversation;
       session = await panels.api("/api/meetings/start", { conversation_id: context.conversation?.id || null, bot_id: context.bot?.id, title: title.value, consent: consent.checked });
       const rev = ++generation; phase = "authorizing"; keep.checked = false; pending = null;
       if (welcome) {
-        if (draft) {
-          localStorage.setItem(`grokbot.draft.${session.conversation_id}`, draft);
-          localStorage.setItem(`grokbot.draft.${session.conversation_id}.document`, JSON.stringify(panels.draftDocument()));
-        }
         await panels.refresh();
-        if (!panels.openConversation(session.conversation_id)) throw new Error("Ouvrez la conversation créée avant d’enregistrer.");
-        localStorage.removeItem("grokbot.draft.new"); localStorage.removeItem("grokbot.draft.new.document");
+        if (!await panels.openWithDraft(session.conversation_id)) throw new Error("Ouvrez la conversation créée avant d’enregistrer.");
       }
       dialog.close(); render(); await accept(await bridge("start"), rev);
     } catch (error) {

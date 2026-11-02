@@ -32,10 +32,10 @@ function panel(response, welcome = false) {
   const richDocument = {type:"doc",content:[{type:"paragraph",content:[{type:"botMention",attrs:{id:"grokbot",label:"Ezerbot"}},{type:"text",text:"Mon brouillon"}]}]};
   const panels = { register(value) { registration = value; }, composerChanged() {}, draft: () => welcome ? "Mon brouillon" : "", draftDocument: () => richDocument, notify: (text) => notifications.push(text),
     async api() {return {conversation:{id:"created-chat"}};}, async refresh() {},
-    openConversation(id) {
-      storage.set("grokbot.draft.new", "Mon brouillon");
-      storage.set("grokbot.draft.new.document", JSON.stringify(richDocument));
-      assert.equal(storage.get(`grokbot.draft.${id}.document`), JSON.stringify(richDocument));
+    async openWithDraft(id) {
+      storage.set(`grokbot.draft.${id}`, "Mon brouillon");
+      storage.set(`grokbot.draft.${id}.document`, JSON.stringify(richDocument));
+      storage.delete("grokbot.draft.new"); storage.delete("grokbot.draft.new.document");
       ctx.conversation={id,messages:[]}; registration.onState(ctx.state,ctx); return true;
     },
   };

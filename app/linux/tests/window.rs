@@ -589,3 +589,45 @@ fn a_second_launch_shows_the_open_window_and_a_later_launch_starts_again() {
     });
     third.quit();
 }
+
+#[test]
+fn a_draft_typed_before_closing_is_sent_after_reopening() {
+    let home = TestDir::new("ezerbot-draft-reopen");
+    let screen = Screen::start();
+    let fake = [("EZERBOT_FAKE_SIGNIN", "1")];
+    let app = App::start(shell_with_wrapper(), &screen, &home, &fake);
+    wait_for("the window stayed blank", || {
+        (screen.colours().len() >= 16).then_some(())
+    });
+    screen.focus();
+    screen.press(&["Control_L", "n"]);
+    std::thread::sleep(Duration::from_millis(500));
+    let text = "brouillon durable depuis xvfb";
+    screen.type_text(text);
+    let database = home.join("state/ezerbot.sqlite");
+    wait_for("the typed draft was never acknowledged in SQLite", || {
+        let saved = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT text FROM wrapper_composer_drafts WHERE target=''",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .ok();
+        (saved.as_deref() == Some(text)).then_some(())
+    });
+    app.quit();
+    let reopened = App::start(shell_with_wrapper(), &screen, &home, &fake);
+    wait_for("the reopened window stayed blank", || {
+        (screen.colours().len() >= 16).then_some(())
+    });
+    screen.focus();
+    screen.press(&["Control_L", "n"]);
+    std::thread::sleep(Duration::from_millis(500));
+    screen.press(&["Return"]);
+    wait_for("the restored draft was not sent and answered", || {
+        exchange_persisted(&database, text).then_some(())
+    });
+    reopened.quit();
+}

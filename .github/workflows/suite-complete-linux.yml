@@ -52,6 +52,7 @@ jobs:
             suite-linux-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
       - name: Exécuter et mesurer la suite
         run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           df -BG "$GITHUB_WORKSPACE"
           python3 tools/run-complete-suite.py --output "$RUNNER_TEMP/suite-complete-linux/result.json"
       - name: Publier uniquement le résultat JSON

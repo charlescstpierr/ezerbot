@@ -25,13 +25,20 @@ if phase == "npm":
     sys.exit(case == "npm-error")
 if phase == "cargo":
     if case == "compile-error":
-        print("PRIVATE_SENTINEL /Users/private/runtime")
+        print("error[E0308]: PRIVATE_SENTINEL /Users/private/runtime")
+        print(" --> crates/sample/src/lib.rs:1:1")
+        print("error: could not compile `sample` due to 1 previous error")
         sys.exit(101)
     if case == "dirty-lock":
         pathlib.Path("Cargo.lock").write_text("modified")
     failed = int(case == "rust-error")
     print("Running tests/yolo.rs (target/debug/deps/yolo-abcdef1234)")
     print("test sample ... " + ("FAILED" if failed else "ok"))
+    if failed:
+        print("\\nfailures:\\n\\n---- sample stdout ----\\n")
+        print("thread 'sample' panicked at crates/sample/src/lib.rs:1:1:")
+        print("called `Result::unwrap()` on an `Err` value: Os { code: 1, kind: PermissionDenied, message: Operation not permitted PRIVATE_SENTINEL /Users/private/runtime }")
+        print("\\nfailures:\\n    sample\\n")
     print(f"test result: {'FAILED' if failed else 'ok'}. {1-failed} passed; {failed} failed; 0 ignored; 0 measured; 1 filtered out;")
     sys.exit(failed)
 web = any("app/web/" in arg for arg in sys.argv)
@@ -223,6 +230,17 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
                     self.assertNotIn("/Users/private", output.read_text())
                     if case == "rust-error":
                         self.assertIn("rust:yolo:sample", report["failures"])
+                        diagnostic = next(item for item in report["phases"]["rust"]["diagnostics"] if item["failure"] == "rust:yolo:sample")
+                        self.assertIn("permission-denied", diagnostic["causes"])
+                        self.assertIn("unwrap-error", diagnostic["causes"])
+                        self.assertIn("crates/sample/src/lib.rs:1:1", diagnostic["locations"])
+                    if case == "compile-error":
+                        self.assertEqual(report["phases"]["rust"]["exit_code"], 101)
+                        diagnostic = next(item for item in report["phases"]["rust"]["diagnostics"] if item["failure"] == "rust:command-failed")
+                        self.assertIn("compile-error", diagnostic["causes"])
+                        self.assertEqual(diagnostic["compiler_codes"], ["E0308"])
+                        self.assertIn("crates/sample/src/lib.rs:1:1", diagnostic["locations"])
+                        self.assertEqual(report["phases"]["ui"]["exit_code"], 0)
                     if case == "node-error":
                         self.assertIn("web:app/web/src/sample.test.js:1", report["failures"])
                     if case == "dirty-lock":

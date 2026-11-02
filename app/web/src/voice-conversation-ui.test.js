@@ -14,7 +14,7 @@ class Element {
 const all = n => [n,...n.children.flatMap(all)];
 const cls = (n,c) => all(n).find(x => x.className === c);
 function fixture() {
-  let startExtras={}, notices=[], panel, timer, keydown, source={status:"idle",transcript:"",utterance_id:0,barged:0}, scenario="", nextSend, refusal="";
+  let startExtras={}, notices=[], panel, timer, keydown, source={status:"idle",transcript:"",utterance_id:0,barged:0}, scenario="", nextSend, refusal="", draftHandoff;
   const calls=[], sends=[], follows=[], held=[], holding=new Set();
   let script;
   const limits=[];
@@ -58,7 +58,7 @@ function fixture() {
   const panels={
     register(p){ panel=p;p.composer.mount(composer,context);p.onState(context.state,context);},
     composerChanged(){}, notify(text){notices.push(text);}, async refresh(){}, async api(path,body){calls.push({path,...body});if(path==="/api/voice/bot"&&refusal)throw new Error(refusal);if(path==="/api/conversations")return {conversation:{id:"created"}};},
-    async openWithDraft(id){context={...context,conversation:{id,messages:[]}};panel.onState(context.state,context);return true;},
+    async openWithDraft(id){if(draftHandoff){draftHandoff.enter();await draftHandoff.wait;}context={...context,conversation:{id,messages:[]}};panel.onState(context.state,context);return true;},
     async sendVoice(text,id){sends.push({text,id});nextSend?.();},
     followVoiceReply(id){follows.push(id);},
   };
@@ -69,8 +69,23 @@ function fixture() {
   });
   const section=bot=>{const container=new Element("div");const cleanup=panel.botSection(bot,container,context);return {container,cleanup};};
   return {section,heard,talk,failWith,set clock(ms){clock=ms;},set bargeOnSpeak(value){bargeOnSpeak=value;},set refuseSpeak(value){refuseSpeak=value;},hold(...commands){holding.clear();for(const command of commands)holding.add(command);},set script(fn){script=fn;},release(...commands){if(!commands.length)holding.clear();for(const late of held.splice(0))if(!commands.length||commands.includes(late.command))late.resolve();else held.push(late);},set refusal(text){refusal=text;},root,calls,sends,follows,notices,panel,set startExtras(value){startExtras=value;},setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
+    gateDraftHandoff(){let enter,release;const waiting=new Promise(resolve=>{enter=resolve;});const wait=new Promise(resolve=>{release=resolve;});draftHandoff={enter,wait};return {waiting,release};},
     setContext(c){context=c;panel.onState(c.state,c);},tick:async()=>timer?.(),keydown:e=>keydown(e),expire(){limits.forEach((fn,i)=>{limits[i]=null;fn?.();});}};
 }
+for (const navigated of [false, true]) test(`voice draft handoff ${navigated ? "cancels on real navigation" : "survives an idle observation"}`, async () => {
+  const f=fixture();
+  f.setContext({...f.context,conversation:null});
+  await cls(f.root,"voice-session-toggle").onclick();
+  const gate=f.gateDraftHandoff();
+  f.source.final_text="Bonjour depuis l’accueil";f.source.utterance_id=1;
+  const work=f.tick();
+  await gate.waiting;
+  f.setContext({...f.context,...(navigated ? {conversation:{id:"other",messages:[]}} : {})});
+  gate.release();
+  await work;
+  assert.deepEqual(f.sends,navigated ? [] : [{text:"Bonjour depuis l’accueil",id:"created"}]);
+  assert.equal(f.calls.some(call=>call.command==="cancel"),navigated);
+});
 test("end-to-end voice sends only the recognized utterance once, reads streamed sentences, pauses on approval",async()=>{
   const f=fixture(); await cls(f.root,"voice-session-toggle").onclick();
   f.source.transcript="Bonjour";f.source.barged=1;await f.tick();

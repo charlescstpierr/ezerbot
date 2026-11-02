@@ -246,7 +246,7 @@ function parsePage(document) {
   }
 }
 
-function boot(server = null) {
+function boot(server = null, initialStorage = []) {
   const document = {
     ids: new Map(),
     listeners: {},
@@ -275,7 +275,7 @@ function boot(server = null) {
     removeAllRanges() { this.rangeCount = 0; this.isCollapsed = true; this.text = ""; this.range = null; this.fire(); },
     fire() { for (const handler of document.listeners.selectionchange || []) handler(); },
   };
-  const storage = new Map();
+  const storage = new Map(initialStorage);
   const localStorage = {
     getItem: (key) => storage.has(key) ? storage.get(key) : null,
     setItem: (key, value) => storage.set(key, String(value)),
@@ -304,8 +304,10 @@ function boot(server = null) {
   let conversationSerial = 0;
   const realSetTimeout = setTimeout;
   const realClearTimeout = clearTimeout;
+  let heartbeat;
   function relaxedTimeout(handler, delay, ...args) {
     const timer = realSetTimeout(handler, delay, ...args);
+    if (delay === 5000) heartbeat = { timer, handler, args };
     timer.unref?.();
     return timer;
   }
@@ -430,6 +432,12 @@ function boot(server = null) {
     refuseSend(status) { sendStatus = status; },
     thread: () => threadOptions,
     composer: () => composer,
+    async heartbeat() {
+      assert.ok(heartbeat, "the idle heartbeat must be scheduled");
+      const next = heartbeat;
+      realClearTimeout(next.timer);
+      await next.handler(...next.args);
+    },
     type(text) { composer.api.value = text; composer.onInput(); },
     cmdN() {
       document.body.dispatchEvent({ type: "keydown", key: "n", metaKey: true, ctrlKey: false, altKey: false, preventDefault() {} });
@@ -850,6 +858,33 @@ for (const passage of [null, "Confort", "Con"]) test(`r12 citation ${passage ?? 
 });
 
 function draftServer() { return { drafts: new Map(), conversations: [] }; }
+
+test("an idle heartbeat retries a failed first draft read without a state change", async () => {
+  const server = draftServer();
+  server.readError = true;
+  server.drafts.set(null, { conversation_id: null, text: "déjà sauvé", document: docOf("déjà sauvé") });
+  const app = boot(server);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(app.document.getElementById("composer-hint").textContent, /non lus/);
+  server.readError = false;
+  await app.heartbeat();
+  assert.equal(app.composer().api.value, "déjà sauvé");
+  assert.doesNotMatch(app.document.getElementById("composer-hint").textContent, /non lus/);
+});
+
+test("a deleted saved selection restores the welcome draft without overwriting it", async () => {
+  const app = boot(null, [
+    ["grokbot.selected", "deleted"],
+    ["grokbot.draft.deleted", "ancien fil"],
+    ["grokbot.draft.new", "accueil à garder"],
+    ["grokbot.draft.new.document", JSON.stringify(docOf("accueil à garder"))],
+  ]);
+  await ready(app);
+  assert.equal(app.composer().api.value, "accueil à garder");
+  app.cmdN();
+  assert.equal(stored(app, "grokbot.draft.new"), "accueil à garder");
+  assert.equal(JSON.stringify(app.composer().api.document), JSON.stringify(docOf("accueil à garder")));
+});
 
 test("native drafts reopen with fresh browser storage, text and document per target", async () => {
   const server = draftServer();

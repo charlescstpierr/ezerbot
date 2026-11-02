@@ -71,6 +71,8 @@ class CompleteSuiteTests(unittest.TestCase):
  --> app/linux/src/main.rs:1:1
 error[E0308]: PRIVATE_SENTINEL
  --> app/linux/src/main.rs:2:1
+warning: unused variable after error
+ --> app/linux/src/main.rs:1:1
 Running unittests src/main.rs (target/debug/deps/linux-abcdef1234)
 error[E9999]: PRIVATE_SENTINEL
  --> app/linux/src/main.rs:1:1
@@ -351,6 +353,10 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
                     if case in {"malformed-location", "diagnostics-error"}:
                         self.assertTrue({"rust:failed-tests", "rust:exclusion-mismatch", "rust:command-failed"} <= set(report["failures"]))
                         self.assertEqual(report["phases"]["ui"]["exit_code"], 0)
+                    if case == "malformed-location":
+                        self.assertNotIn("rust:runner-error", report["failures"])
+                        diagnostic = next(item for item in report["phases"]["rust"]["diagnostics"] if item["failure"] == "rust:yolo:sample")
+                        self.assertEqual(diagnostic["locations"], ["crates/sample/src/lib.rs:1:1"])
                     if case == "compile-error":
                         self.assertEqual(report["phases"]["rust"]["exit_code"], 101)
                         diagnostic = next(item for item in report["phases"]["rust"]["diagnostics"] if item["failure"] == "rust:command-failed")

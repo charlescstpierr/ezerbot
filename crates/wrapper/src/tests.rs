@@ -2556,3 +2556,68 @@ fn an_undecodable_event_fails_a_state_read_like_a_conversation_read() {
     let state = app.api("GET", "/api/state", b"").unwrap_err();
     assert_eq!((state.status, state.message), (alone.status, alone.message));
 }
+
+#[test]
+fn composer_drafts_survive_restart_and_leave_with_their_conversation() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    let doc = json!({"type":"doc","content":[]});
+    let text = "brouillon privé ".repeat(6000);
+    let revision = app.api("GET", "/api/ping", b"").unwrap();
+    for target in [None, Some(&id)] {
+        post(
+            &mut app,
+            "/api/drafts",
+            json!({"conversation_id":target,"text":text,"document":doc}),
+        )
+        .unwrap();
+    }
+    assert_eq!(app.api("GET", "/api/ping", b"").unwrap(), revision);
+    assert!(!app
+        .api("GET", "/api/state", b"")
+        .unwrap()
+        .to_string()
+        .contains("brouillon privé"));
+    drop(app);
+    let mut app = App::open(&db.0).unwrap();
+    let drafts = app.api("GET", "/api/drafts", b"").unwrap();
+    assert_eq!(drafts["drafts"].as_array().unwrap().len(), 2);
+    for draft in drafts["drafts"].as_array().unwrap() {
+        assert_eq!(draft["text"], text);
+        assert_eq!(draft["document"], doc);
+    }
+    assert_eq!(
+        post(&mut app, "/api/drafts", json!({"text":"x","document":[]})),
+        Err(400)
+    );
+    assert_eq!(
+        post(
+            &mut app,
+            "/api/drafts",
+            json!({"conversation_id":"absent","text":"x"})
+        ),
+        Err(404)
+    );
+    post(&mut app, "/api/conversations/delete", json!({"id":id})).unwrap();
+    assert_eq!(
+        post(
+            &mut app,
+            "/api/drafts",
+            json!({"conversation_id":id,"text":"x"})
+        ),
+        Err(404)
+    );
+    assert_eq!(
+        app.api("GET", "/api/drafts", b"").unwrap()["drafts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    post(&mut app, "/api/drafts", json!({"text":""})).unwrap();
+    assert_eq!(
+        app.api("GET", "/api/drafts", b"").unwrap(),
+        json!({"drafts":[]})
+    );
+}

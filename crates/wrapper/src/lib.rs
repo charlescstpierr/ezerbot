@@ -138,6 +138,7 @@ pub fn body_limit(path: &str) -> usize {
         "/api/templates/create" | "/api/templates/decode" => TEMPLATE_BODY_LIMIT,
         // Every write resends the whole document, which grows with each rating.
         "/api/ratings" => 8 * 1024 * 1024,
+        "/api/drafts" => 1024 * 1024,
         _ => BODY_LIMIT,
     }
 }
@@ -647,6 +648,7 @@ pub struct App {
     debug_voice_call: features::voice_call::DebugCall,
     // Host-owned: survives a WebView reload, never persisted across app starts.
     deep_link_seen: BTreeMap<String, u64>,
+    composer_draft_changes: u64,
     // Display fluidity (#255), per polling page; `state_client` is the page of
     // the `/api/state` being served, set by the HTTP host.
     stream_watches: BTreeMap<&'static str, fluidity::StreamWatch>,
@@ -766,6 +768,7 @@ impl App {
             #[cfg(debug_assertions)]
             debug_voice_call: features::voice_call::DebugCall::default(),
             deep_link_seen: BTreeMap::new(),
+            composer_draft_changes: 0,
             stream_watches: BTreeMap::new(),
             state_client: "principal",
         })

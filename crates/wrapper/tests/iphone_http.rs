@@ -307,6 +307,56 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
         .status(),
         403
     );
+    let draft_conversation: Value = host
+        .post("/api/conversations", json!({}))
+        .into_json()
+        .unwrap();
+    let draft_id = &draft_conversation["conversation"]["id"];
+    host.post(
+        "/api/drafts",
+        json!({"conversation_id":draft_id,"text":"brouillon réservé au bureau"}),
+    );
+    let phone_state: Value = ureq::get(&format!("{remote}/api/state"))
+        .set("Cookie", cookie)
+        .call()
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert!(!phone_state
+        .to_string()
+        .contains("brouillon réservé au bureau"));
+    assert_eq!(
+        response(
+            ureq::get(&format!("{remote}/api/drafts"))
+                .set("Cookie", cookie)
+                .call()
+        )
+        .status(),
+        403
+    );
+    assert_eq!(
+        response(
+            ureq::post(&format!("{remote}/api/drafts"))
+                .set("Cookie", cookie)
+                .set("Origin", &remote)
+                .set("X-Grokbot-Request", "local")
+                .send_json(json!({"text":"intrus"}))
+        )
+        .status(),
+        403
+    );
+    assert_eq!(
+        ureq::post(&format!("{remote}/api/conversations/delete"))
+            .set("Cookie", cookie)
+            .set("Origin", &remote)
+            .set("X-Grokbot-Request", "local")
+            .send_json(json!({"id":draft_id}))
+            .unwrap()
+            .status(),
+        200
+    );
+    let remaining: Value = host.get("/api/drafts").into_json().unwrap();
+    assert_eq!(remaining, json!({"drafts":[]}));
     // Desktop protection has NOT been relaxed for a tailnet Host.
     assert_eq!(
         response(

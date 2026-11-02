@@ -320,6 +320,7 @@ function boot(server = null) {
       await server?.readGate;
       if (server?.readError) return json({ error: "Lecture brouillon refusée" }, 503);
       if (body) {
+        (server.writes ||= []).push(structuredClone(body));
         await server?.writeGate;
         if (server?.writeError) return json({ error: "Écriture brouillon refusée" }, 503);
         server.drafts.set(body.conversation_id, structuredClone(body));
@@ -857,8 +858,13 @@ test("native drafts reopen with fresh browser storage, text and document per tar
   await first.document.getElementById("composer-form").requestSubmit();
   first.type("brouillon fil");
   const threadDocument = JSON.stringify(first.composer().api.document);
-  first.cmdN(); first.type("brouillon accueil");
+  assert.equal(first.storage.get("grokbot.selected"), "conv-1");
+  assert.equal(first.composer().api.value, "brouillon fil");
+  first.cmdN();
+  assert.equal(first.composer().api.value, "");
+  first.type("brouillon accueil");
   await ready(first);
+  assert.equal(server.drafts.get("conv-1")?.text, "brouillon fil", JSON.stringify([...server.drafts]));
   const second = boot(server); await ready(second);
   assert.equal(second.storage.size > 0, true);
   assert.equal(second.composer().api.value, "brouillon accueil");
@@ -888,4 +894,29 @@ test("native draft read and write failures stay visible", async () => {
   server.writeError = true; app.type("à garder"); await ready(app);
   assert.match(app.document.getElementById("composer-hint").textContent, /brouillon/i);
   assert.equal(app.composer().api.value, "à garder");
+});
+
+
+test("native writes coalesce behind one acknowledgement and retry a failed transfer", async () => {
+  const server = draftServer();
+  const app = boot(server); await ready(app);
+  let release; server.writeGate = new Promise(resolve => { release = resolve; });
+  app.type("première frappe"); app.type("deuxième frappe"); app.type("dernière frappe");
+  await ready(app);
+  assert.equal(server.writes.length, 1);
+  release(); await ready(app);
+  assert.equal(server.writes.length, 2);
+  assert.equal(server.drafts.get(null).text, "dernière frappe");
+  server.conversations.push({ id: "destination", bot_id: "grokbot", messages: [], kind: "direct" });
+  await ready(app);
+  server.writeError = true;
+  await assert.rejects(app.window.GrokbotPanels.openWithDraft("destination"));
+  assert.equal(server.drafts.get(null).text, "dernière frappe");
+  assert.equal(app.composer().api.value, "dernière frappe");
+  server.writeError = false;
+  assert.equal(await app.window.GrokbotPanels.openWithDraft("destination"), true);
+  const reopened = boot(server); await ready(reopened);
+  assert.equal(reopened.composer().api.value, "");
+  assert.equal(reopened.window.GrokbotPanels.openConversation("destination"), true);
+  assert.equal(reopened.composer().api.value, "dernière frappe");
 });

@@ -32,11 +32,10 @@ function fixture() {
   };
   const host = {register(panel) { registration = panel; panel.composer.mount(container,ctx); }, composerChanged() {}, appendDraft(text) { draft += `\n${text}`; },
     async api(path, body) { if (path === "/api/conversations") { created.push(body); return {conversation:{id:"created-chat"}}; } uploads.push({path,body}); if (path === "/api/voice/microphone") return {microphone:body.id}; return {id:"voice_one",duration_ms:1000}; },
-    async refresh() {}, openConversation(id) {
-      // selectConversation saves the departing welcome draft, including its rich document.
-      storage.set("grokbot.draft.new", draft);
-      storage.set("grokbot.draft.new.document", JSON.stringify(richDocument));
-      assert.equal(storage.get(`grokbot.draft.${id}.document`), JSON.stringify(richDocument), "rich text must be handed off before opening");
+    async refresh() {}, async openWithDraft(id) {
+      storage.set(`grokbot.draft.${id}`, draft);
+      storage.set(`grokbot.draft.${id}.document`, JSON.stringify(richDocument));
+      storage.delete("grokbot.draft.new"); storage.delete("grokbot.draft.new.document");
       ctx.conversation={id}; registration.onState(ctx.state, ctx); return true;
     }, notify(text) { notices.push(text); }, draft() {return draft;}, draftDocument() {return richDocument;} };
   const document = {documentElement:{lang:"fr"},createElement:tag=>new Element(tag), createTextNode:text=>Object.assign(new Element("text"),{textContent:text}), getElementById:()=>send, addEventListener(name, fn) { if (name === "keydown") keydown = fn; }};

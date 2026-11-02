@@ -29,6 +29,7 @@ function fixture() {
   };
   const host = { register(panel) { registration = panel; }, composerChanged() {}, notify(message) { notices.push(message); }, draft: () => "", draftDocument: () => ({}),
     async refresh() {}, openConversation(id) { context.conversation = {id}; registration.onState(context.state, context); return true; },
+    hasDraft: id => Boolean(storage.get(`grokbot.draft.${id}`)), async openWithDraft(id) { context.conversation = {id}; registration.onState(context.state, context); return true; },
     async api(path, body) { requests.push({path,body}); if (path === "/api/meetings/start") return { id: "meeting_one", conversation_id: body.conversation_id || "created", title: body.title }; return {}; },
   };
   const document = { createElement: tag => new Element(tag), createTextNode: text => Object.assign(new Element("text"),{textContent:text}), getElementById: id => id === "welcome" ? welcome : panels, querySelector: () => top };

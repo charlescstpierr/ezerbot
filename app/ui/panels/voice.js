@@ -112,18 +112,9 @@
     const { conversation } = await panels.api("/api/conversations", { bot_id: context.bot?.id });
     await panels.refresh();
     if (key(context) !== before) throw new Error("La conversation a changé. Recommencez la dictée ici.");
-    const draft = panels.draft();
-    if (draft) {
-      localStorage.setItem(`grokbot.draft.${conversation.id}`, draft);
-      localStorage.setItem(`grokbot.draft.${conversation.id}.document`, JSON.stringify(panels.draftDocument()));
-    }
     // The memo session follows its own new thread instead of being cancelled by it.
     if (session) session.key = conversation.id;
-    if (!panels.openConversation(conversation.id)) throw new Error("Ouvrez la conversation créée pour joindre le mémo.");
-    try {
-      localStorage.removeItem("grokbot.draft.new");
-      localStorage.removeItem("grokbot.draft.new.document");
-    } catch { /* Draft is already handed off. */ }
+    if (!await panels.openWithDraft(conversation.id)) throw new Error("Ouvrez la conversation créée pour joindre le mémo.");
   }
   async function start() {
     if (live() || window.EzerbotVoiceMode?.active() || window.EzerbotVoiceCall?.active()) return;

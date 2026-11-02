@@ -58,7 +58,7 @@ function fixture() {
   const panels={
     register(p){ panel=p;p.composer.mount(composer,context);p.onState(context.state,context);},
     composerChanged(){}, notify(text){notices.push(text);}, async refresh(){}, async api(path,body){calls.push({path,...body});if(path==="/api/voice/bot"&&refusal)throw new Error(refusal);if(path==="/api/conversations")return {conversation:{id:"created"}};},
-    openConversation(id){context={...context,conversation:{id,messages:[]}};panel.onState(context.state,context);return true;},
+    async openWithDraft(id){context={...context,conversation:{id,messages:[]}};panel.onState(context.state,context);return true;},
     async sendVoice(text,id){sends.push({text,id});nextSend?.();},
     followVoiceReply(id){follows.push(id);},
   };

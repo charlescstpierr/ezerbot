@@ -13,7 +13,7 @@ class Element {
 const descendants = root => [root, ...root.children.flatMap(descendants)];
 const cls = (root, name) => descendants(root).find(el => el.className.split(" ").includes(name));
 const flush = () => new Promise(resolve => setImmediate(resolve));
-function fixture() {
+function fixture({ handoff } = {}) {
   const root = new Element("div"), send = new Element("button"); root.append(send);
   const container = new Element("div"); root.append(container);
   const ctx = { state: { voice: { drafts: [] } }, conversation: { id: "chat" }, bot: { id: "grokbot" } };
@@ -33,6 +33,7 @@ function fixture() {
   const host = {register(panel) { registration = panel; panel.composer.mount(container,ctx); }, composerChanged() {}, appendDraft(text) { draft += `\n${text}`; },
     async api(path, body) { if (path === "/api/conversations") { created.push(body); return {conversation:{id:"created-chat"}}; } uploads.push({path,body}); if (path === "/api/voice/microphone") return {microphone:body.id}; return {id:"voice_one",duration_ms:1000}; },
     async refresh() {}, async openWithDraft(id) {
+      await handoff;
       storage.set(`grokbot.draft.${id}`, draft);
       storage.set(`grokbot.draft.${id}.document`, JSON.stringify(richDocument));
       storage.delete("grokbot.draft.new"); storage.delete("grokbot.draft.new.document");
@@ -323,4 +324,38 @@ test("dictation passes the saved locale to Speech while the interface stays Fren
     assert.equal(f.bodies.filter(body => body.command === "start").at(-1).language, language);
     await cls(f.root,"voice-mic").onclick();
   }
+});
+
+
+test("an idle state during memo draft handoff does not discard the memo", async () => {
+  let release;
+  const handoff = new Promise(resolve => { release = resolve; });
+  const f = fixture({ handoff });
+  f.ctx.conversation = null; f.registration.onState(f.ctx.state, f.ctx);
+  cls(f.root, "voice-mode").children[0].checked = true;
+  await cls(f.root, "voice-mic").onclick();
+  const stopping = cls(f.root, "voice-mic").onclick();
+  await flush();
+  assert.equal(f.created.length, 1);
+  f.registration.onState(f.ctx.state, f.ctx);
+  release(); await stopping; await flush();
+  assert.equal(f.uploads.filter(upload => upload.path === "/api/voice/memos").length, 1);
+  assert.deepEqual(Array.from(f.registration.sendExtras().attachments), ["voice_one"]);
+});
+
+
+test("switching bots during memo handoff still cancels the recording", async () => {
+  let release;
+  const handoff = new Promise(resolve => { release = resolve; });
+  const f = fixture({ handoff });
+  f.ctx.conversation = null; f.registration.onState(f.ctx.state, f.ctx);
+  cls(f.root, "voice-mode").children[0].checked = true;
+  await cls(f.root, "voice-mic").onclick();
+  const stopping = cls(f.root, "voice-mic").onclick();
+  await flush();
+  assert.equal(f.created.length, 1);
+  f.ctx.bot = { id: "other-bot" }; f.registration.onState(f.ctx.state, f.ctx);
+  release(); await stopping; await flush();
+  assert.equal(f.uploads.length, 0);
+  assert.deepEqual(Array.from(f.registration.sendExtras().attachments), []);
 });

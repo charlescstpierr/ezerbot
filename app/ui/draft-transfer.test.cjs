@@ -428,6 +428,7 @@ function boot(server = null, initialStorage = []) {
   vm.runInContext(appSource, context);
   return {
     window, document, storage, state, sent, context,
+    blockStorage() { localStorage.setItem = localStorage.removeItem = () => { throw new Error("Storage unavailable"); }; },
     servePage(detail) { pageDetail = detail; },
     refuseSend(status) { sendStatus = status; },
     thread: () => threadOptions,
@@ -954,4 +955,29 @@ test("native writes coalesce behind one acknowledgement and retry a failed trans
   assert.equal(reopened.composer().api.value, "");
   assert.equal(reopened.window.GrokbotPanels.openConversation("destination"), true);
   assert.equal(reopened.composer().api.value, "dernière frappe");
+});
+
+
+test("a failed draft on a removed thread does not mask the saved welcome draft", async () => {
+  const server = draftServer();
+  server.conversations.push({ id: "removed", bot_id: "grokbot", messages: [], kind: "direct" });
+  const app = boot(server); await ready(app);
+  assert.equal(app.window.GrokbotPanels.openConversation("removed"), true);
+  server.writeError = true; app.type("sur le fil"); await ready(app);
+  assert.match(app.document.getElementById("composer-hint").textContent, /non sauvegardé/);
+  server.conversations.splice(0); server.writeError = false;
+  await app.window.GrokbotPanels.refresh();
+  app.type("accueil sauvé"); await ready(app);
+  assert.equal(server.drafts.get(null).text, "accueil sauvé");
+  assert.doesNotMatch(app.document.getElementById("composer-hint").textContent, /non sauvegardé/);
+});
+
+test("browser storage failure preserves the in-memory draft and allows sending", async () => {
+  const app = boot(); await ready(app);
+  app.blockStorage();
+  app.type("message malgré le stockage indisponible");
+  app.cmdN();
+  assert.equal(app.composer().api.value, "message malgré le stockage indisponible");
+  await app.document.getElementById("composer-form").requestSubmit();
+  assert.equal(app.sent.at(-1)?.body, "message malgré le stockage indisponible");
 });

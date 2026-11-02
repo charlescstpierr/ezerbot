@@ -54,7 +54,7 @@ def install_bundle(bundle, destination, data_home):
             "[Desktop Entry]\nType=Application\nName=Ezerbot\n"
             "Comment=Conversations locales avec Ezerbot\n"
             # GIO checks argv[0] before expanding %% in Exec paths.
-            f"Exec=/usr/bin/env {exec_argument(destination / 'ezerbot-linux')}\n"
+            f"Exec=/usr/bin/env bash {exec_argument(destination / 'Ouvrir Ezerbot.sh')}\n"
             f"Icon={desktop_value(destination / 'ezerbot.png')}\n"
             "Terminal=false\nCategories=Utility;\nStartupWMClass=Ezerbot\n",
             encoding="utf-8",

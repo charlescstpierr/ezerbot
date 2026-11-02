@@ -107,7 +107,7 @@ class LinuxBundleInstallTests(unittest.TestCase):
         self.launch(self.home / "desktop data/applications/ezerbot.desktop", destination)
 
     def test_desktop_launcher_handles_exec_metacharacters(self):
-        destination = self.home / 'Apps "quoted" $dollar `tick` \\slash 100%/Ezerbot'
+        destination = self.home / 'Apps =equals "quoted" $dollar `tick` \\slash 100%/Ezerbot'
         self.install(destination)
         self.launch(self.home / "desktop data/applications/ezerbot.desktop", destination)
 

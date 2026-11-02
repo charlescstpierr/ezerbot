@@ -246,7 +246,7 @@ function parsePage(document) {
   }
 }
 
-function boot() {
+function boot(server = null) {
   const document = {
     ids: new Map(),
     listeners: {},
@@ -287,7 +287,7 @@ function boot() {
     { id: "qa-long", name: "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN", color: "cyan", shape: "galet", description: "", instructions: "" },
   ];
   const state = {
-    account: { name: "Espace personnel" }, mode: "simulated", conversations: [], bots,
+    account: { name: "Espace personnel" }, mode: "simulated", conversations: server?.conversations || [], bots,
     preferences: { theme: "dark", accent: "citron" },
     provider: { connected: false, signin: "idle", backend: "sharing", models: [], connections: {} },
     state_revision: 1,
@@ -316,6 +316,17 @@ function boot() {
   async function fetch(path, options = {}) {
     const url = String(path);
     const body = options.body ? JSON.parse(options.body) : undefined;
+    if (url === "/api/drafts") {
+      await server?.readGate;
+      if (server?.readError) return json({ error: "Lecture brouillon refusée" }, 503);
+      if (body) {
+        await server?.writeGate;
+        if (server?.writeError) return json({ error: "Écriture brouillon refusée" }, 503);
+        server.drafts.set(body.conversation_id, structuredClone(body));
+      }
+      return json({ drafts: [...server.drafts.values()].filter((draft) => draft.text) });
+    }
+    if (url === "/api/ratings") return json({ value: "[]" });
     if (url === "/api/state") return json(state);
     if (url === `/api/pages/${pageDetail?.id}`) return json({ page: pageDetail });
     if (url === "/api/ping") return json({ revision: state.state_revision });
@@ -350,6 +361,7 @@ function boot() {
 
   let composer = null;
   const window = {
+    ...(server ? { webkit: { messageHandlers: { ezerbotRatings: {} } } } : {}),
     GrokbotMascot: {
       shapes: { galet: { label: "Galet" }, etoile: { label: "Étoile" } },
       create: () => document.createElement("span"),
@@ -834,4 +846,46 @@ for (const passage of [null, "Confort", "Con"]) test(`r12 citation ${passage ?? 
     page_id: "page_forfaits", source_version: "c".repeat(64), passage,
   } : undefined, "le réessai utilise la nouvelle citation, jamais l’ancienne");
   assert.equal(chip.hidden, true);
+});
+
+function draftServer() { return { drafts: new Map(), conversations: [] }; }
+
+test("native drafts reopen with fresh browser storage, text and document per target", async () => {
+  const server = draftServer();
+  const first = boot(server); await ready(first);
+  first.type("sur le fil");
+  await first.document.getElementById("composer-form").requestSubmit();
+  first.type("brouillon fil");
+  const threadDocument = JSON.stringify(first.composer().api.document);
+  first.cmdN(); first.type("brouillon accueil");
+  await ready(first);
+  const second = boot(server); await ready(second);
+  assert.equal(second.storage.size > 0, true);
+  assert.equal(second.composer().api.value, "brouillon accueil");
+  assert.equal(JSON.stringify(second.composer().api.document), JSON.stringify(docOf("brouillon accueil")));
+  assert.equal(second.window.GrokbotPanels.openConversation("conv-1"), true);
+  assert.equal(second.composer().api.value, "brouillon fil");
+  assert.equal(JSON.stringify(second.composer().api.document), threadDocument);
+});
+
+test("a native draft cannot overwrite disk before its first successful read", async () => {
+  const server = draftServer();
+  server.drafts.set(null, { conversation_id: null, text: "déjà sauvé", document: docOf("déjà sauvé") });
+  let release; server.readGate = new Promise((resolve) => { release = resolve; });
+  const app = boot(server);
+  app.type("trop tôt");
+  assert.equal(server.drafts.get(null).text, "déjà sauvé");
+  release(); await ready(app);
+  assert.equal(app.composer().api.value, "déjà sauvé");
+});
+
+test("native draft read and write failures stay visible", async () => {
+  const server = draftServer(); server.readError = true;
+  const app = boot(server);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(app.document.getElementById("composer-hint").textContent, /brouillon/i);
+  server.readError = false; await ready(app);
+  server.writeError = true; app.type("à garder"); await ready(app);
+  assert.match(app.document.getElementById("composer-hint").textContent, /brouillon/i);
+  assert.equal(app.composer().api.value, "à garder");
 });

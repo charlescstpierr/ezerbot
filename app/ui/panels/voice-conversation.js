@@ -169,8 +169,7 @@
     const {conversation} = await panels.api("/api/conversations", {bot_id:ctx.bot?.id});
     await panels.refresh();
     if (rev !== epoch) return;
-    // Bind before openConversation publishes the new selection to panel observers.
-    conversationId = conversation.id; scopeKey = conversation.id;
+    conversationId = conversation.id;
     if (!await panels.openWithDraft(conversation.id)) throw new Error("Ouvrez la conversation créée pour poursuivre le mode voix.");
   }
   function schedule(rev) { clearTimeout(timer); if (active() && rev === epoch) timer = setTimeout(() => tick(rev), 100); }
@@ -250,7 +249,10 @@
     finally { ticking = false; schedule(rev); }
   }
   function observe(next) {
-    if (scopeKey && scopeKey !== contextKey(next)) exit();
+    if (scopeKey && scopeKey !== contextKey(next)) {
+      if (conversationId && next.conversation?.id === conversationId) scopeKey = conversationId;
+      else exit();
+    }
     ctx = next;
     if (!voicesLoaded && (ctx.state?.voice?.debug_fake || window.webkit?.messageHandlers?.ezerbotVoiceSession)) loadVoices();
     for (const view of botViews) view.render();

@@ -591,9 +591,10 @@
     connectionStatus = "online";
     ui.banner.hidden = true;
     for (const panel of panels.values()) panelCall(panel, panel.onConnection, true);
-    if (selectedId && !state.conversations.some((item) => item.id === selectedId)) selectedId = null;
+    const resetSelection = Boolean(selectedId && !state.conversations.some((item) => item.id === selectedId));
+    if (resetSelection) selectedId = null;
     writePreference("grokbot.selected", selectedId || "");
-    if (await drafts.load()) {
+    if (await drafts.load() || resetSelection) {
       setComposerText(drafts.get()?.text || "");
       restoreDraftDocument();
     }
@@ -617,7 +618,7 @@
     pollTimer = setTimeout(async () => {
       if (busy) { schedulePoll(); return; }
       try {
-        if (live || waiting || !connected) await refresh();
+        if (live || waiting || !connected || !drafts.ready) await refresh();
         else {
           // Idle liveness must not serialize/repaint the entire workspace.
           const ping = await api("/api/ping");

@@ -60,6 +60,72 @@ sys.exit(failed)
 
 
 class CompleteSuiteTests(unittest.TestCase):
+    def test_linux_environment_publishes_only_numeric_sysctls(self):
+        spec = importlib.util.spec_from_file_location("runner", TOOLS / "run-complete-suite.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        with patch.object(Path, "read_text", side_effect=["1\n", "PRIVATE_SENTINEL", FileNotFoundError()]):
+            self.assertEqual(runner.linux_environment(), {
+                "apparmor_restrict_unprivileged_userns": 1,
+                "unprivileged_userns_clone": None,
+                "max_user_namespaces": None,
+            })
+
+    def test_rust_diagnostics_keep_targets_separate_and_reject_private_locations(self):
+        spec = importlib.util.spec_from_file_location("runner", TOOLS / "run-complete-suite.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        source = "crates/sample/src/lib.rs"
+        raw = """Running tests/first.rs (target/debug/deps/first-abcdef1234)
+test same_name ... FAILED
+test unknown ... FAILED
+failures:
+
+---- same_name stdout ----
+thread 'PRIVATE_SENTINEL' panicked at crates/sample/src/lib.rs:1:1:
+assertion `left == right` failed: PRIVATE_SENTINEL
+  left: PRIVATE_SENTINEL
+ right: /Users/private/runtime
+---- unknown stdout ----
+thread 'unknown' panicked at /Users/private/crates/sample/src/lib.rs:1:1:
+PRIVATE_SENTINEL
+thread 'unknown' panicked at crates/untracked/src/lib.rs:1:1:
+thread 'unknown' panicked at crates/sample/src/lib.rs:99999:1:
+thread 'unknown' panicked at crates/sample/src/lib.rs:1:99999:
+failures:
+    same_name
+    unknown
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 1 filtered out;
+Running tests/second.rs (target/debug/deps/second-abcdef1234)
+test same_name ... FAILED
+failures:
+
+---- same_name stderr ----
+thread 'same_name' panicked at crates/sample/src/lib.rs:1:1:
+bwrap: Creating new namespace failed: Operation not permitted PRIVATE_SENTINEL
+failures:
+    same_name
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out;
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / source).parent.mkdir(parents=True)
+            (root / source).write_text("fn sample() {}\n")
+            _, failures, _ = runner.rust_results(raw)
+            with patch.object(runner, "ROOT", root), patch.object(runner, "git", return_value=source):
+                diagnostics = runner.rust_diagnostics(raw, failures, 101)
+        by_failure = {item["failure"]: item for item in diagnostics}
+        first = by_failure["rust:first:same_name"]
+        second = by_failure["rust:second:same_name"]
+        self.assertEqual(first["causes"], ["assertion-failed"])
+        self.assertEqual(second["causes"], ["namespace-unavailable", "permission-denied"])
+        self.assertEqual(first["locations"], [source + ":1:1"])
+        self.assertEqual(second["locations"], [source + ":1:1"])
+        self.assertEqual(by_failure["rust:first:unknown"]["locations"], [])
+        self.assertEqual(by_failure["rust:first:unknown"]["causes"], [])
+        self.assertNotIn("PRIVATE_SENTINEL", json.dumps(diagnostics))
+        self.assertNotIn("/Users/private", json.dumps(diagnostics))
+
     def test_preflight_failure_detail_is_visible_without_private_diagnostics(self):
         spec = importlib.util.spec_from_file_location("runner", TOOLS / "run-complete-suite.py")
         runner = importlib.util.module_from_spec(spec)
@@ -174,7 +240,7 @@ class CompleteSuiteTests(unittest.TestCase):
         self.assertEqual(result["partial"], ["crates/sample/src/shared.rs::partial"])
         self.assertEqual(result["runtime_branches"], ["crates/sample/src/shared.rs::runtime"])
 
-    def test_cli_reports_failures_and_continues_without_publishing_diagnostics(self):
+    def test_cli_reports_controlled_failures_and_continues_without_publishing_raw_logs(self):
         LOGS.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=LOGS) as directory:
             root = Path(directory)
@@ -226,6 +292,9 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
                     self.assertEqual(set(report["phases"]), {"npm", "rust"} if case == "interrupt" else {"npm", "rust", "web", "ui"})
                     self.assertEqual(report["counts"]["excluded"], 1)
                     self.assertEqual(report["counts"]["absent_linux"], 1)
+                    self.assertEqual(set(report["linux_environment"]), {
+                        "apparmor_restrict_unprivileged_userns", "unprivileged_userns_clone", "max_user_namespaces",
+                    })
                     self.assertNotIn("PRIVATE_SENTINEL", output.read_text() + process.stdout + process.stderr)
                     self.assertNotIn("/Users/private", output.read_text())
                     if case == "rust-error":

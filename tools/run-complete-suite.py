@@ -122,13 +122,15 @@ def rust_diagnostics(raw, failures, exit_code):
     diagnostics = {failure: {"failure": failure, "causes": [], "locations": [], "compiler_codes": []}
                    for failure in failures}
     command = {"failure": "rust:command-failed", "causes": [], "locations": [], "compiler_codes": []}
-    tracked = set(git("ls-files", "--", "crates/**/*.rs").splitlines())
+    tracked = set(git("ls-files", "--", "crates/**/*.rs", "app/linux/**/*.rs").splitlines())
     target, active = "suite", None
+    compiling, compiler_error = True, False
     for line in raw.splitlines():
         running = re.search(r"\bRunning .*\((?:[^()]*[/\\])?([A-Za-z0-9_-]+)-[a-f0-9]+\)", line)
         doctest = re.fullmatch(r"\s*Doc-tests ([A-Za-z0-9_-]+)\s*", line)
         if running or doctest:
             target, active = (running or doctest).group(1), None
+            compiling = False
         block = re.fullmatch(r"---- (" + SYMBOL + r") (?:stdout|stderr) ----", line)
         if block:
             active = diagnostics.get("rust:" + target + ":" + block[1])
@@ -137,17 +139,22 @@ def rust_diagnostics(raw, failures, exit_code):
         destination = active if active is not None else command
         if active is not None:
             destination["causes"].extend(key for key, pattern in RUST_CAUSES.items() if re.search(pattern, line))
-        code = re.match(r"error\[(E[0-9]{4})\]:", line)
-        if code or line.startswith("error: could not compile "):
-            command["causes"].append("compile-error")
-        if code:
-            command["compiler_codes"].append(code[1])
-        if line.startswith("error: linking with "):
-            command["causes"].append("linker-error")
-        if line.startswith("error: failed to run custom build command for "):
-            command["causes"].append("build-script-failed")
-        location = re.search(r"(?:panicked at |^\s*(?:-->|:::)\s+)([^\n]+?):([0-9]+):([0-9]+):?\s*$", line)
-        if location:
+        if compiling:
+            code = re.match(r"error\[(E[0-9]{4})\]:", line)
+            if re.match(r"error(?:\[E[0-9]{4}\])?:", line):
+                compiler_error = True
+            elif re.match(r"warning(?:\[[^\]]+\])?:", line):
+                compiler_error = False
+            if code or line.startswith("error: could not compile "):
+                command["causes"].append("compile-error")
+            if code:
+                command["compiler_codes"].append(code[1])
+            if line.startswith("error: linking with "):
+                command["causes"].append("linker-error")
+            if line.startswith("error: failed to run custom build command for "):
+                command["causes"].append("build-script-failed")
+        location = re.search(r"(?:panicked at |^\s*(?:-->|:::)\s+)([^\n]+?):([0-9]{1,10}):([0-9]{1,10}):?\s*$", line)
+        if location and (active is not None or compiling and compiler_error):
             path, row, column = location.group(1, 2, 3)
             path = path.removeprefix(str(ROOT) + "/")
             if path in tracked:
@@ -272,8 +279,6 @@ def main():
                         outcome[key] = counts[key]
                         report["counts"][key] += counts[key]
                     report["failures"].extend(failures)
-                    if phase == "rust":
-                        outcome["diagnostics"] = rust_diagnostics(raw, failures, outcome["exit_code"])
                     if not complete or counts["passed"] + counts["failed"] + counts["ignored"] == 0:
                         report["failures"].append(phase + ":missing-summary")
                     if counts["failed"]:
@@ -284,6 +289,8 @@ def main():
                         report["failures"].append("rust:exclusion-mismatch")
                 if outcome["exit_code"] != 0:
                     report["failures"].append(phase + ":command-failed")
+                if phase == "rust":
+                    outcome["diagnostics"] = rust_diagnostics(raw, failures, outcome["exit_code"])
             except Exception:
                 report["failures"].append(phase + ":runner-error")
             save(output, report)

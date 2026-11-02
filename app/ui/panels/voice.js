@@ -112,8 +112,7 @@
     const { conversation } = await panels.api("/api/conversations", { bot_id: context.bot?.id });
     await panels.refresh();
     if (key(context) !== before) throw new Error("La conversation a changé. Recommencez la dictée ici.");
-    // The memo session follows its own new thread instead of being cancelled by it.
-    if (session) session.key = conversation.id;
+    if (session) session.destination = conversation.id;
     if (!await panels.openWithDraft(conversation.id)) throw new Error("Ouvrez la conversation créée pour joindre le mémo.");
   }
   async function start() {
@@ -301,7 +300,10 @@
       onSent({extras}) { for (const id of extras.attachments || []) { consumed.add(id); localMemos.delete(id); } memoItems = memoItems.filter((m) => !consumed.has(m.id)); if (!live() && !panels.draft().trim()) phase = "idle"; render(); },
     },
     onState(state, ctx) {
-      if (session && session.key !== key(ctx)) reset();
+      if (session && session.key !== key(ctx)) {
+        if (session.destination === key(ctx)) { session.key = key(ctx); delete session.destination; }
+        else reset();
+      }
       context = ctx;
       if (chosenOverride !== null && state.voice?.microphone === chosenOverride) chosenOverride = null;
       if (microphoneList && !microphonesLoaded) loadMicrophones(); else renderMicrophones();

@@ -411,7 +411,7 @@
     return {
       forget(id) { values.delete(id); failures.delete(id); if (!native) { removePreference(key(id)); removePreference(`${key(id)}.document`); } },
       get ready() { return loaded; },
-      get error() { return readError || failures.values().next().value || ""; },
+      get error() { return readError || failures.get(selectedId) || ""; },
       async load() {
         if (loaded) return false;
         if (!loading) loading = api("/api/drafts").then(({ drafts }) => {
@@ -424,7 +424,7 @@
         return loading;
       },
       get(id = selectedId) {
-        if (native) return values.get(id);
+        if (native || values.has(id)) return values.get(id);
         const text = readPreference(key(id), "");
         if (!text) { removePreference(`${key(id)}.document`); return null; }
         let document = null;
@@ -442,8 +442,9 @@
             } else {
               localStorage.removeItem(key(id)); localStorage.removeItem(`${key(id)}.document`);
             }
+            values.delete(id);
             return Promise.resolve();
-          } catch (error) { return Promise.reject(error); }
+          } catch { values.set(id, value); return Promise.resolve(); }
         }
         const previous = values.get(id);
         values.set(id, value);

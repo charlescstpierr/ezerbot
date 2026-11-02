@@ -769,7 +769,6 @@ pub fn routes(
     if path == "/api/drafts" && matches!(method, "GET" | "POST") {
         let before = app.connection.total_changes();
         let result = composer_drafts(&app.connection, method, body);
-        // Drafts are private editor state, absent from /api/state.
         app.composer_draft_changes += app.connection.total_changes() - before;
         return Some(result.map(ApiResponse::Json));
     }

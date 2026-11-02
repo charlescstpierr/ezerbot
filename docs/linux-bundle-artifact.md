@@ -34,7 +34,7 @@ Utilisez le lanceur Bash. Après fusion de la PR #648, le workflow embarquera au
 l'installateur produit par le script de build, sans liste de fichiers à modifier.
 
 Le build release cible Ubuntu 24.04 x86_64 avec les bibliothèques dynamiques GTK 3,
-WebKitGTK 4.1 et PipeWire de cette distribution. Elles ne sont pas embarquées.
+et WebKitGTK 4.1 de cette distribution. Elles ne sont pas embarquées.
 Un bureau graphique et ses services sont nécessaires. Les autres distributions,
 anciennes glibc, ARM64, les fonctions natives et les conversations ne sont pas
 validés par ce job. Le faux fournisseur de développement est absent en release.

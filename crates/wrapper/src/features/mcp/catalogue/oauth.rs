@@ -426,7 +426,7 @@ pub(super) fn begin(
     let path = ctx.db_path.to_path_buf();
     let provider = ctx.provider.clone();
     let server = server.clone();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let authorization_url = url.to_string();
     // Détruire l'App lève `stop` : l'attente finit sans rien écrire, puis le fil est joint (#463).
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -561,6 +561,12 @@ pub(super) fn begin(
         let _ = result;
     });
     if fake_base().is_none() {
+        #[cfg(target_os = "linux")]
+        if grokbot_linux_desktop::open::launch(authorization_url.as_ref()).is_err() {
+            return Ok(
+                json!({"message":"Ouvrez le lien de connexion dans Paramètres › Connecteurs pour continuer."}),
+            );
+        }
         #[cfg(target_os = "macos")]
         if std::process::Command::new("/usr/bin/open")
             .arg(&authorization_url)

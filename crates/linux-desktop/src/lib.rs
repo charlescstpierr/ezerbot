@@ -4,6 +4,7 @@
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 
+pub mod application;
 mod bus;
 pub mod notifications;
 pub mod open;

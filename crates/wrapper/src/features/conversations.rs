@@ -79,35 +79,41 @@ fn ratings(app: &mut App, method: &str, body: &[u8]) -> Result<Value, ApiError> 
 
 // Detect writes from both this connection and background engine connections.
 // A process identity also invalidates the client's token after a wrapper restart.
+// The keyring locks and unlocks outside the app without writing a row.
 fn state_revision(
     connection: &rusqlite::Connection,
     path: &std::path::Path,
+    keyring_locked: bool,
 ) -> Result<String, ApiError> {
     let external: u64 = connection.pragma_query_value(None, "data_version", |row| row.get(0))?;
     Ok(format!(
-        "{}.{}.{}.{}.{}",
+        "{}.{}.{}.{}.{}.{}",
         std::process::id(),
         external,
         connection.total_changes(),
         super::screen::revision(path),
         super::updates::revision(),
+        u8::from(keyring_locked),
     ))
 }
 
 fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     match path {
-        "/api/ping" => Ok(json!({"revision": state_revision(&app.connection, &app.db_path)?})),
+        "/api/ping" => {
+            let locked = super::engine::keyring_locked(&app.connection);
+            Ok(json!({"revision": state_revision(&app.connection, &app.db_path, locked)?}))
+        }
         "/api/state" => {
+            // Trousseau verrouillé : le coffre n'est lu qu'en partie, donc rien de l'historique
+            // ne peut être masqué. Aucun contenu n'est servi, ni ici ni à l'iPhone.
+            let locked = super::engine::keyring_locked(&app.connection);
             // Capture before reading: a concurrent write during serialization
             // must cause another refresh, never be mistaken for observed data.
-            let revision = state_revision(&app.connection, &app.db_path)?;
+            let revision = state_revision(&app.connection, &app.db_path, locked)?;
             let (theme, accent) = app.preferences()?;
             let provider = app.provider.status();
             let resolved = app.resolved_model()?;
             let fast = app.model_preferences()?.2;
-            // Trousseau verrouillé : le coffre n'est lu qu'en partie, donc rien de l'historique
-            // ne peut être masqué. Aucun contenu n'est servi, ni ici ni à l'iPhone.
-            let locked = super::engine::keyring_locked(&app.connection);
             let conversations = if locked {
                 app.locked_conversations()?
             } else {

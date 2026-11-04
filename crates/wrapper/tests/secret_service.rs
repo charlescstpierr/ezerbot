@@ -382,3 +382,53 @@ fn the_ping_revision_follows_the_keyring_both_ways() {
     assert_eq!(host.state()["vault"]["locked"], false);
     assert!(!host.output().contains("valeur-factice"));
 }
+
+/// La fenêtre montrait le compositeur, puis le trousseau s'est verrouillé avant Envoyer. L'envoi
+/// est refusé avant d'être conservé : le brouillon que la fenêtre remet en place est la seule
+/// copie, et son renvoi après déverrouillage ne fait pas de doublon.
+#[test]
+fn a_send_refused_by_a_locked_keyring_keeps_nothing() {
+    let mut f = Fixture::new();
+    f.vault()
+        .set("TOKEN", "Envoi", "valeur-factice-envoi-7712")
+        .unwrap();
+    let host = f.launch(Some(&f.bus()));
+    let chat = host.post("/api/conversations", json!({"title":"Trousseau"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let send = |id: &str| {
+        host.try_post(
+            "/api/send",
+            json!({"conversation_id":chat,"message_id":id,"body":"Bonjour, une seule fois"}),
+        )
+    };
+    f.keyring.lock();
+    let Err(refused) = send("premier") else {
+        panic!("a send was accepted with a locked keyring");
+    };
+    let ureq::Error::Status(_, response) = *refused else {
+        panic!("the send failed otherwise: {refused}");
+    };
+    assert!(response.into_string().unwrap().contains("Déverrouillez"));
+    f.keyring.unlock();
+    send("second").unwrap();
+    let state = host.wait_state(|s| s["vault"]["locked"] == false);
+    let users: Vec<_> = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == chat.as_str())
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .map(|m| m["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        users,
+        ["second"],
+        "the refused send was kept: its resend duplicates it"
+    );
+}

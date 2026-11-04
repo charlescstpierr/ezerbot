@@ -485,7 +485,18 @@ struct App(Option<Child>);
 
 impl App {
     fn start(binary: &Path, screen: &Screen, home: &TestDir, extra: &[(&str, &str)]) -> Self {
+        Self::open(binary, screen, home, extra, &[])
+    }
+
+    fn open(
+        binary: &Path,
+        screen: &Screen,
+        home: &TestDir,
+        extra: &[(&str, &str)],
+        links: &[&str],
+    ) -> Self {
         let shell = Command::new(binary)
+            .args(links)
             .arg("--data-dir")
             .arg(home.join("state"))
             .env("DISPLAY", &screen.name)
@@ -1294,4 +1305,77 @@ fn the_bridge_refuses_a_command_of_the_other_view() {
         "{refused}"
     );
     shell.app.quit();
+}
+
+/// The notification belongs to another thread than the one shown: only following the link
+/// opens it. The visible thread marks its own notifications read by itself.
+fn notification(database: &Path, id: &str) {
+    let database = Connection::open(database).unwrap();
+    let thread = format!("autre-{}", id.replace(':', "-"));
+    database
+        .execute_batch(&format!(
+            "CREATE TEMP TABLE copy AS SELECT * FROM wrapper_conversations LIMIT 1;
+             UPDATE copy SET id='{thread}';
+             INSERT INTO wrapper_conversations SELECT * FROM copy;
+             DROP TABLE copy;"
+        ))
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO wrapper_notifications SELECT account_id,?1,'reply',id,'card','Réponse',1,1,1 FROM wrapper_conversations WHERE id=?2",
+            [id, thread.as_str()],
+        )
+        .unwrap();
+}
+
+fn notification_opened(database: &Path, id: &str) -> Option<()> {
+    let database = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let unread: i64 = database
+        .query_row(
+            "SELECT unread FROM wrapper_notifications WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .ok()?;
+    (unread == 0).then_some(())
+}
+
+#[test]
+fn a_link_reaches_the_open_window_and_the_window_it_starts() {
+    let home = TestDir::new("ezerbot-links");
+    let screen = Screen::start();
+    let fake = [("EZERBOT_FAKE_SIGNIN", "1")];
+    let app = App::start(shell_with_wrapper(), &screen, &home, &fake);
+    wait_for("the window stayed blank", || {
+        (screen.colours().len() >= 16).then_some(())
+    });
+    let area = screen.web_area();
+    let text = "bonjour depuis un lien";
+    screen.focus();
+    screen.click(area.x + area.width as i32 / 2, area.y + 200);
+    screen.press(&["Control_L", "n"]);
+    std::thread::sleep(Duration::from_millis(500));
+    screen.type_text(text);
+    screen.press(&["Return"]);
+    let database = home.join("state/ezerbot.sqlite");
+    wait_for("the conversation was not persisted", || {
+        exchange_persisted(&database, text).then_some(())
+    });
+
+    notification(&database, "reply:open");
+    let link = "EZERBOT://app/v1/notification?id=reply%3Aopen";
+    let mut second = App::open(shell_with_wrapper(), &screen, &home, &fake, &[link]);
+    wait_for("the second launch did not leave", || second.exited());
+    wait_for("the open window did not follow the link", || {
+        notification_opened(&database, "reply:open")
+    });
+    app.quit();
+
+    notification(&database, "reply:start");
+    let link = "ezerbot://app/v1/notification?id=reply%3Astart";
+    let third = App::open(shell_with_wrapper(), &screen, &home, &fake, &[link]);
+    wait_for("the window it started did not follow the link", || {
+        notification_opened(&database, "reply:start")
+    });
+    third.quit();
 }

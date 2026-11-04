@@ -23,6 +23,20 @@ function install(origin, originalFetch, location = `${origin}/`, frames = [], ex
   return window;
 }
 
+test('sends the notification commands to the wrapper route', async () => {
+  const requests = [];
+  const origin = 'http://127.0.0.1:32123';
+  const window = install(origin, async request => {
+    requests.push(request);
+    return new Response('{"status":"granted"}');
+  });
+  const answer = await window.EzerbotShell.notifications.postMessage({command: 'status'});
+  assert.equal(answer.status, 'granted');
+  assert.equal(requests[0].url, `${origin}/api/notifications/native`);
+  assert.equal(requests[0].headers.get('X-Grokbot-Request'), 'local');
+  assert.equal(await requests[0].text(), '{"command":"status"}');
+});
+
 test('authorizes only the exact origin and preserves effective Request headers and bodies', async () => {
   const requests = [];
   const origin = 'http://127.0.0.1:32123';
@@ -62,7 +76,7 @@ test('installs immutable Linux capabilities and resource helpers only in the bac
     assert.equal(window.EzerbotLocal.resourceURL(raw), raw);
   }
   assert.equal(window.EzerbotShell.platform, 'linux');
-  assert.deepEqual(Array.from(window.EzerbotShell.unavailablePanels), ['voice', 'voice-conversation', 'voice-call', 'meetings', 'screen', 'demonstrations']);
+  assert.deepEqual(Array.from(window.EzerbotShell.unavailablePanels), ['voice-conversation', 'voice-call', 'meetings', 'screen', 'demonstrations']);
   assert.ok(Object.isFrozen(window.EzerbotShell));
   assert.ok(Object.isFrozen(window.EzerbotShell.unavailablePanels));
   assert.equal(Object.getOwnPropertyDescriptor(window, 'EzerbotShell').writable, false);

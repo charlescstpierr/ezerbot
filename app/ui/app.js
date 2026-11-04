@@ -55,7 +55,7 @@
   if (window.EzerbotShell?.platform === "linux") {
     const notice = document.createElement("p");
     notice.id = "linux-native-services";
-    notice.textContent = "Indisponibles sous Linux : dictée, microphone, appels et mode voix, enregistrement local de réunion, capture et contrôle de l’écran et démonstrations.";
+    notice.textContent = "Indisponibles sous Linux : dictée, appels et mode voix, enregistrement local de réunion, capture et contrôle de l’écran et démonstrations.";
     $("settings-extensions").before(notice);
     for (const paragraph of document.querySelectorAll(".setting-info p")) {
       paragraph.textContent = paragraph.textContent.replace("sur ce Mac", "sur cet ordinateur");
@@ -332,6 +332,8 @@
     if (kind === "conversation") {
       if (!state.conversations.some((item) => item.id === id)) throw new Error("Cette conversation est introuvable ou inaccessible sur ce Mac.");
       selectConversation(id, true);
+    } else if (kind === "notification") {
+      await window.EzerbotNotifications.activate(id);
     } else if (kind === "bot") {
       const bot = botById(id);
       if (!bot || bot.deleted) throw new Error("Ce bot est introuvable ou inaccessible sur ce Mac.");

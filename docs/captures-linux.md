@@ -52,6 +52,7 @@ Le registre du pilote fournit ces vues, dans cet ordre. Le viewport est de 1440 
 | `routines-dark` | Dialogue des routines ouvert. |
 | `notifications-dark` | Dialogue ouvert avec la notification de la réponse synthétique. |
 | `conversation-tools-dark` | Tour actif après un vrai outil local : seulement la phrase du bot et « Réfléchit », sans aucune trace d'outil. |
+| `settings-microphone-dark` | Réglages ouverts sur « Microphone » : la ligne « Microphone par défaut du système » et les micros factices de la fixture. |
 | `floating-panel-native` | Vraie coque native : le panneau flottant ouvert par son raccourci reste au-dessus d'une autre fenêtre remontée. |
 
 ## Format du manifeste

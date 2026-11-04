@@ -186,6 +186,22 @@ fn accepted_by_host(status: u16) -> bool {
 }
 
 #[test]
+fn the_microphone_route_needs_the_identity_only_the_main_frame_holds() {
+    let host = Host::new();
+    let path = format!("{}/api/voice/microphones", host.url);
+    assert_eq!(status(ureq::get(&path).call()), 403);
+    // Past the guard a debug build has no such route: it stays on the fixture microphones.
+    assert_eq!(
+        status(
+            ureq::get(&path)
+                .set("X-Ezerbot-Launch", &host.identity.value())
+                .call()
+        ),
+        404
+    );
+}
+
+#[test]
 fn proof_script_calls_pass_the_local_guard_and_a_bare_post_stays_forbidden() {
     let host = Host::new();
     let ui = |path: &str, body: &[u8]| host.post(path, "application/json", body);

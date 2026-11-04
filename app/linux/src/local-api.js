@@ -43,7 +43,7 @@
         }).then(response => response.json()),
       }),
       unavailablePanels: Object.freeze([
-        'voice', 'voice-conversation', 'voice-call', 'meetings', 'screen', 'demonstrations', 'floating',
+        'voice-conversation', 'voice-call', 'meetings', 'screen', 'demonstrations', 'floating',
       ]),
     }),
     writable: false, configurable: false,

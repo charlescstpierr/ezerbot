@@ -12,6 +12,9 @@ const VIEWS = Object.freeze([
   { id: "routines-dark", label: "Routines", action: "document.querySelector('[data-sidebar-destination=routines]').click()", ready: "document.querySelector('.routines-dialog')?.open && document.querySelector('.routines-content')?.textContent.includes('Aucune routine pour ce bot.')" },
   { id: "notifications-dark", label: "Notifications", action: "document.querySelector('[data-sidebar-destination=notifications]').click()", ready: "document.querySelector('.notifications-dialog')?.open && document.querySelector('.notifications-dialog .notification-item')?.textContent.includes('Préparer la semaine')" },
   { id: "conversation-tools-dark", label: "Conversation avec outils", action: "window.captureToolConversation()", ready: "window.captureToolRan?.() && document.getElementById('conversation-title')?.textContent === 'Ranger le dossier' && document.querySelector('.gb-thinking')?.textContent.includes('Réfléchit') && document.querySelector('.gb-conversation')?.textContent.includes('Je regarde ce qu’il y a dans le dossier.') && !document.querySelector('.gb-conversation [data-card-kind], .gb-conversation details, .gb-conversation-problem') && ![...document.querySelectorAll('.gb-conversation .gb-assistant')].some(element => /list_directory|\\/tmp/.test(element.textContent))" },
+  { id: "settings-microphone-dark", label: "Paramètres › Micro", before: "Object.defineProperty(window, 'EzerbotShell', { value: { platform: 'linux', unavailablePanels: [] }, configurable: true })", action: "document.getElementById('settings-button').click()", step: "document.querySelector('.voice-microphone-settings')?.scrollIntoView({ block: 'center' })",
+    ready: "document.getElementById('settings-dialog')?.open && ['Microphone par défaut du système', 'Microphone USB (test)'].every(text => [...document.querySelectorAll('.voice-microphone-settings .voice-microphone-name')].some(name => name.textContent === text && name.getClientRects().length))",
+    settled: "['Microphone par défaut du système', 'Microphone USB (test)'].every(text => { const box = [...document.querySelectorAll('.voice-microphone-settings .voice-microphone-name')].find(name => name.textContent === text)?.getBoundingClientRect(); return box && box.top >= 0 && box.bottom <= innerHeight; })" },
 ]);
 
 async function bounded(work, description, signal, timeoutMs = 20000) {
@@ -125,7 +128,7 @@ async function capture(sha, binary, output, signal) {
     const views = [];
     for (const view of VIEWS) {
       stage = `${view.id} readiness`;
-      await bounded(evaluate(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); ${view.action}`), stage, cancelled.signal);
+      await bounded(evaluate(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); ${view.before ?? ''}; ${view.action}`), stage, cancelled.signal);
       await waitFor(() => check(view.ready), stage, cancelled.signal);
       stage = `${view.id} fonts, images and paint`;
       await bounded(evaluate(`(async () => {
@@ -133,9 +136,10 @@ async function capture(sha, binary, output, signal) {
         await Promise.all([...document.images].filter(image => image.getClientRects().length).map(async image => { await image.decode(); if (!image.naturalWidth) throw Error('Image did not decode'); }));
         document.activeElement?.blur();
         window.scrollTo(0,0); document.querySelectorAll('dialog[open],#chat-scroll,#conversation-list').forEach(element => element.scrollTop=0);
+        ${view.step ?? ''};
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       })()`), stage, cancelled.signal);
-      await waitFor(() => check(view.ready), `${view.id} after paint`, cancelled.signal);
+      await waitFor(() => check(view.settled ?? view.ready), `${view.id} after paint`, cancelled.signal);
       if (browserFailure) throw new Error(browserFailure);
       stage = `${view.id} screenshot`;
       const { data } = await send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false });

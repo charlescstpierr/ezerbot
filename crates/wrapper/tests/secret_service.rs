@@ -351,3 +351,34 @@ fn a_migrated_vault_opened_without_a_bus_is_unavailable_and_never_plaintext() {
     assert!(!host.output().contains("valeur-factice"));
     assert_eq!(f.stored(), ["TOKEN"]);
 }
+
+/// Verrouiller ou déverrouiller le trousseau hors de l'app n'écrit aucune ligne. La fenêtre au
+/// repos ne relit l'état que sur une nouvelle révision de `/api/ping` : la révision suit donc le
+/// trousseau, sinon le bandeau et le bouton Envoyer restent figés.
+#[test]
+fn the_ping_revision_follows_the_keyring_both_ways() {
+    let mut f = Fixture::new();
+    f.vault()
+        .set("TOKEN", "Révision", "valeur-factice-revision-3318")
+        .unwrap();
+    let host = f.launch(Some(&f.bus()));
+    let ping = || {
+        host.get("/api/ping")["revision"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let open = ping();
+    assert_eq!(open, ping(), "stable while nothing changes");
+    f.keyring.lock();
+    let locked = ping();
+    assert_ne!(open, locked, "locking must wake the idle window");
+    assert_eq!(locked, ping(), "stable while locked");
+    assert_eq!(host.state()["vault"]["locked"], true);
+    let locked = ping();
+    f.keyring.unlock();
+    let unlocked = ping();
+    assert_ne!(locked, unlocked, "unlocking must wake the idle window");
+    assert_eq!(host.state()["vault"]["locked"], false);
+    assert!(!host.output().contains("valeur-factice"));
+}

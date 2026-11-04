@@ -56,6 +56,10 @@ impl Fixture {
     fn launch_with(&self, override_address: Option<&str>, ambient: Option<&str>) -> Host {
         linux_host::launch(self.keyring.home(), &self.db, override_address, ambient)
     }
+    /// The plaintext file as it is on disk. A migrated vault no longer opens without its keyring.
+    fn file_entries(&self) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::from_str(&fs::read_to_string(self.file()).unwrap()).unwrap()
+    }
     fn bus(&self) -> String {
         self.keyring.address().to_owned()
     }
@@ -126,11 +130,7 @@ fn locked_secret_service_refuses_plaintext_and_unconfirmed_delete_is_not_claimed
     let plaintext = fs::read_to_string(f.file()).unwrap();
     assert!(!plaintext.contains("valeur-factice-fallback"));
     assert!(!plaintext.contains("valeur-factice-latest-file"));
-    assert!(Vault::open(&f.file())
-        .unwrap()
-        .get("NEW_TOKEN")
-        .unwrap()
-        .is_none());
+    assert!(f.file_entries().is_empty());
     let error = vault.remove("TOKEN").unwrap_err().to_string();
     assert!(error.contains("Suppression non confirmée"));
     assert!(!error.contains("valeur-factice"));
@@ -141,7 +141,7 @@ fn locked_secret_service_refuses_plaintext_and_unconfirmed_delete_is_not_claimed
     );
     assert!(vault.get("NEW_TOKEN").unwrap().is_none());
     assert_eq!(vault.storage_status().backend, "keychain");
-    assert!(Vault::open(&f.file()).unwrap().list().unwrap().is_empty());
+    assert!(f.file_entries().is_empty());
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn wrapper_first_start_projects_storage_and_restart_uses_secret_service_without_
         );
         assert_eq!(state["forms"]["secrets"][0]["name"], "TOKEN");
         assert!(!state.to_string().contains("valeur-factice"));
-        assert!(Vault::open(&f.file()).unwrap().list().unwrap().is_empty());
+        assert!(f.file_entries().is_empty());
         assert!(!host.output().contains("valeur-factice"));
     }
     {
@@ -216,7 +216,7 @@ fn mcp_after_locked_restart_explains_unavailable_store_instead_of_missing_variab
     {
         let host = f.launch(Some(&f.bus()));
         assert_eq!(host.state()["forms"]["storage"]["backend"], "keychain");
-        assert!(Vault::open(&f.file()).unwrap().list().unwrap().is_empty());
+        assert!(f.file_entries().is_empty());
     }
     f.keyring.lock();
     let host = f.launch(Some(&f.bus())); // No in-memory copy of the migrated value.

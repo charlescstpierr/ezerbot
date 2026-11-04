@@ -167,6 +167,11 @@ impl Vault {
             refuse_keychain: false,
         };
         let _file_guard = vault.lock_file(true)?;
+        #[cfg(target_os = "linux")]
+        let vault = Self {
+            keychain: keychain::Target::for_vault(&vault.path, false),
+            ..vault
+        };
         // The companion lock keeps every other opener of this vault out, so the
         // thread mutex is released before the scan of the parent directory, whose
         // cost grows with the directory.
@@ -206,7 +211,7 @@ impl Vault {
         // No per-binary ACL here, so mode 1 (no stable signature) has no Linux meaning.
         #[cfg(target_os = "linux")]
         if OS_MODE.load(std::sync::atomic::Ordering::Relaxed) != 0 {
-            vault.keychain = keychain::Target::for_app();
+            vault.keychain = keychain::Target::for_vault(&vault.path, true);
         }
         Ok(vault)
     }

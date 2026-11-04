@@ -325,3 +325,29 @@ fn invalid_debug_override_never_falls_through_and_french_notice_is_visible() {
         .unwrap()
         .contains("valeur-factice-file-9931"));
 }
+
+/// Où vivent les secrets est un fait du coffre, pas du lancement. Un coffre migré, ouvert par un
+/// hôte sans bus (ni coque, ni override), est indisponible : il ne se fait pas passer pour un
+/// coffre complet et n'écrit aucun secret en clair.
+#[test]
+fn a_migrated_vault_opened_without_a_bus_is_unavailable_and_never_plaintext() {
+    let f = Fixture::new();
+    f.vault()
+        .set("TOKEN", "Migré", "valeur-factice-migree-4417")
+        .unwrap();
+    assert_eq!(f.stored(), ["TOKEN"]);
+    let host = f.launch(None);
+    let state = host.state();
+    assert_eq!(state["forms"]["storage"]["backend"], "file_fallback");
+    assert_eq!(state["vault"]["locked"], true, "masking must refuse");
+    let bot = state["bots"][0]["id"].as_str().unwrap().to_owned();
+    let put = host.try_post(
+        "/api/secrets/put",
+        json!({"bot_id":bot,"name":"NOUVEAU","description":"Sans bus","value":"valeur-factice-en-clair-5521"}),
+    );
+    assert!(put.is_err(), "a secret was accepted without the keyring");
+    let plaintext = fs::read_to_string(f.file()).unwrap();
+    assert!(!plaintext.contains("valeur-factice"), "plaintext on disk");
+    assert!(!host.output().contains("valeur-factice"));
+    assert_eq!(f.stored(), ["TOKEN"]);
+}

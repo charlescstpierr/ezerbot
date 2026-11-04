@@ -405,17 +405,18 @@ mod tests {
     fn quit_during_startup_reaps_the_child() {
         let fixture = Fixture::new("sys.stdin.buffer.read()\nwhile True: time.sleep(.01)");
         let quit = AtomicBool::new(false);
+        let returned = AtomicBool::new(false);
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                while !fixture.0.join("pid").exists() {
+                while !fixture.0.join("pid").exists() && !returned.load(Ordering::SeqCst) {
                     thread::sleep(Duration::from_millis(10));
                 }
                 quit.store(true, Ordering::SeqCst);
             });
-            assert!(
-                Backend::start(&fixture.0.join("wrapper"), &fixture.0.join("state"), &quit)
-                    .is_err()
-            );
+            let started =
+                Backend::start(&fixture.0.join("wrapper"), &fixture.0.join("state"), &quit);
+            returned.store(true, Ordering::SeqCst);
+            assert!(started.is_err());
         });
         fixture.assert_reaped();
     }

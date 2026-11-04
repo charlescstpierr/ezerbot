@@ -21,6 +21,20 @@ function install(origin, originalFetch, location = `${origin}/`) {
   return window;
 }
 
+test('sends the notification commands to the wrapper route', async () => {
+  const requests = [];
+  const origin = 'http://127.0.0.1:32123';
+  const window = install(origin, async request => {
+    requests.push(request);
+    return new Response('{"status":"granted"}');
+  });
+  const answer = await window.EzerbotShell.notifications.postMessage({command: 'status'});
+  assert.equal(answer.status, 'granted');
+  assert.equal(requests[0].url, `${origin}/api/notifications/native`);
+  assert.equal(requests[0].headers.get('X-Grokbot-Request'), 'local');
+  assert.equal(await requests[0].text(), '{"command":"status"}');
+});
+
 test('authorizes only the exact origin and preserves effective Request headers and bodies', async () => {
   const requests = [];
   const origin = 'http://127.0.0.1:32123';

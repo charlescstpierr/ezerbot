@@ -941,7 +941,10 @@ mod contracts_tests {
 
         fn open(&self) -> Connection {
             let conn = Connection::open(self.0.join("test.sqlite")).unwrap();
-            conn.busy_timeout(std::time::Duration::from_secs(5))
+            // SQLite's busy handler polls unfairly, so one writer can wait out
+            // every other writer here. Only this test's writers contend, which
+            // bounds that wait by the test, not by a fixed time.
+            conn.busy_timeout(std::time::Duration::from_secs(60))
                 .unwrap();
             conn
         }

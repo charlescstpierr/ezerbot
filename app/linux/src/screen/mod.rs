@@ -1,8 +1,6 @@
 //! `ezerbot-linux --screen-helper`: the Linux side of the lease in `screen_native.rs`.
 #[cfg(any(test, not(debug_assertions)))]
 pub mod capture;
-#[cfg(all(test, debug_assertions))]
-mod fake_portal;
 pub mod gate;
 pub mod image;
 mod overlay;
@@ -145,7 +143,7 @@ fn helper(duration: Duration) -> i32 {
     }
     let overlay = Overlay::build(&gate);
     // `ready` waits for the banner, so a lease never opens on a hidden one. A banner
-    // that cannot be proven (Wayland) gives up here and stays paused.
+    // that cannot be proven (a compositing manager) gives up here and stays paused.
     let shown = Instant::now() + BANNER_WAIT;
     while !gate.showing() && Instant::now() < shown {
         if gtk::events_pending() {
@@ -299,8 +297,8 @@ fn answer(
     }
 }
 
-/// The source opens here and stays here: an X display and a D-Bus connection
-/// belong to one thread, and a slow portal must not stall the overlay's buttons.
+/// The source opens here and stays here: an X display belongs to one thread, and
+/// a slow capture must not stall the overlay's buttons.
 fn worker(queue: &Receiver<(Ticket, Action)>, gate: &Gate<Stdout>) {
     let mut source = match opened() {
         Ok(source) => source,
@@ -321,11 +319,7 @@ fn worker(queue: &Receiver<(Ticket, Action)>, gate: &Gate<Stdout>) {
 pub enum Refusal {
     NoDisplay,
     #[cfg(any(test, not(debug_assertions)))]
-    WaylandNeedsPortal,
-    #[cfg(any(test, not(debug_assertions)))]
-    Portal,
-    #[cfg(any(test, not(debug_assertions)))]
-    Denied,
+    Wayland,
     Capture,
     TooLarge,
 }
@@ -335,13 +329,9 @@ impl Refusal {
         match self {
             Self::NoDisplay => "Aucun affichage disponible pour partager l’écran.",
             #[cfg(any(test, not(debug_assertions)))]
-            Self::WaylandNeedsPortal => {
+            Self::Wayland => {
                 "Le partage d’écran fonctionne sous X11 sans compositeur, pas sous Wayland."
             }
-            #[cfg(any(test, not(debug_assertions)))]
-            Self::Portal => "Le portail du bureau n’a pas fourni de capture.",
-            #[cfg(any(test, not(debug_assertions)))]
-            Self::Denied => "Capture refusée ou annulée dans la fenêtre du système.",
             Self::Capture => "La capture de l’écran est indisponible.",
             Self::TooLarge => {
                 "La capture dépasse la taille permise. Réduisez la résolution de l’écran."
@@ -353,8 +343,6 @@ impl Refusal {
 pub enum Source {
     #[cfg(debug_assertions)]
     Fixture { delay: Duration },
-    #[cfg(any(test, not(debug_assertions)))]
-    Portal(capture::Portal),
     #[cfg(any(test, not(debug_assertions)))]
     X11(capture::X11Root),
 }
@@ -376,8 +364,6 @@ impl Source {
                 }
                 fixture()
             }
-            #[cfg(any(test, not(debug_assertions)))]
-            Self::Portal(portal) => portal.shot(give_up),
             #[cfg(any(test, not(debug_assertions)))]
             Self::X11(root) => root.shot(),
         }

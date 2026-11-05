@@ -4,42 +4,12 @@ use super::{
     image::{Bounds, Shot},
     Refusal, Source,
 };
-use dbus::{
-    arg::{PropMap, RefArg, Variant},
-    blocking::{stdintf::org_freedesktop_dbus::Properties, Connection},
-    channel::Channel,
-    message::MatchRule,
-    Message, Path,
-};
 use gtk::{
     gdk_pixbuf::{Colorspace, Pixbuf},
     glib::Bytes,
 };
-use nix::fcntl::OFlag;
-use std::{
-    ffi::CString,
-    fs::{self, OpenOptions},
-    io::{Cursor, Read},
-    os::{raw::c_ulong, unix::fs::OpenOptionsExt},
-    path::PathBuf,
-    sync::{
-        mpsc::{self, Receiver},
-        Once,
-    },
-    time::{Duration, Instant},
-};
+use std::{ffi::CString, os::raw::c_ulong, sync::Once};
 use x11_dl::xlib::{self, Xlib};
-
-pub(super) const DESKTOP: &str = "org.freedesktop.portal.Desktop";
-pub(super) const OBJECT: &str = "/org/freedesktop/portal/desktop";
-pub(super) const REQUEST: &str = "org.freedesktop.portal.Request";
-const SCREENSHOT: &str = "org.freedesktop.portal.Screenshot";
-const PROBE_LIMIT: Duration = Duration::from_secs(1);
-const CALL_LIMIT: Duration = Duration::from_secs(5);
-// The whole request, its call and the closing PROBE_LIMIT included, stays under
-// the 20 s of Client::action: a slow first consent fails one call, not the lease.
-const ANSWER_LIMIT: Duration = Duration::from_secs(17);
-const FILE_LIMIT: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Display {
@@ -60,53 +30,7 @@ impl Display {
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub enum Route {
-    Portal,
-    X11Root,
-}
-
-/// X11 needs no portal, and no portal file to read and remove from the person's
-/// folders. XWayland's root shows only X clients, so Wayland never falls back to
-/// it: the model would receive a false desktop.
-pub fn route(display: Display, portal: bool) -> Result<Route, Refusal> {
-    match (display, portal) {
-        (Display::None, _) => Err(Refusal::NoDisplay),
-        (Display::X11, _) => Ok(Route::X11Root),
-        (Display::Wayland, true) => Ok(Route::Portal),
-        (Display::Wayland, false) => Err(Refusal::WaylandNeedsPortal),
-    }
-}
-
-pub struct BusAddress(String);
 pub struct XDisplay(CString);
-
-impl BusAddress {
-    #[cfg(not(debug_assertions))]
-    fn session() -> Option<Self> {
-        let runtime = std::env::var("XDG_RUNTIME_DIR").ok();
-        Self::of_session(std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(), runtime)
-    }
-
-    /// The same order as libdbus: a session started by systemd may leave only
-    /// its socket, and a missing address must not read as a missing portal.
-    fn of_session(listed: Option<String>, runtime: Option<String>) -> Option<Self> {
-        let socket = || {
-            let path = std::path::Path::new(&runtime?).join("bus");
-            path.exists()
-                .then(|| format!("unix:path={}", path.display()))
-        };
-        listed
-            .filter(|address| !address.is_empty())
-            .or_else(socket)
-            .map(Self)
-    }
-
-    #[cfg(test)]
-    pub fn private(address: String) -> Self {
-        Self(address)
-    }
-}
 
 impl XDisplay {
     #[cfg(not(debug_assertions))]
@@ -123,7 +47,6 @@ impl XDisplay {
 
 pub struct Env {
     pub display: Display,
-    pub bus: Option<BusAddress>,
     pub x: Option<XDisplay>,
 }
 
@@ -135,195 +58,19 @@ impl Env {
         let x = XDisplay::session();
         Self {
             display: Display::of_session(set("WAYLAND_DISPLAY"), session.as_deref(), x.is_some()),
-            bus: BusAddress::session(),
             x,
         }
     }
 }
 
-/// Connects without capturing. It never opens a dialog, so the settings route
-/// can call it too.
+/// Connects without capturing. XWayland's root shows only X clients, so Wayland
+/// never falls back to it: the model would receive a false desktop.
 pub fn open(env: &Env) -> Result<Source, Refusal> {
-    let portal = env
-        .bus
-        .as_ref()
-        .and_then(|bus| Portal::open(bus).ok())
-        .filter(Portal::available);
-    match (route(env.display, portal.is_some())?, portal) {
-        (Route::Portal, Some(portal)) => Ok(Source::Portal(portal)),
-        _ => X11Root::open(env.x.as_ref().ok_or(Refusal::NoDisplay)?).map(Source::X11),
+    match env.display {
+        Display::None => Err(Refusal::NoDisplay),
+        Display::Wayland => Err(Refusal::Wayland),
+        Display::X11 => X11Root::open(env.x.as_ref().ok_or(Refusal::NoDisplay)?).map(Source::X11),
     }
-}
-
-pub struct Portal {
-    conn: Connection,
-    sender: String,
-    next: u64,
-    pub(super) limit: Duration,
-    /// The only folders a portal answer may name: the backends save there, and
-    /// nothing outside them is ever read or removed.
-    pub(super) captures: Vec<PathBuf>,
-}
-
-impl Portal {
-    pub fn open(address: &BusAddress) -> Result<Self, Refusal> {
-        let mut channel = Channel::open_private(&address.0).map_err(|_| Refusal::Portal)?;
-        channel.register().map_err(|_| Refusal::Portal)?;
-        let conn = Connection::from(channel);
-        let sender = conn.unique_name().replace(':', "").replace('.', "_");
-        Ok(Self {
-            conn,
-            sender,
-            next: 0,
-            limit: ANSWER_LIMIT,
-            captures: capture_folders(),
-        })
-    }
-
-    fn available(&self) -> bool {
-        self.conn
-            .with_proxy(DESKTOP, OBJECT, PROBE_LIMIT)
-            .get::<u32>(SCREENSHOT, "version")
-            .is_ok()
-    }
-
-    fn owner(&self) -> Result<String, Refusal> {
-        let bus = "org.freedesktop.DBus";
-        let (owner,): (String,) = self
-            .conn
-            .with_proxy(bus, "/org/freedesktop/DBus", PROBE_LIMIT)
-            .method_call(bus, "GetNameOwner", (DESKTOP,))
-            .map_err(|_| Refusal::Portal)?;
-        Ok(owner)
-    }
-
-    /// The handle is computed, not received: the match exists before the call,
-    /// so a portal that answers before its method return is still heard.
-    pub fn shot(&mut self, give_up: &dyn Fn() -> bool) -> Result<Shot, Refusal> {
-        self.next += 1;
-        let token = format!("ezerbot{}", self.next);
-        let handle = format!("{OBJECT}/request/{}/{token}", self.sender);
-        let path = Path::new(handle).map_err(|_| Refusal::Portal)?;
-        let (answer, answers) = mpsc::channel();
-        // Any client can address a signal to us, and a well-known sender name
-        // matches them all: only the name's current owner is the portal.
-        let rule = MatchRule::new_signal(REQUEST, "Response")
-            .with_path(path.clone())
-            .with_strict_sender(self.owner()?);
-        let listening = self
-            .conn
-            .add_match(
-                rule,
-                move |(code, results): (u32, PropMap), _: &Connection, _: &Message| {
-                    let uri = results.get("uri").and_then(|value| value.0.as_str());
-                    let _ = answer.send((code, uri.map(str::to_owned)));
-                    true
-                },
-            )
-            .map_err(|_| Refusal::Portal)?;
-        let outcome = self.ask(&token, &path, &answers, give_up);
-        let _ = self.conn.remove_match(listening);
-        let pixbuf = take_image(&outcome?, &self.captures)?;
-        let bounds = Bounds {
-            x: 0.0,
-            y: 0.0,
-            w: f64::from(pixbuf.width()),
-            h: f64::from(pixbuf.height()),
-        };
-        Ok(Shot { pixbuf, bounds })
-    }
-
-    fn ask(
-        &self,
-        token: &str,
-        path: &Path<'static>,
-        answers: &Receiver<(u32, Option<String>)>,
-        give_up: &dyn Fn() -> bool,
-    ) -> Result<String, Refusal> {
-        let deadline = Instant::now() + self.limit;
-        let mut options = PropMap::new();
-        options.insert("handle_token".into(), Variant(Box::new(token.to_owned())));
-        options.insert("interactive".into(), Variant(Box::new(false)));
-        options.insert("modal".into(), Variant(Box::new(false)));
-        let (handle,): (Path,) = self
-            .conn
-            .with_proxy(DESKTOP, OBJECT, CALL_LIMIT)
-            .method_call(SCREENSHOT, "Screenshot", ("", options))
-            .map_err(|_| Refusal::Portal)?;
-        if handle != *path {
-            return Err(Refusal::Portal);
-        }
-        loop {
-            match answers.try_recv() {
-                Ok((0, Some(uri))) => return Ok(uri),
-                Ok((0, None)) => return Err(Refusal::Portal),
-                Ok(_) => return Err(Refusal::Denied),
-                Err(_) => {}
-            }
-            if give_up() || Instant::now() >= deadline {
-                let _: Result<(), _> = self
-                    .conn
-                    .with_proxy(DESKTOP, path.clone(), PROBE_LIMIT)
-                    .method_call(REQUEST, "Close", ());
-                return Err(Refusal::Portal);
-            }
-            self.conn
-                .process(Duration::from_millis(100))
-                .map_err(|_| Refusal::Portal)?;
-        }
-    }
-}
-
-/// Where the screenshot backends save: Pictures, and the Screenshots folder
-/// GNOME uses inside it.
-fn capture_folders() -> Vec<PathBuf> {
-    gtk::glib::user_special_dir(gtk::glib::UserDirectory::Pictures)
-        .map(|pictures| vec![pictures.join("Screenshots"), pictures])
-        .unwrap_or_default()
-}
-
-/// True when `path` names an entry directly inside one of `folders`, links resolved
-/// on the folder side: the answer of whoever owns the portal name is not trusted.
-fn inside(path: &std::path::Path, folders: &[PathBuf]) -> bool {
-    let (Some(parent), Some(_)) = (path.parent(), path.file_name()) else {
-        return false;
-    };
-    let Ok(parent) = fs::canonicalize(parent) else {
-        return false;
-    };
-    folders
-        .iter()
-        .filter_map(|folder| fs::canonicalize(folder).ok())
-        .any(|folder| folder == parent)
-}
-
-/// Backends write into the person's folders, and a lease leaves no desktop
-/// pixels behind. Only an image inside a capture folder is read, then removed.
-fn take_image(uri: &str, captures: &[PathBuf]) -> Result<Pixbuf, Refusal> {
-    let path = url::Url::parse(uri)
-        .ok()
-        .filter(|url| url.scheme() == "file")
-        .and_then(|url| url.to_file_path().ok())
-        .filter(|path| inside(path, captures))
-        .ok_or(Refusal::Portal)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK).bits())
-        .open(&path)
-        .map_err(|_| Refusal::Portal)?;
-    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
-        return Err(Refusal::Portal);
-    }
-    let mut bytes = Vec::new();
-    file.take(FILE_LIMIT + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| Refusal::Capture)?;
-    if bytes.len() as u64 > FILE_LIMIT {
-        return Err(Refusal::TooLarge);
-    }
-    let pixbuf = Pixbuf::from_read(Cursor::new(bytes)).map_err(|_| Refusal::Capture)?;
-    fs::remove_file(&path).map_err(|_| Refusal::Capture)?;
-    Ok(pixbuf)
 }
 
 pub struct X11Root {
@@ -449,6 +196,7 @@ mod tests {
     use super::super::{image::encode, xvfb::Xvfb};
     use super::*;
     use gtk::glib;
+    use std::io::Cursor;
 
     struct Painter {
         xlib: Xlib,
@@ -585,36 +333,23 @@ mod tests {
     }
 
     #[test]
-    fn the_bus_falls_back_to_the_runtime_socket_like_libdbus() {
-        let found = |listed: Option<&str>, runtime: Option<&std::path::Path>| {
-            let runtime = runtime.map(|path| path.display().to_string());
-            BusAddress::of_session(listed.map(str::to_owned), runtime).map(|bus| bus.0)
+    fn only_a_bare_x11_session_opens_a_source() {
+        let server = Xvfb::start("640x480x24");
+        let env = |display| Env {
+            display,
+            x: Some(XDisplay::private(&server.name)),
         };
-        let home = grokbot_test_support::TestDir::new("ezerbot-bus");
-        let directory = home.path();
-        assert_eq!(
-            found(Some("unix:path=/x"), None).as_deref(),
-            Some("unix:path=/x")
-        );
-        assert_eq!(found(None, Some(directory)), None);
-        assert_eq!(found(Some(""), None), None);
-        std::fs::write(directory.join("bus"), "").unwrap();
-        let socket = format!("unix:path={}", directory.join("bus").display());
-        assert_eq!(found(None, Some(directory)), Some(socket.clone()));
-        assert_eq!(found(Some(""), Some(directory)), Some(socket));
-    }
-
-    #[test]
-    fn the_route_never_shows_a_false_desktop() {
-        assert_eq!(route(Display::Wayland, true), Ok(Route::Portal));
-        assert_eq!(route(Display::X11, true), Ok(Route::X11Root));
-        assert_eq!(route(Display::X11, false), Ok(Route::X11Root));
-        assert_eq!(
-            route(Display::Wayland, false),
-            Err(Refusal::WaylandNeedsPortal)
-        );
-        assert_eq!(route(Display::None, true), Err(Refusal::NoDisplay));
-        assert_eq!(route(Display::None, false), Err(Refusal::NoDisplay));
+        assert!(matches!(open(&env(Display::X11)), Ok(Source::X11(_))));
+        assert!(matches!(
+            open(&env(Display::Wayland)),
+            Err(Refusal::Wayland)
+        ));
+        assert!(matches!(open(&env(Display::None)), Err(Refusal::NoDisplay)));
+        let without_x = Env {
+            display: Display::X11,
+            x: None,
+        };
+        assert!(matches!(open(&without_x), Err(Refusal::NoDisplay)));
     }
 
     #[test]

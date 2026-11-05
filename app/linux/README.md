@@ -44,22 +44,20 @@ les liens profonds et l’ouverture par `xdg-open`.
 ## Partage d’écran
 
 Le bot voit l’écran le temps d’un bail, pour un fil et une durée. Il n’effectue aucun geste.
-Le partage fonctionne seulement sous X11 sans compositeur. Sous Wayland ou sous X11 avec un compositeur, il reste en pause et aucune capture ne part. La suite est dans #632.
+Le partage fonctionne seulement sous X11 sans compositeur. Sous X11 avec un compositeur, il reste en pause et aucune capture ne part. Sous Wayland, le bail est refusé. La suite, par le portail du bureau, est dans #632.
 Le wrapper lance `ezerbot-linux --screen-helper <ms>`. Son parent doit être le `grokbot-wrapper` voisin.
-Sous X11, l’image vient de `XGetImage` sur la fenêtre racine, sans portail.
-Sans portail, Wayland refuse le bail.
-Le fichier écrit par le portail est retiré dès sa lecture.
+L’image vient de `XGetImage` sur la fenêtre racine. Aucun fichier n’est écrit.
+Sous Wayland, la racine de XWayland ne montre que les clients X : le bail est refusé plutôt que d’envoyer un faux bureau.
 
 Une superposition reste affichée pendant tout le bail, avec **Pause** et **Arrêter**.
 La fermer révoque le bail. La réduire ou la couvrir le met en pause. Réduite, elle revient seule. La reprise est refusée tant qu’elle n’est pas visible à l’écran.
-Sous Wayland, ou sous X11 avec un compositeur, rien ne prouve que la superposition reste visible : le bail s’annonce en pause dès le départ, affiche « Partage en pause : bandeau non garanti visible », et refuse chaque capture comme chaque reprise.
+Sous X11 avec un compositeur, rien ne prouve que la superposition reste visible : le bail s’annonce en pause dès le départ, affiche « Partage en pause : bandeau non garanti visible », et refuse chaque capture comme chaque reprise.
 Seul l’écran entier est partagé. Le partage d’une seule fenêtre est reporté.
 Il n’existe pas de touche Échap globale sous Linux. Échap agit quand Ezerbot ou la superposition a le focus.
 L’image contient la superposition et la fenêtre d’Ezerbot si elles sont visibles.
 
 Le build de debug ne contient aucune capture réelle et sert `app/native/screen-fixture.png`.
-Les tests de capture réelle sont des tests unitaires, avec un Xvfb et un `dbus-daemon` privés.
-Ils échouent si `dbus-daemon` manque.
+Les tests de capture réelle sont des tests unitaires, avec un Xvfb privé.
 
 ## Preuve sans compte réel
 

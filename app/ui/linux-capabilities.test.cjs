@@ -186,7 +186,7 @@ test("a Linux session the person paused says so without blaming the banner", () 
 
 test("the Linux consent card names both sessions where the share stays paused", () => {
   const { open } = screenPanel({ platform: "linux", unavailablePanels: unavailable });
-  assert.match(open().dialog.text, /Sous Wayland ou avec un compositeur.*reste en pause/);
+  assert.match(open().dialog.text, /Avec un compositeur.*reste en pause\. Sous Wayland, il n’est pas encore possible/);
 });
 
 test("a live Linux session shows what the bot does and keeps the stop control", () => {

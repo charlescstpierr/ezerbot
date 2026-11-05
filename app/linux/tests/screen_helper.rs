@@ -546,14 +546,8 @@ fn a_window_over_the_banner_pauses_and_nothing_is_captured_until_it_is_seen_agai
 #[test]
 fn the_debug_binary_holds_no_capture_code() {
     let binary = std::fs::read(HELPER).unwrap();
-    for name in ["org.freedesktop.portal.Screenshot", "handle_token"] {
-        assert!(
-            !binary
-                .windows(name.len())
-                .any(|bytes| bytes == name.as_bytes()),
-            "{name}"
-        );
-    }
+    let refusal = "pas sous Wayland".as_bytes();
+    assert!(!binary.windows(refusal.len()).any(|bytes| bytes == refusal));
 }
 
 #[test]

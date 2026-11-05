@@ -132,42 +132,28 @@ fn a_turn_waits_for_the_keyring_and_never_leaves_unmasked() {
         let state = f.state();
         assert_eq!(state["forms"]["storage"]["backend"], "file_fallback");
         assert_eq!(state["vault"]["locked"], true);
-        // La réponse elle-même ne sert rien de l'historique : seul compte ce qui part.
-        let _ = f.app.api(
+        // Refusé avant d'être conservé : la fenêtre remet le brouillon, seule copie.
+        let refused = f.app.api(
             "POST",
             "/api/send",
             json!({"conversation_id":chat,"message_id":"m","body":format!("Voici la clé : {SECRET}")}).to_string().as_bytes(),
         );
-        wait("fin du tour refusé", || {
-            f.db()
-                .query_row(
-                    "SELECT count(*) FROM engine_runs JOIN wrapper_engine_runs USING(run_id) WHERE json_extract(input_json,'$.entry_id')='m'",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )
-                .unwrap()
-                > 0
-                && !matches!(f.run_of("m").status, RunStatus::Running | RunStatus::Queued)
-        });
-        assert!(
-            !f.sent().contains(SECRET),
-            "the secret reached the provider"
-        );
+        assert!(format!("{:?}", refused.expect_err("refused")).contains(MESSAGE));
+        let runs: i64 = f
+            .db()
+            .query_row("SELECT count(*) FROM wrapper_engine_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(runs, 0, "no turn starts while the keyring is locked");
         assert_eq!(f.server.seen.lock().unwrap().bodies.len(), 0);
     } else {
         assert_eq!(f.state()["forms"]["storage"]["backend"], "keychain");
-        let refused = f
-            .messages(&chat)
-            .into_iter()
-            .find(|m| m["id"] == "reply-m")
-            .unwrap();
         assert!(
-            refused["error"].as_str().unwrap().contains(MESSAGE),
-            "{refused}"
+            f.messages(&chat).iter().all(|m| m["id"] != "m"),
+            "nothing was kept while locked"
         );
         f.post(
-            "/api/regenerate",
-            json!({"conversation_id":chat,"message_id":"m"}),
+            "/api/send",
+            json!({"conversation_id":chat,"message_id":"m","body":format!("Voici la clé : {SECRET}")}),
         );
         wait("réponse", || {
             f.messages(&chat)

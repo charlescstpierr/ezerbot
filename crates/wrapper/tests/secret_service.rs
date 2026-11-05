@@ -407,7 +407,7 @@ fn a_send_refused_by_a_locked_keyring_keeps_nothing() {
     let Err(refused) = send("premier") else {
         panic!("a send was accepted with a locked keyring");
     };
-    let ureq::Error::Status(_, response) = *refused else {
+    let ureq::Error::Status(423, response) = *refused else {
         panic!("the send failed otherwise: {refused}");
     };
     assert!(response.into_string().unwrap().contains("Déverrouillez"));

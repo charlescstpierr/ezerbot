@@ -353,6 +353,11 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             validate_conversation_id(&input.conversation_id)?;
             validate_id(&input.message_id)?;
             app.require_conversation(&input.conversation_id)?;
+            // Refused before anything is kept: a locked window shows no message, so it restores
+            // the draft, and a kept copy would come back beside its resend.
+            if keyring_locked(&app.connection) {
+                return Err(ApiError::new(423, KEYRING_LOCKED));
+            }
             super::delegation::ensure_send_allowed(&app.feature_context(), &input.conversation_id)?;
             for id in &input.attachments {
                 validate_id(id)?;

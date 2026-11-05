@@ -55,6 +55,7 @@ Le registre du pilote fournit ces vues, dans cet ordre. Le viewport est de 1440 
 | `screen-consent-dark` | Carte d'accord du partage d'écran, ouverte dans la conversation synthétique. |
 | `screen-overlay` | Fenêtre racine de Xvfb avec la superposition du bail, au-dessus de Chromium. |
 | `screen-overlay-unproven` | La même fenêtre racine sous `picom` : le bail démarre en pause et le bandeau le dit. |
+| `settings-microphone-dark` | Réglages ouverts sur « Microphone » : la ligne « Microphone par défaut du système » et les micros factices de la fixture. |
 
 ## Format du manifeste
 

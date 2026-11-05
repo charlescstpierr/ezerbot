@@ -6,7 +6,7 @@ const { runInNewContext } = require("node:vm");
 const source = readFileSync(`${__dirname}/app.js`, "utf8");
 const registration = source.slice(source.indexOf("    register(panel) {"), source.indexOf("    openConversation(id, messageId) {"));
 const availability = source.slice(source.indexOf("  const unavailablePanels ="), source.indexOf("  const panelFailed ="));
-const unavailable = ["voice", "voice-conversation", "voice-call", "meetings", "demonstrations", "floating"];
+const unavailable = ["voice-conversation", "voice-call", "meetings", "demonstrations", "floating"];
 
 function registry(shell) {
   const mounted = [];
@@ -37,10 +37,11 @@ function registry(shell) {
 test("Linux hides unavailable native controls before mounting, while ordinary panels still mount", () => {
   const app = registry({ platform: "linux", unavailablePanels: unavailable });
   for (const id of unavailable) assert.equal(app.register({ id }), false, id);
-  for (const id of ["attachments", "forms", "engine"]) assert.equal(app.register({ id }), true, id);
-  assert.deepEqual(app.mounted, ["attachments", "forms", "engine"]);
+  for (const id of ["attachments", "forms", "engine", "voice"]) assert.equal(app.register({ id }), true, id);
+  assert.deepEqual(app.mounted, ["attachments", "forms", "engine", "voice"]);
   assert.equal(app.notices.length, 1);
-  assert.match(app.notices[0], /Indisponibles sous Linux/);
+  assert.match(app.notices[0], /Indisponibles sous Linux : dictée/);
+  assert.doesNotMatch(app.notices[0], /microphone/i);
   assert.match(app.notices[0], /contrôle de l’écran/);
   assert.doesNotMatch(app.notices[0], /capture/);
   assert.equal(app.rows[1].hidden, true);
@@ -50,8 +51,8 @@ test("Linux hides unavailable native controls before mounting, while ordinary pa
 
 test("macOS without a Linux capability object keeps its native panels and shortcuts", () => {
   const app = registry();
-  for (const id of unavailable) assert.equal(app.register({ id }), true, id);
-  assert.deepEqual(app.mounted, unavailable);
+  for (const id of ["voice", ...unavailable]) assert.equal(app.register({ id }), true, id);
+  assert.deepEqual(app.mounted, ["voice", ...unavailable]);
   assert.deepEqual(app.notices, []);
   assert.equal(app.rows[1].hidden, false);
   assert.equal(app.rows[0].key.textContent, "⌘ N");

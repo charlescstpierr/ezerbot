@@ -11,7 +11,7 @@ use nix::{
 use serde::Deserialize;
 use std::{
     fs::{self, DirBuilder, File, OpenOptions, TryLockError},
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt},
     path::Path,
     process::{Child, Command, Stdio},
@@ -49,9 +49,9 @@ pub struct Instance(File);
 
 impl Instance {
     /// `None` means a shell already holds the directory and was asked to show
-    /// its window. Its wrapper owns the engine: a second one would wait 210 s
-    /// for that lock and then fail.
-    pub fn claim(directory: &Path) -> Result<Option<Self>, &'static str> {
+    /// its window and follow `link`. Its wrapper owns the engine: a second one
+    /// would wait 210 s for that lock and then fail.
+    pub fn claim(directory: &Path, link: Option<&str>) -> Result<Option<Self>, &'static str> {
         prepare_directory(directory)?;
         let path = directory.join("shell.fifo");
         match mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR) {
@@ -68,20 +68,22 @@ impl Instance {
         match file.try_lock() {
             Ok(()) => Ok(Some(Self(file))),
             Err(TryLockError::WouldBlock) => {
-                file.write_all(b"\n").map_err(|_| START_ERROR)?;
+                let request = format!("{}\n", link.unwrap_or_default());
+                file.write_all(request.as_bytes())
+                    .map_err(|_| START_ERROR)?;
                 Ok(None)
             }
             Err(TryLockError::Error(_)) => Err(START_ERROR),
         }
     }
 
-    /// Calls `show` for each later launch until the process exits.
-    pub fn watch(&self, show: impl Fn() + Send + 'static) -> Result<(), &'static str> {
-        let mut requests = self.0.try_clone().map_err(|_| START_ERROR)?;
+    /// Calls `requested` with the link of each later launch, empty without one,
+    /// until the process exits.
+    pub fn watch(&self, requested: impl Fn(String) + Send + 'static) -> Result<(), &'static str> {
+        let requests = self.0.try_clone().map_err(|_| START_ERROR)?;
         thread::spawn(move || {
-            let mut request = [0u8; 64];
-            while requests.read(&mut request).is_ok_and(|length| length > 0) {
-                show();
+            for request in BufReader::new(requests).lines().map_while(Result::ok) {
+                requested(request);
             }
         });
         Ok(())

@@ -17,6 +17,9 @@ const VIEWS = Object.freeze([
   { id: "screen-consent-dark", label: "Accord de partage d’écran", action: "window.captureScreenConsent()", ready: "document.querySelector('.screen-dialog')?.open && document.querySelector('.screen-consent')?.textContent.includes('n’effectue aucun geste')" },
   { id: "screen-overlay", label: "Superposition du partage d’écran", native: true },
   { id: "screen-overlay-unproven", label: "Superposition en pause, bandeau non prouvé", native: true, compositor: true },
+  { id: "settings-microphone-dark", label: "Paramètres › Micro", before: "Object.defineProperty(window, 'EzerbotShell', { value: { platform: 'linux', unavailablePanels: [] }, configurable: true })", action: "document.getElementById('settings-button').click()", step: "document.querySelector('.voice-microphone-settings')?.scrollIntoView({ block: 'center' })",
+    ready: "document.getElementById('settings-dialog')?.open && ['Microphone par défaut du système', 'Microphone USB (test)'].every(text => [...document.querySelectorAll('.voice-microphone-settings .voice-microphone-name')].some(name => name.textContent === text && name.getClientRects().length))",
+    settled: "['Microphone par défaut du système', 'Microphone USB (test)'].every(text => { const box = [...document.querySelectorAll('.voice-microphone-settings .voice-microphone-name')].find(name => name.textContent === text)?.getBoundingClientRect(); return box && box.top >= 0 && box.bottom <= innerHeight; })" },
 ]);
 
 async function bounded(work, description, signal, timeoutMs = 20000) {
@@ -176,7 +179,7 @@ async function capture(sha, binary, output, signal) {
         continue;
       }
       stage = `${view.id} readiness`;
-      await bounded(evaluate(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); ${view.action}`), stage, cancelled.signal);
+      await bounded(evaluate(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); ${view.before ?? ''}; ${view.action}`), stage, cancelled.signal);
       await waitFor(() => check(view.ready), stage, cancelled.signal);
       stage = `${view.id} fonts, images and paint`;
       await bounded(evaluate(`(async () => {
@@ -184,9 +187,10 @@ async function capture(sha, binary, output, signal) {
         await Promise.all([...document.images].filter(image => image.getClientRects().length).map(async image => { await image.decode(); if (!image.naturalWidth) throw Error('Image did not decode'); }));
         document.activeElement?.blur();
         window.scrollTo(0,0); document.querySelectorAll('dialog[open],#chat-scroll,#conversation-list').forEach(element => element.scrollTop=0);
+        ${view.step ?? ''};
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       })()`), stage, cancelled.signal);
-      await waitFor(() => check(view.ready), `${view.id} after paint`, cancelled.signal);
+      await waitFor(() => check(view.settled ?? view.ready), `${view.id} after paint`, cancelled.signal);
       if (browserFailure) throw new Error(browserFailure);
       stage = `${view.id} screenshot`;
       const { data } = await send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false });

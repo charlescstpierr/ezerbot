@@ -12,7 +12,7 @@ class Element {
   addEventListener(name, callback) { this.events[name] = callback; }
 }
 const flush = () => new Promise((resolve) => setImmediate(resolve));
-function fixture(status = "recording", hostOverrides = {}) {
+function fixture(status = "recording", hostOverrides = {}, shell = null) {
   const requests = [], calls = [], root = new Element("div");
   let registration;
   const state = { floating: { shortcut: "cmd+option+space" } };
@@ -23,7 +23,7 @@ function fixture(status = "recording", hostOverrides = {}) {
     async focusConversation(id) { calls.push(id); return id === "visible"; },
     ...hostOverrides,
   };
-  const window = { GrokbotPanels: host, ...(status === null ? {} : { webkit: { messageHandlers: { ezerbotFloating: { async postMessage(body) { calls.push(body); return { status }; } } } } }) };
+  const window = { GrokbotPanels: host, ...(shell ? { EzerbotShell: { platform: "linux", floating: { async postMessage(body) { calls.push(body); return typeof shell === "string" ? { status: shell } : shell; } } } } : {}), ...(status === null ? {} : { webkit: { messageHandlers: { ezerbotFloating: { async postMessage(body) { calls.push(body); return { status }; } } } } }) };
   runInNewContext(readFileSync(new URL("../../ui/panels/floating.js", import.meta.url), "utf8"), { window, document: { createElement: (tag) => new Element(tag) } });
   const nodes = (element) => [element, ...element.children.flatMap(nodes)];
   const all = nodes(root);
@@ -53,6 +53,52 @@ test("saved shortcut confirmation keeps the browser-only scope explicit", async 
   await f.save.events.click();
   assert.match(f.status.textContent, /Raccourci enregistré : ⌘ ⌥ J/);
   assert.match(f.status.textContent, /navigateur/);
+});
+
+const labels = (f) => f.select.children.map((option) => option.textContent);
+const section = (f) => f.root.children.find((c) => c.tag === "p").textContent;
+
+test("on Linux the panel talks to the shell host, with Linux labels and wording", async () => {
+  const f = fixture(null, {}, "registered"); f.select.value = "cmd+option+j";
+  assert.deepEqual(labels(f), ["Super Alt Espace", "Ctrl Alt Espace", "Super Maj Espace", "Super Alt J", "Désactivé"]);
+  assert.match(section(f), /son en-tête/);
+  await f.save.events.click();
+  assert.equal(f.calls[0].command, "configure");
+  assert.equal(f.calls[0].shortcut, "cmd+option+j");
+  assert.equal(f.requests[0].path, "/api/floating/settings");
+  assert.match(f.status.textContent, /Raccourci enregistré : Super Alt J/);
+  assert.match(f.status.textContent, /cet ordinateur, sans surveillance du clavier/);
+  assert.doesNotMatch(f.status.textContent, /Mac|⌘/);
+});
+
+test("on Linux the combination the desktop assigned is shown instead of the one asked for", async () => {
+  const f = fixture(null, {}, { status: "registered", trigger: "Ctrl Alt K" }); f.select.value = "cmd+option+j";
+  await f.save.events.click();
+  assert.equal(f.requests[0].body.shortcut, "cmd+option+j");
+  assert.equal(f.status.textContent, "Raccourci attribué par le bureau : Ctrl Alt K.");
+});
+
+test("on Linux an unavailable shortcut is announced and never persisted", async () => {
+  const f = fixture(null, {}, "unavailable"); f.select.value = "cmd+option+j";
+  await f.save.events.click();
+  assert.match(f.status.textContent, /pas disponible dans cette session/);
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.save.disabled, false);
+});
+
+test("macOS keeps its labels, wording and bridge", async () => {
+  const f = fixture("registered"); f.select.value = "cmd+option+j";
+  assert.deepEqual(labels(f), ["⌘ ⌥ Espace", "⌃ ⌥ Espace", "⌘ ⇧ Espace", "⌘ ⌥ J", "Désactivé"]);
+  assert.match(section(f), /sa barre de titre/);
+  await f.save.events.click();
+  assert.match(f.status.textContent, /ce Mac, sans permission de surveillance du clavier/);
+});
+
+test("the compact panel drags by its header only on Linux", () => {
+  const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
+  assert.match(source, /window\.EzerbotShell\?\.floating \|\| window\.webkit\?\.messageHandlers\?\.ezerbotFloating/);
+  assert.match(source, /const draggable = inNativePanel && window\.EzerbotShell\?\.platform === "linux"/);
+  assert.match(source, /onMouseDown=\{draggable \? \(e\) => \{ if \(e\.button === 0\) [^}]*command: "drag"/);
 });
 
 test("selection publication is ordered, deduplicated and excludes task/routine composers", async () => {
@@ -302,4 +348,12 @@ test("native test builds compile out global registration and all event capture",
   assert.match(source, /NSWindowCollectionBehaviorCanJoinAllSpaces/);
   assert.match(source, /initWithContentRect:NSMakeRect\(80, 80, 420, 560\)/);
   assert.match(source, /panel.minSize = NSMakeSize\(360, 520\)/);
+});
+
+test("under Wayland the settings say plainly the global shortcut is unavailable", async () => {
+  const f = fixture(null, {}, "wayland");
+  f.registration.onState({ floating: { shortcut: "cmd+option+j" } }, { connected: true });
+  await flush();
+  assert.match(f.status.textContent, /pas disponible sous Wayland/);
+  assert.match(f.status.textContent, /menu Ezerbot/);
 });

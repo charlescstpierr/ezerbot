@@ -1472,24 +1472,20 @@ fn a_secret_migrated_then_locked_across_a_restart_still_stops_automatic_memory()
     let vault = Vault::open_app(&f.path.with_extension("secrets.json")).unwrap();
     assert_eq!(vault.storage_status().backend, "file_fallback");
     f.script(json!([fact("Je préfère la porcelaine ambrée.", None)]));
-    // Trousseau verrouillé : la réponse ne sert rien de l'historique, seul compte le refus.
-    let _ = f.app.api(
+    // Trousseau verrouillé : l'envoi est refusé avant d'être conservé, aucun tour ne part.
+    let refused = f.app.api(
         "POST",
         "/api/send",
         json!({"conversation_id":c,"message_id":"m","body":"Je préfère la porcelaine ambrée."})
             .to_string()
             .as_bytes(),
     );
-    wait("refus du tour", || {
-        f.db()
-            .query_row(
-                "SELECT count(*) FROM wrapper_engine_runs WHERE error_kind = 'keyring'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap()
-            > 0
-    });
+    assert!(format!("{:?}", refused.expect_err("refused")).contains("Déverrouillez"));
+    let runs: i64 = f
+        .db()
+        .query_row("SELECT count(*) FROM wrapper_engine_runs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(runs, 0, "a turn started while the keyring is locked");
     f.settle();
     assert_eq!(
         f.calls().len(),

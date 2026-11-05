@@ -32,6 +32,33 @@
   Object.defineProperty(window, 'EzerbotLocal', {
     value: Object.freeze({resourceURL}), writable: false, configurable: false,
   });
+  const ipc = window.ipc;
+  const pending = new Map();
+  let sequence = 0;
+  // Only this top frame gets the bridge, and the shell refuses to load any
+  // document into a frame (a response that is not the main frame's main resource
+  // is ignored natively), so no other page's script can reach this one.
+  const post = body => new Promise((resolve, reject) => {
+    const id = ++sequence;
+    pending.set(id, {resolve, reject});
+    try { ipc.postMessage(JSON.stringify({launch, id, body})); }
+    catch (error) { pending.delete(id); reject(error); }
+  });
+  const settle = (id, value, error) => {
+    const call = pending.get(id);
+    if (!call) return;
+    pending.delete(id);
+    if (error) call.reject(new Error(error)); else call.resolve(value);
+  };
+  const openConversation = (request, id) => Promise.resolve()
+    .then(() => window.EzerbotFloatingMain.openConversation(id))
+    .catch(() => ({opened: false}))
+    .then(result => {
+      post({
+        command: 'conversationOpened', request, opened: result?.opened === true,
+        reason: typeof result?.reason === 'string' ? result.reason : '',
+      }).catch(() => {});
+    });
   Object.defineProperty(window, 'EzerbotShell', {
     value: Object.freeze({
       platform: 'linux',
@@ -43,8 +70,11 @@
         }).then(response => response.json()),
       }),
       unavailablePanels: Object.freeze([
-        'voice-conversation', 'voice-call', 'meetings', 'demonstrations', 'floating',
+        'voice-conversation', 'voice-call', 'meetings', 'demonstrations',
       ]),
+      floating: Object.freeze({postMessage: post}),
+      settle,
+      openConversation,
     }),
     writable: false, configurable: false,
   });

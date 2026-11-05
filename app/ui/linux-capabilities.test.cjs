@@ -6,7 +6,7 @@ const { runInNewContext } = require("node:vm");
 const source = readFileSync(`${__dirname}/app.js`, "utf8");
 const registration = source.slice(source.indexOf("    register(panel) {"), source.indexOf("    openConversation(id, messageId) {"));
 const availability = source.slice(source.indexOf("  const unavailablePanels ="), source.indexOf("  const panelFailed ="));
-const unavailable = ["voice-conversation", "voice-call", "meetings", "demonstrations", "floating"];
+const unavailable = ["voice-conversation", "voice-call", "meetings", "demonstrations"];
 
 function registry(shell) {
   const mounted = [];
@@ -37,13 +37,14 @@ function registry(shell) {
 test("Linux hides unavailable native controls before mounting, while ordinary panels still mount", () => {
   const app = registry({ platform: "linux", unavailablePanels: unavailable });
   for (const id of unavailable) assert.equal(app.register({ id }), false, id);
-  for (const id of ["attachments", "forms", "engine", "voice"]) assert.equal(app.register({ id }), true, id);
-  assert.deepEqual(app.mounted, ["attachments", "forms", "engine", "voice"]);
+  for (const id of ["attachments", "forms", "engine", "voice", "floating"]) assert.equal(app.register({ id }), true, id);
+  assert.deepEqual(app.mounted, ["attachments", "forms", "engine", "voice", "floating"]);
   assert.equal(app.notices.length, 1);
   assert.match(app.notices[0], /Indisponibles sous Linux : dictée/);
   assert.doesNotMatch(app.notices[0], /microphone/i);
   assert.match(app.notices[0], /contrôle de l’écran/);
   assert.doesNotMatch(app.notices[0], /capture/);
+  assert.doesNotMatch(app.notices[0], /flottante/);
   assert.equal(app.rows[1].hidden, true);
   assert.equal(app.rows[0].key.textContent, "Ctrl N");
   assert.match(app.paragraph.textContent, /sur cet ordinateur/);

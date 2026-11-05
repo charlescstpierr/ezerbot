@@ -55,7 +55,7 @@
   if (window.EzerbotShell?.platform === "linux") {
     const notice = document.createElement("p");
     notice.id = "linux-native-services";
-    notice.textContent = "Indisponibles sous Linux : dictée, appels et mode voix, enregistrement local de réunion, contrôle de l’écran, démonstrations et fenêtre flottante.";
+    notice.textContent = "Indisponibles sous Linux : dictée, appels et mode voix, enregistrement local de réunion, contrôle de l’écran et démonstrations.";
     $("settings-extensions").before(notice);
     for (const paragraph of document.querySelectorAll(".setting-info p")) {
       paragraph.textContent = paragraph.textContent.replace("sur ce Mac", "sur cet ordinateur");

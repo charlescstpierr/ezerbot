@@ -540,6 +540,43 @@ fn replacement_cites_the_new_tariff_and_leaves_the_other_bot() {
 }
 
 #[test]
+fn repeated_pages_stay_fresh_after_replacement_reset_and_removal() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.bot("bot-a", "Alpha");
+    f.bot("bot-b", "Bravo");
+    let pages = |tariff| {
+        format!(
+            "[Page 1]\nLe tarif X est de {tariff} euros. {}\n[Page 2]\nLe tarif X est de {tariff} euros. {}",
+            "été cœur ".repeat(2_000),
+            "été cœur ".repeat(2_000)
+        )
+    };
+    f.deposit("bot-a", FILE_NAME, pages(42).as_bytes());
+    f.deposit("bot-b", FILE_NAME, TARIFF.as_bytes());
+    let alpha = f.conversation("bot-a");
+    let bravo = f.conversation("bot-b");
+    f.cite_present();
+    f.ask(&alpha, "before-replacement");
+    assert!(f.reply(&alpha, "before-replacement").contains("42 euros"));
+
+    f.deposit("bot-a", FILE_NAME, pages(99).as_bytes());
+    f.post("/api/conversations/reset", json!({"conversation_id":alpha}));
+    let prompt = f.library_prompt(&alpha);
+    assert!(prompt.contains("99 euros"));
+    assert!(!prompt.contains("42 euros"));
+    assert!(f.library_prompt(&bravo).contains("42 euros"));
+    f.ask(&alpha, "after-replacement");
+    assert!(f.reply(&alpha, "after-replacement").contains("99 euros"));
+
+    let id = f.listed("bot-a")[0]["id"].as_str().unwrap().to_owned();
+    f.remove("bot-a", &id);
+    f.post("/api/conversations/reset", json!({"conversation_id":alpha}));
+    assert!(f.library_prompt(&alpha).is_empty());
+    assert!(f.library_prompt(&bravo).contains("42 euros"));
+}
+
+#[test]
 fn removal_hides_the_file_from_the_next_thread() {
     let mut f = Fixture::new();
     f.connect();

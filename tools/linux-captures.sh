@@ -89,7 +89,7 @@ binary="$cache/debug/grokbot-wrapper"
 
 staging=$(mktemp -d "$output/.staging-$sha.XXXXXX")
 mkdir -p "$scratch/home" "$scratch/config" "$scratch/cache" "$scratch/data" "$scratch/runtime" "$scratch/tmp"
-printf 'linux-captures: rendering %s through Chromium. Native Linux shell capture is unavailable.\n' "$sha"
+printf 'linux-captures: rendering %s through Chromium, then through the native GTK shell.\n' "$sha"
 run "$worktree" env -i PATH="$PATH" HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/config" XDG_CACHE_HOME="$scratch/cache" XDG_DATA_HOME="$scratch/data" XDG_RUNTIME_DIR="$scratch/runtime" TMPDIR="$scratch/tmp" LANG=C.UTF-8 TZ=UTC CHROME_BIN="$chrome" xvfb-run -a -s '-screen 0 1440x900x24 -nolisten tcp' node --experimental-websocket "$worktree/tools/linux-captures.cjs" "$sha" "$binary" "$staging"
 [[ -f "$staging/manifest.json" ]] || fail 'Capture driver did not complete its manifest.'
 if [[ -e "$output/$sha" ]]; then

@@ -676,15 +676,10 @@ fn a_link_reaches_the_open_window_and_the_window_it_starts() {
     third.quit();
 }
 
-/// Keyring locked after a restart: the window says so above the composer and sends nothing.
-/// Enter neither stores a message nor starts a turn, so no draft can come back twice.
-#[test]
-fn a_locked_keyring_shows_the_banner_and_the_window_sends_nothing() {
+/// A state directory whose only secret lives in `keyring`: the plaintext file holds nothing.
+fn migrated_state(keyring: &grokbot_linux_desktop::testing::Keyring, name: &str) -> TestDir {
     use grokbot_forms::vault::Vault;
-    use grokbot_linux_desktop::testing::Keyring;
-    use std::os::unix::fs::PermissionsExt;
-    let keyring = Keyring::start();
-    let home = TestDir::new("ezerbot-locked-window");
+    let home = TestDir::new(name);
     let state = home.join("state");
     std::fs::create_dir(&state).unwrap();
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -698,6 +693,38 @@ fn a_locked_keyring_shows_the_banner_and_the_window_sends_nothing() {
         )
         .unwrap();
     Vault::open_test_keychain(&file, keyring.address()).unwrap();
+    home
+}
+
+fn submissions(home: &TestDir) -> i64 {
+    Connection::open_with_flags(
+        home.join("state").join("ezerbot.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row("SELECT count(*) FROM submissions", [], |row| row.get(0))
+    .unwrap()
+}
+
+fn live_shot(screen: &Screen, variable: &str) {
+    if let Ok(shot) = std::env::var(variable) {
+        let status = Command::new("import")
+            .args(["-window", "root"])
+            .arg(&shot)
+            .env("DISPLAY", &screen.name)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+}
+
+/// Keyring locked after a restart: the window says so above the composer and sends nothing.
+/// Enter neither stores a message nor starts a turn, so no draft can come back twice.
+#[test]
+fn a_locked_keyring_shows_the_banner_and_the_window_sends_nothing() {
+    use grokbot_linux_desktop::testing::Keyring;
+    let keyring = Keyring::start();
+    let home = migrated_state(&keyring, "ezerbot-locked-window");
     keyring.lock();
     let screen = Screen::start();
     let keyring_home = keyring.home().path().to_str().unwrap().to_owned();
@@ -720,34 +747,63 @@ fn a_locked_keyring_shows_the_banner_and_the_window_sends_nothing() {
     screen.press(&["Return"]);
     screen.press(&["Return"]);
     std::thread::sleep(Duration::from_secs(3));
-    let database = Connection::open_with_flags(
-        state.join("ezerbot.sqlite"),
+    assert_eq!(submissions(&home), 0, "a message was sent while locked");
+    let runs: i64 = Connection::open_with_flags(
+        home.join("state").join("ezerbot.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
+    .unwrap()
+    .query_row("SELECT count(*) FROM wrapper_engine_runs", [], |row| {
+        row.get(0)
+    })
     .unwrap();
-    let count = |sql: &str| {
-        database
-            .query_row(sql, [], |row| row.get::<_, i64>(0))
-            .unwrap()
-    };
-    assert_eq!(
-        count("SELECT count(*) FROM submissions"),
-        0,
-        "a message was sent while locked"
-    );
-    assert_eq!(
-        count("SELECT count(*) FROM wrapper_engine_runs"),
-        0,
-        "a turn started while locked"
-    );
-    if let Ok(shot) = std::env::var("LIVE_SHOT") {
-        let status = Command::new("import")
-            .args(["-window", "root"])
-            .arg(&shot)
-            .env("DISPLAY", &screen.name)
-            .status()
-            .unwrap();
-        assert!(status.success());
-    }
+    assert_eq!(runs, 0, "a turn started while locked");
+    live_shot(&screen, "LIVE_SHOT");
+    app.quit();
+}
+
+/// The keyring locks while the window shows the composer, then Envoyer: nothing is kept and the
+/// draft comes back. Unlocking outside the app wakes the idle window, and Enter alone sends that
+/// draft once.
+#[test]
+fn the_window_follows_the_keyring_and_sends_the_draft_once() {
+    use grokbot_linux_desktop::testing::Keyring;
+    let mut keyring = Keyring::start();
+    let home = migrated_state(&keyring, "ezerbot-relock-window");
+    let screen = Screen::start();
+    let keyring_home = keyring.home().path().to_str().unwrap().to_owned();
+    let address = keyring.address().to_owned();
+    let extra = [
+        ("EZERBOT_FAKE_SIGNIN", "1"),
+        ("HOME", keyring_home.as_str()),
+        ("GROKBOT_TEST_SESSION_BUS", address.as_str()),
+    ];
+    let app = App::start(shell_with_wrapper(), &screen, &home, &extra);
+    wait_for("the window stayed blank", || {
+        (screen.colours().len() >= 16).then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    let area = screen.web_area();
+    screen.focus();
+    screen.click(area.x + area.width as i32 / 2, area.y + 200);
+    screen.press(&["Control_L", "n"]);
+    std::thread::sleep(Duration::from_millis(500));
+    screen.type_text("un seul envoi malgre le verrou");
+    keyring.lock();
+    screen.press(&["Return"]);
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(submissions(&home), 0, "a message was kept while locked");
+    live_shot(&screen, "LIVE_SHOT_LOCKED");
+    keyring.unlock();
+    let started = Instant::now();
+    wait_for("unlocking never re-enabled Envoyer", || {
+        screen.press(&["Return"]);
+        std::thread::sleep(Duration::from_millis(900));
+        (submissions(&home) > 0).then_some(())
+    });
+    eprintln!("sent {:?} after the unlock", started.elapsed());
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(submissions(&home), 1, "the draft was sent twice");
+    live_shot(&screen, "LIVE_SHOT_UNLOCKED");
     app.quit();
 }

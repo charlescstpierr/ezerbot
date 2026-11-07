@@ -194,7 +194,7 @@ impl Vault {
     /// are never opened by this code.
     pub fn open_app(path: &Path) -> Result<Self> {
         let vault = Self::app_store(path)?;
-        vault.readable_values()?; // Keychain migration.
+        vault.migrate_on_open()?;
         Ok(vault)
     }
     /// `open_app` before its read: redaction masks with its own read instead of a second one
@@ -387,17 +387,20 @@ impl Vault {
     pub(crate) fn known_values(&self) -> Result<Vec<String>> {
         let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
-        let secrets = self.read()?;
+        let secrets = self.read();
         if self.is_partial() {
             return Err(invalid(KEYRING_LOCKED));
         }
-        Ok(Self::values_of(secrets))
+        Ok(Self::values_of(secrets?))
     }
-    /// What can be read now, partial or not: for the keyring migration only, never for masking.
-    pub(crate) fn readable_values(&self) -> Result<Vec<String>> {
+    /// The keychain migration on open. A partial vault still opens, and every read then refuses.
+    pub(crate) fn migrate_on_open(&self) -> Result<()> {
         let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
-        Ok(Self::values_of(self.read()?))
+        match self.read() {
+            Err(_) if self.is_partial() => Ok(()),
+            read => read.map(drop),
+        }
     }
     fn values_of(secrets: Secrets) -> Vec<String> {
         let mut values = Vec::new();

@@ -2,8 +2,8 @@
 //! (GNOME Keyring, KWallet), one item per name, scoped to the canonical workspace path.
 //! There is no per-binary ACL here, so the macOS signature gate has no equivalent. The
 //! service is never unlocked. A refused or unanswered write fails closed and is not copied
-//! into the plaintext companion file. A read it refuses leaves out what only it holds, so
-//! redaction refuses too (`Vault::is_partial`): nothing derived from history is served.
+//! into the plaintext companion file. While it refuses and holds any of this vault's secrets,
+//! every read and redaction refuse too (`Vault::is_partial`): nothing read earlier is served.
 use super::*;
 use grokbot_linux_desktop::{secrets::Collection, Bus};
 use sha2::{Digest, Sha256};
@@ -35,7 +35,6 @@ fn unavailable() -> Error {
 }
 #[derive(Default)]
 struct State {
-    cached: Secrets,
     failed: bool,
 }
 static STATES: OnceLock<Mutex<BTreeMap<PathBuf, State>>> = OnceLock::new();
@@ -89,7 +88,7 @@ impl Vault {
     pub fn open_test_keychain(path: &Path, bus_address: &str) -> Result<Self> {
         let mut vault = Self::create(path)?;
         vault.keychain = Some(Target(Bus::private(bus_address)));
-        vault.readable_values()?; // First-start migration, as `open_app` does.
+        vault.migrate_on_open()?;
         Ok(vault)
     }
 }
@@ -122,7 +121,7 @@ impl Backend for Native {
 // Caller holds both the process mutex and stable companion-file OS lock. If a
 // process dies after verification but before the rename, that entry is replayed
 // idempotently on restart. File entries always override older store entries.
-fn migrate(vault: &Vault, backend: &impl Backend, state: &mut State) -> Result<Secrets> {
+fn migrate(vault: &Vault, backend: &impl Backend) -> Result<Secrets> {
     let mut file = vault.read_file()?;
     let mut merged = backend.read_all()?;
     merged.extend(file.clone());
@@ -134,7 +133,6 @@ fn migrate(vault: &Vault, backend: &impl Backend, state: &mut State) -> Result<S
     } else {
         note_secrets_in_service(vault)?;
     }
-    state.cached = merged.clone();
     for (name, secret) in &merged {
         if !file.contains_key(name) {
             continue;
@@ -150,17 +148,19 @@ pub(super) fn snapshot(vault: &Vault, target: &Target) -> Result<Secrets> {
     let state = states.entry(vault.path.clone()).or_default();
     match target
         .connect(&vault.path)
-        .and_then(|backend| migrate(vault, &backend, state))
+        .and_then(|backend| migrate(vault, &backend))
     {
         Ok(secrets) => {
             state.failed = false;
             Ok(secrets)
         }
+        // Nothing read earlier is served: the keyring decides on every read.
         Err(_) => {
             state.failed = true;
-            let mut secrets = state.cached.clone();
-            secrets.extend(vault.read_file()?);
-            Ok(secrets)
+            match holds_secrets(&vault.path).exists() {
+                true => Err(unavailable()),
+                false => vault.read_file(),
+            }
         }
     }
 }
@@ -182,7 +182,6 @@ pub(super) fn set(vault: &Vault, target: &Target, name: &str, secret: &StoredSec
     file.remove(name);
     vault.write(&file)?;
     state.failed = false;
-    state.cached.insert(name.into(), secret.clone());
     Ok(())
 }
 pub(super) fn remove(vault: &Vault, target: &Target, name: &str) -> Result<()> {
@@ -207,11 +206,10 @@ pub(super) fn remove(vault: &Vault, target: &Target, name: &str) -> Result<()> {
     let mut file = vault.read_file()?;
     file.remove(name);
     vault.write(&file)?;
-    state.cached.remove(name);
     // The last secret gone: a keyring locked from now on hides nothing.
     let _ = target
         .connect(&vault.path)
-        .and_then(|backend| migrate(vault, &backend, state));
+        .and_then(|backend| migrate(vault, &backend));
     Ok(())
 }
 
@@ -256,14 +254,13 @@ mod tests {
             writes: Cell::new(0),
             fail_at: 2,
         };
-        let mut state = State::default();
         let _guard = access(test.vault.path());
         let _lock = test.vault.lock_file(true).unwrap();
-        assert!(migrate(&test.vault, &fake, &mut state).is_err());
+        assert!(migrate(&test.vault, &fake).is_err());
         assert!(!test.vault.read_file().unwrap().contains_key("FIRST"));
         assert!(test.vault.read_file().unwrap().contains_key("SECOND"));
         // Restart has no in-memory cache; both verified and unverified entries survive.
-        let all = migrate(&test.vault, &fake, &mut State::default()).unwrap();
+        let all = migrate(&test.vault, &fake).unwrap();
         assert_eq!(all.len(), 2);
         assert!(test.vault.read_file().unwrap().is_empty());
     }
@@ -283,7 +280,7 @@ mod tests {
             };
             let _guard = access(test.vault.path());
             let _lock = test.vault.lock_file(true).unwrap();
-            let _ = migrate(&test.vault, &fake, &mut State::default());
+            let _ = migrate(&test.vault, &fake);
             assert_eq!(
                 fs::read_to_string(&victim).unwrap(),
                 "contenu d'un autre compte",
@@ -308,7 +305,7 @@ mod tests {
         STEPS.with(|steps| steps.borrow_mut().clear());
         let _guard = access(test.vault.path());
         let _lock = test.vault.lock_file(true).unwrap();
-        migrate(&test.vault, &fake, &mut State::default()).unwrap();
+        migrate(&test.vault, &fake).unwrap();
         let steps = STEPS.with(|steps| steps.borrow().clone());
         assert_eq!(steps, ["marqueur durable", "trousseau:FIRST"]);
         assert!(marker.exists());

@@ -527,7 +527,7 @@ fn a_keyring_locked_after_a_read_serves_no_secret_from_memory() {
     match vault.get("TOKEN") {
         Ok(Some(_)) => panic!("a locked keyring still served the secret from memory"),
         Ok(None) => panic!("a locked keyring read as empty"),
-        Err(error) => assert!(error.to_string().contains("Déverrouillez"), "{error}"),
+        Err(error) => assert!(error.to_string().contains("verrouillé"), "{error}"),
     }
     f.keyring.unlock();
     assert!(

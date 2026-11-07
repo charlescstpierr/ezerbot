@@ -20,6 +20,46 @@ pub struct Request {
     pub format: String,
     pub content: String,
 }
+impl Request {
+    /// A Mermaid diagram draws its labels decoded (`<br>`, entities): the text drawn is not the
+    /// text written.
+    pub fn is_mermaid(&self) -> bool {
+        self.format == "svg" && !is_json_diagram(&self.content)
+    }
+    /// This request with `mask` applied to each text decoded, then in the form it is drawn: with
+    /// the spaces the drawing puts between characters, and before any line is cut.
+    pub fn masked(&self, mut mask: impl FnMut(&str) -> String) -> Self {
+        let mut masked = |text: &str, draw: fn(&str) -> String| {
+            let decoded = mask(text);
+            mask(&draw(&decoded))
+        };
+        let content = match self.format.as_str() {
+            "csv" | "xlsx" => serde_json::from_str::<Vec<Vec<String>>>(&self.content)
+                .ok()
+                .map(|rows| {
+                    let rows: Vec<Vec<String>> = rows
+                        .iter()
+                        .map(|row| row.iter().map(|c| masked(c, one_line)).collect())
+                        .collect();
+                    serde_json::json!(rows).to_string()
+                }),
+            "svg" if is_json_diagram(&self.content) => {
+                serde_json::from_str::<JsonDiagram>(&self.content)
+                    .ok()
+                    .map(|diagram| {
+                        let nodes: Vec<String> =
+                            diagram.nodes.iter().map(|n| masked(n, spaced)).collect();
+                        serde_json::json!({"nodes": nodes, "edges": diagram.edges}).to_string()
+                    })
+            }
+            _ => None,
+        };
+        Self {
+            content: content.unwrap_or_else(|| masked(&self.content, spaced)),
+            ..self.clone()
+        }
+    }
+}
 pub struct Generated {
     pub name: String,
     pub format: String,
@@ -54,12 +94,31 @@ pub fn xml(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
-// Keeps runs of spaces and indentation (tab = 4 spaces): aligned columns stay
-// aligned in Courier. Breaks on the last space that fits, else mid-word.
+/// Draws `content` as written. An SVG renderer collapses runs of spaces unless `xml:space` sits
+/// on the `<text>` itself: an ancestor's is ignored (measured in WebKitGTK and Chrome). The
+/// drawing then equals the text a mask was applied to.
+fn svg_text(attributes: &str, content: &str) -> String {
+    format!(
+        "<text {attributes} xml:space=\"preserve\">{}</text>",
+        xml(content)
+    )
+}
+/// A table cell stays on one line of its preview.
+fn one_line(cell: &str) -> String {
+    cell.replace(['\n', '\r', '\t'], " ")
+}
+/// Tab = 4 spaces, and a lone carriage return draws as a space.
+fn spaced(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', " ")
+        .replace('\t', "    ")
+}
+// Keeps runs of spaces and indentation: aligned columns stay aligned in Courier.
+// Breaks on the last space that fits, else mid-word.
 fn wrap(s: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     for line in s.lines() {
-        let mut rest: Vec<char> = line.replace('\t', "    ").trim_end().chars().collect();
+        let mut rest: Vec<char> = spaced(line).trim_end().chars().collect();
         while rest.len() > width {
             let indent = rest.iter().take_while(|c| **c == ' ').count();
             match (indent + 1..=width).rev().find(|&i| rest[i] == ' ') {
@@ -203,18 +262,14 @@ fn table_preview(rows: &[Vec<String>]) -> String {
     for (r, row) in rows.iter().take(count).enumerate() {
         for c in 0..cols {
             let (x, y) = (12.0 + c as f64 * cell, 12 + r * 32);
-            let text = row
-                .get(c)
-                .map(String::as_str)
-                .unwrap_or("")
-                .replace(['\n', '\r', '\t'], " ");
+            let text = one_line(row.get(c).map(String::as_str).unwrap_or(""));
             let limit = ((cell - 16.0) / 8.0) as usize;
             let mut shown: String = text.chars().take(limit).collect();
             if text.chars().count() > limit {
                 shown.pop();
                 shown.push('…');
             }
-            svg.push_str(&format!("<rect x=\"{x:.1}\" y=\"{y}\" width=\"{cell:.1}\" height=\"32\" fill=\"{}\" stroke=\"#e2e8f0\"/><text x=\"{:.1}\" y=\"{}\" fill=\"#172033\"{}>{}</text>", if r == 0 { "#f1f5f9" } else { "#fff" }, x + 8.0, y + 21, if r == 0 { " font-weight=\"bold\"" } else { "" }, xml(&shown)));
+            svg.push_str(&format!("<rect x=\"{x:.1}\" y=\"{y}\" width=\"{cell:.1}\" height=\"32\" fill=\"{}\" stroke=\"#e2e8f0\"/>{}", if r == 0 { "#f1f5f9" } else { "#fff" }, svg_text(&format!("x=\"{:.1}\" y=\"{}\" fill=\"#172033\"{}", x + 8.0, y + 21, if r == 0 { " font-weight=\"bold\"" } else { "" }), &shown)));
         }
     }
     svg.push_str("</svg>");
@@ -244,9 +299,7 @@ fn text_preview(lines: &[String], format: &str) -> String {
     } else {
         "Courier New,Courier,monospace"
     };
-    let mut body = format!(
-        "<g fill=\"#172033\" font-family=\"{family}\" font-size=\"12\" xml:space=\"preserve\">"
-    );
+    let mut body = format!("<g fill=\"#172033\" font-family=\"{family}\" font-size=\"12\">");
     let mut y = 42;
     let mut right: f64 = 320.0;
     for (i, line) in lines.iter().take(count).enumerate() {
@@ -271,14 +324,16 @@ fn text_preview(lines: &[String], format: &str) -> String {
             .take(if slide { 80 } else { 70 })
             .collect::<String>();
         right = right.max(84.0 + visible.chars().count() as f64 * font_size as f64 * 0.6);
-        body.push_str(&format!(
-            "<text x=\"42\" y=\"{y}\" font-size=\"{font_size}\"{}>{}</text>",
-            if heading > 0 {
-                " font-weight=\"bold\""
-            } else {
-                ""
-            },
-            xml(&visible)
+        body.push_str(&svg_text(
+            &format!(
+                "x=\"42\" y=\"{y}\" font-size=\"{font_size}\"{}",
+                if heading > 0 {
+                    " font-weight=\"bold\""
+                } else {
+                    ""
+                }
+            ),
+            &visible,
         ));
         if y > h - 40 {
             break;
@@ -471,9 +526,7 @@ fn blocks_preview(format: &str, blocks: &[Block]) -> String {
     } else {
         "Arial,Helvetica,Noto Color Emoji,sans-serif"
     };
-    let mut body = format!(
-        "<g fill=\"#172033\" font-family=\"{family}\" font-size=\"12\" xml:space=\"preserve\">"
-    );
+    let mut body = format!("<g fill=\"#172033\" font-family=\"{family}\" font-size=\"12\">");
     let mut y = 28i32;
     for block in blocks {
         if y > page_h - 28 {
@@ -486,7 +539,7 @@ fn blocks_preview(format: &str, blocks: &[Block]) -> String {
                 if !shown.contains(pdf_font::PARTY) && line.contains(pdf_font::PARTY) {
                     shown.push(pdf_font::PARTY);
                 }
-                body.push_str(&format!("<text x=\"42\" y=\"{y}\">{}</text>", xml(&shown)));
+                body.push_str(&svg_text(&format!("x=\"42\" y=\"{y}\""), &shown));
             }
             Block::Table(rows) => {
                 let cols = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
@@ -498,7 +551,7 @@ fn blocks_preview(format: &str, blocks: &[Block]) -> String {
                         let fill = if r == 0 { "#f1f5f9" } else { "#ffffff" };
                         let cell = row.get(c).map(String::as_str).unwrap_or("");
                         let text: String = cell.chars().take(40).collect();
-                        body.push_str(&format!("<rect x=\"{x}\" y=\"{y}\" width=\"{cw}\" height=\"22\" fill=\"{fill}\" stroke=\"#e2e8f0\"/><text x=\"{}\" y=\"{}\">{}</text>", x + 6, y + 15, xml(&text)));
+                        body.push_str(&format!("<rect x=\"{x}\" y=\"{y}\" width=\"{cw}\" height=\"22\" fill=\"{fill}\" stroke=\"#e2e8f0\"/>{}", svg_text(&format!("x=\"{}\" y=\"{}\"", x + 6, y + 15), &text)));
                     }
                     y += 22;
                     if y > page_h - 28 {
@@ -1725,8 +1778,11 @@ fn mermaid_link(s: &str) -> Option<(Link, &str)> {
     }
     Some(((None, dashed, arrow), rest))
 }
+fn is_json_diagram(content: &str) -> bool {
+    content.trim_start().starts_with('{')
+}
 fn diagram(content: &str) -> Result<String> {
-    let graph = if content.trim_start().starts_with('{') {
+    let graph = if is_json_diagram(content) {
         let d:JsonDiagram=serde_json::from_str(content).map_err(|_|invalid("Pour SVG, content doit être un flowchart Mermaid ou un graphe JSON : {\"nodes\":[\"Départ\",\"Arrivée\"],\"edges\":[[0,1]]}."))?;
         if d.edges.iter().flatten().any(|&i| i >= d.nodes.len()) {
             return Err(invalid(
@@ -2150,7 +2206,7 @@ fn render(graph: &Graph) -> String {
             }
         ));
         if let (Some(text), Some(r)) = (&edge.label, routed.label) {
-            labels.push_str(&format!("<rect x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"22\" rx=\"4\" fill=\"#fff\" stroke=\"#cbd5e1\"/><text x=\"{:.0}\" y=\"{:.0}\" text-anchor=\"middle\" font-size=\"13\" fill=\"#334155\">{}</text>", r.x - r.w / 2.0, r.y - 11.0, r.w, r.x, r.y + 4.5, xml(text)));
+            labels.push_str(&format!("<rect x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"22\" rx=\"4\" fill=\"#fff\" stroke=\"#cbd5e1\"/>{}", r.x - r.w / 2.0, r.y - 11.0, r.w, svg_text(&format!("x=\"{:.0}\" y=\"{:.0}\" text-anchor=\"middle\" font-size=\"13\" fill=\"#334155\"", r.x, r.y + 4.5), text)));
         }
     }
     for (node, r) in graph.nodes.iter().zip(&layout.nodes) {
@@ -2161,10 +2217,12 @@ fn render(graph: &Graph) -> String {
         });
         let lines: Vec<&str> = node.label.lines().collect();
         for (i, line) in lines.iter().enumerate() {
-            svg.push_str(&format!(
-                "<text x=\"{x:.0}\" y=\"{:.0}\" text-anchor=\"middle\" font-size=\"16\" fill=\"#172033\">{}</text>",
-                y + 5.5 + (i as f64 - (lines.len() as f64 - 1.0) / 2.0) * 20.0,
-                xml(line)
+            svg.push_str(&svg_text(
+                &format!(
+                    "x=\"{x:.0}\" y=\"{:.0}\" text-anchor=\"middle\" font-size=\"16\" fill=\"#172033\"",
+                    y + 5.5 + (i as f64 - (lines.len() as f64 - 1.0) / 2.0) * 20.0
+                ),
+                line,
             ));
         }
     }
@@ -3083,7 +3141,9 @@ mod tests {
         ));
         assert!(document.contains("w:hanging") && document.contains("•\u{a0}Première idée"));
         assert!(!document.contains("# Bilan") && !document.contains("Courier"));
-        assert!(result.preview.contains("font-weight=\"bold\">Bilan d’été<"));
+        assert!(result
+            .preview
+            .contains("font-weight=\"bold\" xml:space=\"preserve\">Bilan d’été<"));
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         documents::migrate(&conn).unwrap();
         assert!(documents::prepare(&conn, &result.name, &result.bytes)

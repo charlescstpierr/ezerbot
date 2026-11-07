@@ -116,20 +116,43 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
             byte_length: generated.bytes.len(),
             pages: generated.pages,
         };
-        ctx.connection.execute(
-            "INSERT INTO attachments_generated VALUES (?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
-            params![
-                file.id,
-                serde_json::to_string(&file).map_err(|_| ApiError::new(
-                    500,
-                    "Le document généré n’a pas pu être enregistré."
-                ))?,
-                generated.bytes,
-                generated.preview,
-                ctx.now_ms
-            ],
-        )?;
-        Ok(json!(file))
+        ctx.connection
+            .execute_batch("SAVEPOINT wrapper_generated_tool")?;
+        let stored = (|| -> Result<Value, ApiError> {
+            let inserted = ctx.connection.execute(
+                "INSERT INTO attachments_generated VALUES (?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
+                params![
+                    file.id,
+                    serde_json::to_string(&file).map_err(|_| ApiError::new(
+                        500,
+                        "Le document généré n’a pas pu être enregistré."
+                    ))?,
+                    generated.bytes,
+                    generated.preview,
+                    ctx.now_ms
+                ],
+            )?;
+            let created = super::livrables::record(
+                ctx.connection,
+                ctx,
+                &call.call_id,
+                "document",
+                &file.id,
+                &file.name,
+                &file.preview_url,
+            )?;
+            if inserted > 0 || created {
+                super::disclosure::stamp(ctx.connection, "document", &file.id)?;
+            }
+            Ok(json!(file))
+        })();
+        if stored.is_err() {
+            ctx.connection
+                .execute_batch("ROLLBACK TO wrapper_generated_tool")?;
+        }
+        ctx.connection
+            .execute_batch("RELEASE wrapper_generated_tool")?;
+        stored
     })();
     Some(outcome(result))
 }
@@ -443,6 +466,69 @@ pub fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: Arc<AtomicBool>) -> T
         }
     })())
 }
+/// The card of a creation, then its tool call: both found by key, whatever the history.
+pub const SOURCE_CARD: &str =
+    "SELECT entry_id FROM wrapper_livrables WHERE ref=?1 AND entry_id IS NOT NULL LIMIT 1";
+pub const SOURCE_CALL: &str = "SELECT json_extract(payload,'$.arguments') FROM engine_run_events WHERE run_id=?1 AND seq=?2 AND kind='tool_call'";
+/// Shown when the text a preview was drawn from is lost: nothing in it can be checked.
+const HIDDEN: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 320 144\"><rect width=\"320\" height=\"144\" fill=\"#fff\"/><text x=\"24\" y=\"76\" fill=\"#172033\" font-family=\"Arial,Helvetica,sans-serif\" font-size=\"14\">Aperçu indisponible</text></svg>";
+/// The stored preview is the bot's text once decoded, escaped, wrapped and cut: a secret the
+/// vault learned since no longer matches there, and a phrase memory forgot is still drawn.
+/// Each text of the source is masked as drawn, then redrawn; the stored preview is never served.
+fn preview(conn: &Connection, file: &File) -> Result<String, ApiError> {
+    super::disclosure::read(conn, |patterns| {
+        if !patterns.covers_file(conn, &file.id)? {
+            return Ok(HIDDEN.into());
+        }
+        let Some(request) = source(conn, file)? else {
+            return Ok(HIDDEN.into());
+        };
+        if request.is_mermaid() {
+            return Ok(neutral(&patterns.text(&drawn(&patterns.text(&file.name)))));
+        }
+        let masked = request.masked(|text| patterns.text(text));
+        Ok(generation::generate(&masked).map_or_else(|_| HIDDEN.into(), |masked| masked.preview))
+    })
+}
+/// SVG text collapses runs of spaces: the name is masked as it is drawn too.
+fn drawn(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+/// A diagram icon and the file name, never the rendered diagram.
+fn neutral(name: &str) -> String {
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 480 144\"><rect width=\"480\" height=\"144\" fill=\"#fff\"/><g fill=\"none\" stroke=\"#172033\" stroke-width=\"2\"><rect x=\"24\" y=\"40\" width=\"28\" height=\"20\" rx=\"3\"/><rect x=\"24\" y=\"84\" width=\"28\" height=\"20\" rx=\"3\"/><rect x=\"68\" y=\"62\" width=\"28\" height=\"20\" rx=\"3\"/><path d=\"M52 50h8v22h8M52 94h8V72\"/></g><text x=\"116\" y=\"78\" fill=\"#172033\" font-family=\"Arial,Helvetica,sans-serif\" font-size=\"14\">{}</text></svg>",
+        generation::xml(name)
+    )
+}
+/// What the bot wrote: the arguments of the call that created the file, or the bytes of a
+/// Markdown file, which are that text.
+fn source(conn: &Connection, file: &File) -> Result<Option<Request>, ApiError> {
+    let card: Option<String> = conn
+        .query_row(SOURCE_CARD, [&file.id], |r| r.get(0))
+        .optional()?;
+    if let Some((run, seq)) = card.as_deref().and_then(|card| card.rsplit_once(':')) {
+        let arguments: Option<String> = conn
+            .query_row(SOURCE_CALL, params![run, seq.parse::<i64>().ok()], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten();
+        if let Some(request) = arguments.and_then(|a| serde_json::from_str(&a).ok()) {
+            return Ok(Some(request));
+        }
+    }
+    if file.format != "md" {
+        return Ok(None);
+    }
+    Ok(String::from_utf8(bytes(conn, &file.id)?)
+        .ok()
+        .map(|content| Request {
+            name: file.name.clone(),
+            format: file.format.clone(),
+            content,
+        }))
+}
 pub fn routes(
     app: &mut App,
     method: &str,
@@ -467,9 +553,23 @@ pub fn routes(
                             "Le dossier personnel est introuvable. Saisissez un chemin complet.",
                         )
                     })?;
-                Ok(ApiResponse::Json(
-                    json!({"path": home.join("Desktop").join(file.name)}),
-                ))
+                // The name comes from the bot: a secret learned since is masked in it, never in
+                // the folder, which may hold the account name.
+                super::disclosure::read(&app.connection, |patterns| {
+                    if !patterns.covers_file(&app.connection, &file.id)? {
+                        return Ok(ApiResponse::Json(json!({"path":null})));
+                    }
+                    let mut name = patterns.text(&file.name);
+                    if !name.to_lowercase().ends_with(&format!(".{}", file.format)) {
+                        name = format!("{name}.{}", file.format);
+                    }
+                    if patterns.text(&name) != name {
+                        return Err(super::disclosure::refused());
+                    }
+                    Ok(ApiResponse::Json(
+                        json!({"path": home.join("Desktop").join(name)}),
+                    ))
+                })
             })());
         }
         if let Some(id) = path
@@ -477,12 +577,8 @@ pub fn routes(
             .and_then(|s| s.strip_suffix("/preview"))
         {
             return Some((|| {
-                get(&app.connection, id)?;
-                let preview: String = app.connection.query_row(
-                    "SELECT preview FROM attachments_generated WHERE id=?1",
-                    [id],
-                    |r| r.get(0),
-                )?;
+                let file = get(&app.connection, id)?;
+                let preview = preview(&app.connection, &file)?;
                 Ok(ApiResponse::Bytes {
                     content_type: "image/svg+xml".into(),
                     body: preview.into_bytes(),

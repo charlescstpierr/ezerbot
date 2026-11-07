@@ -464,6 +464,9 @@ fn preview(conn: &Connection, file: &File) -> Result<String, ApiError> {
         let Some(request) = source(conn, file)? else {
             return Ok(HIDDEN.into());
         };
+        if request.is_mermaid() {
+            return Ok(neutral(&patterns.text(&drawn(&patterns.text(&file.name)))));
+        }
         let mut found = false;
         let masked = request.masked(|text| {
             let masked = patterns.text(text);
@@ -479,6 +482,17 @@ fn preview(conn: &Connection, file: &File) -> Result<String, ApiError> {
         }
         Ok(generation::generate(&masked).map_or_else(|_| HIDDEN.into(), |masked| masked.preview))
     })
+}
+/// SVG text collapses runs of spaces: the name is masked as it is drawn too.
+fn drawn(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+/// A diagram icon and the file name, never the rendered diagram.
+fn neutral(name: &str) -> String {
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 480 144\"><rect width=\"480\" height=\"144\" fill=\"#fff\"/><g fill=\"none\" stroke=\"#172033\" stroke-width=\"2\"><rect x=\"24\" y=\"40\" width=\"28\" height=\"20\" rx=\"3\"/><rect x=\"24\" y=\"84\" width=\"28\" height=\"20\" rx=\"3\"/><rect x=\"68\" y=\"62\" width=\"28\" height=\"20\" rx=\"3\"/><path d=\"M52 50h8v22h8M52 94h8V72\"/></g><text x=\"116\" y=\"78\" fill=\"#172033\" font-family=\"Arial,Helvetica,sans-serif\" font-size=\"14\">{}</text></svg>",
+        generation::xml(name)
+    )
 }
 /// What the bot wrote: the arguments of the call that created the file, or the bytes of a
 /// Markdown file, which are that text.

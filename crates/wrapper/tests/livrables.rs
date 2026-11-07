@@ -719,6 +719,40 @@ fn the_preview_masks_a_secret_of_several_lines_in_a_cell() {
 }
 
 #[test]
+fn a_mermaid_preview_never_draws_its_labels() {
+    const SECRET: &str = "mermaid-r15-alpha\nmermaid-r15-beta";
+    let (before, after) = previews(
+        "svg",
+        "flowchart TD\n  A[mermaid-r15-alpha<br>mermaid-r15-beta] --> B[Public]",
+        SECRET,
+    );
+    for preview in [&before, &after] {
+        assert!(
+            !preview.contains("mermaid-r15") && !preview.contains("Public"),
+            "{preview}"
+        );
+        assert!(preview.contains("Rapport"), "{preview}");
+    }
+}
+
+#[test]
+fn a_mermaid_preview_masks_its_name_as_drawn() {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.call(
+        &chat,
+        "d1",
+        "create_document",
+        json!({"name":"Schema mermaid  r15-nom","format":"svg","content":"flowchart TD\n  A --> B"}),
+    );
+    let url = link(&mut f, "document");
+    vault(&f, "NOM_TEST", "Secret de test", "mermaid r15-nom");
+    let preview = body(&mut f, "GET", &url, json!(null));
+    assert!(!preview.contains("r15-nom"), "{preview}");
+    assert!(preview.contains("Schema [...]"), "{preview}");
+}
+
+#[test]
 fn a_secret_absent_from_the_text_leaves_the_preview_untouched() {
     let (before, after) = previews("md", "Été à Québec", "font-family");
     assert!(before.contains("font-family="), "{before}");

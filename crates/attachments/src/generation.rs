@@ -21,6 +21,11 @@ pub struct Request {
     pub content: String,
 }
 impl Request {
+    /// A Mermaid diagram draws its labels decoded (`<br>`, entities): the text drawn is not the
+    /// text written.
+    pub fn is_mermaid(&self) -> bool {
+        self.format == "svg" && !is_json_diagram(&self.content)
+    }
     /// This request with `mask` applied to each text decoded, then in the form it is drawn: with
     /// the spaces the drawing puts between characters, and before any line is cut.
     pub fn masked(&self, mut mask: impl FnMut(&str) -> String) -> Self {

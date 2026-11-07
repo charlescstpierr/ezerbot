@@ -74,8 +74,9 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             [tool],
         )?;
     }
-    // A masked historical ID leaves the origin of unmatched files ambiguous.
-    // Keep those files as storage roots, but never relabel them as public unknowns.
+    // A masked historical ID, its masks read as wildcards, may name this file: its origin is
+    // then ambiguous. Keep it as a storage root, but never relabel it as a public unknown.
+    // A clean ID naming a cleaned file says nothing about this one.
     conn.execute(
         "INSERT OR IGNORE INTO wrapper_livrables
          SELECT CASE WHEN EXISTS (
@@ -84,7 +85,8 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
                   AND json_extract(c.payload,'$.call_id')=json_extract(e.payload,'$.call_id')
              WHERE e.kind='tool_result' AND json_extract(e.payload,'$.outcome.status')='done'
                AND json_extract(c.payload,'$.name')='create_document'
-               AND NOT EXISTS (SELECT 1 FROM attachments_generated known WHERE known.id=json_extract(e.payload,'$.outcome.output.id'))
+               AND instr(json_extract(e.payload,'$.outcome.output.id'),'[...]') > 0
+               AND g.id GLOB replace(json_extract(e.payload,'$.outcome.output.id'),'[...]','*')
          ) THEN 'nonattribue:' ELSE 'inconnu:' END||g.id,
                 NULL, 'document', g.id, COALESCE(json_extract(g.record,'$.name'), g.id),
                 NULL, NULL, '/api/generated/'||g.id||'/preview', g.created_at

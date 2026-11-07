@@ -951,6 +951,50 @@ fn catalogue_masked_historical_id_cannot_resurrect_a_deleted_document_as_unknown
 }
 
 #[test]
+fn a_cleaned_old_file_leaves_an_independent_orphan_document_visible() {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.document(&chat, "d1", "Nettoyé", "md");
+    f.db()
+        .execute("DELETE FROM attachments_generated", [])
+        .unwrap();
+    f.db().execute("INSERT INTO attachments_generated VALUES ('generated_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',?1,x'00','<svg/>',?2)", rusqlite::params![json!({"id":"generated_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","name":"Orphelin.pdf","format":"pdf","byte_length":1,"pages":1,"preview_url":"/api/generated/generated_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/preview"}).to_string(), 5]).unwrap();
+    f.before_the_migration();
+    let items = f.list("");
+    assert_eq!(
+        items.len(),
+        1,
+        "a cleaned file hid an unrelated orphan: {items:?}"
+    );
+    assert_eq!(items[0]["type"], "document");
+    assert_eq!(items[0]["title"], "Document");
+    assert!(items[0]["bot_id"].is_null() && items[0]["open_url"].is_null());
+}
+
+#[test]
+fn a_partly_masked_historical_id_hides_only_the_files_it_can_name() {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.document(&chat, "d1", "Ancien", "md");
+    let id: String = f
+        .db()
+        .query_row("SELECT id FROM attachments_generated", [], |r| r.get(0))
+        .unwrap();
+    let masked = format!("{}[...]{}", &id[..14], &id[id.len() - 4..]);
+    f.db().execute("UPDATE engine_run_events SET payload=json_set(payload,'$.outcome.output.id',?1) WHERE kind='tool_result' AND json_extract(payload,'$.outcome.output.id') IS NOT NULL", [masked]).unwrap();
+    f.db().execute("INSERT INTO attachments_generated VALUES ('generated_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',?1,x'00','<svg/>',?2)", rusqlite::params![json!({"id":"generated_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","name":"Orphelin.pdf","format":"pdf","byte_length":1,"pages":1,"preview_url":"/api/generated/generated_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/preview"}).to_string(), 5]).unwrap();
+    f.post("/api/conversations/delete", json!({"id":chat}));
+    f.before_the_migration();
+    let items = f.list("");
+    assert_eq!(
+        items.len(),
+        1,
+        "only the orphan the mask cannot name stays: {items:?}"
+    );
+    assert_eq!(items[0]["title"], "Document");
+}
+
+#[test]
 fn catalogue_record_failure_does_not_publish_a_livrable() {
     let mut f = Fixture::new();
     let chat = f.chat("alpha");

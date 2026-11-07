@@ -382,7 +382,8 @@ impl RunServices for BlockedServices {
     }
 
     fn on_activity(&mut self, id: &str, activity: RunActivity<'_>) {
-        self.provider.watchdog_test_activity(id, activity);
+        self.provider
+            .watchdog_test_activity(id, activity, self.internal);
     }
 }
 
@@ -627,6 +628,38 @@ fn internal_tool_holding_the_writer_is_cancelled_and_its_effect_rolls_back() {
 }
 
 #[test]
+fn external_tool_is_signalled_while_another_connection_holds_the_writer() {
+    let mut f = Fixture::new();
+    f.run("external", RunStatus::Running);
+    f.tick(0);
+    let worker = BlockedWorker::start(&f, "external");
+    let other = Connection::open(f.dir.join("workspace.sqlite")).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    f.tick(540_000);
+    worker
+        .stopped
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the watchdog must signal the external tool while another writer holds the lock");
+    other.execute_batch("ROLLBACK").unwrap();
+    let calls = worker.calls.clone();
+    assert_eq!(worker.finish(), RunProgress::Ended(TurnEnd::Stopped));
+    f.tick(555_000);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store::required(&f.conn, "external").unwrap().status,
+        RunStatus::Cancelled
+    );
+    assert_eq!(f.event_count("external", RunEventKind::Cancelled), 1);
+    let stalled = f.messages("stalled");
+    assert_eq!(stalled.len(), 1);
+    assert_eq!(
+        stalled[0]["body"],
+        "Arrêté : rien ne bougeait depuis 8 min (dernière étape : slow)."
+    );
+    assert_eq!(f.notification_count("external"), 1);
+}
+
+#[test]
 fn human_approval_and_interrupted_runs_remain_waiting_after_twenty_minutes() {
     let mut f = Fixture::new();
     let waiting = [
@@ -728,7 +761,8 @@ fn each_live_activity_clears_silence_without_waiting_for_a_scan() {
         assert_eq!(f.state()["silence"]["active"], f.start);
         let before = f.ping();
         f.clock(241_000);
-        f.provider().watchdog_test_activity("active", activity);
+        f.provider()
+            .watchdog_test_activity("active", activity, true);
         assert_eq!(f.state()["silence"], json!({}));
         assert_ne!(f.ping(), before);
         f.tick(421_000);
@@ -883,6 +917,7 @@ fn last_public_step_does_not_expose_untrusted_tool_content() {
     f.provider().watchdog_test_activity(
         "slow-run",
         RunActivity::ToolStarted("slow/private?secret=NE_PAS_EXPOSER"),
+        true,
     );
     f.tick(540_000);
     let stalled = f.messages("stalled");

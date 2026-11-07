@@ -47,6 +47,7 @@ from verify_lib import (
     session_id,
     sha256_file,
     sign_run_directory,
+    worktree_changes,
 )
 
 

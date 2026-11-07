@@ -14,14 +14,17 @@ use std::{
 };
 
 use grokbot_test_support::TestDir;
+use secret_service::{blocking::SecretService, EncryptionType};
 use zbus::{
-    blocking::{connection::Builder, Connection},
+    blocking::{connection::Builder, Connection, Proxy},
     message::Header,
-    zvariant::OwnedValue,
+    zvariant::{ObjectPath, OwnedObjectPath, OwnedValue},
 };
 
 use crate::Bus;
 
+const KEYRING_PASSWORD: &str = "ezerbot-throwaway-test-991";
+const SECRETS: &str = "org.freedesktop.secrets";
 const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 
@@ -36,6 +39,19 @@ fn package(tool: &str) -> &'static str {
 fn on_path(tool: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(tool).is_file()))
+}
+
+/// Whether a keyring test can run here. `linux-shell-build-test` (linux-shell.yml) installs no
+/// keyring and `linux-build-test` runs the same tests with one: only that job skips them, and
+/// only while the daemon is absent. Anywhere else a missing daemon still fails the test.
+pub fn keyring_runs_here() -> bool {
+    let shell_job = std::env::var("GITHUB_JOB").as_deref() == Ok("linux-shell-build-test");
+    if shell_job && !on_path("gnome-keyring-daemon") {
+        let test = std::thread::current().name().unwrap_or("test").to_owned();
+        eprintln!("SKIP {test}: gnome-keyring absent from linux-shell-build-test; linux-build-test runs it");
+        return false;
+    }
+    true
 }
 
 /// Fails the test when a tool is missing, on CI too: a test that returns early proves nothing.
@@ -178,6 +194,167 @@ impl PrivateBus {
 
     pub fn connection(&self) -> Connection {
         self.bus().connect().unwrap()
+    }
+}
+
+/// A real `gnome-keyring-daemon` with an unlocked `login` collection, on its own bus.
+pub struct Keyring {
+    daemon: Option<Process>,
+    bus: PrivateBus,
+    home: Home,
+}
+
+impl Keyring {
+    pub fn start() -> Self {
+        tools(&["dbus-daemon", "gnome-keyring-daemon"]);
+        let home = Home::new("ezk");
+        let bus = PrivateBus::new(&home);
+        let mut keyring = Self {
+            daemon: None,
+            bus,
+            home,
+        };
+        keyring.unlock();
+        keyring
+    }
+
+    pub fn bus(&self) -> Bus {
+        self.bus.bus()
+    }
+
+    pub fn address(&self) -> &str {
+        self.bus.address()
+    }
+
+    pub fn home(&self) -> &Home {
+        &self.home
+    }
+
+    fn service(&self) -> Proxy<'static> {
+        Proxy::new(
+            &self.bus.connection(),
+            SECRETS,
+            "/org/freedesktop/secrets",
+            "org.freedesktop.Secret.Service",
+        )
+        .unwrap()
+    }
+
+    fn collection(&self) -> Option<OwnedObjectPath> {
+        let path: OwnedObjectPath = self.service().call("ReadAlias", &"default").ok()?;
+        (path.as_str() != "/").then_some(path)
+    }
+
+    fn locked(&self) -> Option<bool> {
+        self.locked_at(&self.collection()?)
+    }
+    fn locked_at(&self, path: &OwnedObjectPath) -> Option<bool> {
+        Proxy::new(
+            &self.bus.connection(),
+            SECRETS,
+            path.clone(),
+            "org.freedesktop.Secret.Collection",
+        )
+        .ok()?
+        .get_property("Locked")
+        .ok()
+    }
+    pub fn lock(&self) {
+        self.lock_collection(&self.default_collection());
+    }
+
+    /// The collection the `default` alias points at now.
+    pub fn default_collection(&self) -> String {
+        self.collection().unwrap().as_str().to_owned()
+    }
+
+    /// Points `default` at another collection, as a user switching keyrings would.
+    pub fn point_default_at(&self, collection: &str) {
+        let path = ObjectPath::try_from(collection).unwrap();
+        let _: () = self
+            .service()
+            .call("SetAlias", &("default", &path))
+            .unwrap();
+        assert_eq!(self.default_collection(), collection);
+    }
+
+    /// Copies the item of `account` into another collection, as another client or an older
+    /// build that wrote to a different `default` would leave it.
+    pub fn copy_item(&self, account: &str, collection: &str) {
+        self.place_item(account, collection, false);
+    }
+
+    pub fn move_item(&self, account: &str, collection: &str) {
+        self.place_item(account, collection, true);
+    }
+
+    fn place_item(&self, account: &str, collection: &str, remove: bool) {
+        let service =
+            SecretService::connect_with_existing(EncryptionType::Plain, self.bus.connection())
+                .unwrap();
+        let found = service
+            .search_items(HashMap::from([("account", account)]))
+            .unwrap();
+        let [item] = found.unlocked.as_slice() else {
+            panic!("expected one unlocked {account} item");
+        };
+        let target = service
+            .get_all_collections()
+            .unwrap()
+            .into_iter()
+            .find(|target| target.collection_path.as_str() == collection)
+            .unwrap();
+        let attributes = item.get_attributes().unwrap();
+        target
+            .create_item(
+                &item.get_label().unwrap(),
+                attributes
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect(),
+                &item.get_secret().unwrap(),
+                false,
+                &item.get_secret_content_type().unwrap(),
+            )
+            .unwrap();
+        if remove {
+            item.delete().unwrap();
+        }
+    }
+
+    pub fn lock_collection(&self, collection: &str) {
+        let path = OwnedObjectPath::try_from(collection).unwrap();
+        let _: (Vec<OwnedObjectPath>, OwnedObjectPath) = self
+            .service()
+            .call("Lock", &(vec![ObjectPath::from(&path)],))
+            .unwrap();
+        assert_eq!(self.locked_at(&path), Some(true));
+    }
+
+    /// Restarts the daemon with the password: the `login` keyring file persists.
+    pub fn unlock(&mut self) {
+        self.stop();
+        let mut daemon = Command::new("gnome-keyring-daemon");
+        self.home
+            .env(&mut daemon)
+            .env("DBUS_SESSION_BUS_ADDRESS", self.bus.address())
+            .args(["--foreground", "--unlock", "--components=secrets"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut daemon = daemon.spawn().unwrap();
+        {
+            use std::io::Write;
+            let mut input = daemon.stdin.take().unwrap();
+            input.write_all(KEYRING_PASSWORD.as_bytes()).unwrap();
+        }
+        self.daemon = Some(Process(daemon));
+        wait_for("the unlocked login collection", || {
+            self.locked() == Some(false)
+        });
+    }
+    pub fn stop(&mut self) {
+        self.daemon = None;
     }
 }
 

@@ -3,9 +3,13 @@
 Services du bureau Linux d’Ezerbot. La crate cache zbus : aucun type de transport ne sort de son
 interface publique, et elle est vide hors Linux.
 
-- `Bus` : le seul endroit où l’on choisit un bus. En release, le bus de session ; en debug ou en
-  test, rien sans `GROKBOT_TEST_SESSION_BUS=unix:path=<socket>`, accepté seulement si le socket est
-  sous un HOME qui contient `.ezerbot-test-home`. Une valeur mal formée ne retombe sur aucun autre bus.
+- `Bus` : le seul endroit où l’on choisit un bus. Le bus de session seulement quand la coque lance le
+  wrapper (`EZERBOT_DESKTOP_SESSION=1`) hors d’un HOME de test (`.ezerbot-test-home`), quel que soit le
+  profil de build. Sinon rien, sauf `GROKBOT_TEST_SESSION_BUS=unix:path=<socket>`, accepté seulement si
+  le socket est sous un HOME qui contient `.ezerbot-test-home`. Une valeur mal formée ne retombe sur aucun autre bus.
+- `secrets` : collection par défaut de Secret Service (GNOME Keyring, KWallet), session chiffrée
+  (DH). Elle ne déverrouille jamais : verrouillée, elle est indisponible. Si le service demande de
+  confirmer une écriture ou une suppression, l’attente est bornée à 10 s, puis l’opération échoue.
 - `notifications` : `org.freedesktop.Notifications` sur une connexion longue, clic en `ActionInvoked`.
   Une alerte est identifiée par son serveur et son numéro, car un serveur redémarré réutilise les
   numéros. Le wrapper garde l’événement des 64 dernières alertes et ferme les plus anciennes. Un
@@ -20,7 +24,7 @@ interface publique, et elle est vide hors Linux.
   de l’entrée. Si le dossier de données a lui-même un tel chemin, l’enregistrement est refusé.
 - `open` : `xdg-open` sans shell, sans attendre l’application ouverte.
 - `testing` (fonctionnalité `test-support`) : HOME isolé, `dbus-daemon` sans activation, vrai
-  faux serveur de notifications.
+  `gnome-keyring-daemon`, faux serveur de notifications.
 
 ## Branchement dans la coque
 
@@ -29,5 +33,5 @@ Un lien reçu en argument passe par ce fichier jusqu'à `window.EzerbotDeepLinks
 transmet les notifications à `POST /api/notifications/native` par `EzerbotShell.notifications`.
 `tools/build-app-linux.sh` enregistre `ezerbot-linux` pour `ezerbot://`, et
 `tools/install-app-linux.py` le réenregistre pour le dossier installé. Le CI installe
-`dbus-daemon xdg-utils` (`desktop-file-utils` est facultatif) : s'il en manque un, les
+`dbus-daemon gnome-keyring xdg-utils` (`desktop-file-utils` est facultatif) : s'il en manque un, les
 tests concernés échouent en nommant le paquet.

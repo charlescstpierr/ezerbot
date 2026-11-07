@@ -19,7 +19,10 @@ use grokbot_engine::{
     run_loop::{self, RunServices},
     store,
 };
-use grokbot_forms::{redact, requests, vault::Vault};
+use grokbot_forms::{
+    redact, requests,
+    vault::{Vault, KEYRING_LOCKED},
+};
 use grokbot_session::{
     LookupOutcome, ReconciliationRequest, SendOutcome, SendRequest, SubmissionTransport,
 };
@@ -357,6 +360,11 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             validate_conversation_id(&input.conversation_id)?;
             validate_id(&input.message_id)?;
             app.require_conversation(&input.conversation_id)?;
+            // Refused before anything is kept: a locked window shows no message, so it restores
+            // the draft, and a kept copy would come back beside its resend.
+            if keyring_locked(&app.connection) {
+                return Err(ApiError::new(423, KEYRING_LOCKED));
+            }
             super::delegation::ensure_send_allowed(&app.feature_context(), &input.conversation_id)?;
             for id in &input.attachments {
                 validate_id(id)?;
@@ -1074,6 +1082,9 @@ pub(crate) fn queue_approved_action(
     name: &str,
     arguments: Value,
 ) -> Result<Value, ApiError> {
+    if keyring_locked(ctx.connection) {
+        return Err(ApiError::new(423, KEYRING_LOCKED));
+    }
     if name == super::routines_background::ACTION || name == super::routine_webhooks::ACTION {
         let existing: Option<(String, String, String)> = ctx.connection.query_row(
             "SELECT r.conversation_id,r.run_id,e.payload FROM engine_runs r JOIN engine_run_events e ON e.run_id=r.run_id WHERE r.run_id LIKE 'mcp-host-%' AND r.status IN ('queued','running','interrupted','awaiting_approval') AND e.kind='tool_call' AND json_extract(e.payload,'$.name')=?1 AND NOT EXISTS(SELECT 1 FROM forms_requests f WHERE f.run_id=r.run_id AND f.status<>'pending') ORDER BY r.rowid DESC LIMIT 1",
@@ -1383,6 +1394,22 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
     if live {
         ctx.provider.title_started();
     }
+    // Masking would refuse this turn: a durable thread card, the question stays and can be
+    // retried. Decided only by the run's owner, never over a worker that still runs it.
+    if keyring_locked(ctx.connection) {
+        ctx.connection.execute(
+            "UPDATE wrapper_engine_runs SET error=?2,error_kind='keyring' WHERE run_id=?1",
+            params![
+                run.run_id,
+                format!(
+                    "{KEYRING_LOCKED} Votre message est conservé : relancez la réponse ensuite."
+                )
+            ],
+        )?;
+        let mut services = Services::new(ctx)?;
+        fail_host(ctx.connection, &mut services, &run.run_id)?;
+        return Ok(());
+    }
     if !live && !run.run_id.starts_with("mcp-host-") {
         let _guard = guard;
         let mut services = Services::new(ctx)?;
@@ -1478,6 +1505,14 @@ fn drive_owned(
     Err(Error::InvalidInput(
         "run owner could not make progress".into(),
     ))
+}
+/// Whether masking would refuse this turn because the keyring holds secrets and refuses access.
+/// A corrupt vault is not that case: masking refuses it on its own.
+pub(crate) fn keyring_locked(conn: &Connection) -> bool {
+    conn.path().is_some_and(|path| {
+        Vault::open_app(&Path::new(path).with_extension("secrets.json"))
+            .is_ok_and(|vault| vault.is_partial())
+    })
 }
 struct RunOwner {
     provider: Provider,

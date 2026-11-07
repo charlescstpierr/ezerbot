@@ -27,6 +27,8 @@ pub const MAX_SECRET_VALUE_BYTES: usize = 4096;
 pub const MAX_MCP_ENV_BYTES: usize = 16_384;
 /// Opaque envelope used by the local connector host; never a public projection.
 pub const MCP_ENV_PURPOSE: &str = "Variables privées d’un connecteur MCP";
+/// Why nothing leaves or is kept while the keyring refuses access.
+pub const KEYRING_LOCKED: &str = "Déverrouillez votre trousseau pour continuer.";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretMetadata {
@@ -97,7 +99,7 @@ fn invalid(message: &str) -> Error {
 /// Deliberately has no Serialize or Debug implementation.
 pub struct Vault {
     path: PathBuf,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     keychain: Option<keychain::Target>,
     signature_notice: Option<&'static str>,
     /// Test double of an active keychain that refuses mutations. Production
@@ -107,6 +109,10 @@ pub struct Vault {
 }
 #[cfg(target_os = "macos")]
 mod keychain;
+#[cfg(target_os = "linux")]
+mod secret_service;
+#[cfg(target_os = "linux")]
+use secret_service as keychain;
 std::thread_local! {
     static READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -154,13 +160,18 @@ impl Vault {
         }
         let vault = Self {
             path,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             keychain: None,
             signature_notice: None,
             #[cfg(any(test, debug_assertions))]
             refuse_keychain: false,
         };
         let _file_guard = vault.lock_file(true)?;
+        #[cfg(target_os = "linux")]
+        let vault = Self {
+            keychain: keychain::Target::for_vault(&vault.path, false),
+            ..vault
+        };
         // The companion lock keeps every other opener of this vault out, so the
         // thread mutex is released before the scan of the parent directory, whose
         // cost grows with the directory.
@@ -177,17 +188,20 @@ impl Vault {
         Ok(vault)
     }
     /// Application entry point. macOS release hosts prefer Keychain; development
-    /// uses only an explicit throwaway override, otherwise the file vault.
+    /// uses only an explicit throwaway override, otherwise the file vault. Linux
+    /// never falls back to the file: without a bus the vault refuses new secrets.
     /// The empty legacy file remains a recovery container. ChatGPT credentials
     /// are never opened by this code.
     pub fn open_app(path: &Path) -> Result<Self> {
-        Ok(Self::open_app_known(path)?.0)
+        let vault = Self::app_store(path)?;
+        vault.migrate_on_open()?;
+        Ok(vault)
     }
-    /// `open_app` and what its one read found, keychain migration included: redaction masks with
-    /// it instead of reading the vault again (`redact::app_patterns`, #328).
-    pub(crate) fn open_app_known(path: &Path) -> Result<(Self, Vec<String>)> {
+    /// `open_app` before its read: redaction masks with its own read instead of a second one
+    /// (`redact::app_patterns`, #328).
+    pub(crate) fn app_store(path: &Path) -> Result<Self> {
         let vault = Self::create(path)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let mut vault = vault;
         #[cfg(target_os = "macos")]
         match OS_MODE.load(std::sync::atomic::Ordering::Relaxed) {
@@ -195,8 +209,12 @@ impl Vault {
             2 => vault.keychain = keychain::Target::for_app(),
             _ => (),
         }
-        let values = vault.known_values()?;
-        Ok((vault, values))
+        // No per-binary ACL here, so mode 1 (no stable signature) has no Linux meaning.
+        #[cfg(target_os = "linux")]
+        if OS_MODE.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+            vault.keychain = keychain::Target::for_vault(&vault.path, true);
+        }
+        Ok(vault)
     }
     /// Simulates keychain refusal without falling back to plaintext storage.
     #[cfg(any(test, debug_assertions))]
@@ -207,7 +225,7 @@ impl Vault {
         Ok(vault)
     }
     pub fn storage_status(&self) -> StorageStatus {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if self.keychain.is_some() {
             return keychain::status(&self.path);
         }
@@ -218,6 +236,15 @@ impl Vault {
             notice_kind: self.signature_notice.map(|_| "info"),
         }
     }
+    /// Whether secrets may be missing from what can be read: the keyring holds some and refuses
+    /// access. Nothing can then be masked for certain, whatever the reads return.
+    pub fn is_partial(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.keychain.is_some() {
+            return keychain::is_partial(&self.path);
+        }
+        false
+    }
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -225,7 +252,7 @@ impl Vault {
     pub(crate) fn handle(&self) -> Self {
         Self {
             path: self.path.clone(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             keychain: self.keychain.clone(),
             signature_notice: self.signature_notice,
             #[cfg(any(test, debug_assertions))]
@@ -234,7 +261,7 @@ impl Vault {
     }
     /// Whether both handles read the same secrets: same file, same backend.
     pub(crate) fn same_store(&self, other: &Self) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if self.keychain.is_some() != other.keychain.is_some() {
             return false;
         }
@@ -355,12 +382,29 @@ impl Vault {
     pub fn values_for_redaction(&self) -> Result<Vec<String>> {
         self.known_values()
     }
-    /// Restricted to redaction, not model context construction.
+    /// Restricted to redaction, not model context construction. Refuses a partial read: a secret
+    /// it leaves out would go out unmasked.
     pub(crate) fn known_values(&self) -> Result<Vec<String>> {
         let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
+        let secrets = self.read();
+        if self.is_partial() {
+            return Err(invalid(KEYRING_LOCKED));
+        }
+        Ok(Self::values_of(secrets?))
+    }
+    /// The keychain migration on open. A partial vault still opens, and every read then refuses.
+    pub(crate) fn migrate_on_open(&self) -> Result<()> {
+        let _guard = access(&self.path);
+        let _file_guard = self.lock_file(true)?;
+        match self.read() {
+            Err(_) if self.is_partial() => Ok(()),
+            read => read.map(drop),
+        }
+    }
+    fn values_of(secrets: Secrets) -> Vec<String> {
         let mut values = Vec::new();
-        for (name, secret) in self.read()? {
+        for (name, secret) in secrets {
             // Connector envelopes preserve short/whitespace-sensitive values.
             // Long values also belong to the GLOBAL redaction boundary: another
             // connector or the provider must not echo a different server's key.
@@ -401,14 +445,14 @@ impl Vault {
             }
             values.push(secret.value);
         }
-        Ok(values)
+        values
     }
 
     // Call only while holding this vault's VAULT_ACCESS entry and its companion-file lock. Parse
     // errors must not echo input: serde diagnostics can contain secret strings.
     fn read(&self) -> Result<Secrets> {
         READS.set(READS.get() + 1);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(target) = &self.keychain {
             return keychain::snapshot(self, target);
         }
@@ -447,11 +491,11 @@ impl Vault {
             self.write(&file)?;
             return Ok(());
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(target) = &self.keychain {
             return keychain::set(self, target, key, secrets.get(key).unwrap());
         }
-        #[cfg(not(any(test, debug_assertions, target_os = "macos")))]
+        #[cfg(not(any(test, debug_assertions, target_os = "macos", target_os = "linux")))]
         let _ = key;
         self.write(secrets)
     }
@@ -467,7 +511,7 @@ impl Vault {
                 "Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez.",
             ));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(target) = &self.keychain {
             return keychain::remove(self, target, key);
         }

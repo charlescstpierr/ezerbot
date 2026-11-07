@@ -1,0 +1,537 @@
+//! Real GNOME Keyring tests: every operation goes through a throwaway bus and a throwaway
+//! HOME, never the session bus or a real keyring.
+#![cfg(all(target_os = "linux", debug_assertions))]
+#[path = "support/launch_identity.rs"]
+mod launch_identity;
+#[path = "support/linux_host.rs"]
+mod linux_host;
+use grokbot_forms::vault::{Vault, MCP_ENV_PURPOSE};
+use grokbot_linux_desktop::{secrets::Collection, testing::Keyring};
+use linux_host::Host;
+use serde_json::json;
+use sha2::Digest;
+use std::{fs, path::PathBuf};
+
+struct Fixture {
+    keyring: Keyring,
+    db: PathBuf,
+}
+impl Fixture {
+    fn new() -> Self {
+        let keyring = Keyring::start();
+        let db = keyring.home().path().join("workspace.sqlite");
+        Self { keyring, db }
+    }
+    fn file(&self) -> PathBuf {
+        self.db.with_extension("secrets.json")
+    }
+    fn vault(&self) -> Vault {
+        Vault::open_test_keychain(&self.file(), self.keyring.address()).unwrap()
+    }
+    fn scope(&self) -> String {
+        format!(
+            "ca.ezerbot.secrets.v1.{:x}",
+            sha2::Sha256::digest(
+                fs::canonicalize(self.file())
+                    .unwrap()
+                    .as_os_str()
+                    .as_encoded_bytes()
+            )
+        )
+    }
+    fn stored(&self) -> Vec<String> {
+        let collection = Collection::open(&self.keyring.bus(), self.scope()).unwrap();
+        let mut names: Vec<String> = collection
+            .entries()
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        names
+    }
+    fn launch(&self, override_address: Option<&str>) -> Host {
+        self.launch_with(override_address, None)
+    }
+    fn launch_with(&self, override_address: Option<&str>, ambient: Option<&str>) -> Host {
+        linux_host::launch(self.keyring.home(), &self.db, override_address, ambient)
+    }
+    /// The plaintext file as it is on disk. A migrated vault no longer opens without its keyring.
+    fn file_entries(&self) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::from_str(&fs::read_to_string(self.file()).unwrap()).unwrap()
+    }
+    fn bus(&self) -> String {
+        self.keyring.address().to_owned()
+    }
+}
+
+fn refused_until_unlocked(host: &Host, path: &str, id: &str) {
+    let Err(error) = host.try_post(path, json!({"id":id})) else {
+        panic!("{path} accepted with a locked keyring");
+    };
+    let ureq::Error::Status(423, response) = *error else {
+        panic!("{path} failed otherwise: {error}");
+    };
+    assert!(response.into_string().unwrap().contains("Déverrouillez"));
+}
+
+#[test]
+fn real_secret_service_migration_persistence_rotation_and_deletion() {
+    let f = Fixture::new();
+    let file = Vault::open(&f.file()).unwrap();
+    file.set("FORM_TOKEN", "Formulaire", "valeur-factice-form-9931")
+        .unwrap();
+    let private = "valeur-factice-mcp-9931";
+    let env = json!({"variables":{"API_TOKEN":private}}).to_string();
+    file.set("MCP_TEST_ENV", MCP_ENV_PURPOSE, &env).unwrap();
+    let before = file.list().unwrap();
+    let vault = f.vault();
+    assert_eq!(vault.storage_status().backend, "keychain");
+    assert_eq!(vault.list().unwrap(), before);
+    assert!(file.list().unwrap().is_empty());
+    assert_eq!(f.stored(), ["FORM_TOKEN", "MCP_TEST_ENV"]);
+    assert_eq!(
+        vault.get("MCP_TEST_ENV").unwrap().as_deref(),
+        Some(env.as_str())
+    );
+    vault
+        .set("FORM_TOKEN", "Modification", "valeur-factice-rotated-9931")
+        .unwrap();
+    assert_eq!(
+        f.vault().get("FORM_TOKEN").unwrap().as_deref(),
+        Some("valeur-factice-rotated-9931")
+    );
+    vault.remove("FORM_TOKEN").unwrap();
+    assert!(f.vault().get("FORM_TOKEN").unwrap().is_none());
+    assert_eq!(f.stored(), ["MCP_TEST_ENV"]);
+    assert!(!fs::read_to_string(f.file()).unwrap().contains("9931"));
+}
+
+#[test]
+fn locked_secret_service_refuses_plaintext_and_unconfirmed_delete_is_not_claimed() {
+    let mut f = Fixture::new();
+    let vault = f.vault();
+    vault
+        .set("TOKEN", "Test", "valeur-factice-before-lock")
+        .unwrap();
+    f.keyring.lock();
+    let created = vault
+        .set("NEW_TOKEN", "Secours", "valeur-factice-fallback")
+        .unwrap_err()
+        .to_string();
+    assert!(created.contains("service de secrets"));
+    assert!(!created.contains("valeur-factice"));
+    let rotated = vault
+        .set("TOKEN", "Rotation en secours", "valeur-factice-latest-file")
+        .unwrap_err()
+        .to_string();
+    assert!(!rotated.contains("valeur-factice"));
+    assert_eq!(vault.storage_status().backend, "file_fallback");
+    let plaintext = fs::read_to_string(f.file()).unwrap();
+    assert!(!plaintext.contains("valeur-factice-fallback"));
+    assert!(!plaintext.contains("valeur-factice-latest-file"));
+    assert!(f.file_entries().is_empty());
+    let error = vault.remove("TOKEN").unwrap_err().to_string();
+    assert!(error.contains("Suppression non confirmée"));
+    assert!(!error.contains("valeur-factice"));
+    f.keyring.unlock();
+    assert_eq!(
+        vault.get("TOKEN").unwrap().as_deref(),
+        Some("valeur-factice-before-lock")
+    );
+    assert!(vault.get("NEW_TOKEN").unwrap().is_none());
+    assert_eq!(vault.storage_status().backend, "keychain");
+    assert!(f.file_entries().is_empty());
+}
+
+#[test]
+fn a_service_that_disappears_refuses_new_secrets_and_keeps_the_old_ones() {
+    let mut f = Fixture::new();
+    let vault = f.vault();
+    vault
+        .set("TOKEN", "Test", "valeur-factice-before-stop")
+        .unwrap();
+    f.keyring.stop();
+    let error = vault
+        .set("NEW_TOKEN", "Après arrêt", "valeur-factice-after-stop")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("indisponible"));
+    assert_eq!(vault.storage_status().backend, "file_fallback");
+    assert_eq!(
+        vault.storage_status().label,
+        "Service de secrets indisponible"
+    );
+    assert!(!fs::read_to_string(f.file())
+        .unwrap()
+        .contains("valeur-factice"));
+    f.keyring.unlock();
+    assert_eq!(
+        vault.get("TOKEN").unwrap().as_deref(),
+        Some("valeur-factice-before-stop")
+    );
+    assert!(vault.get("NEW_TOKEN").unwrap().is_none());
+}
+
+#[test]
+fn wrapper_first_start_projects_storage_and_restart_uses_secret_service_without_plaintext() {
+    let f = Fixture::new();
+    Vault::open(&f.file())
+        .unwrap()
+        .set("TOKEN", "Test HTTP", "valeur-factice-http-9931")
+        .unwrap();
+    {
+        let host = f.launch(Some(&f.bus()));
+        let state = host.state();
+        assert_eq!(state["forms"]["storage"]["backend"], "keychain");
+        assert_eq!(
+            state["forms"]["storage"]["label"],
+            "Service de secrets du bureau"
+        );
+        assert_eq!(state["forms"]["secrets"][0]["name"], "TOKEN");
+        assert!(!state.to_string().contains("valeur-factice"));
+        assert!(f.file_entries().is_empty());
+        assert!(!host.output().contains("valeur-factice"));
+    }
+    {
+        let host = f.launch(Some(&f.bus()));
+        assert_eq!(host.state()["forms"]["secrets"][0]["name"], "TOKEN");
+        host.delete("TOKEN");
+        assert!(!host.output().contains("valeur-factice"));
+    }
+    assert!(f.launch(Some(&f.bus())).state()["forms"]["secrets"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(f.stored().is_empty());
+}
+
+#[test]
+fn mcp_after_locked_restart_explains_unavailable_store_instead_of_missing_variables() {
+    let f = Fixture::new();
+    let id = {
+        let host = f.launch(Some(&f.bus()));
+        host.post("/api/mcp/add", json!({"name":"Atelier jetable","command":"/usr/bin/false","arguments":[],"environment":{"API_TOKEN":"valeur-factice-mcp-locked"}}))["id"].as_str().unwrap().to_owned()
+    };
+    {
+        let host = f.launch(Some(&f.bus()));
+        assert_eq!(host.state()["forms"]["storage"]["backend"], "keychain");
+        assert!(f.file_entries().is_empty());
+    }
+    f.keyring.lock();
+    let host = f.launch(Some(&f.bus())); // No in-memory copy of the migrated value.
+    assert_eq!(host.state()["forms"]["storage"]["backend"], "file_fallback");
+    refused_until_unlocked(&host, "/api/mcp/restart", &id);
+    let state = host.state();
+    let public = state.to_string();
+    assert!(public.contains("Vérifier le stockage"));
+    assert!(public.contains("service de secrets du bureau"));
+    assert!(!public.contains("macOS"));
+    assert!(!public.contains("absentes du coffre"));
+    assert!(!public.contains("valeur-factice-mcp-locked"));
+    assert!(!host.output().contains("valeur-factice"));
+}
+
+#[test]
+fn a_locked_keyring_keeps_the_mcp_connector_and_its_secret() {
+    let mut f = Fixture::new();
+    let id = {
+        let host = f.launch(Some(&f.bus()));
+        host.post("/api/mcp/add", json!({"name":"Suppression jetable","command":"/usr/bin/false","arguments":[],"environment":{"API_TOKEN":"valeur-factice-delete"}}))["id"].as_str().unwrap().to_owned()
+    };
+    {
+        let host = f.launch(Some(&f.bus()));
+        assert_eq!(host.state()["forms"]["storage"]["backend"], "keychain");
+    }
+    f.keyring.lock();
+    {
+        let host = f.launch(Some(&f.bus()));
+        refused_until_unlocked(&host, "/api/mcp/remove", &id);
+        let state = host.state();
+        assert_eq!(state["mcp"]["servers"].as_array().unwrap().len(), 1);
+    }
+    f.keyring.unlock();
+    let host = f.launch(Some(&f.bus()));
+    assert_eq!(host.state()["mcp"]["servers"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        host.state()["forms"]["secrets"].as_array().unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn debug_without_override_never_reaches_a_keyring_on_the_ambient_bus() {
+    let f = Fixture::new();
+    Vault::open(&f.file())
+        .unwrap()
+        .set("TOKEN", "Sans override", "valeur-factice-no-override")
+        .unwrap();
+    for _ in 0..2 {
+        let host = f.launch_with(None, Some(&f.bus()));
+        let state = host.state();
+        assert_eq!(state["forms"]["storage"]["backend"], "file_fallback");
+        assert_eq!(state["forms"]["secrets"][0]["name"], "TOKEN");
+        assert_eq!(
+            Vault::open(&f.file())
+                .unwrap()
+                .get("TOKEN")
+                .unwrap()
+                .as_deref(),
+            Some("valeur-factice-no-override")
+        );
+    }
+    assert!(f.stored().is_empty());
+}
+
+#[test]
+fn invalid_debug_override_never_falls_through_and_french_notice_is_visible() {
+    let f = Fixture::new();
+    Vault::open(&f.file())
+        .unwrap()
+        .set("TOKEN", "Test", "valeur-factice-file-9931")
+        .unwrap();
+    let socket = f.bus();
+    for malformed in [
+        format!("{socket},guid=0123456789abcdef0123456789abcdef"),
+        socket.replace("unix:path=", "unix:abstract="),
+        "unix:path=/tmp/ezerbot-not-under-home/bus".to_owned(),
+        format!("{socket};unix:path=/tmp/other"),
+    ] {
+        let host = f.launch_with(Some(&malformed), Some(&f.bus()));
+        let state = host.state();
+        assert_eq!(state["forms"]["storage"]["backend"], "file_fallback");
+        assert_eq!(
+            state["forms"]["storage"]["label"],
+            "Service de secrets indisponible"
+        );
+        let notice = state["forms"]["storage"]["notice"].as_str().unwrap();
+        assert!(notice.contains("ne sont pas enregistrés"));
+        assert!(!notice.contains("fichier de secours"));
+        assert!(!notice.contains("non chiffré"));
+        assert_eq!(state["forms"]["secrets"][0]["name"], "TOKEN");
+    }
+    let outside = Fixture::new();
+    let link = f.keyring.home().path().join("bus-lien");
+    let target = outside.bus();
+    std::os::unix::fs::symlink(target.strip_prefix("unix:path=").unwrap(), &link).unwrap();
+    let host = f.launch(Some(&format!("unix:path={}", link.display())));
+    assert_eq!(
+        host.state()["forms"]["storage"]["backend"],
+        "file_fallback",
+        "a link under HOME must not reach a bus outside it"
+    );
+    assert!(f.stored().is_empty());
+    assert!(fs::read_to_string(f.file())
+        .unwrap()
+        .contains("valeur-factice-file-9931"));
+}
+
+/// Où vivent les secrets est un fait du coffre, pas du lancement. Un coffre migré, ouvert par un
+/// hôte sans bus (ni coque, ni override), est indisponible : il ne se fait pas passer pour un
+/// coffre complet et n'écrit aucun secret en clair.
+#[test]
+fn a_migrated_vault_opened_without_a_bus_is_unavailable_and_never_plaintext() {
+    let f = Fixture::new();
+    f.vault()
+        .set("TOKEN", "Migré", "valeur-factice-migree-4417")
+        .unwrap();
+    assert_eq!(f.stored(), ["TOKEN"]);
+    let host = f.launch(None);
+    let state = host.state();
+    assert_eq!(state["forms"]["storage"]["backend"], "file_fallback");
+    assert_eq!(state["vault"]["locked"], true, "masking must refuse");
+    let bot = state["bots"][0]["id"].as_str().unwrap().to_owned();
+    let put = host.try_post(
+        "/api/secrets/put",
+        json!({"bot_id":bot,"name":"NOUVEAU","description":"Sans bus","value":"valeur-factice-en-clair-5521"}),
+    );
+    assert!(put.is_err(), "a secret was accepted without the keyring");
+    let plaintext = fs::read_to_string(f.file()).unwrap();
+    assert!(!plaintext.contains("valeur-factice"), "plaintext on disk");
+    assert!(!host.output().contains("valeur-factice"));
+    assert_eq!(f.stored(), ["TOKEN"]);
+}
+
+/// Verrouiller ou déverrouiller le trousseau hors de l'app n'écrit aucune ligne. La fenêtre au
+/// repos ne relit l'état que sur une nouvelle révision de `/api/ping` : la révision suit donc le
+/// trousseau, sinon le bandeau et le bouton Envoyer restent figés.
+#[test]
+fn the_ping_revision_follows_the_keyring_both_ways() {
+    let mut f = Fixture::new();
+    f.vault()
+        .set("TOKEN", "Révision", "valeur-factice-revision-3318")
+        .unwrap();
+    let host = f.launch(Some(&f.bus()));
+    let ping = || {
+        host.get("/api/ping")["revision"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let open = ping();
+    assert_eq!(open, ping(), "stable while nothing changes");
+    f.keyring.lock();
+    let locked = ping();
+    assert_ne!(open, locked, "locking must wake the idle window");
+    assert_eq!(locked, ping(), "stable while locked");
+    assert_eq!(host.state()["vault"]["locked"], true);
+    let locked = ping();
+    f.keyring.unlock();
+    let unlocked = ping();
+    assert_ne!(locked, unlocked, "unlocking must wake the idle window");
+    assert_eq!(host.state()["vault"]["locked"], false);
+    assert!(!host.output().contains("valeur-factice"));
+}
+
+/// La fenêtre montrait le compositeur, puis le trousseau s'est verrouillé avant Envoyer. L'envoi
+/// est refusé avant d'être conservé : le brouillon que la fenêtre remet en place est la seule
+/// copie, et son renvoi après déverrouillage ne fait pas de doublon.
+#[test]
+fn a_send_refused_by_a_locked_keyring_keeps_nothing() {
+    let mut f = Fixture::new();
+    f.vault()
+        .set("TOKEN", "Envoi", "valeur-factice-envoi-7712")
+        .unwrap();
+    let host = f.launch(Some(&f.bus()));
+    let chat = host.post("/api/conversations", json!({"title":"Trousseau"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let send = |id: &str| {
+        host.try_post(
+            "/api/send",
+            json!({"conversation_id":chat,"message_id":id,"body":"Bonjour, une seule fois"}),
+        )
+    };
+    f.keyring.lock();
+    let Err(refused) = send("premier") else {
+        panic!("a send was accepted with a locked keyring");
+    };
+    let ureq::Error::Status(423, response) = *refused else {
+        panic!("the send failed otherwise: {refused}");
+    };
+    assert!(response.into_string().unwrap().contains("Déverrouillez"));
+    f.keyring.unlock();
+    send("second").unwrap();
+    let state = host.wait_state(|s| s["vault"]["locked"] == false);
+    let users: Vec<_> = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == chat.as_str())
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .map(|m| m["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        users,
+        ["second"],
+        "the refused send was kept: its resend duplicates it"
+    );
+}
+
+/// Les secrets restent là où la migration les a mis. Si l'alias `default` passe à une collection
+/// vide, le coffre les retrouve et les masque ; si leur collection se verrouille, le masquage
+/// refuse au lieu de traiter le coffre comme vide.
+#[test]
+fn moving_the_default_alias_to_an_empty_collection_keeps_the_secrets_masked() {
+    const SESSION: &str = "/org/freedesktop/secrets/collection/session";
+    let f = Fixture::new();
+    let value = ["valeur", "factice", "alias", "8841"].join("-");
+    f.vault().set("TOKEN", "Alias", &value).unwrap();
+    let origin = f.keyring.default_collection();
+    assert_ne!(origin, SESSION);
+    f.keyring.point_default_at(SESSION);
+    let vault = f.vault();
+    assert!(
+        vault.values_for_redaction().unwrap().contains(&value),
+        "the secret left masking when default moved"
+    );
+    assert!(
+        f.file().with_extension("keyring").exists(),
+        "the marker was dropped"
+    );
+    f.keyring.lock_collection(&origin);
+    let refused = Vault::open_test_keychain(&f.file(), f.keyring.address())
+        .unwrap()
+        .values_for_redaction()
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("Déverrouillez"), "{refused}");
+    assert!(!refused.contains(&value));
+}
+
+/// Un coffre réparti sur deux collections : chaque rotation remplace le secret là où il vit,
+/// sans laisser l'ancienne valeur à côté de la nouvelle.
+#[test]
+fn rotating_secrets_split_across_collections_replaces_each_where_it_lives() {
+    const SESSION: &str = "/org/freedesktop/secrets/collection/session";
+    let f = Fixture::new();
+    let value = |name: &str| ["valeur", "factice", name, "5517"].join("-");
+    let vault = f.vault();
+    vault.set("ALPHA", "Alpha", &value("alpha")).unwrap();
+    vault.set("BETA", "Beta", &value("beta")).unwrap();
+    f.keyring.move_item("BETA", SESSION);
+    let vault = f.vault();
+    assert!(
+        vault.set("ALPHA", "Alpha", &value("alpha-2")).is_ok(),
+        "the rotation of ALPHA was refused"
+    );
+    assert!(
+        vault.set("BETA", "Beta", &value("beta-2")).is_ok(),
+        "the rotation of BETA was refused"
+    );
+    assert_eq!(f.stored(), ["ALPHA", "BETA"]);
+    let masked = f.vault().values_for_redaction().unwrap();
+    for name in ["alpha-2", "beta-2"] {
+        assert!(masked.contains(&value(name)), "{name} is not masked");
+    }
+}
+
+/// Deux éléments pour un même compte : la lecture ne choisit pas, elle refuse ; la rotation
+/// refuse aussi. Supprimer le secret efface toutes ses copies et rend le coffre lisible.
+#[test]
+fn an_account_found_twice_refuses_masking_and_rotation_until_removed() {
+    const SESSION: &str = "/org/freedesktop/secrets/collection/session";
+    let f = Fixture::new();
+    let value = |name: &str| ["valeur", "factice", name, "6623"].join("-");
+    let vault = f.vault();
+    vault.set("ALPHA", "Alpha", &value("alpha")).unwrap();
+    vault.set("BETA", "Beta", &value("beta")).unwrap();
+    f.keyring.copy_item("BETA", SESSION);
+    let vault = f.vault();
+    let refused = vault.values_for_redaction();
+    assert!(refused.is_err(), "masking chose one of two BETA items");
+    assert!(
+        vault.set("BETA", "Beta", &value("beta-2")).is_err(),
+        "a rotation wrote beside two BETA items"
+    );
+    vault.remove("BETA").unwrap();
+    let masked = f.vault().values_for_redaction().unwrap();
+    assert!(masked.contains(&value("alpha")), "alpha is not masked");
+}
+
+/// Un secret déjà lu ne survit pas au verrouillage en mémoire : tant que le trousseau refuse,
+/// la lecture refuse aussi, puis le secret revient au déverrouillage.
+#[test]
+fn a_keyring_locked_after_a_read_serves_no_secret_from_memory() {
+    let mut f = Fixture::new();
+    let value = ["valeur", "factice", "cache", "7319"].join("-");
+    let vault = f.vault();
+    vault.set("TOKEN", "Jeton", &value).unwrap();
+    assert_eq!(vault.get("TOKEN").unwrap().as_deref(), Some(value.as_str()));
+    f.keyring.lock();
+    match vault.get("TOKEN") {
+        Ok(Some(_)) => panic!("a locked keyring still served the secret from memory"),
+        Ok(None) => panic!("a locked keyring read as empty"),
+        Err(error) => assert!(error.to_string().contains("verrouillé"), "{error}"),
+    }
+    f.keyring.unlock();
+    assert!(
+        vault.get("TOKEN").unwrap().as_deref() == Some(value.as_str()),
+        "the secret did not come back after the unlock"
+    );
+}

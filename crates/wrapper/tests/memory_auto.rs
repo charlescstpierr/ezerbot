@@ -15,7 +15,7 @@ struct Fixture {
     app: App,
     server: FakeOpenAi,
     path: PathBuf,
-    _dir: grokbot_test_support::TestDir,
+    _dir: Option<grokbot_test_support::TestDir>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -24,6 +24,9 @@ impl Fixture {
     fn with_small_model(memory_model: bool) -> Self {
         let guard = grokbot_test_support::TestDir::new("memory-auto");
         let path = guard.to_path_buf().join("workspace.sqlite");
+        Self::at(path, memory_model, Some(guard))
+    }
+    fn at(path: PathBuf, memory_model: bool, guard: Option<grokbot_test_support::TestDir>) -> Self {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1407,5 +1410,100 @@ fn known_vault_values_are_excluded_even_without_secret_keywords() {
     f.send(&c, "one", "Je préfère utiliser valeur-factice-inconnue.");
     f.settle();
     assert!(f.calls().is_empty());
+    assert!(f.facts("grokbot").is_empty());
+}
+
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[test]
+fn a_secret_kept_in_secret_service_still_stops_automatic_memory() {
+    if support::keyring_phases(
+        "a_secret_kept_in_secret_service_still_stops_automatic_memory",
+        1,
+        |_, _| {},
+    )
+    .is_none()
+    {
+        return;
+    }
+    let mut f = Fixture::new();
+    let file = f.path.with_extension("secrets.json");
+    let vault = grokbot_forms::vault::Vault::open_app(&file).unwrap();
+    assert_eq!(vault.storage_status().backend, "keychain");
+    vault
+        .set("PORCELAINE", "Piège synthétique", "porcelaine ambrée")
+        .unwrap();
+    assert!(!std::fs::read_to_string(&file)
+        .unwrap()
+        .contains("porcelaine"));
+    let c = f.conv("grokbot");
+    f.script(json!([fact("Je préfère la porcelaine ambrée.", None)]));
+    f.send(&c, "m", "Je préfère la porcelaine ambrée.");
+    f.settle();
+    assert_eq!(
+        f.calls().len(),
+        0,
+        "the secret reached the extraction model"
+    );
+    assert!(f.facts("grokbot").is_empty());
+}
+
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[test]
+fn a_secret_migrated_then_locked_across_a_restart_still_stops_automatic_memory() {
+    use grokbot_forms::vault::Vault;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let Some(phase) = support::keyring_phases(
+        "a_secret_migrated_then_locked_across_a_restart_still_stops_automatic_memory",
+        2,
+        |phase, keyring| {
+            if phase == 0 {
+                return;
+            }
+            let file = keyring.home().path().join("workspace.secrets.json");
+            Vault::open(&file)
+                .unwrap()
+                .set("PORCELAINE", "Piège synthétique", "porcelaine ambrée")
+                .unwrap();
+            Vault::open_test_keychain(&file, keyring.address()).unwrap();
+            assert!(!std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("porcelaine"));
+            keyring.lock();
+        },
+    ) else {
+        return;
+    };
+    let path = home.unwrap().join("workspace.sqlite");
+    let mut f = Fixture::at(path, true, None);
+    let saved = f.path.with_extension("conv");
+    if phase == 0 {
+        let c = f.conv("grokbot");
+        std::fs::write(&saved, c).unwrap();
+        return;
+    }
+    let c = std::fs::read_to_string(&saved).unwrap();
+    let vault = Vault::open_app(&f.path.with_extension("secrets.json")).unwrap();
+    assert_eq!(vault.storage_status().backend, "file_fallback");
+    f.script(json!([fact("Je préfère la porcelaine ambrée.", None)]));
+    // Trousseau verrouillé : l'envoi est refusé avant d'être conservé, aucun tour ne part.
+    let refused = f.app.api(
+        "POST",
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"m","body":"Je préfère la porcelaine ambrée."})
+            .to_string()
+            .as_bytes(),
+    );
+    assert!(format!("{:?}", refused.expect_err("refused")).contains("Déverrouillez"));
+    let runs: i64 = f
+        .db()
+        .query_row("SELECT count(*) FROM wrapper_engine_runs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(runs, 0, "a turn started while the keyring is locked");
+    f.settle();
+    assert_eq!(
+        f.calls().len(),
+        0,
+        "the secret reached the extraction model"
+    );
     assert!(f.facts("grokbot").is_empty());
 }

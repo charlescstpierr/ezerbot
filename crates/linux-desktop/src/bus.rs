@@ -24,33 +24,39 @@ impl std::fmt::Display for Unavailable {
 }
 impl std::error::Error for Unavailable {}
 
-/// Which bus a service talks to. The login session bus only exists in release builds:
-/// a debug or test binary can reach nothing but a throwaway bus named explicitly.
+/// The variable the Linux shell sets on the wrapper it starts for the user's desktop session.
+/// It is the only way to the login session bus: a binary started any other way (a test, in any
+/// build profile, a script) reaches nothing but a throwaway bus named explicitly.
+pub const DESKTOP_SESSION: &str = "EZERBOT_DESKTOP_SESSION";
+
+/// Which bus a service talks to.
 #[derive(Clone)]
 pub enum Bus {
-    #[cfg(not(debug_assertions))]
     Session,
-    #[cfg(debug_assertions)]
     Private(String),
     /// A malformed override must never fall through to another bus.
-    #[cfg(debug_assertions)]
     Refused,
 }
 
 impl Bus {
-    /// Release: the session bus. Debug: nothing without `GROKBOT_TEST_SESSION_BUS`; with it,
-    /// only `unix:path=<socket>` under a HOME that holds `.ezerbot-test-home`.
+    /// `GROKBOT_TEST_SESSION_BUS` first: only `unix:path=<socket>` under a HOME that holds
+    /// `.ezerbot-test-home`. Then the session bus, only when the shell said so with
+    /// `EZERBOT_DESKTOP_SESSION=1` and HOME is not a test HOME. Otherwise nothing, whatever
+    /// the build profile.
     pub fn for_app() -> Option<Self> {
-        #[cfg(not(debug_assertions))]
-        return Some(Self::Session);
-        #[cfg(debug_assertions)]
-        {
-            let raw = std::env::var_os("GROKBOT_TEST_SESSION_BUS")?;
-            Some(checked_override(&raw).map_or(Self::Refused, Self::Private))
+        if let Some(raw) = std::env::var_os("GROKBOT_TEST_SESSION_BUS") {
+            return Some(checked_override(&raw).map_or(Self::Refused, Self::Private));
         }
+        let shell = std::env::var_os(DESKTOP_SESSION).as_deref() == Some(std::ffi::OsStr::new("1"));
+        // A test HOME never reaches the session bus, even through a real shell.
+        let test_home = std::env::var_os("HOME").is_some_and(|home| {
+            std::path::Path::new(&home)
+                .join(".ezerbot-test-home")
+                .exists()
+        });
+        (shell && !test_home).then_some(Self::Session)
     }
 
-    #[cfg(debug_assertions)]
     pub fn private(address: impl Into<String>) -> Self {
         Self::Private(address.into())
     }
@@ -59,11 +65,8 @@ impl Bus {
         let bus = self.clone();
         bounded(CONNECT_LIMIT, move || {
             let builder = match &bus {
-                #[cfg(not(debug_assertions))]
                 Self::Session => Builder::session(),
-                #[cfg(debug_assertions)]
                 Self::Private(address) => Builder::address(address.as_str()),
-                #[cfg(debug_assertions)]
                 Self::Refused => return Err(Unavailable),
             };
             builder
@@ -100,7 +103,6 @@ pub(crate) fn bounded<T: Send + 'static>(
     receiver.recv_timeout(limit).map_err(|_| Unavailable)?
 }
 
-#[cfg(debug_assertions)]
 fn checked_override(raw: &std::ffi::OsStr) -> Option<String> {
     use std::path::Path;
     let home = std::fs::canonicalize(std::env::var_os("HOME")?).ok()?;

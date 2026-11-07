@@ -105,8 +105,8 @@ pub fn app_patterns(path: &Path) -> Result<Patterns> {
     if let Some(patterns) = kept {
         return Ok(Patterns(patterns));
     }
-    let (vault, values) = Vault::open_app_known(path)?;
-    let mut patterns = patterns_of(values)?;
+    let vault = Vault::app_store(path)?;
+    let mut patterns = read_patterns(&vault)?;
     HELD.with_borrow_mut(|held| {
         if let Some(read) = held
             .as_mut()

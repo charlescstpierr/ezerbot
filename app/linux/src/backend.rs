@@ -121,6 +121,8 @@ impl Backend {
         let mut bytes = [0u8; 32];
         getrandom::getrandom(&mut bytes).map_err(|_| START_ERROR)?;
         let spawned = Command::new(wrapper)
+            // The one launch that is the user's desktop session (`grokbot_linux_desktop::Bus`).
+            .env("EZERBOT_DESKTOP_SESSION", "1")
             .args(["--port", "0", "--db"])
             .arg(directory.join("ezerbot.sqlite"))
             .stdin(Stdio::piped())

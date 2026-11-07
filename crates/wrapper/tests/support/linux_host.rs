@@ -71,7 +71,10 @@ pub fn launch(
 
 impl Host {
     pub fn state(&self) -> Value {
-        ureq::get(&format!("{}/api/state", self.url))
+        self.get("/api/state")
+    }
+    pub fn get(&self, path: &str) -> Value {
+        ureq::get(&format!("{}{path}", self.url))
             .set("X-Ezerbot-Launch", &self.identity.value())
             .call()
             .unwrap()

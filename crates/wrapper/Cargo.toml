@@ -69,5 +69,9 @@ security-framework = { version = "=3.7.0", default-features = false }
 core-foundation = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+grokbot-linux-desktop = { workspace = true }
 # Portée des sockets abstraits du shell YOLO : aucun droit sur les fichiers n'est géré.
 landlock = "0.4"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+grokbot-linux-desktop = { workspace = true, features = ["test-support"] }

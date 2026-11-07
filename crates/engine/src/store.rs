@@ -203,6 +203,7 @@ pub(crate) fn trigger_key(trigger: &Trigger) -> (&str, &str, u32) {
         } => ("user_message", message_id, *attempt),
         Trigger::Occurrence { occurrence_id } => ("occurrence", occurrence_id, 0),
         Trigger::Delegation { delegation_id } => ("delegation", delegation_id, 0),
+        Trigger::DelegationReturn { parent_run_id } => ("delegation_return", parent_run_id, 0),
     }
 }
 

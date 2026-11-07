@@ -1,10 +1,14 @@
 "use strict";
 (() => {
   const P = window.GrokbotPanels;
-  const bridge = (body) => window.webkit?.messageHandlers?.ezerbotFloating?.postMessage(body);
+  const linux = window.EzerbotShell?.platform === "linux";
+  const bridge = (body) => (window.EzerbotShell?.floating || window.webkit?.messageHandlers?.ezerbotFloating)?.postMessage(body);
   let select, status, save, lastContext, configured, chosen;
   let contextWork = Promise.resolve();
-  const names = [
+  const names = linux ? [
+    ["cmd+option+space", "Super Alt Espace"], ["ctrl+option+space", "Ctrl Alt Espace"],
+    ["cmd+shift+space", "Super Maj Espace"], ["cmd+option+j", "Super Alt J"], ["disabled", "Désactivé"],
+  ] : [
     ["cmd+option+space", "⌘ ⌥ Espace"], ["ctrl+option+space", "⌃ ⌥ Espace"],
     ["cmd+shift+space", "⌘ ⇧ Espace"], ["cmd+option+j", "⌘ ⌥ J"], ["disabled", "Désactivé"],
   ];
@@ -17,8 +21,13 @@
     const result = await bridge({ command: "configure", shortcut });
     if (result?.status === "conflict") throw new Error("Ce raccourci est déjà utilisé par une autre application. Choisissez-en un autre.");
     if (result?.status === "error") throw new Error("Le raccourci n’a pas pu être activé. L’ouverture par le menu reste disponible.");
-    status.textContent = result?.status === "recording" ? "Mode test : aucun raccourci global enregistré." : result?.status === "disabled" ? "Raccourci global désactivé. Ouvrez le panneau depuis le menu Ezerbot." : result ? "Raccourci enregistré sur ce Mac, sans permission de surveillance du clavier." : "L’ouverture globale est disponible dans l’application Mac. Ici, le panneau s’ouvre dans le navigateur.";
+    // Wayland lets no application grab a key; the GlobalShortcuts portal is not supported yet (issue #635).
+    if (result?.status === "wayland") throw new Error("Le raccourci global n’est pas disponible sous Wayland pour l’instant. Ouvrez le panneau depuis le menu Ezerbot.");
+    if (result?.status === "unavailable") throw new Error("Le raccourci global n’est pas disponible dans cette session. Ouvrez le panneau depuis le menu Ezerbot.");
+    const granted = result?.status === "registered" && typeof result.trigger === "string" && result.trigger ? result.trigger : null;
+    status.textContent = granted ? `Raccourci attribué par le bureau : ${granted}.` : result?.status === "recording" ? "Mode test : aucun raccourci global enregistré." : result?.status === "disabled" ? "Raccourci global désactivé. Ouvrez le panneau depuis le menu Ezerbot." : result ? `Raccourci enregistré sur ${linux ? "cet ordinateur" : "ce Mac"}, sans ${linux ? "surveillance" : "permission de surveillance"} du clavier.` : "L’ouverture globale est disponible dans l’application Mac. Ici, le panneau s’ouvre dans le navigateur.";
     configured = shortcut;
+    return granted;
   }
   window.EzerbotFloatingMain = {
     async openConversation(id) {
@@ -36,7 +45,7 @@
     id: "floating",
     settingsSection(container) {
       container.className = "setting-section"; container.id = "settings-floating";
-      container.append(text("h3", "Panneau flottant"), text("p", "Votre bot et un composeur compact, même lorsque la fenêtre principale est masquée. Déplacez le panneau par sa barre de titre ; Échap le ferme."));
+      container.append(text("h3", "Panneau flottant"), text("p", `Votre bot et un composeur compact, même lorsque la fenêtre principale est masquée. Déplacez le panneau par ${linux ? "son en-tête" : "sa barre de titre"} ; Échap le ferme.`));
       const label = text("label", "Raccourci global", "form-label"); label.htmlFor = "floating-shortcut";
       select = document.createElement("select"); select.id = "floating-shortcut"; select.className = "floating-shortcut";
       for (const [value, title] of names) { const option = text("option", title); option.value = value; select.append(option); }
@@ -48,11 +57,11 @@
         const shortcut = select.value;
         const previous = P.state.floating?.shortcut || "cmd+option+j";
         try {
-          await configure(shortcut);
+          const granted = await configure(shortcut);
           const environment = status.textContent;
           await P.api("/api/floating/settings", { shortcut });
           chosen = null; await P.refresh();
-          status.textContent = `Raccourci enregistré : ${names.find(([value]) => value === shortcut)?.[1] || shortcut}. ${environment}`;
+          status.textContent = granted ? environment : `Raccourci enregistré : ${names.find(([value]) => value === shortcut)?.[1] || shortcut}. ${environment}`;
         } catch (error) {
           try { await configure(previous); } catch { /* Keep the actionable error below. */ }
           status.textContent = error.message;

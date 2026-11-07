@@ -23,7 +23,7 @@ import { citeMarkdown, hasSources, textWithSources } from "./sources.js";
 import { PageQuote } from "./page-quote.jsx";
 import { SourcesContext, SourcesLine, citeComponents, citeTags } from "./sources.jsx";
 import { MemoryUsedPill } from "./memory-used.jsx";
-import { signInCardState, replyProblemState, visibleNotice } from "./connection-view.js";
+import { regenerable, signInCardState, replyProblemState, visibleNotice } from "./connection-view.js";
 import { presentThread, conversationReplyError } from "./thread-presentation.js";
 import { LocalIntervention } from "./local-intervention.jsx";
 
@@ -279,7 +279,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}
             {onRateGood && <button type="button" className="gb-text-button" onClick={() => onRateGood(message)}>Bon résultat</button>}
             {onRateBad && <button type="button" className="gb-text-button" onClick={() => onRateBad(message)}>Mauvais résultat</button>}
-            {message.state === "stopped" && <><span className={group ? "gb-status gb-group-stopped" : "gb-status"}>{message.payload?.never_started ? <Clock /> : <Square className={group ? "gb-stop-solid" : undefined} />}{actions.isTask ? "Sous-tâche annulée" : message.payload?.never_started ? "Tour annulé avant de commencer" : "Réponse arrêtée"}</span>{!group && !actions.isTask && <button type="button" className="gb-text-button" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}</>}
+            {message.state === "stopped" && <><span className={group ? "gb-status gb-group-stopped" : "gb-status"}>{message.payload?.never_started ? <Clock /> : <Square className={group ? "gb-stop-solid" : undefined} />}{actions.isTask ? "Sous-tâche annulée" : message.payload?.never_started ? "Tour annulé avant de commencer" : "Réponse arrêtée"}</span>{!group && !actions.isTask && regenerable(message) && <button type="button" className="gb-text-button" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}</>}
           </footer>
         )}
         {group && message.state === "stopped" && <p className="gb-reply-advice">Envoyez un nouveau message pour reprendre.</p>}

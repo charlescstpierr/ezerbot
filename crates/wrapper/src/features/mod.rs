@@ -104,6 +104,8 @@ pub mod mcp;
 pub mod meetings;
 pub mod memory;
 pub mod memory_auto;
+#[cfg(all(target_os = "linux", any(test, not(debug_assertions))))]
+pub mod microphones;
 pub mod multibot;
 pub mod notifications;
 pub mod page_snapshot;

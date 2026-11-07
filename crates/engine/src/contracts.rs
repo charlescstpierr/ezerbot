@@ -72,6 +72,7 @@ pub enum Trigger {
     UserMessage { message_id: String, attempt: u32 },
     Occurrence { occurrence_id: String },
     Delegation { delegation_id: String },
+    DelegationReturn { parent_run_id: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -658,6 +659,9 @@ mod contracts_tests {
             Trigger::Delegation {
                 delegation_id: "delegation-1".into(),
             },
+            Trigger::DelegationReturn {
+                parent_run_id: "parent-1".into(),
+            },
         ] {
             round_trip(trigger);
         }
@@ -941,7 +945,10 @@ mod contracts_tests {
 
         fn open(&self) -> Connection {
             let conn = Connection::open(self.0.join("test.sqlite")).unwrap();
-            conn.busy_timeout(std::time::Duration::from_secs(5))
+            // SQLite's busy handler polls unfairly, so one writer can wait out
+            // every other writer here. Only this test's writers contend, which
+            // bounds that wait by the test, not by a fixed time.
+            conn.busy_timeout(std::time::Duration::from_secs(60))
                 .unwrap();
             conn
         }

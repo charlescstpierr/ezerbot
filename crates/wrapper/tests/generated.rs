@@ -494,24 +494,26 @@ fn model_saves_keep_the_format_and_respect_the_file_write_switch() {
     });
     let request = requests::list_for_run(&f.db(), &run_id).unwrap().remove(0);
     f.decide(&request, json!("allow_once"));
+    let chat = f.chat.clone();
+    let tool_message = |state: Value| {
+        state["conversations"]
+            .as_array()?
+            .iter()
+            .find(|conversation| conversation["id"] == chat)?["messages"]
+            .as_array()?
+            .iter()
+            .find(|message| message["kind"] == "tool" && message["payload"]["run_id"] == run_id)
+            .cloned()
+    };
+    // The file lands before the run records its outcome.
     wait("card save", || {
         f.app.tick(now());
-        copy.exists()
+        tool_message(f.app.api("GET", "/api/state", b"").unwrap())
+            .is_some_and(|message| !message["payload"]["outcome"].is_null())
     });
+    assert!(copy.exists());
     // No model speaks in this run: the thread acknowledges it from these fields.
-    let state = f.app.api("GET", "/api/state", b"").unwrap();
-    let conversation = state["conversations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|conversation| conversation["id"] == f.chat)
-        .unwrap();
-    let saved = conversation["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|message| message["kind"] == "tool" && message["payload"]["run_id"] == run_id)
-        .unwrap();
+    let saved = tool_message(f.app.api("GET", "/api/state", b"").unwrap()).unwrap();
     assert!(run_id.starts_with("mcp-host-"), "{run_id}");
     assert_eq!(saved["payload"]["outcome"]["status"], "done");
     assert_eq!(

@@ -782,10 +782,59 @@ fn a_preview_is_drawn_from_its_source_once_memory_forgot_a_phrase() {
 }
 
 #[test]
+fn every_preview_draws_its_spaces_as_written() {
+    const SECRET: &str = "catalogue jeton-prive";
+    const WRITTEN: &str = "catalogue  jeton-prive";
+    for (format, content) in [
+        ("csv", json!([["Public"], [WRITTEN]]).to_string()),
+        ("xlsx", json!([["Public"], [WRITTEN]]).to_string()),
+        (
+            "svg",
+            json!({"nodes":["Public",WRITTEN],"edges":[[0,1]]}).to_string(),
+        ),
+        ("md", format!("Public : {WRITTEN}")),
+        ("pdf", format!("Public : {WRITTEN}")),
+        ("pptx", format!("Public : {WRITTEN}")),
+    ] {
+        let (_, after) = previews(format, &content, SECRET);
+        let preserved = after.find("xml:space=\"preserve\"");
+        assert!(
+            preserved.is_some_and(|at| at < after.find("<text").unwrap()),
+            "{format} : the drawing collapses the spaces the mask kept, {after}"
+        );
+        assert!(after.contains(WRITTEN), "{format} : {after}");
+    }
+}
+
+#[test]
 fn a_secret_absent_from_the_text_leaves_the_preview_untouched() {
     let (before, after) = previews("md", "Été à Québec", "font-family");
     assert!(before.contains("font-family="), "{before}");
     assert_eq!(after, before);
+}
+
+#[test]
+fn the_save_path_keeps_an_extension_written_in_capitals() {
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.call(
+        &chat,
+        "d1",
+        "create_document",
+        json!({"name":"Rapport.PDF","format":"pdf","content":"Bilan"}),
+    );
+    let id = f.list("type=document")[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let path = f
+        .app
+        .api("GET", &format!("/api/generated/{id}/save-path"), b"")
+        .unwrap()["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(path.ends_with("/Desktop/Rapport.PDF"), "{path}");
 }
 
 #[test]

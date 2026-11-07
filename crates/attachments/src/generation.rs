@@ -243,13 +243,14 @@ pub fn generate(request: &Request) -> Result<Generated> {
 }
 /// A spreadsheet has cells, not pages. Keep a bounded, readable thumbnail even
 /// for a three-row table; truncate only the preview, never the stored data.
+/// Spaces are drawn as written, so a mask applied to the text holds in the drawing.
 fn table_preview(rows: &[Vec<String>]) -> String {
     let cols = rows.iter().map(Vec::len).max().unwrap_or(1).min(6);
     let count = rows.len().min(8);
     let w = 640;
     let h = count * 32 + 24;
     let cell = 616.0 / cols as f64;
-    let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" font-family=\"Arial,Helvetica,sans-serif\" font-size=\"14\"><rect width=\"{w}\" height=\"{h}\" fill=\"#fff\"/>");
+    let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" font-family=\"Arial,Helvetica,sans-serif\" font-size=\"14\" xml:space=\"preserve\"><rect width=\"{w}\" height=\"{h}\" fill=\"#fff\"/>");
     for (r, row) in rows.iter().take(count).enumerate() {
         for c in 0..cols {
             let (x, y) = (12.0 + c as f64 * cell, 12 + r * 32);
@@ -2169,7 +2170,7 @@ fn layout(graph: &Graph) -> Layout {
 fn render(graph: &Graph) -> String {
     let layout = layout(graph);
     let (w, h) = (layout.width, layout.height);
-    let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w:.0} {h:.0}\" width=\"{w:.0}\" height=\"{h:.0}\" font-family=\"Helvetica,Arial,sans-serif\"><rect width=\"{w:.0}\" height=\"{h:.0}\" fill=\"#fff\"/><defs><marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"9\" refY=\"5\" orient=\"auto\"><path d=\"M0 0 L10 5 L0 10Z\" fill=\"#64748b\"/></marker></defs>");
+    let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w:.0} {h:.0}\" width=\"{w:.0}\" height=\"{h:.0}\" font-family=\"Helvetica,Arial,sans-serif\" xml:space=\"preserve\"><rect width=\"{w:.0}\" height=\"{h:.0}\" fill=\"#fff\"/><defs><marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"9\" refY=\"5\" orient=\"auto\"><path d=\"M0 0 L10 5 L0 10Z\" fill=\"#64748b\"/></marker></defs>");
     let mut labels = String::new();
     for (edge, routed) in graph.edges.iter().zip(&layout.edges) {
         let start = match routed.segments[0] {

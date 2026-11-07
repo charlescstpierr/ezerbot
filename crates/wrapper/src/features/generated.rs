@@ -560,7 +560,7 @@ pub fn routes(
                         return Ok(ApiResponse::Json(json!({"path":null})));
                     }
                     let mut name = patterns.text(&file.name);
-                    if !name.ends_with(&format!(".{}", file.format)) {
+                    if !name.to_lowercase().ends_with(&format!(".{}", file.format)) {
                         name = format!("{name}.{}", file.format);
                     }
                     if patterns.text(&name) != name {

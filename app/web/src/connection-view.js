@@ -34,7 +34,7 @@ export function signInCardState({ message, isGroup = false, isTask = false, prov
   const group = isGroup || Boolean(message.payload?.turn_id);
   return {
     title: providerConnected ? "Compte ChatGPT connecté" : expired ? "Votre session ChatGPT a expiré" : "Connectez votre compte ChatGPT",
-    copy: signInCopy({ providerConnected, expired, group: group || !regenerable(message), isTask }),
+    copy: signInCopy({ providerConnected, expired, group: group || (!isTask && !regenerable(message)), isTask }),
     signInLabel: expired ? "Se reconnecter" : "Se connecter",
     showRetry: !group && !isTask && regenerable(message),
     retryDisabled: !providerConnected || !engineConnected,
@@ -70,7 +70,7 @@ export function replyProblemState(message, { isGroup = false, isTask = false, en
   const error = presentedFailureText(message.error, { retry, replacement: isTask ? "Poursuivez dans la conversation principale." : "Envoyez un nouveau message." });
   const shown = `${message.error || ""} ${error}`.toLocaleLowerCase("fr");
   const advice = local || signin || context || shown.includes("envoyez un nouveau message") || shown.includes("poursuivez dans la conversation principale") ? null
-    : group || !regenerable(message) ? "Envoyez un nouveau message pour demander une nouvelle réponse."
+    : group || (!isTask && !regenerable(message)) ? "Envoyez un nouveau message pour demander une nouvelle réponse."
       : isTask ? "Poursuivez dans la conversation principale." : null;
   return { signin, advice, error, retry, retryDisabled: !engineConnected,
     retryTitle: !engineConnected ? "Moteur local indisponible" : "Réessayer cette réponse" };

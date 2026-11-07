@@ -297,3 +297,16 @@ test("la carte de connexion d’une réponse non relançable dit d’envoyer un 
   const question = { ...message, payload: { run_id: "question", regenerable: true } };
   assert.equal(signInCardState({ message: question, providerConnected: true, engineConnected: true }).copy, "Votre question est conservée. Réessayez pour obtenir la réponse.");
 });
+
+test("une tâche non relançable garde « Poursuivez dans la conversation principale », jamais un nouveau message", () => {
+  const task = { id: "reply-task", role: "assistant", kind: "message", state: "failed", error_kind: "other", error: "OpenAI a refusé la demande (erreur 500).", payload: { run_id: "task", regenerable: false } };
+  const problem = replyProblemState(task, { isTask: true });
+  assert.equal(problem.retry, false);
+  assert.equal(problem.advice, "Poursuivez dans la conversation principale.");
+  for (const providerConnected of [false, true]) {
+    const card = signInCardState({ message: { ...task, error_kind: "signin" }, isTask: true, providerConnected, engineConnected: true });
+    assert.match(card.copy, /poursuivez dans la conversation principale/i, `connecté=${providerConnected}`);
+    assert.doesNotMatch(card.copy, /nouveau message|réessayez/i, `connecté=${providerConnected}`);
+    assert.equal(card.showRetry, false);
+  }
+});

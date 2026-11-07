@@ -1288,22 +1288,6 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
         [&run.run_id],
         |r| r.get(0),
     )?;
-    // Masking would refuse this turn. Like a missing sign-in below, it is a durable thread
-    // card: the question stays and can be retried.
-    if keyring_locked(ctx.connection) {
-        ctx.connection.execute(
-            "UPDATE wrapper_engine_runs SET error=?2,error_kind='keyring' WHERE run_id=?1",
-            params![
-                run.run_id,
-                format!(
-                    "{KEYRING_LOCKED} Votre message est conservé : relancez la réponse ensuite."
-                )
-            ],
-        )?;
-        let mut services = Services::new(ctx)?;
-        fail_host(ctx.connection, &mut services, &run.run_id)?;
-        return Ok(());
-    }
     // Missing credentials are a durable thread card, never a queued spinner or
     // a simulated success. Legacy simulated jobs cannot run in production.
     if (live && !ctx.provider.connected())
@@ -1359,6 +1343,22 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
     // Mark before the final event can stop UI polling; clear even on unwind.
     if live {
         ctx.provider.title_started();
+    }
+    // Masking would refuse this turn: a durable thread card, the question stays and can be
+    // retried. Decided only by the run's owner, never over a worker that still runs it.
+    if keyring_locked(ctx.connection) {
+        ctx.connection.execute(
+            "UPDATE wrapper_engine_runs SET error=?2,error_kind='keyring' WHERE run_id=?1",
+            params![
+                run.run_id,
+                format!(
+                    "{KEYRING_LOCKED} Votre message est conservé : relancez la réponse ensuite."
+                )
+            ],
+        )?;
+        let mut services = Services::new(ctx)?;
+        fail_host(ctx.connection, &mut services, &run.run_id)?;
+        return Ok(());
     }
     if !live && !run.run_id.starts_with("mcp-host-") {
         let _guard = guard;

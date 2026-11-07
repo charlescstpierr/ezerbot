@@ -267,6 +267,32 @@ mod tests {
         assert!(test.vault.read_file().unwrap().is_empty());
     }
     #[test]
+    fn a_link_planted_beside_the_vault_never_gets_a_file_truncated() {
+        let test = test_support::TestVault::new();
+        test.vault.set("FIRST", "premier", "private-first").unwrap();
+        let marker = holds_secrets(test.vault.path());
+        let victim = marker.with_file_name("victime");
+        fs::write(&victim, "contenu d'un autre compte").unwrap();
+        for planted in [marker.with_extension("keyring.tmp"), marker.clone()] {
+            std::os::unix::fs::symlink(&victim, &planted).unwrap();
+            let fake = Fake {
+                secrets: RefCell::default(),
+                writes: Cell::new(0),
+                fail_at: 0,
+            };
+            let _guard = access(test.vault.path());
+            let _lock = test.vault.lock_file(true).unwrap();
+            let _ = migrate(&test.vault, &fake, &mut State::default());
+            assert_eq!(
+                fs::read_to_string(&victim).unwrap(),
+                "contenu d'un autre compte",
+                "{} was followed",
+                planted.display()
+            );
+            fs::remove_file(&planted).unwrap();
+        }
+    }
+    #[test]
     fn the_marker_is_durable_on_disk_before_the_first_keyring_write() {
         let test = test_support::TestVault::new();
         test.vault.set("FIRST", "premier", "private-first").unwrap();

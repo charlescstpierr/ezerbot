@@ -188,7 +188,8 @@ impl Vault {
         Ok(vault)
     }
     /// Application entry point. macOS release hosts prefer Keychain; development
-    /// uses only an explicit throwaway override, otherwise the file vault.
+    /// uses only an explicit throwaway override, otherwise the file vault. Linux
+    /// never falls back to the file: without a bus the vault refuses new secrets.
     /// The empty legacy file remains a recovery container. ChatGPT credentials
     /// are never opened by this code.
     pub fn open_app(path: &Path) -> Result<Self> {

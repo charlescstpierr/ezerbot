@@ -210,7 +210,7 @@ fn wrapper_first_start_projects_storage_and_restart_uses_secret_service_without_
 fn mcp_after_locked_restart_explains_unavailable_store_instead_of_missing_variables() {
     let f = Fixture::new();
     let id = {
-        let host = f.launch(None);
+        let host = f.launch(Some(&f.bus()));
         host.post("/api/mcp/add", json!({"name":"Atelier jetable","command":"/usr/bin/false","arguments":[],"environment":{"API_TOKEN":"valeur-factice-mcp-locked"}}))["id"].as_str().unwrap().to_owned()
     };
     {
@@ -236,7 +236,7 @@ fn mcp_after_locked_restart_explains_unavailable_store_instead_of_missing_variab
 fn a_locked_keyring_keeps_the_mcp_connector_and_its_secret() {
     let mut f = Fixture::new();
     let id = {
-        let host = f.launch(None);
+        let host = f.launch(Some(&f.bus()));
         host.post("/api/mcp/add", json!({"name":"Suppression jetable","command":"/usr/bin/false","arguments":[],"environment":{"API_TOKEN":"valeur-factice-delete"}}))["id"].as_str().unwrap().to_owned()
     };
     {
@@ -260,7 +260,7 @@ fn a_locked_keyring_keeps_the_mcp_connector_and_its_secret() {
 }
 
 #[test]
-fn debug_without_override_stays_on_file_even_when_a_keyring_is_on_the_ambient_bus() {
+fn debug_without_override_never_reaches_a_keyring_on_the_ambient_bus() {
     let f = Fixture::new();
     Vault::open(&f.file())
         .unwrap()
@@ -269,7 +269,7 @@ fn debug_without_override_stays_on_file_even_when_a_keyring_is_on_the_ambient_bu
     for _ in 0..2 {
         let host = f.launch_with(None, Some(&f.bus()));
         let state = host.state();
-        assert_eq!(state["forms"]["storage"]["backend"], "file");
+        assert_eq!(state["forms"]["storage"]["backend"], "file_fallback");
         assert_eq!(state["forms"]["secrets"][0]["name"], "TOKEN");
         assert_eq!(
             Vault::open(&f.file())

@@ -12,14 +12,13 @@ use std::sync::OnceLock;
 #[derive(Clone)]
 pub(super) struct Target(Bus);
 impl Target {
-    /// Where this vault's secrets live is a fact on disk, not a choice of this process. Once the
-    /// keyring holds some, the vault reads through it or not at all: without a bus it is
-    /// unavailable, never a complete file vault. `app` asks for the keyring otherwise.
+    /// The keyring, or a refused target when no bus is reachable: never the plaintext file.
+    /// The application always asks for it (#598 refuses the file fallback by default). A library
+    /// fixture asks only once the keyring holds some of its secrets: where they live is a fact
+    /// on disk, and without a bus the vault is unavailable, never a complete file vault.
     pub(super) fn for_vault(vault_path: &Path, app: bool) -> Option<Self> {
-        if holds_secrets(vault_path).exists() {
-            return Some(Self(Bus::for_app().unwrap_or(Bus::Refused)));
-        }
-        app.then(Bus::for_app).flatten().map(Self)
+        (app || holds_secrets(vault_path).exists())
+            .then(|| Self(Bus::for_app().unwrap_or(Bus::Refused)))
     }
     fn connect(&self, path: &Path) -> Result<Native> {
         let canonical = fs::canonicalize(path)?;

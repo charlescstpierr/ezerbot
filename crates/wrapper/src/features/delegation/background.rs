@@ -502,22 +502,43 @@ fn reserve_return(ctx: &Context<'_>, group: &Receipt, parent: &Run) -> Result<()
     Ok(())
 }
 
+fn open_returns(conn: &Connection) -> Result<Vec<Receipt>> {
+    Ok(conn
+        .prepare(WORK)?
+        .query_map([], receipt)?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The origin and members an open return still answers; `None` once any of them is gone.
+fn live_origin(conn: &Connection, group: &Receipt) -> Result<Option<(Run, Vec<Delegation>)>> {
+    let Some(parent) = store::get(conn, &group.parent_run_id)? else {
+        return Ok(None);
+    };
+    if !origin_available(conn, group, &parent)? {
+        return Ok(None);
+    }
+    Ok(member_edges(conn, group)?.map(|edges| (parent, edges)))
+}
+
+/// A deletion cancels the returns it invalidates in its own transaction: a return model
+/// answer that lands before the next tick must find its run already stopped.
+pub(super) fn invalidate(ctx: &Context<'_>) -> Result<()> {
+    require_transaction(ctx.connection)?;
+    for group in open_returns(ctx.connection)? {
+        if live_origin(ctx.connection, &group)?.is_none() {
+            cancel_parent(ctx, &group.parent_run_id)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn reconcile(ctx: &Context<'_>) -> Result<()> {
     require_transaction(ctx.connection)?;
-    let mut statement = ctx.connection.prepare(WORK)?;
-    let groups = statement
-        .query_map([], receipt)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for group in groups {
-        let Some(parent) = store::get(ctx.connection, &group.parent_run_id)? else {
+    for group in open_returns(ctx.connection)? {
+        let Some((parent, edges)) = live_origin(ctx.connection, &group)? else {
             cancel_parent(ctx, &group.parent_run_id)?;
             continue;
         };
-        let edges = member_edges(ctx.connection, &group)?;
-        if !origin_available(ctx.connection, &group, &parent)? || edges.is_none() {
-            cancel_parent(ctx, &group.parent_run_id)?;
-            continue;
-        }
         if group.state == State::Started {
             let run = store::get(ctx.connection, &group.return_run_id)?
                 .ok_or_else(|| invalid("reserved background return run is missing"))?;
@@ -536,7 +557,7 @@ pub(super) fn reconcile(ctx: &Context<'_>) -> Result<()> {
             continue;
         }
         if !normal_finish(&parent)
-            || !members_finished(ctx.connection, edges.as_deref().unwrap_or_default())?
+            || !members_finished(ctx.connection, &edges)?
             || ctx.connection.query_row(
                 THREAD_BUSY,
                 params![parent.conversation_id, group.return_run_id],

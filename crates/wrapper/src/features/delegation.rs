@@ -1601,6 +1601,10 @@ pub(super) fn reset_background(ctx: &Context<'_>, conversation: &str) -> Result<
     background::cancel_conversation(ctx, conversation)
 }
 
+pub(super) fn invalidate_background(ctx: &Context<'_>) -> Result<()> {
+    background::invalidate(ctx)
+}
+
 pub fn tick(ctx: &Context<'_>) {
     // Idle polling must not take a writer lock or scan historical terminal runs.
     if active_edges(ctx.connection).is_ok_and(|edges| edges.is_empty())

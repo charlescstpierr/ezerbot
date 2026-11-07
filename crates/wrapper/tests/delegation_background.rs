@@ -2039,3 +2039,119 @@ fn a_failed_return_offers_no_regeneration_that_the_api_refuses() {
     assert_eq!(refused.status, 409);
     assert!(scenario.return_calls.load(Ordering::SeqCst) >= 1);
 }
+
+#[test]
+fn an_invalidation_before_the_return_model_finishes_rejects_its_text_without_a_tick_in_between() {
+    for action in [
+        "stop-origin",
+        "stop-return",
+        "reset",
+        "delete-parent",
+        "delete-child",
+        "delete-child-bot",
+        "regenerate",
+    ] {
+        let mut f = Fixture::new(true);
+        let scenario = one_background(&f);
+        let c = f.conversation();
+        let parent = f.start(&c, "return-in-flight");
+        let edge = f.children(&parent).remove(0);
+        f.tick();
+        wait("enfant fini avant retour bloqué", || {
+            matches!(f.status(&edge), DelegationStatus::Done { .. })
+                && f.provider.status()["titling"] == false
+        });
+        let (gate, at) = f.hold_next_response();
+        f.tick();
+        f.tick();
+        f.wait_request(at);
+        let trigger = Trigger::DelegationReturn {
+            parent_run_id: parent.run_id.clone(),
+        };
+        let returned = store::latest_run_for_trigger(&f.db(), &trigger)
+            .unwrap()
+            .unwrap();
+        assert_eq!(returned.status, RunStatus::Running, "{action}");
+        match action {
+            "stop-origin" => {
+                f.post(
+                    "/api/stop",
+                    json!({"conversation_id":c,"message_id":"return-in-flight"}),
+                );
+            }
+            "stop-return" => {
+                f.post(
+                    "/api/stop",
+                    json!({"conversation_id":c,"message_id":returned.run_id}),
+                );
+            }
+            "reset" => {
+                f.post("/api/conversations/reset", json!({"conversation_id":c}));
+            }
+            "delete-parent" => {
+                f.post("/api/conversations/delete", json!({"id":c}));
+            }
+            "delete-child" => {
+                f.post(
+                    "/api/conversations/delete",
+                    json!({"id":edge.conversation_id}),
+                );
+            }
+            "delete-child-bot" => {
+                f.post("/api/bots/delete", json!({"id":edge.child_bot}));
+            }
+            "regenerate" => {
+                f.post(
+                    "/api/regenerate",
+                    json!({"conversation_id":c,"message_id":"return-in-flight"}),
+                );
+            }
+            _ => unreachable!(),
+        }
+        gate.store(true, Ordering::SeqCst);
+        wait("réponse du retour reçue avant tout tick", || {
+            f.provider.status()["titling"] == false
+                && store::required(&f.db(), &returned.run_id)
+                    .unwrap()
+                    .status
+                    .is_terminal()
+                || f.server.seen.lock().unwrap().bodies.len() > at
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        for _ in 0..3 {
+            f.tick();
+        }
+        wait("retour réglé après invalidation", || {
+            f.tick();
+            f.provider.status()["titling"] == false
+                && store::required(&f.db(), &returned.run_id)
+                    .unwrap()
+                    .status
+                    .is_terminal()
+        });
+        let run = store::required(&f.db(), &returned.run_id).unwrap();
+        let text = grokbot_engine::run_loop::replay_items(
+            &store::events(&f.db(), &returned.run_id, 0).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !text
+                .iter()
+                .any(|item| item.role == Role::Assistant && item.text.contains(RETURN)),
+            "{action}: {:?}",
+            run.status
+        );
+        assert_ne!(run.status, RunStatus::Finished, "{action}");
+        let reply_id = format!("reply:{}", returned.run_id);
+        let notifications = f.app.api("GET", "/api/notifications", b"").unwrap();
+        assert!(
+            !notifications["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == reply_id),
+            "{action}"
+        );
+        assert_eq!(scenario.return_calls.load(Ordering::SeqCst), 1, "{action}");
+    }
+}

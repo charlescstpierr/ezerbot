@@ -458,3 +458,24 @@ fn after_the_notification_server_restarts_a_reused_id_opens_the_newest_thread() 
         fs::read_to_string(&log).is_ok_and(|text| text == link)
     });
 }
+
+/// Le repli fichier est refusé par défaut : sans bus de bureau, l'application n'écrit aucun
+/// secret, même dans un coffre neuf. Seules les fixtures de bibliothèque restent sur fichier.
+#[test]
+fn without_a_desktop_bus_the_app_never_writes_a_secret_in_plaintext() {
+    let home = Home::new("ezp");
+    let db = home.path().join("workspace.sqlite");
+    let host = linux_host::launch(&home, &db, None, None);
+    let state = host.state();
+    assert_eq!(state["forms"]["storage"]["backend"], "file_fallback");
+    let bot = state["bots"][0]["id"].as_str().unwrap().to_owned();
+    let value = ["valeur", "factice", "sans", "bus", "6021"].join("-");
+    let put = host.try_post(
+        "/api/secrets/put",
+        json!({"bot_id":bot,"name":"NOUVEAU","description":"Sans bus","value":value}),
+    );
+    assert!(put.is_err(), "a secret was accepted without a keyring");
+    let file = fs::read_to_string(db.with_extension("secrets.json")).unwrap_or_default();
+    assert!(!file.contains(&value), "plaintext on disk");
+    assert!(!host.output().contains(&value));
+}

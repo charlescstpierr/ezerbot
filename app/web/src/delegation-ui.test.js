@@ -84,3 +84,15 @@ test("leaving a finished task restores the ordinary group and chat composer", as
   c.conversation.kind = "chat"; c.update();
   assert.equal(c.ui.send.dataset.mode, "stop");
 });
+
+test("a locked keyring blocks new sends but keeps Arrêter usable", async () => {
+  const c = await composer(); c.ctx.active = false; c.update();
+  assert.equal(c.panels.openConversation("group"), true);
+  c.panels.state.vault = { locked: true, message: "Déverrouillez votre trousseau pour continuer." };
+  c.ui.input.value = "Bonjour au groupe"; c.update();
+  assert.equal(c.ui.send.dataset.mode, "send");
+  assert.equal(c.ui.send.disabled, true, "no new message while locked");
+  c.conversation.kind = "chat"; c.update();
+  assert.equal(c.ui.send.dataset.mode, "stop");
+  assert.equal(c.ui.send.disabled, false, "the running reply can still be stopped");
+});

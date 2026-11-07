@@ -346,7 +346,14 @@ fn checkpoint(
     if services.is_interrupted() {
         return Err(invalid("engine owner handover"));
     }
-    if services.is_cancelled(run_id) {
+    // The flag stops work in progress. A human wait has none left, so the
+    // writer that raised the flag decides under its own recheck.
+    if services.is_cancelled(run_id)
+        && !matches!(
+            run.status,
+            RunStatus::AwaitingApproval | RunStatus::AwaitingHumanInput
+        )
+    {
         return ended(&cancel(conn, services, run_id, TurnEnd::Stopped)?).map(Some);
     }
     if run.status == RunStatus::Running

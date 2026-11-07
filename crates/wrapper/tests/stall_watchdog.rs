@@ -737,7 +737,12 @@ fn a_watchdog_signal_never_cancels_an_approval_wait_begun_after_its_claim() {
         RunStatus::AwaitingApproval
     );
     assert_eq!(f.event_count("approval", RunEventKind::Cancelled), 0);
-    assert!(f.messages("stalled").is_empty());
+    let stalled: Vec<_> = f
+        .messages("stalled")
+        .into_iter()
+        .map(|message| message["payload"]["run_id"].clone())
+        .collect();
+    assert_eq!(stalled, vec![json!("plain")]);
     assert_eq!(f.notification_count("approval"), 0);
     assert_eq!(f.state()["silence"], json!({}));
 }

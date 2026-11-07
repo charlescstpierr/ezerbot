@@ -20,6 +20,41 @@ pub struct Request {
     pub format: String,
     pub content: String,
 }
+impl Request {
+    /// This request with `mask` applied to each text decoded, then in the form it is drawn: with
+    /// the spaces the drawing puts between characters, and before any line is cut.
+    pub fn masked(&self, mut mask: impl FnMut(&str) -> String) -> Self {
+        let mut masked = |text: &str, draw: fn(&str) -> String| {
+            let decoded = mask(text);
+            mask(&draw(&decoded))
+        };
+        let content = match self.format.as_str() {
+            "csv" | "xlsx" => serde_json::from_str::<Vec<Vec<String>>>(&self.content)
+                .ok()
+                .map(|rows| {
+                    let rows: Vec<Vec<String>> = rows
+                        .iter()
+                        .map(|row| row.iter().map(|c| masked(c, one_line)).collect())
+                        .collect();
+                    serde_json::json!(rows).to_string()
+                }),
+            "svg" if is_json_diagram(&self.content) => {
+                serde_json::from_str::<JsonDiagram>(&self.content)
+                    .ok()
+                    .map(|diagram| {
+                        let nodes: Vec<String> =
+                            diagram.nodes.iter().map(|n| masked(n, spaced)).collect();
+                        serde_json::json!({"nodes": nodes, "edges": diagram.edges}).to_string()
+                    })
+            }
+            _ => None,
+        };
+        Self {
+            content: content.unwrap_or_else(|| masked(&self.content, spaced)),
+            ..self.clone()
+        }
+    }
+}
 pub struct Generated {
     pub name: String,
     pub format: String,
@@ -54,12 +89,22 @@ pub fn xml(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
-// Keeps runs of spaces and indentation (tab = 4 spaces): aligned columns stay
-// aligned in Courier. Breaks on the last space that fits, else mid-word.
+/// A table cell stays on one line of its preview.
+fn one_line(cell: &str) -> String {
+    cell.replace(['\n', '\r', '\t'], " ")
+}
+/// Tab = 4 spaces, and a lone carriage return draws as a space.
+fn spaced(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', " ")
+        .replace('\t', "    ")
+}
+// Keeps runs of spaces and indentation: aligned columns stay aligned in Courier.
+// Breaks on the last space that fits, else mid-word.
 fn wrap(s: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     for line in s.lines() {
-        let mut rest: Vec<char> = line.replace('\t', "    ").trim_end().chars().collect();
+        let mut rest: Vec<char> = spaced(line).trim_end().chars().collect();
         while rest.len() > width {
             let indent = rest.iter().take_while(|c| **c == ' ').count();
             match (indent + 1..=width).rev().find(|&i| rest[i] == ' ') {
@@ -203,11 +248,7 @@ fn table_preview(rows: &[Vec<String>]) -> String {
     for (r, row) in rows.iter().take(count).enumerate() {
         for c in 0..cols {
             let (x, y) = (12.0 + c as f64 * cell, 12 + r * 32);
-            let text = row
-                .get(c)
-                .map(String::as_str)
-                .unwrap_or("")
-                .replace(['\n', '\r', '\t'], " ");
+            let text = one_line(row.get(c).map(String::as_str).unwrap_or(""));
             let limit = ((cell - 16.0) / 8.0) as usize;
             let mut shown: String = text.chars().take(limit).collect();
             if text.chars().count() > limit {
@@ -1725,8 +1766,11 @@ fn mermaid_link(s: &str) -> Option<(Link, &str)> {
     }
     Some(((None, dashed, arrow), rest))
 }
+fn is_json_diagram(content: &str) -> bool {
+    content.trim_start().starts_with('{')
+}
 fn diagram(content: &str) -> Result<String> {
-    let graph = if content.trim_start().starts_with('{') {
+    let graph = if is_json_diagram(content) {
         let d:JsonDiagram=serde_json::from_str(content).map_err(|_|invalid("Pour SVG, content doit être un flowchart Mermaid ou un graphe JSON : {\"nodes\":[\"Départ\",\"Arrivée\"],\"edges\":[[0,1]]}."))?;
         if d.edges.iter().flatten().any(|&i| i >= d.nodes.len()) {
             return Err(invalid(

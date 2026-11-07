@@ -1,0 +1,184 @@
+//! Stays mapped for the whole lease. It receives clicks, unlike the macOS panel,
+//! because no input tap exists here: its buttons are the takeover.
+use super::gate::{Gate, Stop, View};
+use gtk::{gdk, prelude::*};
+use std::{cell::Cell, io::Stdout, rc::Rc, sync::Arc};
+
+const WIDTH: i32 = 640;
+const HEIGHT: i32 = 44;
+const LIVE: &str = "Ezerbot voit l’écran";
+const UNPROVEN: &str = "Partage en pause : bandeau non garanti visible";
+const BUTTON_WIDTH: i32 = 96;
+const STYLE: &str = "window { background-color: #1f2129; }
+label { color: #ffffff; font-weight: 600; }
+button { background-image: none; background-color: #3a3d4a; border: 1px solid #5a5e6e;
+  box-shadow: none; text-shadow: none; }
+button:disabled { background-color: #2b2d36; }
+button:disabled label { color: #8a8d99; }";
+
+/// What X11 tells about the banner. Wayland tells nothing that proves it is on top,
+/// and a compositing manager makes X11 compute visibility on an offscreen buffer:
+/// in both cases the banner is never proven visible and the lease stays paused.
+#[derive(Clone, Copy, Default)]
+struct Sight {
+    mapped: bool,
+    minimized: bool,
+    unobscured: bool,
+}
+
+impl Sight {
+    fn visible(self, provable: bool) -> bool {
+        provable && self.mapped && !self.minimized && self.unobscured
+    }
+}
+
+fn provable() -> bool {
+    let x11 =
+        gdk::Display::default().is_some_and(|display| display.type_().name() == "GdkX11Display");
+    x11 && !gdk::Screen::default().is_some_and(|screen| screen.is_composited())
+}
+
+/// Reports every change of what the person can see to the gate.
+fn watch(window: &gtk::Window, gate: &Arc<Gate<Stdout>>) {
+    let sight = Rc::new(Cell::new(Sight::default()));
+    let report = {
+        let (sight, gate) = (sight.clone(), gate.clone());
+        move |change: &dyn Fn(&mut Sight)| {
+            let mut now = sight.get();
+            change(&mut now);
+            sight.set(now);
+            gate.banner(now.visible(provable()));
+        }
+    };
+    if let Some(screen) = gdk::Screen::default() {
+        let composited = report.clone();
+        screen.connect_composited_changed(move |_| composited(&|_| {}));
+    }
+    window.add_events(gdk::EventMask::VISIBILITY_NOTIFY_MASK | gdk::EventMask::STRUCTURE_MASK);
+    let mapped = report.clone();
+    window.connect_map_event(move |_, _| {
+        mapped(&|sight| sight.mapped = true);
+        gtk::glib::Propagation::Proceed
+    });
+    let unmapped = report.clone();
+    window.connect_unmap_event(move |_, _| {
+        unmapped(&|sight| sight.mapped = false);
+        gtk::glib::Propagation::Proceed
+    });
+    let state = report.clone();
+    window.connect_window_state_event(move |_, event| {
+        let minimized = event
+            .new_window_state()
+            .intersects(gdk::WindowState::ICONIFIED | gdk::WindowState::WITHDRAWN);
+        state(&|sight| sight.minimized = minimized);
+        gtk::glib::Propagation::Proceed
+    });
+    // GTK 3 still emits `visibility-notify-event` on X11; gtk-rs no longer names it.
+    window.connect_event(move |_, event| {
+        if let Some(visibility) = event.downcast_ref::<gdk::EventVisibility>() {
+            let unobscured = visibility.state() == gdk::VisibilityState::Unobscured;
+            report(&|sight| sight.unobscured = unobscured);
+        }
+        gtk::glib::Propagation::Proceed
+    });
+}
+
+pub struct Overlay {
+    window: gtk::Window,
+    label: gtk::Label,
+    pause: gtk::Button,
+    shown: Cell<View>,
+}
+
+fn button(text: &str, gate: &Arc<Gate<Stdout>>, stop: Stop) -> gtk::Button {
+    let button = gtk::Button::with_label(text);
+    button.set_size_request(BUTTON_WIDTH, -1);
+    let gate = gate.clone();
+    button.connect_clicked(move |_| gate.stop(stop));
+    button
+}
+
+impl Overlay {
+    pub fn build(gate: &Arc<Gate<Stdout>>) -> Self {
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_title("Partage d’écran");
+        window.set_decorated(false);
+        window.set_keep_above(true);
+        window.stick();
+        window.set_skip_taskbar_hint(true);
+        window.set_skip_pager_hint(true);
+        window.set_type_hint(gdk::WindowTypeHint::Utility);
+        window.set_focus_on_map(false);
+        window.set_resizable(false);
+        window.set_default_size(WIDTH, HEIGHT);
+        let style = gtk::CssProvider::new();
+        if style.load_from_data(STYLE.as_bytes()).is_ok() {
+            if let Some(screen) = gdk::Screen::default() {
+                gtk::StyleContext::add_provider_for_screen(
+                    &screen,
+                    &style,
+                    gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                );
+            }
+        }
+        let label = gtk::Label::new(None);
+        let pause = button("Pause", gate, Stop::Pause);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.set_border_width(6);
+        row.pack_start(&label, true, true, 0);
+        row.pack_start(&pause, false, false, 0);
+        row.pack_start(&button("Arrêter", gate, Stop::Revoke), false, false, 0);
+        window.add(&row);
+
+        let closing = gate.clone();
+        window.connect_delete_event(move |_, _| {
+            closing.stop(Stop::Revoke);
+            gtk::glib::Propagation::Stop
+        });
+        watch(&window, gate);
+        let escape = gate.clone();
+        window.connect_key_press_event(move |_, event| {
+            if event.keyval() == gdk::keys::constants::Escape {
+                escape.stop(Stop::Revoke);
+            }
+            gtk::glib::Propagation::Proceed
+        });
+
+        if let Some(area) = gdk::Display::default()
+            .and_then(|display| display.monitor(0))
+            .map(|monitor| monitor.geometry())
+        {
+            window.move_(area.x() + (area.width() - WIDTH) / 2, area.y() + 8);
+        }
+        label.set_text(UNPROVEN);
+        pause.set_sensitive(false);
+        window.show_all();
+        Self {
+            window,
+            label,
+            pause,
+            shown: Cell::new(View::Unproven),
+        }
+    }
+
+    pub fn render(&self, view: View) {
+        // Minimizing paused the lease and nothing else can bring the banner back:
+        // it has no taskbar entry, and resuming needs it on screen.
+        let minimized = |window: gdk::Window| window.state().contains(gdk::WindowState::ICONIFIED);
+        if view != View::Closed && self.window.window().is_some_and(minimized) {
+            self.window.deiconify();
+        }
+        if self.shown.replace(view) == view {
+            return;
+        }
+        self.pause.set_sensitive(view == View::Live);
+        match view {
+            View::Live => self.label.set_text(LIVE),
+            View::Paused => self
+                .label
+                .set_text("Ezerbot en pause. Reprenez dans l’application."),
+            View::Unproven => self.label.set_text(UNPROVEN),
+            View::Closed => self.window.hide(),
+        }
+    }
+}

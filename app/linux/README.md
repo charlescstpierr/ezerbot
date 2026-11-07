@@ -47,8 +47,8 @@ L’inventaire de #598 renvoie vers les mêmes tickets.
 | Mémos vocaux | Reconnaissance vocale, branchement du flux du micro | #607 |
 | Appels et mode voix | Branchement du flux du micro et lecture audio native | #607 |
 | Enregistrement local de réunion | Branchement du flux du micro et transcription | #607 |
-| Capture de l’écran | Permissions et services du bureau | #608 |
-| Contrôle de l’écran | Actions d’entrée par le portail RemoteDesktop | Optionnel dans #608, à cadrer |
+| Partage d’écran sous Wayland ou avec un compositeur | Portail ScreenCast et son indicateur système | #632 |
+| Contrôle de l’écran | Actions d’entrée par le portail RemoteDesktop | À cadrer après #608 |
 | Démonstrations | Capture des gestes et de l’écran | Dépend de #608 |
 
 Le choix du micro est porté (#606) : **Paramètres › Micro** liste les entrées, le défaut du système en premier,
@@ -63,6 +63,24 @@ Les versions de développement gardent les micros factices et n’atteignent jam
 Le bac à sable YOLO est suivi dans #528.
 Les services de #598 comprennent Secret Service, les notifications D-Bus,
 les liens profonds et l’ouverture par `xdg-open`.
+
+## Partage d’écran
+
+Le bot voit l’écran le temps d’un bail, pour un fil et une durée. Il n’effectue aucun geste.
+Le partage fonctionne seulement sous X11 sans compositeur. Sous X11 avec un compositeur, il reste en pause et aucune capture ne part. Sous Wayland, le bail est refusé. La suite, par le portail du bureau, est dans #632.
+Le wrapper lance `ezerbot-linux --screen-helper <ms>`. Son parent doit être le `grokbot-wrapper` voisin.
+L’image vient de `XGetImage` sur la fenêtre racine. Aucun fichier n’est écrit.
+Sous Wayland, la racine de XWayland ne montre que les clients X : le bail est refusé plutôt que d’envoyer un faux bureau.
+
+Une superposition reste affichée pendant tout le bail, avec **Pause** et **Arrêter**.
+La fermer révoque le bail. La réduire ou la couvrir le met en pause. Réduite, elle revient seule. La reprise est refusée tant qu’elle n’est pas visible à l’écran.
+Sous X11 avec un compositeur, rien ne prouve que la superposition reste visible : le bail s’annonce en pause dès le départ, affiche « Partage en pause : bandeau non garanti visible », et refuse chaque capture comme chaque reprise.
+Seul l’écran entier est partagé. Le partage d’une seule fenêtre est reporté.
+Il n’existe pas de touche Échap globale sous Linux. Échap agit quand Ezerbot ou la superposition a le focus.
+L’image contient la superposition et la fenêtre d’Ezerbot si elles sont visibles.
+
+Le build de debug ne contient aucune capture réelle et sert `app/native/screen-fixture.png`.
+Les tests de capture réelle sont des tests unitaires, avec un Xvfb privé.
 
 ## Preuve sans compte réel
 

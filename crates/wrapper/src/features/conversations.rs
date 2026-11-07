@@ -280,6 +280,10 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 return Err(ApiError::new(409, "Arrêtez ou supprimez la réunion en cours avant de supprimer cette conversation."));
             }
             tx.execute("UPDATE wrapper_conversations SET deleted = 1, updated_at = ?3 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, now()])?;
+            super::delegation::invalidate_background(&super::Context {
+                connection: &tx,
+                ..app.feature_context()
+            })?;
             super::storage::discard_conversation_draft(&tx, &input.id)?;
             super::storage::discard_conversation_images(&tx, &input.id)?;
             super::pages::anchors::discard_conversation(&tx, &input.id)?;

@@ -1328,7 +1328,11 @@ fn connected_requires_a_real_openai_call_and_a_failed_probe_still_sends() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|message| message["id"] == "reply-q2" && message["body"] == "bonjour quand même")
+            .any(|message| {
+                message["id"] == "reply-q2"
+                    && message["body"] == "bonjour quand même"
+                    && message["state"] != "streaming"
+            })
     });
     let sent = app.api("GET", "/api/state", b"").unwrap();
     let reply = sent["conversations"][0]["messages"]
@@ -1556,6 +1560,14 @@ fn retry_relaunches_the_probe_then_returns_the_complete_default_model_reply() {
             .unwrap()
             .iter()
             .any(|m| m["body"] == "premier envoi" && m["state"] == "echoed")
+    });
+    // The background title call shares the scripted queue: let it pass first.
+    wait("titre du premier échange", || {
+        f.server.seen.lock().unwrap().bodies.iter().any(|body| {
+            body["instructions"]
+                .as_str()
+                .is_some_and(|instructions| instructions.contains("Tu écris le titre"))
+        })
     });
     let before = f.server.seen.lock().unwrap().probe_bodies.len();
     f.server.seen.lock().unwrap().fail_probe = false;

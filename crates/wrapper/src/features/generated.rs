@@ -22,6 +22,15 @@ use std::{
     },
 };
 
+#[cfg(target_os = "linux")]
+const REVEAL_LABEL: &str = "Afficher dans son dossier";
+#[cfg(not(target_os = "linux"))]
+const REVEAL_LABEL: &str = "Afficher dans le Finder";
+#[cfg(target_os = "linux")]
+const REVEALED: &str = "Document affiché dans son dossier.";
+#[cfg(not(target_os = "linux"))]
+const REVEALED: &str = "Document affiché dans le Finder.";
+
 empty_hooks!(state, tick, context, entry, on_run_event, link_attachments);
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     conn.execute_batch(
@@ -254,7 +263,7 @@ pub fn approval_display(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, Api
     let a = args(call)?;
     let file = get(ctx.connection, &a.id)?;
     Ok(
-        json!({"document":file.name,"taille":file.byte_length,"action_id":a.action,"action":match a.action.as_str(){"save"=>"Enregistrer une copie (sans remplacer)","open"=>"Ouvrir avec l’application par défaut",_=>"Afficher dans le Finder"},"destination":a.path,"id":a.id}),
+        json!({"document":file.name,"taille":file.byte_length,"action_id":a.action,"action":match a.action.as_str(){"save"=>"Enregistrer une copie (sans remplacer)","open"=>"Ouvrir avec l’application par défaut",_=>REVEAL_LABEL},"destination":a.path,"id":a.id}),
     )
 }
 fn io(e: std::io::Error) -> ApiError {
@@ -413,15 +422,24 @@ pub fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: Arc<AtomicBool>) -> T
                     return Err(ApiError::new(400,"macOS n’a pas pu ouvrir ce document. Enregistrez une copie puis choisissez une application compatible."));
                 }
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "linux")]
+            {
+                let target = if a.action == "reveal" {
+                    path.parent().unwrap_or(&path)
+                } else {
+                    &path
+                };
+                if grokbot_linux_desktop::open::launch(target.as_os_str()).is_err() {
+                    return Err(ApiError::new(400,"Ezerbot n’a pas pu ouvrir ce document. Enregistrez une copie puis choisissez une application compatible."));
+                }
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             return Err(ApiError::new(
                 400,
                 "L’ouverture et le Finder sont disponibles uniquement sur macOS.",
             ));
             #[allow(unreachable_code)]
-            Ok(
-                json!({"message":if a.action=="open"{"Document ouvert."}else{"Document affiché dans le Finder."}}),
-            )
+            Ok(json!({"message":if a.action=="open"{"Document ouvert."}else{REVEALED}}))
         }
     })())
 }

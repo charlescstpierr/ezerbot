@@ -63,7 +63,7 @@ async function main([sha, binary, output]) {
   for (const name of ["SIGINT", "SIGTERM"]) process.once(name, () => controller.abort());
   let error = null;
   try {
-    await capture(sha, binary, output, controller.signal, views);
+    await capture(sha, binary, output, controller.signal, views, []);
   } catch (failure) {
     error = failure.message;
   }

@@ -89,6 +89,10 @@ const BASE_INSTRUCTIONS: &str = concat!(
     "Sinon, explique en une phrase simple ce qui n'a pas marché et le prochain pas possible, sans jargon, code d'erreur ni sortie brute. ",
     "N'annonce jamais un succès que les résultats ne confirment pas. ",
     "Ne recopie pas les commandes ou les chemins sauf demande explicite.",
+    "\n\nPour un travail qui demande plus de quelques étapes, utilise delegate en mode background dans un fil direct si un sous-bot est disponible. ",
+    "Après l'admission, termine ton tour par une courte phrase humaine qui annonce que tu t'en occupes et que tu reviendras avec le résultat. ",
+    "Tu restes disponible pour d'autres messages. Le résultat revient dans un nouveau tour. ",
+    "Utilise le mode wait quand tu dois attendre le résultat pour poursuivre, ou dans les groupes et les tâches imbriquées. Respecte les approbations et les refus.",
 );
 const INTERRUPTED: &str = "La réponse a été interrompue avant la fin. Vous pouvez la relancer.";
 const CONTEXT_TOO_LARGE: &str = "Le texte et les pièces jointes dépassent ce que le modèle peut lire en un message. Raccourcissez le texte ou joignez moins de documents dans un nouveau message.";
@@ -647,7 +651,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     return Ok(json!({"ok":true,"run_id":old.run_id}));
                 }
             } else {
-                if !matches!(old.trigger, Trigger::UserMessage { .. }) {
+                if !regenerable(&old.trigger) {
                     return Err(ApiError::new(
                         409,
                         "Une réponse de tâche ne peut pas être régénérée.",
@@ -720,6 +724,13 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 }
             }
             let tx = super::write_transaction(&app.connection)?;
+            super::delegation::reset_background(
+                &super::Context {
+                    connection: &tx,
+                    ..app.feature_context()
+                },
+                &input.conversation_id,
+            )?;
             let id = format!("reset-{}", random_id(&tx)?);
             super::conversations::append_entry(&tx, &input.conversation_id, "reset", &id, now())?;
             compaction::invalidate_all(&tx, &input.conversation_id)?;
@@ -970,7 +981,10 @@ fn create_run(
         }
         other => other,
     };
-    let kind = if matches!(trigger, Trigger::UserMessage { .. }) {
+    let kind = if matches!(
+        trigger,
+        Trigger::UserMessage { .. } | Trigger::DelegationReturn { .. }
+    ) {
         RunKind::Chat
     } else {
         RunKind::Task
@@ -1127,6 +1141,7 @@ fn host_action_response(
 }
 
 pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Result<(), ApiError> {
+    super::delegation::stop_background(ctx, run)?;
     ctx.provider.cancel_run(&run.run_id);
     let mut services = Services::new(ctx)?;
     let ended = store::get(ctx.connection, &run.run_id)?.is_some_and(|r| r.status.is_terminal());
@@ -2849,6 +2864,10 @@ fn projected_parts_with(
     }
     Ok(parts)
 }
+/// Only a reply to Charles's message can be asked again; the screen offers what this accepts.
+fn regenerable(trigger: &Trigger) -> bool {
+    matches!(trigger, Trigger::UserMessage { .. })
+}
 fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiError> {
     let events = match crate::projection_hints::events_of(&run.run_id) {
         Some(events) => events,
@@ -2897,7 +2916,7 @@ fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiErr
         error_kind: metadata.1,
         notice: metadata.2,
         kind: "message".into(),
-        payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":usage,
+        payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"regenerable":regenerable(&run.trigger),"parts":parts,"usage":usage,
             "sources":secrets.value(&json!(sources))?,"citations":citations,
             "recalled_fact_ids":super::memory::recalled_ids(conn, &run.run_id)?}),
         attachments: vec![],

@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { createHash } = require("node:crypto");
-const { VIEWS, VIEWPORT, waitFor, pngInfo } = require("./linux-captures.cjs");
+const { VIEWS, NATIVE_VIEWS, VIEWPORT, waitFor, pngInfo, stackingIds, hasAbove, nativeEntry } = require("./linux-captures.cjs");
 
 function repository(t) {
   const root = fs.mkdtempSync(join(tmpdir(), "linux-captures-test-"));
@@ -132,16 +132,39 @@ test("SIGTERM stops only the owned build group and removes the worktree", { time
 test("view registry matches the documented set and PNG metadata hashes actual bytes", () => {
   const docs = fs.readFileSync(join(__dirname, "../docs/captures-linux.md"), "utf8");
   const documented = [...docs.matchAll(/^\| `([^`]+)` \|/gm)].map(match => match[1]);
-  assert.deepEqual(VIEWS.map(view => view.id), documented);
+  assert.deepEqual([...VIEWS, ...NATIVE_VIEWS].map(view => view.id), documented);
   const bytes = Buffer.alloc(33);
   Buffer.from("89504e470d0a1a0a", "hex").copy(bytes);
   bytes.write("IHDR", 12);
   bytes.writeUInt32BE(VIEWPORT.width, 16);
   bytes.writeUInt32BE(VIEWPORT.height, 20);
-  assert.deepEqual(pngInfo(bytes), { width: 1440, height: 900, sha256: createHash("sha256").update(bytes).digest("hex") });
+  assert.deepEqual(pngInfo(bytes), { width: 1440, height: 900, sha256: createHash("sha256").update(bytes).digest("hex"), size: 33 });
   assert.throws(() => pngInfo(Buffer.from("not a PNG")), /not a PNG/);
   bytes.writeUInt32BE(1, 16);
   assert.throws(() => pngInfo(bytes), /dimensions/);
+});
+
+test("a native view names its renderer and hashes the exact PNG", () => {
+  const bytes = Buffer.alloc(33);
+  Buffer.from("89504e470d0a1a0a", "hex").copy(bytes);
+  bytes.write("IHDR", 12);
+  bytes.writeUInt32BE(VIEWPORT.width, 16);
+  bytes.writeUInt32BE(VIEWPORT.height, 20);
+  const [view] = NATIVE_VIEWS;
+  assert.deepEqual(nativeEntry(view, bytes), {
+    id: view.id, label: view.label, file: `${view.id}.png`, renderer: "webkitgtk-native-shell",
+    width: 1440, height: 900, sha256: createHash("sha256").update(bytes).digest("hex"), size: 33,
+  });
+  bytes.writeUInt32BE(800, 16);
+  assert.throws(() => nativeEntry(view, bytes), /dimensions/);
+});
+
+test("the window manager's answers are read for the stacking order and the above state", () => {
+  const listed = "_NET_CLIENT_LIST_STACKING(WINDOW): window id # 0x400003, 0x40002C, 0x600001\n";
+  assert.deepEqual(stackingIds(listed), ["0x400003", "0x40002c", "0x600001"]);
+  assert.deepEqual(stackingIds("_NET_CLIENT_LIST_STACKING:  no such atom on any window.\n"), []);
+  assert.equal(hasAbove("_NET_WM_STATE(ATOM) = _NET_WM_STATE_SKIP_TASKBAR, _NET_WM_STATE_ABOVE\n"), true);
+  assert.equal(hasAbove("_NET_WM_STATE(ATOM) = _NET_WM_STATE_SKIP_TASKBAR\n"), false);
 });
 
 test("readiness observes delayed success and bounds false or stalled predicates", async () => {

@@ -1983,3 +1983,59 @@ fn deleting_a_background_member_stops_a_queued_return_child_before_launch() {
         assert_eq!(state, "cancelled", "{action}");
     }
 }
+
+#[test]
+fn a_failed_return_offers_no_regeneration_that_the_api_refuses() {
+    let mut f = Fixture::new(true);
+    let scenario = one_background(&f);
+    let router = scenario.clone();
+    f.server.seen.lock().unwrap().reply_for = Some(Arc::new(move |request| {
+        let instructions = request["instructions"].as_str().unwrap_or_default();
+        if instructions.contains("Summarize these background task outcomes briefly") {
+            router.return_calls.fetch_add(1, Ordering::SeqCst);
+            return ScriptedResponse::json(500, json!({"error":{"message":"upstream reset"}}));
+        }
+        router.reply(request)
+    }));
+    let c = f.conversation();
+    let parent = f.start(&c, "return-network");
+    let trigger = Trigger::DelegationReturn {
+        parent_run_id: parent.run_id.clone(),
+    };
+    wait("retour modèle en échec", || {
+        f.tick();
+        store::latest_run_for_trigger(&f.db(), &trigger)
+            .unwrap()
+            .is_some_and(|run| run.status.is_terminal())
+            && f.provider.status()["titling"] == false
+    });
+    let returned = store::latest_run_for_trigger(&f.db(), &trigger)
+        .unwrap()
+        .unwrap();
+    assert_eq!(returned.status, RunStatus::Failed);
+    let projection = f.projected(&c);
+    let reply_of = |run: &str| {
+        projection
+            .iter()
+            .find(|message| message["payload"]["run_id"] == run)
+            .unwrap()
+            .clone()
+    };
+    let failed = reply_of(&returned.run_id);
+    assert_eq!(failed["state"], "failed");
+    assert_eq!(failed["payload"]["regenerable"], false);
+    assert_eq!(reply_of(&parent.run_id)["payload"]["regenerable"], true);
+
+    let refused = f
+        .app
+        .api(
+            "POST",
+            "/api/regenerate",
+            json!({"conversation_id":c,"message_id":failed["id"].as_str().unwrap().trim_start_matches("reply-")})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap_err();
+    assert_eq!(refused.status, 409);
+    assert!(scenario.return_calls.load(Ordering::SeqCst) >= 1);
+}

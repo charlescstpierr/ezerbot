@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { pendingReply } from "./thread-order.js";
-import { connectionMessages, composerConnectionState, signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
+import { connectionMessages, composerConnectionState, regenerable, signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
 
 test("an authoritative terminal snapshot releases loading without a final stream event", () => {
   const live = [{ role: "assistant", state: "streaming", body: "Début" }];
@@ -267,4 +267,18 @@ test("a disabled secondary button is dimmed and does not look actionable", () =>
   assert.ok(rule, "règle .secondary-button:disabled absente");
   assert.match(rule[0], /opacity:\s*\.5/);
   assert.match(rule[0], /cursor:\s*default/);
+});
+
+test("une réponse que /api/regenerate refuse ne propose ni Réessayer ni Relancer", () => {
+  const returned = { id: "reply-return", role: "assistant", kind: "message", state: "failed", error_kind: "other",
+    error: "OpenAI a renvoyé une erreur. Réessayez.", payload: { run_id: "return", regenerable: false } };
+  assert.equal(regenerable(returned), false);
+  const problem = replyProblemState(returned);
+  assert.equal(problem.retry, false);
+  assert.doesNotMatch(problem.error, /Réessayez/);
+  assert.equal(signInCardState({ message: { ...returned, error_kind: "signin" }, providerConnected: true, engineConnected: true }).showRetry, false);
+
+  const answer = { ...returned, id: "reply-question", payload: { run_id: "question", regenerable: true } };
+  assert.equal(replyProblemState(answer).retry, true);
+  assert.equal(signInCardState({ message: { ...answer, error_kind: "signin" }, providerConnected: true, engineConnected: true }).showRetry, true);
 });

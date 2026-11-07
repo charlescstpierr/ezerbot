@@ -651,7 +651,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     return Ok(json!({"ok":true,"run_id":old.run_id}));
                 }
             } else {
-                if !matches!(old.trigger, Trigger::UserMessage { .. }) {
+                if !regenerable(&old.trigger) {
                     return Err(ApiError::new(
                         409,
                         "Une réponse de tâche ne peut pas être régénérée.",
@@ -2864,6 +2864,10 @@ fn projected_parts_with(
     }
     Ok(parts)
 }
+/// Only a reply to Charles's message can be asked again; the screen offers what this accepts.
+fn regenerable(trigger: &Trigger) -> bool {
+    matches!(trigger, Trigger::UserMessage { .. })
+}
 fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiError> {
     let events = match crate::projection_hints::events_of(&run.run_id) {
         Some(events) => events,
@@ -2912,7 +2916,7 @@ fn run_reply(conn: &Connection, run: &Run, id: String) -> Result<Message, ApiErr
         error_kind: metadata.1,
         notice: metadata.2,
         kind: "message".into(),
-        payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":usage,
+        payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"regenerable":regenerable(&run.trigger),"parts":parts,"usage":usage,
             "sources":secrets.value(&json!(sources))?,"citations":citations,
             "recalled_fact_ids":super::memory::recalled_ids(conn, &run.run_id)?}),
         attachments: vec![],

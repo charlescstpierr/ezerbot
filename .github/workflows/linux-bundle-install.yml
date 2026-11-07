@@ -1,0 +1,37 @@
+name: Installation du bundle Linux
+
+on:
+  pull_request:
+    paths:
+      - 'tools/build-app-linux.sh'
+      - 'tools/install-app-linux.py'
+      - 'tools/test_linux_bundle_install.py'
+      - 'docs/install-linux.md'
+      - '.github/workflows/linux-bundle-install.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/build-app-linux.sh'
+      - 'tools/install-app-linux.py'
+      - 'tools/test_linux_bundle_install.py'
+      - 'docs/install-linux.md'
+      - '.github/workflows/linux-bundle-install.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  install-bundle:
+    runs-on: ubuntu-24.04
+    container: ubuntu:24.04
+    timeout-minutes: 5
+    steps:
+      - name: Installer les outils de validation du raccourci
+        run: |
+          apt-get update
+          apt-get install --no-install-recommends -y ca-certificates git python3 libglib2.0-bin desktop-file-utils
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Vérifier l'installation avec des exécutables fixture
+        run: python3 -m unittest discover -s tools -p test_linux_bundle_install.py -v

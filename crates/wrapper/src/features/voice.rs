@@ -340,6 +340,13 @@ pub fn routes(
                 .map(ApiResponse::Json),
         );
     }
+    #[cfg(all(target_os = "linux", not(debug_assertions)))]
+    if method == "GET" && path == "/api/voice/microphones" {
+        return Some(
+            super::microphones::listing(&super::microphones::AudioSession::system())
+                .map(ApiResponse::Json),
+        );
+    }
     match (method, path) {
         ("POST", "/api/voice/bot") => {
             Some(super::voice_session::save_bot(&app.connection, body).map(ApiResponse::Json))

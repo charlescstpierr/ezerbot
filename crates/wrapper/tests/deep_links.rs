@@ -34,6 +34,14 @@ fn grammar_canonicalizes_without_treating_text_as_a_command() {
             agent: Some("grokbot".into())
         }
     );
+    let notification = parse_link("ezerbot://app/v1/notification?id=reply%3Arun-1").unwrap();
+    assert_eq!(
+        notification.destination,
+        Destination::Notification {
+            id: "reply:run-1".into()
+        }
+    );
+    assert!(parse_link("ezerbot://app/v1/notification?id=a&agent=b").is_err());
     let thread = parse_link("ezerbot://app/v1/thread?id=task%3Achild%3Aparent").unwrap();
     assert!(matches!(
         thread.destination,

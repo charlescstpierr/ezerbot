@@ -795,12 +795,14 @@ fn every_preview_draws_its_spaces_as_written() {
         ("md", format!("Public : {WRITTEN}")),
         ("pdf", format!("Public : {WRITTEN}")),
         ("pptx", format!("Public : {WRITTEN}")),
+        ("docx", format!("Public : {WRITTEN}")),
     ] {
         let (_, after) = previews(format, &content, SECRET);
-        let preserved = after.find("xml:space=\"preserve\"");
+        let texts: Vec<&str> = after.split("<text").skip(1).collect();
         assert!(
-            preserved.is_some_and(|at| at < after.find("<text").unwrap()),
-            "{format} : the drawing collapses the spaces the mask kept, {after}"
+            !texts.is_empty()
+                && texts.iter().all(|t| t[..t.find('>').unwrap()].contains("xml:space=\"preserve\"")),
+            "{format} : a <text> without its own xml:space collapses the spaces the mask kept, {after}"
         );
         assert!(after.contains(WRITTEN), "{format} : {after}");
     }

@@ -20,11 +20,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import doctor  # noqa: E402
 import linux_verdict  # noqa: E402
+import verify_lib  # noqa: E402
 
 SCRIPTS = Path(__file__).resolve().parent
 SHA = "a" * 40
-# Paths prove-linux.sh requires unchanged since the commit, read from the script itself.
-GUARDED = re.search(r"status --porcelain -- (.+)\)$", (SCRIPTS / "prove-linux.sh").read_text(), re.M).group(1).split()
+REPO = SCRIPTS.parents[3]
 
 
 def png(width: int = 4, height: int = 3, raw: bytes | None = None) -> bytes:
@@ -528,8 +528,7 @@ class LinuxPrerequisitesTests(unittest.TestCase):
 
     def failing_build(self, tool: str, extra_env: dict[str, str]) -> tuple[subprocess.CompletedProcess[str], Path]:
         repo = SCRIPTS.parents[3]
-        dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", *GUARDED], capture_output=True, text=True, check=True).stdout
-        if dirty:
+        if verify_lib.worktree_changes(repo):
             self.skipTest("checkout modifié : prove-linux.sh refuse avant le build")
         scratch = Path(tempfile.mkdtemp(prefix="linux-build-"))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(scratch)], check=True))
@@ -548,8 +547,7 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         import fcntl
 
         repo = SCRIPTS.parents[3]
-        dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", *GUARDED], capture_output=True, text=True, check=True).stdout
-        if dirty:
+        if verify_lib.worktree_changes(repo):
             self.skipTest("checkout modifié : prove-linux.sh refuse avant le verrou")
         target = repo / "target" / "verify-linux"
         target.mkdir(parents=True, exist_ok=True)
@@ -584,30 +582,60 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         self.assertTrue(report[-1].startswith("FIX "))
         self.assertIn("L’étape `cargo build` a échoué (code 9) ; aucune vue n’a été pilotée.", report)
 
-    def test_every_source_read_by_the_capture_driver_is_guarded(self) -> None:
-        driver = (SCRIPTS.parents[3] / "tools" / "linux-captures.cjs").read_text()
-        reads = re.findall(r'join\(source, "([^"]+)"', driver)
-        self.assertIn("app/linux/src/local-api.js", reads)
-        for read in reads:
-            with self.subTest(read=read):
-                self.assertTrue(any(read == path or read.startswith(f"{path}/") for path in GUARDED), f"{read} absent du contrôle de prove-linux.sh")
-
-    def test_modified_linux_shell_script_is_refused_before_the_build(self) -> None:
+    def clone_at_head(self) -> tuple[Path, Path]:
         scratch = Path(tempfile.mkdtemp(prefix="linux-dirty-"))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(scratch)], check=True))
         clone = scratch / "repo"
         head = subprocess.run(["git", "-C", str(SCRIPTS), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-        subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", str(SCRIPTS.parents[3]), str(clone)], check=True)
+        subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", str(REPO), str(clone)], check=True)
         subprocess.run(["git", "-C", str(clone), "checkout", "-q", "--detach", head], check=True)
         shutil.copytree(SCRIPTS, clone / ".cursor/skills/verify-ezerbot/scripts", dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
-        subprocess.run(["git", "-C", str(clone), "-c", "user.name=verify", "-c", "user.email=verify@localhost", "commit", "-qam", "scripts under test", "--allow-empty"], check=True)
-        with open(clone / "app/linux/src/local-api.js", "a") as script:
-            script.write("// modifié après le commit\n")
-        result = subprocess.run(["bash", str(clone / ".cursor/skills/verify-ezerbot/scripts/prove-linux.sh"), "--evidence", str(scratch / "ev")], capture_output=True, text=True, timeout=120)
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("sources compilées modifiées", result.stderr)
-        self.assertIn("app/linux/src/local-api.js", result.stderr)
-        self.assertFalse((clone / "target" / "verify-linux" / "debug").exists())
+        subprocess.run(["git", "-C", str(clone), "add", "-A", ".cursor/skills/verify-ezerbot/scripts"], check=True)
+        subprocess.run(["git", "-C", str(clone), "-c", "user.name=verify", "-c", "user.email=verify@localhost", "commit", "-qm", "scripts under test", "--allow-empty"], check=True)
+        return scratch, clone
+
+    def test_every_embedded_resource_and_driver_read_is_guarded_without_a_list(self) -> None:
+        embedded = {str((rust.parent / target).resolve().relative_to(REPO))
+                    for rust in REPO.glob("crates/*/src/**/*.rs")
+                    for target in re.findall(r'include_(?:bytes|str)!\(\s*"([^"]+)"\s*\)', rust.read_text())}
+        driver = (REPO / "tools" / "linux-captures.cjs").read_text()
+        reads = set(re.findall(r'join\(source, "([^"]+)"', driver)) - {"app/ui"}
+        self.assertIn("app/native/screen-fixture.png", embedded)
+        self.assertIn("app/linux/src/local-api.js", reads)
+        _, clone = self.clone_at_head()
+        self.assertEqual(verify_lib.worktree_changes(clone), [])
+        for path in sorted(embedded | reads):
+            with self.subTest(path=path):
+                with open(clone / path, "ab") as handle:
+                    handle.write(b"\n")
+                self.assertTrue(any(path in line for line in verify_lib.worktree_changes(clone)), f"{path} modifié sans être signalé")
+                subprocess.run(["git", "-C", str(clone), "checkout", "-q", "--", path], check=True)
+        for extra in ("app/ui/panels/nouveau.js", "app/ui/.DS_Store"):
+            with self.subTest(path=extra):
+                (clone / extra).write_text("ajouté après le commit\n")
+                self.assertTrue(any(extra in line for line in verify_lib.worktree_changes(clone)), f"{extra} ajouté sans être signalé")
+                (clone / extra).unlink()
+        for output in ("target/verify-linux/debug/x", "app/web/node_modules/x/index.js", "artifacts/captures-linux/x/manifest.json"):
+            (clone / output).parent.mkdir(parents=True, exist_ok=True)
+            (clone / output).write_text("sortie de la preuve\n")
+        self.assertEqual(verify_lib.worktree_changes(clone), [])
+
+    def test_change_after_the_commit_is_refused_before_the_build(self) -> None:
+        for path in ("app/native/screen-fixture.png", "app/linux/src/local-api.js"):
+            with self.subTest(path=path):
+                scratch, clone = self.clone_at_head()
+                with open(clone / path, "ab") as handle:
+                    handle.write(b"modifie apres le commit\n")
+                fake = scratch / "bin"
+                fake.mkdir()
+                (fake / "npm").write_text("#!/bin/sh\nexit 7\n")
+                (fake / "npm").chmod(0o755)
+                env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}"}
+                result = subprocess.run(["bash", str(clone / ".cursor/skills/verify-ezerbot/scripts/prove-linux.sh"), "--evidence", str(scratch / "ev")], env=env, capture_output=True, text=True, timeout=120)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("diffère de", result.stderr)
+                self.assertIn(path, result.stderr)
+                self.assertFalse((clone / "target" / "verify-linux" / "debug").exists())
 
     def test_used_evidence_folder_is_refused(self) -> None:
         used = Path(tempfile.mkdtemp(prefix="linux-used-"))

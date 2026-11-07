@@ -21,6 +21,7 @@ from verify_lib import (
     repo_root,
     resolve_commit,
     sha256_file,
+    worktree_changes,
 )
 
 
@@ -38,7 +39,12 @@ def main() -> None:
         help="Linux : vérifie Xvfb, Chrome, Node, cargo, disque, sans lancer d'instance",
     )
     parser.add_argument("--chrome", action="store_true", help="Linux : imprime le Chrome retenu")
+    parser.add_argument("--worktree", action="store_true", help="liste ce qui diffère du commit extrait ; code 1 si non vide")
     args = parser.parse_args()
+    if args.worktree:
+        changes = worktree_changes(repo_root())
+        print("\n".join(changes))
+        raise SystemExit(1 if changes else 0)
     if args.chrome:
         chrome = linux_chrome()
         if not chrome:
@@ -70,7 +76,7 @@ def main() -> None:
     binary_ok = bool(digest) and digest == run.get("binary_sha256")
     failures.append(check("binaire", binary_ok, "empreinte inchangée depuis le lancement") or "")
     sources_ok = bool(run.get("sources_clean"))
-    failures.append(check("sources", sources_ok, "crates et interface identiques au commit") or "")
+    failures.append(check("sources", sources_ok, "checkout identique au commit au lancement") or "")
     home = Path(str(run.get("home") or "/"))
     try:
         assert_throwaway(home, "HOME")

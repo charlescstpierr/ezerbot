@@ -41,8 +41,8 @@ if ! python3 "$DIR/doctor.py" --prerequisites >"$evidence/doctor.txt"; then
   cat "$evidence/doctor.txt"; fail 'prérequis Linux manquants (voir doctor.txt).'
 fi
 tail -n 1 "$evidence/doctor.txt"
-dirty=$(git -C "$root" status --porcelain -- crates app/ui app/web Cargo.toml Cargo.lock vendor app/linux/src/local-api.js tools/linux-captures.cjs .cursor/skills/verify-ezerbot/scripts)
-[[ -z $dirty ]] || fail "sources compilées modifiées depuis $sha ; committer avant la preuve :
+# Tout l'arbre, pas une liste : Cargo, build.rs, npm et le pilote lisent des fichiers partout.
+dirty=$(python3 "$DIR/doctor.py" --worktree) || fail "le checkout diffère de $sha (modifié, non suivi ou ignoré) ; committer, ou mettre de côté avec \`git stash push -u -m verify\`, puis relancer :
 $dirty"
 
 cargo=${EZERBOT_VERIFY_CARGO:-$HOME/.cargo/bin/cargo}

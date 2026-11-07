@@ -32,7 +32,6 @@ pub(crate) struct Watch {
     last_ms: u64,
     seq: u64,
     version: u64,
-    internal_active: bool,
     step: String,
     phase: Phase,
 }
@@ -93,7 +92,6 @@ impl Registry {
             last_ms: time,
             seq,
             version: 0,
-            internal_active: false,
             step: "réponse du modèle".into(),
             phase: Phase::Watching,
         });
@@ -127,15 +125,8 @@ impl Registry {
         self.activity(id, None);
     }
     pub(crate) fn activity(&self, id: &str, step: Option<&str>) {
-        self.activity_kind(id, step, None);
-    }
-    pub(crate) fn activity_kind(&self, id: &str, step: Option<&str>, internal: Option<bool>) {
         let time = self.now();
-        let mut state = self.lock();
-        if let (Some(active), Some(watch)) = (internal, state.watches.get_mut(id)) {
-            watch.internal_active = active;
-        }
-        Self::signal(&mut state, id, time, step);
+        Self::signal(&mut self.lock(), id, time, step);
     }
     pub(crate) fn committed(&self, run: &Run, seq: u64) {
         let time = self.now();
@@ -216,7 +207,6 @@ impl Registry {
                 last_ms: time,
                 seq: *seq,
                 version: 0,
-                internal_active: false,
                 step: "réponse du modèle".into(),
                 phase: Phase::Watching,
             });
@@ -363,57 +353,40 @@ pub(super) fn scan(ctx: &super::super::Context<'_>) -> Result<(), ApiError> {
     let parents = statement
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<HashMap<String, String>>>()?;
-    for (run, candidate) in registry.reconcile(&runs, parents, ctx.now_ms) {
-        ctx.connection.busy_timeout(Duration::ZERO)?;
-        let result = stop(ctx, &run, &candidate);
-        ctx.connection.busy_timeout(Duration::from_secs(3))?;
-        if result.as_ref().is_err_and(|e| matches!(e, Error::Sqlite(rusqlite::Error::SqliteFailure(e,_)) if matches!(e.code,rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))) {
-            let current = store::required(ctx.connection, &run.run_id)?;
-            if candidate.internal_active && eligible(ctx.connection, &current)? && !has_active_child(ctx.connection, &run.run_id)? && registry.claim(&run.run_id, &candidate, latest_seq(ctx.connection, &run.run_id)?, ctx.now_ms) {
-                ctx.provider.cancel_run(&run.run_id);
-                stop(ctx, &run, &candidate)?;
-            }
-        } else { result?; }
-    }
-    Ok(())
+    let stops: Vec<_> = registry
+        .reconcile(&runs, parents, ctx.now_ms)
+        .into_iter()
+        .map(|(run, candidate)| stop(ctx, &run, &candidate))
+        .collect();
+    stops.into_iter().collect()
 }
 
-fn stop(
-    ctx: &super::super::Context<'_>,
-    run: &Run,
-    candidate: &Watch,
-) -> grokbot_engine::contracts::Result<()> {
-    let mut services = Services::new(ctx)?;
-    run_loop::cancel_if(
-        ctx.connection,
-        &mut services,
-        &run.run_id,
-        TurnEnd::Stopped,
-        |conn, current| {
-            if current.status != RunStatus::Running
-                || !eligible(conn, current)?
-                || has_active_child(conn, &run.run_id)?
-            {
-                return Ok(false);
-            }
-            let seq = latest_seq(conn, &run.run_id)?;
-            if seq != candidate.seq {
-                ctx.provider.watchdog().committed(current, seq);
-                return Ok(false);
-            }
-            if !ctx
-                .provider
-                .watchdog()
-                .claim(&run.run_id, candidate, seq, ctx.now_ms)
-            {
-                return Ok(false);
-            }
-            ctx.provider.cancel_run(&run.run_id);
-            Ok(true)
-        },
-    )?;
-    let _ = super::super::turns::record(ctx.connection, &run.run_id);
-    Ok(())
+fn stoppable(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<bool> {
+    Ok(run.status == RunStatus::Running
+        && eligible(conn, run)?
+        && !has_active_child(conn, &run.run_id)?)
+}
+
+/// The claim is decided on a read so the signal never waits for the writer,
+/// as with /api/stop. The writer only rechecks that no human wait began since.
+fn stop(ctx: &super::super::Context<'_>, run: &Run, candidate: &Watch) -> Result<(), ApiError> {
+    let current = store::required(ctx.connection, &run.run_id)?;
+    let seq = latest_seq(ctx.connection, &run.run_id)?;
+    if !stoppable(ctx.connection, &current)? {
+        return Ok(());
+    }
+    if seq != candidate.seq {
+        ctx.provider.watchdog().committed(&current, seq);
+        return Ok(());
+    }
+    if !ctx
+        .provider
+        .watchdog()
+        .claim(&run.run_id, candidate, seq, ctx.now_ms)
+    {
+        return Ok(());
+    }
+    super::stop_run_if(ctx, &current, TurnEnd::Stopped, stoppable)
 }
 
 pub fn record(
@@ -486,12 +459,7 @@ pub(super) fn entry(ctx: &super::super::Context<'_>, id: &str) -> Option<Message
     ))
 }
 
-pub(crate) fn activity(
-    provider: &Provider,
-    id: &str,
-    activity: run_loop::RunActivity<'_>,
-    internal_tool: bool,
-) {
+pub(crate) fn activity(provider: &Provider, id: &str, activity: run_loop::RunActivity<'_>) {
     let step = match activity {
         run_loop::RunActivity::Model => "réponse du modèle",
         run_loop::RunActivity::ToolStarted(name) | run_loop::RunActivity::ToolFinished(name) => {
@@ -506,12 +474,7 @@ pub(crate) fn activity(
             }
         }
     };
-    let internal = match activity {
-        run_loop::RunActivity::ToolStarted(_) => Some(internal_tool),
-        run_loop::RunActivity::ToolFinished(_) => Some(false),
-        _ => None,
-    };
-    provider.watchdog().activity_kind(id, Some(step), internal);
+    provider.watchdog().activity(id, Some(step));
 }
 
 #[cfg(any(test, feature = "test-support"))]

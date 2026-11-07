@@ -414,9 +414,8 @@ impl Provider {
         &self,
         id: &str,
         activity: grokbot_engine::run_loop::RunActivity<'_>,
-        internal_tool: bool,
     ) {
-        crate::features::engine::watchdog::activity(self, id, activity, internal_tool);
+        crate::features::engine::watchdog::activity(self, id, activity);
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]

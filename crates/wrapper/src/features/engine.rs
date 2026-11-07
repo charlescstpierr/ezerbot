@@ -1130,10 +1130,19 @@ fn host_action_response(
 }
 
 pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Result<(), ApiError> {
+    stop_run_if(ctx, run, end, |_, _| Ok(true))
+}
+/// Signal before writing: a busy writer must not delay the cancellation of a blocked tool.
+pub(crate) fn stop_run_if(
+    ctx: &super::Context<'_>,
+    run: &Run,
+    end: TurnEnd,
+    predicate: impl FnMut(&Connection, &Run) -> grokbot_engine::contracts::Result<bool>,
+) -> Result<(), ApiError> {
     ctx.provider.cancel_run(&run.run_id);
     let mut services = Services::new(ctx)?;
     let ended = store::get(ctx.connection, &run.run_id)?.is_some_and(|r| r.status.is_terminal());
-    run_loop::cancel(ctx.connection, &mut services, &run.run_id, end)?;
+    run_loop::cancel_if(ctx.connection, &mut services, &run.run_id, end, predicate)?;
     // Un tour suspendu n'a plus de worker pour l'écrire au journal.
     if !ended {
         let _ = super::turns::record(ctx.connection, &run.run_id);
@@ -1518,17 +1527,7 @@ impl<'a> Services<'a> {
 }
 impl RunServices for Services<'_> {
     fn on_activity(&mut self, id: &str, activity: run_loop::RunActivity<'_>) {
-        let internal = if let run_loop::RunActivity::ToolStarted(name) = activity {
-            let call = grokbot_engine::contracts::ToolCall {
-                call_id: String::new(),
-                name: name.into(),
-                arguments: json!({}),
-            };
-            !self.is_external_tool(&call) && !self.is_journaled_external_tool(&call)
-        } else {
-            false
-        };
-        watchdog::activity(self.provider, id, activity, internal);
+        watchdog::activity(self.provider, id, activity);
     }
     fn on_run_committed(&mut self, run: &Run, through_seq: u64) {
         self.provider.watchdog().committed(run, through_seq);

@@ -382,8 +382,7 @@ impl RunServices for BlockedServices {
     }
 
     fn on_activity(&mut self, id: &str, activity: RunActivity<'_>) {
-        self.provider
-            .watchdog_test_activity(id, activity, self.internal);
+        self.provider.watchdog_test_activity(id, activity);
     }
 }
 
@@ -761,8 +760,7 @@ fn each_live_activity_clears_silence_without_waiting_for_a_scan() {
         assert_eq!(f.state()["silence"]["active"], f.start);
         let before = f.ping();
         f.clock(241_000);
-        f.provider()
-            .watchdog_test_activity("active", activity, true);
+        f.provider().watchdog_test_activity("active", activity);
         assert_eq!(f.state()["silence"], json!({}));
         assert_ne!(f.ping(), before);
         f.tick(421_000);
@@ -917,7 +915,6 @@ fn last_public_step_does_not_expose_untrusted_tool_content() {
     f.provider().watchdog_test_activity(
         "slow-run",
         RunActivity::ToolStarted("slow/private?secret=NE_PAS_EXPOSER"),
-        true,
     );
     f.tick(540_000);
     let stalled = f.messages("stalled");

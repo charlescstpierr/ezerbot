@@ -276,6 +276,9 @@ test("une réponse que /api/regenerate refuse ne propose ni Réessayer ni Relanc
   const problem = replyProblemState(returned);
   assert.equal(problem.retry, false);
   assert.doesNotMatch(problem.error, /Réessayez/);
+  assert.equal(problem.advice, null, "la phrase du moteur dit déjà d’envoyer un nouveau message");
+  assert.equal(replyProblemState({ ...returned, error: "OpenAI a refusé la demande (erreur 500) : upstream connection reset" }).advice,
+    "Envoyez un nouveau message pour demander une nouvelle réponse.");
   assert.equal(signInCardState({ message: { ...returned, error_kind: "signin" }, providerConnected: true, engineConnected: true }).showRetry, false);
 
   const answer = { ...returned, id: "reply-question", payload: { run_id: "question", regenerable: true } };

@@ -70,7 +70,7 @@ export function replyProblemState(message, { isGroup = false, isTask = false, en
   const error = presentedFailureText(message.error, { retry, replacement: isTask ? "Poursuivez dans la conversation principale." : "Envoyez un nouveau message." });
   const shown = `${message.error || ""} ${error}`.toLocaleLowerCase("fr");
   const advice = local || signin || context || shown.includes("envoyez un nouveau message") || shown.includes("poursuivez dans la conversation principale") ? null
-    : group ? "Envoyez un nouveau message pour demander une nouvelle réponse."
+    : group || !regenerable(message) ? "Envoyez un nouveau message pour demander une nouvelle réponse."
       : isTask ? "Poursuivez dans la conversation principale." : null;
   return { signin, advice, error, retry, retryDisabled: !engineConnected,
     retryTitle: !engineConnected ? "Moteur local indisponible" : "Réessayer cette réponse" };

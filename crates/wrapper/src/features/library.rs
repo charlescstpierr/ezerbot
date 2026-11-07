@@ -11,7 +11,7 @@ use grokbot_memory::recall::normalize;
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 empty_hooks!(
     state,
@@ -649,11 +649,20 @@ impl<'a> Pages<'a> {
             ranked: Vec::new(),
         };
         // A chunk that names the question itself beats one that only reads on into a naming stretch.
+        let mut scores = HashMap::new();
+        let mut score = |text: &'a str| {
+            if terms.is_empty() {
+                return 0;
+            }
+            *scores
+                .entry(text)
+                .or_insert_with(|| score_text(text, terms))
+        };
         let own = (0..pages.bounds.len())
-            .map(|index| score_text(pages.chunk(index), terms))
+            .map(|index| score(pages.chunk(index)))
             .collect::<Vec<_>>();
         let reaching = (0..pages.bounds.len())
-            .map(|index| score_text(pages.scored(index), terms))
+            .map(|index| score(pages.scored(index)))
             .collect::<Vec<_>>();
         let named = (0..reaching.len())
             .filter(|&index| reaching[index] > 0)
@@ -953,5 +962,33 @@ mod tests {
                 .collect::<String>(),
             text
         );
+    }
+
+    #[test]
+    fn repeated_pages_keep_document_order_when_scores_tie() {
+        let body = "Été et cœur. ".repeat(500);
+        let first = format!("[Page 1]\n{body}\n");
+        let second = format!("[Page 2]\n{body}\n");
+        let text = format!("{first}{second}[Page 3]\n{body}\n");
+        let query = terms("été coeur");
+        let shown =
+            Pages::new(&text, &query).excerpt(first.chars().count() + second.chars().count());
+        assert_eq!(shown, format!("{first}{second}"));
+    }
+
+    #[test]
+    fn repeated_pages_are_ranked_again_for_each_question() {
+        let first = format!("[Page 1]\nÉTÉ {}\n", "a".repeat(500));
+        let second = format!("[Page 2]\nCŒUR {}\n", "a".repeat(500));
+        let text = format!("{first}{second}{first}{second}");
+        let room = first.chars().count().min(second.chars().count());
+        let summer = terms("été");
+        let heart = terms("coeur");
+        let shown = Pages::new(&text, &summer).excerpt(room);
+        assert!(shown.starts_with("[Page 1]\nÉTÉ"));
+        assert!(!shown.contains("CŒUR"));
+        let shown = Pages::new(&text, &heart).excerpt(room);
+        assert!(shown.starts_with("[Page 2]\nCŒUR"));
+        assert!(!shown.contains("ÉTÉ"));
     }
 }

@@ -8,18 +8,34 @@ const vm = require('node:vm');
 const template = fs.readFileSync(path.join(__dirname, '../src/local-api.js'), 'utf8');
 const identity = 'synthetic-test-identity';
 
-function install(origin, originalFetch, location = `${origin}/`) {
+function install(origin, originalFetch, location = `${origin}/`, frames = [], extra = {}) {
   class BrowserRequest extends Request {
     constructor(input, init) {
       super(typeof input === 'string' ? new URL(input, location) : input, init);
     }
   }
-  const window = {URL, Headers, Request: BrowserRequest, fetch: originalFetch, location: {href: location}};
+  const posted = [];
+  const window = {URL, Headers, Request: BrowserRequest, fetch: originalFetch, location: {href: location}, frames, ipc: {postMessage: raw => posted.push(JSON.parse(raw))}, ...extra};
+  window.posted = posted;
   vm.runInNewContext(template.replace('__EZERBOT_PARAMETERS__', JSON.stringify([
     origin, origin.replace('http:', 'ezerbot-resource:'), identity,
   ])), {window, document: {baseURI: location}});
   return window;
 }
+
+test('sends the notification commands to the wrapper route', async () => {
+  const requests = [];
+  const origin = 'http://127.0.0.1:32123';
+  const window = install(origin, async request => {
+    requests.push(request);
+    return new Response('{"status":"granted"}');
+  });
+  const answer = await window.EzerbotShell.notifications.postMessage({command: 'status'});
+  assert.equal(answer.status, 'granted');
+  assert.equal(requests[0].url, `${origin}/api/notifications/native`);
+  assert.equal(requests[0].headers.get('X-Grokbot-Request'), 'local');
+  assert.equal(await requests[0].text(), '{"command":"status"}');
+});
 
 test('authorizes only the exact origin and preserves effective Request headers and bodies', async () => {
   const requests = [];
@@ -60,7 +76,7 @@ test('installs immutable Linux capabilities and resource helpers only in the bac
     assert.equal(window.EzerbotLocal.resourceURL(raw), raw);
   }
   assert.equal(window.EzerbotShell.platform, 'linux');
-  assert.deepEqual(Array.from(window.EzerbotShell.unavailablePanels), ['voice', 'voice-conversation', 'voice-call', 'meetings', 'screen', 'demonstrations', 'floating']);
+  assert.deepEqual(Array.from(window.EzerbotShell.unavailablePanels), ['voice-conversation', 'voice-call', 'meetings', 'screen', 'demonstrations']);
   assert.ok(Object.isFrozen(window.EzerbotShell));
   assert.ok(Object.isFrozen(window.EzerbotShell.unavailablePanels));
   assert.equal(Object.getOwnPropertyDescriptor(window, 'EzerbotShell').writable, false);
@@ -105,3 +121,36 @@ test('rejects 302 and 307 redirects before any launch header reaches an attacker
     })));
   }
 });
+
+test('floating commands carry the launch token and settle by id', async () => {
+  const window = install('http://127.0.0.1:32123', () => {});
+  const shell = window.EzerbotShell;
+  assert.ok(Object.isFrozen(shell.floating));
+  const first = shell.floating.postMessage({command: 'show'});
+  const second = shell.floating.postMessage({command: 'configure', shortcut: 'cmd+option+j'});
+  assert.deepEqual(window.posted.map(item => [item.launch, item.id]), [[identity, 1], [identity, 2]]);
+  assert.deepEqual(window.posted[1].body, {command: 'configure', shortcut: 'cmd+option+j'});
+  shell.settle(2, {status: 'registered'}, null);
+  shell.settle(1, null, 'Commande refusée.');
+  assert.deepEqual(await second, {status: 'registered'});
+  await assert.rejects(first, /Commande refusée\./);
+  shell.settle(1, true, null);
+  shell.settle(99, true, null);
+});
+
+test('the main window reports whether the conversation opened', async () => {
+  const window = install('http://127.0.0.1:32123', () => {});
+  const asked = [];
+  window.EzerbotFloatingMain = {openConversation: async id => { asked.push(id); return id === 'ok' ? {opened: true} : {opened: false, reason: 'Fil absent.'}; }};
+  await window.EzerbotShell.openConversation(5, 'ok');
+  await window.EzerbotShell.openConversation(6, 'gone');
+  assert.deepEqual(asked, ['ok', 'gone']);
+  assert.deepEqual(window.posted.map(item => item.body), [
+    {command: 'conversationOpened', request: 5, opened: true, reason: ''},
+    {command: 'conversationOpened', request: 6, opened: false, reason: 'Fil absent.'},
+  ]);
+  delete window.EzerbotFloatingMain;
+  await window.EzerbotShell.openConversation(7, 'x');
+  assert.equal(window.posted.at(-1).body.opened, false);
+});
+

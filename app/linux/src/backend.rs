@@ -11,7 +11,7 @@ use nix::{
 use serde::Deserialize;
 use std::{
     fs::{self, DirBuilder, File, OpenOptions, TryLockError},
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt},
     path::Path,
     process::{Child, Command, Stdio},
@@ -49,9 +49,9 @@ pub struct Instance(File);
 
 impl Instance {
     /// `None` means a shell already holds the directory and was asked to show
-    /// its window. Its wrapper owns the engine: a second one would wait 210 s
-    /// for that lock and then fail.
-    pub fn claim(directory: &Path) -> Result<Option<Self>, &'static str> {
+    /// its window and follow `link`. Its wrapper owns the engine: a second one
+    /// would wait 210 s for that lock and then fail.
+    pub fn claim(directory: &Path, link: Option<&str>) -> Result<Option<Self>, &'static str> {
         prepare_directory(directory)?;
         let path = directory.join("shell.fifo");
         match mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR) {
@@ -68,20 +68,22 @@ impl Instance {
         match file.try_lock() {
             Ok(()) => Ok(Some(Self(file))),
             Err(TryLockError::WouldBlock) => {
-                file.write_all(b"\n").map_err(|_| START_ERROR)?;
+                let request = format!("{}\n", link.unwrap_or_default());
+                file.write_all(request.as_bytes())
+                    .map_err(|_| START_ERROR)?;
                 Ok(None)
             }
             Err(TryLockError::Error(_)) => Err(START_ERROR),
         }
     }
 
-    /// Calls `show` for each later launch until the process exits.
-    pub fn watch(&self, show: impl Fn() + Send + 'static) -> Result<(), &'static str> {
-        let mut requests = self.0.try_clone().map_err(|_| START_ERROR)?;
+    /// Calls `requested` with the link of each later launch, empty without one,
+    /// until the process exits.
+    pub fn watch(&self, requested: impl Fn(String) + Send + 'static) -> Result<(), &'static str> {
+        let requests = self.0.try_clone().map_err(|_| START_ERROR)?;
         thread::spawn(move || {
-            let mut request = [0u8; 64];
-            while requests.read(&mut request).is_ok_and(|length| length > 0) {
-                show();
+            for request in BufReader::new(requests).lines().map_while(Result::ok) {
+                requested(request);
             }
         });
         Ok(())
@@ -289,7 +291,7 @@ mod tests {
         fn new(body: &str) -> Self {
             let directory = TestDir::new("ezerbot-linux-test");
             let source = directory.join("wrapper.source");
-            fs::write(&source, format!("#!/usr/bin/python3\nimport os,sys,time,signal\nroot=os.path.dirname(__file__)\nopen(root+'/pid','w').write(str(os.getpid()))\n{}\n", body)).unwrap();
+            fs::write(&source, format!("#!/usr/bin/python3\nimport os,sys,time,signal\nroot=os.path.dirname(__file__)\nopen(root+'/pid.new','w').write(str(os.getpid()))\nos.rename(root+'/pid.new',root+'/pid')\n{}\n", body)).unwrap();
             let wrapper = directory.join("wrapper");
             // A concurrent test's fork inherits every descriptor this process
             // holds for writing, and exec then fails with ETXTBSY.
@@ -301,12 +303,17 @@ mod tests {
             fs::set_permissions(wrapper, fs::Permissions::from_mode(0o700)).unwrap();
             Self(directory)
         }
+        // Long enough that only the wrapper's behavior decides the outcome,
+        // never how fast a loaded machine starts Python.
         fn start(&self) -> Result<Backend, &'static str> {
+            self.start_within(Duration::from_secs(60))
+        }
+        fn start_within(&self, timeout: Duration) -> Result<Backend, &'static str> {
             Backend::start_with_timeout(
                 &self.0.join("wrapper"),
                 &self.0.join("state"),
                 &AtomicBool::new(false),
-                Duration::from_millis(300),
+                timeout,
             )
         }
         fn assert_reaped(&self) {
@@ -349,7 +356,6 @@ mod tests {
             "print('not-json',flush=True)",
             "print('x'*5000,flush=True)",
             "sys.stdout.close()",
-            "time.sleep(2)",
             "sys.exit(0)",
         ] {
             let fixture =
@@ -357,6 +363,13 @@ mod tests {
             assert!(fixture.start().is_err());
             fixture.assert_reaped();
         }
+    }
+
+    #[test]
+    fn a_silent_wrapper_is_reaped_at_the_startup_deadline() {
+        let fixture = Fixture::new("sys.stdin.buffer.read()\nwhile True: time.sleep(.01)");
+        assert!(fixture.start_within(Duration::from_secs(2)).is_err());
+        fixture.assert_reaped();
     }
 
     #[test]
@@ -392,17 +405,20 @@ mod tests {
 
     #[test]
     fn quit_during_startup_reaps_the_child() {
-        let fixture = Fixture::new("sys.stdin.buffer.read()\ntime.sleep(2)");
+        let fixture = Fixture::new("sys.stdin.buffer.read()\nwhile True: time.sleep(.01)");
         let quit = AtomicBool::new(false);
+        let returned = AtomicBool::new(false);
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                thread::sleep(Duration::from_millis(100));
+                while !fixture.0.join("pid").exists() && !returned.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(10));
+                }
                 quit.store(true, Ordering::SeqCst);
             });
-            assert!(
-                Backend::start(&fixture.0.join("wrapper"), &fixture.0.join("state"), &quit)
-                    .is_err()
-            );
+            let started =
+                Backend::start(&fixture.0.join("wrapper"), &fixture.0.join("state"), &quit);
+            returned.store(true, Ordering::SeqCst);
+            assert!(started.is_err());
         });
         fixture.assert_reaped();
     }

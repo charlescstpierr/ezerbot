@@ -51,4 +51,6 @@ exec "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ezerbot-linux" "$@"
 LAUNCHER
 chmod 755 "$bundle/Ouvrir Ezerbot.sh"
 rm -f -- "$bundle/ezerbot.desktop"
+"$bundle/grokbot-wrapper" --register-url-handler "$bundle/ezerbot-linux" "$bundle/ezerbot.png" >/dev/null ||
+  printf 'Les liens ezerbot:// ne sont pas enregistrés sur ce poste.\n' >&2
 printf 'Application créée : %s\nLancer : "%s/Ouvrir Ezerbot.sh"\nInstaller : python3 "%s/install-app-linux.py"\n' "$bundle" "$bundle" "$bundle"

@@ -2,11 +2,13 @@
 
 `tools/linux-captures.sh <sha>` reconstruit un commit dans un worktree détaché et capture son interface sous Xvfb. Le répertoire de sortie est `artifacts/captures-linux/<sha40>/` dans le checkout qui lance la commande.
 
-Le rendu utilise le vrai wrapper, son interface compilée et un fournisseur factice local. Le manifeste identifie ce rendu comme un repli Chromium. Ces captures prouvent l'interface web servie sous Linux. Elles ne prouvent pas une coque native Linux, absente lors de l'ajout de cet outil.
+Le rendu utilise le vrai wrapper, son interface compilée et un fournisseur factice local. Le manifeste identifie le rendu de chaque vue. Les vues web sont un repli Chromium : elles prouvent l'interface servie sous Linux, pas la coque.
+
+Une étape native complète le pilote. Elle lance la vraie coque GTK de développement avec `EZERBOT_FAKE_SIGNIN=1` dans son propre Xvfb de 1440 × 900 pixels, sous openbox. Elle ouvre une autre fenêtre, envoie le raccourci global et vérifie que le panneau porte `_NET_WM_STATE_ABOVE`. Elle remonte l'autre fenêtre, constate que le panneau reste au-dessus, puis capture tout l'écran avec `import -window root`. Cette vue prouve la coque native, son panneau flottant et son premier plan. Elle ne prouve pas Wayland, dont le compositeur décide du premier plan.
 
 ## Prérequis
 
-La commande exige Linux, Git, Bash, Node avec WebSocket, npm, Rust, Chrome ou Chromium, Xvfb et xauth. Elle utilise aussi `flock` et `setsid`. Sur la box, Node 20 active WebSocket avec `--experimental-websocket`. Rust doit respecter `rust-toolchain.toml`. Sur la box, placez `/home/box/.cargo/bin` avant `/usr/bin` dans `PATH` pour utiliser rustup et Rust 1.99.1.
+La commande exige Linux, Git, Bash, Node avec WebSocket, npm, Rust, Chrome ou Chromium, Xvfb et xauth. Elle utilise aussi `flock` et `setsid`. L'étape native exige en plus openbox, xdotool, xprop et ImageMagick (`import`, `display`, `identify`). Un outil absent fait échouer l'étape avec son nom. Sur la box, Node 20 active WebSocket avec `--experimental-websocket`. Rust doit respecter `rust-toolchain.toml`. Sur la box, placez `/home/box/.cargo/bin` avant `/usr/bin` dans `PATH` pour utiliser rustup et Rust 1.99.1.
 
 Le commit demandé doit contenir le pilote de capture et la fixture attendue. Un ancien commit incompatible provoque un refus avant le build. Le checkout qui lance la commande peut avoir des modifications locales. Le worktree détaché ne les reprend pas.
 
@@ -36,7 +38,7 @@ Les builds utilisent `CARGO_BUILD_JOBS=3`. Avant chaque build, le script contrô
 
 ## À capturer sur le Mac (optionnel)
 
-La fenêtre AppKit, ses menus et les services natifs macOS restent des preuves propres au Mac. Le job `compile` continue de vérifier la compilation de la coque macOS.
+La fenêtre AppKit, son panneau flottant, ses menus et les services natifs macOS restent des preuves propres au Mac. Le job `compile` continue de vérifier la compilation de la coque macOS.
 
 ## Vues attendues
 
@@ -50,13 +52,15 @@ Le registre du pilote fournit ces vues, dans cet ordre. Le viewport est de 1440 
 | `routines-dark` | Dialogue des routines ouvert. |
 | `notifications-dark` | Dialogue ouvert avec la notification de la réponse synthétique. |
 | `conversation-tools-dark` | Tour actif après un vrai outil local : seulement la phrase du bot et « Réfléchit », sans aucune trace d'outil. |
+| `settings-microphone-dark` | Réglages ouverts sur « Microphone » : la ligne « Microphone par défaut du système » et les micros factices de la fixture. |
+| `floating-panel-native` | Vraie coque native : le panneau flottant ouvert par son raccourci reste au-dessus d'une autre fenêtre remontée. |
 
 ## Format du manifeste
 
 `manifest.json` est un objet JSON UTF-8. `schema_version` vaut `1`. `sha` contient les 40 caractères hexadécimaux du commit capturé. `captured_at` donne la date de capture en UTC au format ISO 8601.
 
-`platform` vaut `linux`. `renderer` vaut `chromium-web-fallback`. `chrome_version` indique la version réellement interrogée. `viewport` contient `width`, `height` et `device_scale_factor`.
+`platform` vaut `linux`. `renderer` vaut `chromium-web-fallback` et décrit les vues web. `chrome_version` indique la version réellement interrogée. `viewport` contient `width`, `height` et `device_scale_factor`.
 
-`views` est un tableau ordonné. Chaque entrée contient `id`, `label`, `file`, `sha256`, `width` et `height`. `file` est le nom relatif du PNG dans le même dossier. `sha256` est l'empreinte hexadécimale SHA-256 des octets du fichier. Une preuve complète contient exactement les vues documentées et tous leurs PNG valides.
+`views` est un tableau ordonné. Chaque entrée contient `id`, `label`, `file`, `renderer`, `sha256`, `width` et `height`. `renderer` vaut `chromium-web-fallback` pour une vue web et `webkitgtk-native-shell` pour la vue native. `file` est le nom relatif du PNG dans le même dossier. `sha256` est l'empreinte hexadécimale SHA-256 des octets du fichier. Une preuve complète contient exactement les vues documentées et tous leurs PNG valides.
 
 Le script vérifie le SHA annoncé par le wrapper compilé. Il ne publie le nouveau manifeste qu'après la réussite de toutes les vues. Une nouvelle exécution peut avoir une autre date de capture. L'acceptation exige les mêmes vues. Elle ne suppose pas que des versions différentes de Chrome produisent les mêmes pixels.

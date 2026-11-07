@@ -45,9 +45,16 @@ function shellRouter({ open = [], botEdited = false, memoryEdited = false } = {}
     ui: { input: { value: "", focus() {} } }, writePreference() {}, saveDraft() {}, render() {},
     setComposerText: (text) => { ctx.text = text; }, notify: (message) => ctx.notices.push(message),
     set chosenBotId(value) { ctx.chosenBotId = value; }, get chosenBotId() { return ctx.chosenBotId; },
+    window: { EzerbotNotifications: { activate: (id) => { ctx.activated = id; } } },
   });
   return { ctx, dialogs, navigate };
 }
+
+test("a notification link opens its event, as a macOS click does", async () => {
+  const r = shellRouter();
+  await r.navigate({ kind: "notification", id: "reply:run-1" });
+  assert.equal(r.ctx.activated, "reply:run-1");
+});
 
 test("an incoming link never closes a rename in progress", async () => {
   const r = shellRouter({ open: ["rename-dialog"] });

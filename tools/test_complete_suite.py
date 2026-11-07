@@ -25,14 +25,24 @@ if phase == "npm":
     sys.exit(case == "npm-error")
 if phase == "cargo":
     if case == "compile-error":
-        print("PRIVATE_SENTINEL /Users/private/runtime")
+        print("error[E0308]: PRIVATE_SENTINEL /Users/private/runtime")
+        print(" --> crates/sample/src/lib.rs:1:1")
+        print("error: could not compile `sample` due to 1 previous error")
         sys.exit(101)
     if case == "dirty-lock":
         pathlib.Path("Cargo.lock").write_text("modified")
-    failed = int(case == "rust-error")
+    failed = int(case in {"rust-error", "malformed-location", "diagnostics-error"})
     print("Running tests/yolo.rs (target/debug/deps/yolo-abcdef1234)")
     print("test sample ... " + ("FAILED" if failed else "ok"))
-    print(f"test result: {'FAILED' if failed else 'ok'}. {1-failed} passed; {failed} failed; 0 ignored; 0 measured; 1 filtered out;")
+    if failed:
+        print("\\nfailures:\\n\\n---- sample stdout ----\\n")
+        print("thread 'sample' panicked at crates/sample/src/lib.rs:1:1:")
+        if case == "malformed-location":
+            print("thread 'sample' panicked at crates/sample/src/lib.rs:" + "9" * 5000 + ":1:")
+        print("called `Result::unwrap()` on an `Err` value: Os { code: 1, kind: PermissionDenied, message: Operation not permitted PRIVATE_SENTINEL /Users/private/runtime }")
+        print("\\nfailures:\\n    sample\\n")
+    filtered = 0 if case in {"malformed-location", "diagnostics-error"} else 1
+    print(f"test result: {'FAILED' if failed else 'ok'}. {1-failed} passed; {failed} failed; 0 ignored; 0 measured; {filtered} filtered out;")
     sys.exit(failed)
 web = any("app/web/" in arg for arg in sys.argv)
 failed = case == "node-error" and web
@@ -53,6 +63,112 @@ sys.exit(failed)
 
 
 class CompleteSuiteTests(unittest.TestCase):
+    def test_compiler_locations_exclude_warnings_and_test_output_and_cover_linux(self):
+        spec = importlib.util.spec_from_file_location("runner", TOOLS / "run-complete-suite.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        raw = """warning: unused variable
+ --> app/linux/src/main.rs:1:1
+error[E0308]: PRIVATE_SENTINEL
+ --> app/linux/src/main.rs:2:1
+warning: unused variable after error
+ --> app/linux/src/main.rs:1:1
+Running unittests src/main.rs (target/debug/deps/linux-abcdef1234)
+error[E9999]: PRIVATE_SENTINEL
+ --> app/linux/src/main.rs:1:1
+test sample ... FAILED
+failures:
+
+---- sample stdout ----
+thread 'sample' panicked at app/linux/src/main.rs:3:1:
+assertion failed: PRIVATE_SENTINEL
+failures:
+    sample
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out;
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "app/linux/src/main.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("fn a() {}\nfn b() {}\nfn c() {}\n")
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            _, failures, _ = runner.rust_results(raw)
+            with patch.object(runner, "ROOT", root):
+                diagnostics = runner.rust_diagnostics(raw, failures, 101)
+        by_failure = {item["failure"]: item for item in diagnostics}
+        command = by_failure["rust:command-failed"]
+        self.assertEqual(command["compiler_codes"], ["E0308"])
+        self.assertEqual(command["locations"], ["app/linux/src/main.rs:2:1"])
+        self.assertEqual(by_failure["rust:linux:sample"]["locations"], ["app/linux/src/main.rs:3:1"])
+        self.assertNotIn("PRIVATE_SENTINEL", json.dumps(diagnostics))
+
+    def test_linux_environment_publishes_only_numeric_sysctls(self):
+        spec = importlib.util.spec_from_file_location("runner", TOOLS / "run-complete-suite.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        with patch.object(Path, "read_text", side_effect=["1\n", "PRIVATE_SENTINEL", FileNotFoundError()]):
+            self.assertEqual(runner.linux_environment(), {
+                "apparmor_restrict_unprivileged_userns": 1,
+                "unprivileged_userns_clone": None,
+                "max_user_namespaces": None,
+            })
+
+    def test_rust_diagnostics_keep_targets_separate_and_reject_private_locations(self):
+        spec = importlib.util.spec_from_file_location("runner", TOOLS / "run-complete-suite.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        source = "crates/sample/src/lib.rs"
+        raw = """Running tests/first.rs (target/debug/deps/first-abcdef1234)
+test same_name ... FAILED
+test unknown ... FAILED
+failures:
+
+---- same_name stdout ----
+thread 'PRIVATE_SENTINEL' panicked at crates/sample/src/lib.rs:1:1:
+assertion `left == right` failed: PRIVATE_SENTINEL
+  left: PRIVATE_SENTINEL
+ right: /Users/private/runtime
+---- unknown stdout ----
+thread 'unknown' panicked at /Users/private/crates/sample/src/lib.rs:1:1:
+PRIVATE_SENTINEL
+thread 'unknown' panicked at crates/untracked/src/lib.rs:1:1:
+thread 'unknown' panicked at crates/sample/src/lib.rs:99999:1:
+thread 'unknown' panicked at crates/sample/src/lib.rs:1:99999:
+failures:
+    same_name
+    unknown
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 1 filtered out;
+Running tests/second.rs (target/debug/deps/second-abcdef1234)
+test same_name ... FAILED
+failures:
+
+---- same_name stderr ----
+thread 'same_name' panicked at crates/sample/src/lib.rs:1:1:
+bwrap: Creating new namespace failed: Operation not permitted PRIVATE_SENTINEL
+failures:
+    same_name
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out;
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / source).parent.mkdir(parents=True)
+            (root / source).write_text("fn sample() {}\n")
+            _, failures, _ = runner.rust_results(raw)
+            with patch.object(runner, "ROOT", root), patch.object(runner, "git", return_value=source):
+                diagnostics = runner.rust_diagnostics(raw, failures, 101)
+        by_failure = {item["failure"]: item for item in diagnostics}
+        first = by_failure["rust:first:same_name"]
+        second = by_failure["rust:second:same_name"]
+        self.assertEqual(first["causes"], ["assertion-failed"])
+        self.assertEqual(second["causes"], ["namespace-unavailable", "permission-denied"])
+        self.assertEqual(first["locations"], [source + ":1:1"])
+        self.assertEqual(second["locations"], [source + ":1:1"])
+        self.assertEqual(by_failure["rust:first:unknown"]["locations"], [])
+        self.assertEqual(by_failure["rust:first:unknown"]["causes"], [])
+        self.assertNotIn("PRIVATE_SENTINEL", json.dumps(diagnostics))
+        self.assertNotIn("/Users/private", json.dumps(diagnostics))
+
     def test_preflight_failure_detail_is_visible_without_private_diagnostics(self):
         spec = importlib.util.spec_from_file_location("runner", TOOLS / "run-complete-suite.py")
         runner = importlib.util.module_from_spec(spec)
@@ -167,7 +283,7 @@ class CompleteSuiteTests(unittest.TestCase):
         self.assertEqual(result["partial"], ["crates/sample/src/shared.rs::partial"])
         self.assertEqual(result["runtime_branches"], ["crates/sample/src/shared.rs::runtime"])
 
-    def test_cli_reports_failures_and_continues_without_publishing_diagnostics(self):
+    def test_cli_reports_controlled_failures_and_continues_without_publishing_raw_logs(self):
         LOGS.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=LOGS) as directory:
             root = Path(directory)
@@ -179,6 +295,10 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('runner', 'tools/run-complete-suite.py')
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
+if os.environ.get('SUITE_CASE') == 'diagnostics-error':
+    def fail_diagnostics(*args):
+        raise RuntimeError('PRIVATE_SENTINEL')
+    runner.rust_diagnostics = fail_diagnostics
 free = 19 if os.environ.get('SUITE_CASE') == 'low-disk' else 40
 actual_run = runner.subprocess.run
 def run(command, *args, **kwargs):
@@ -206,7 +326,7 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
                 (root / "bin" / tool).chmod(0o755)
             for args in (("init", "--quiet"), ("add", "."), ("-c", "user.name=Suite fixture", "-c", "user.email=suite@example.invalid", "commit", "--quiet", "-m", "fixture")):
                 subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
-            for case in ("green", "rust-error", "node-error", "compile-error", "npm-error", "unexpected-skip", "low-disk", "bad-metadata", "interrupt", "dirty-lock"):
+            for case in ("green", "rust-error", "malformed-location", "diagnostics-error", "node-error", "compile-error", "npm-error", "unexpected-skip", "low-disk", "bad-metadata", "interrupt", "dirty-lock"):
                 with self.subTest(case=case):
                     output = root / "reports" / case / "result.json"
                     env = {**os.environ, "PATH": str(root / "bin") + os.pathsep + os.environ["PATH"], "SUITE_CASE": case,
@@ -219,10 +339,31 @@ with patch.object(runner.shutil, 'disk_usage', return_value=SimpleNamespace(free
                     self.assertEqual(set(report["phases"]), {"npm", "rust"} if case == "interrupt" else {"npm", "rust", "web", "ui"})
                     self.assertEqual(report["counts"]["excluded"], 1)
                     self.assertEqual(report["counts"]["absent_linux"], 1)
+                    self.assertEqual(set(report["linux_environment"]), {
+                        "apparmor_restrict_unprivileged_userns", "unprivileged_userns_clone", "max_user_namespaces",
+                    })
                     self.assertNotIn("PRIVATE_SENTINEL", output.read_text() + process.stdout + process.stderr)
                     self.assertNotIn("/Users/private", output.read_text())
                     if case == "rust-error":
                         self.assertIn("rust:yolo:sample", report["failures"])
+                        diagnostic = next(item for item in report["phases"]["rust"]["diagnostics"] if item["failure"] == "rust:yolo:sample")
+                        self.assertIn("permission-denied", diagnostic["causes"])
+                        self.assertIn("unwrap-error", diagnostic["causes"])
+                        self.assertIn("crates/sample/src/lib.rs:1:1", diagnostic["locations"])
+                    if case in {"malformed-location", "diagnostics-error"}:
+                        self.assertTrue({"rust:failed-tests", "rust:exclusion-mismatch", "rust:command-failed"} <= set(report["failures"]))
+                        self.assertEqual(report["phases"]["ui"]["exit_code"], 0)
+                    if case == "malformed-location":
+                        self.assertNotIn("rust:runner-error", report["failures"])
+                        diagnostic = next(item for item in report["phases"]["rust"]["diagnostics"] if item["failure"] == "rust:yolo:sample")
+                        self.assertEqual(diagnostic["locations"], ["crates/sample/src/lib.rs:1:1"])
+                    if case == "compile-error":
+                        self.assertEqual(report["phases"]["rust"]["exit_code"], 101)
+                        diagnostic = next(item for item in report["phases"]["rust"]["diagnostics"] if item["failure"] == "rust:command-failed")
+                        self.assertIn("compile-error", diagnostic["causes"])
+                        self.assertEqual(diagnostic["compiler_codes"], ["E0308"])
+                        self.assertIn("crates/sample/src/lib.rs:1:1", diagnostic["locations"])
+                        self.assertEqual(report["phases"]["ui"]["exit_code"], 0)
                     if case == "node-error":
                         self.assertIn("web:app/web/src/sample.test.js:1", report["failures"])
                     if case == "dirty-lock":

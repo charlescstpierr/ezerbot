@@ -18,7 +18,8 @@ async function api(path, body) {
     return value;
   } finally { clearTimeout(timeout); }
 }
-const native = (body) => window.webkit?.messageHandlers?.ezerbotFloating?.postMessage(body);
+const host = () => window.EzerbotShell?.floating || window.webkit?.messageHandlers?.ezerbotFloating;
+const native = (body) => host()?.postMessage(body);
 
 function Floating() {
   const [state, setState] = useState(null);
@@ -31,7 +32,9 @@ function Floating() {
   const [overflowing, setOverflowing] = useState(false);
   const latest = useRef(null);
   const replyContent = useRef(null);
-  const inNativePanel = Boolean(window.webkit?.messageHandlers?.ezerbotFloating);
+  const inNativePanel = Boolean(host());
+  // Only the Linux panel has no title bar to move it by.
+  const draggable = inNativePanel && window.EzerbotShell?.platform === "linux";
   const pending = useRef(null);
   const draftValue = useRef("");
   draftValue.current = draft;
@@ -152,7 +155,7 @@ function Floating() {
     } finally { sending.current = false; setBusy(false); input.current?.focus(); }
   }
   return <section className="floating-panel">
-    <header className="floating-heading"><span id="floating-mascot" aria-hidden="true" /><div><small>VOTRE BOT, À PORTÉE DE MAIN</small><h1>{conversation?.kind === "group" ? "Groupe" : currentBot?.name || "Ezerbot"}</h1></div>{!inNativePanel && <button className="icon-button floating-close" title="Fermer · Échap" aria-label="Fermer le panneau" onClick={() => window.close()}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" /></svg></button>}</header>
+    <header className="floating-heading" onMouseDown={draggable ? (e) => { if (e.button === 0) Promise.resolve(native({ command: "drag" })).catch(() => {}); } : undefined}><span id="floating-mascot" aria-hidden="true" /><div><small>VOTRE BOT, À PORTÉE DE MAIN</small><h1>{conversation?.kind === "group" ? "Groupe" : currentBot?.name || "Ezerbot"}</h1></div>{!inNativePanel && <button className="icon-button floating-close" title="Fermer · Échap" aria-label="Fermer le panneau" onClick={() => window.close()}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" /></svg></button>}</header>
     <label className="form-label" htmlFor="floating-target">Envoyer dans</label>
     <select className="text-input" id="floating-target" value={target} disabled={busy || uncertain} onChange={(e) => { setTarget(e.target.value); setError(""); }}>
       <option value="">Nouvelle conversation · {state?.bots.find((b) => b.id === bot)?.name || "Ezerbot"}</option>

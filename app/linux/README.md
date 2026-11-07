@@ -18,8 +18,23 @@ Les conversations et les notations restent dans le dossier de données XDG d’E
 L’option `--data-dir /chemin/isolé` permet un lancement avec des données séparées.
 Le menu **Quitter Ezerbot**, Ctrl+Q et la fermeture de la fenêtre arrêtent aussi le wrapper.
 Relancer Ezerbot sur le même dossier de données montre la fenêtre déjà ouverte.
+Le script enregistre `ezerbot-linux` pour les liens `ezerbot://`. Une coque déjà ouverte reçoit le lien.
 Les liens qui demandent une nouvelle fenêtre s’ouvrent dans le navigateur par défaut avec `xdg-open`.
 Seules les pages web hors du wrapper sortent de la coque. Un échec du navigateur s’affiche dans une boîte de dialogue.
+
+## Panneau flottant
+
+Le menu **Ezerbot** propose **Ouvrir le panneau flottant**. Les réglages choisissent le raccourci global.
+Le panneau reste au premier plan, sans décoration. On le déplace par son en-tête, et Échap le masque.
+Il garde son brouillon tant qu’Ezerbot reste ouvert.
+
+Sous X11, Ezerbot réserve la touche avec `XGrabKey`, sans surveiller le clavier.
+Un raccourci déjà pris par une autre application est annoncé et l’ancien reste actif.
+Sous Wayland, aucun raccourci global pour l'instant : aucune application ne peut y réserver une touche, et le portail `org.freedesktop.portal.GlobalShortcuts` n'est pas encore utilisé (issue #635). Les réglages l'annoncent, et le panneau s'ouvre depuis le menu Ezerbot.
+Sans X11 ni Wayland, le raccourci est annoncé indisponible et le menu reste disponible.
+Sous Wayland, le premier plan dépend du compositeur : il n’est pas vérifié sous Wayland.
+Fermer la fenêtre principale quitte toujours Ezerbot, donc le raccourci s’arrête avec elle.
+Le pont natif ne sert que la page principale. Aucune page ne se charge dans un cadre : la coque ignore nativement toute réponse qui n'est pas la page du cadre principal. Aucun script d'un autre document ne peut donc atteindre le pont.
 
 ## Fonctions natives non portées
 
@@ -28,14 +43,22 @@ L’inventaire de #598 renvoie vers les mêmes tickets.
 
 | Fonction | Travail restant | Suivi |
 | --- | --- | --- |
-| Dictée | Reconnaissance vocale native | #606, #607 |
-| Microphone et mémos vocaux | Sélection et capture audio | #606, #607 |
-| Appels et mode voix | Capture et lecture audio natives | #607 |
-| Enregistrement local de réunion | Capture audio locale | #606, #607 |
+| Dictée | Reconnaissance vocale native | #607 |
+| Mémos vocaux | Reconnaissance vocale, branchement du flux du micro | #607 |
+| Appels et mode voix | Branchement du flux du micro et lecture audio native | #607 |
+| Enregistrement local de réunion | Branchement du flux du micro et transcription | #607 |
 | Capture de l’écran | Permissions et services du bureau | #608 |
 | Contrôle de l’écran | Actions d’entrée par le portail RemoteDesktop | Optionnel dans #608, à cadrer |
 | Démonstrations | Capture des gestes et de l’écran | Dépend de #608 |
-| Fenêtre flottante | Fenêtre et raccourci global Linux | #609 |
+
+Le choix du micro est porté (#606) : **Paramètres › Micro** liste les entrées, le défaut du système en premier,
+mémorise le choix et annonce le repli sur le défaut quand le micro choisi a disparu.
+Le wrapper pilote le serveur audio avec ses outils en ligne de commande, sans bibliothèque liée :
+`pipewire-bin` (`pw-dump`, `pw-record`) ou `pulseaudio-utils` (`pactl`, `parec`).
+PipeWire passe en premier, puis PulseAudio, qui répond aussi via `pipewire-pulse`.
+Sans l’un des deux, la liste annonce que le serveur audio est indisponible et le choix mémorisé est conservé.
+Le flux est du PCM 16 kHz mono 16 bits, comme sous macOS. Il n’a pas encore de consommateur (#607).
+Les versions de développement gardent les micros factices et n’atteignent jamais le matériel.
 
 Le bac à sable YOLO est suivi dans #528.
 Les services de #598 comprennent Secret Service, les notifications D-Bus,
@@ -52,5 +75,10 @@ de WebKit sans export de buffers graphiques. Le lanceur ne force pas cette optio
 
 `cargo test -p ezerbot-linux` construit le wrapper puis ouvre la vraie fenêtre dans son propre Xvfb.
 `tests/window.rs` constate l’affichage, fait un échange avec le faux fournisseur et clique des liens.
-Il vérifie aussi la vraie connexion jusqu’à `xdg-open` et la relance de l’application déjà ouverte.
-Le test échoue si `Xvfb` manque et il ne couvre que les builds de développement.
+Il vérifie aussi la vraie connexion jusqu’à `xdg-open`, la relance de l’application déjà ouverte
+et l’arrivée d’un lien dans la fenêtre.
+Les tests du panneau lancent aussi `openbox`.
+Ils envoient le raccourci, vérifient `_NET_WM_STATE_ABOVE` et prennent la touche avec un second client X.
+Le test échoue si `Xvfb` ou `openbox` manque. Aucun test n'est sauté, y compris sur GitHub Actions.
+Aucun test ne lance le portail GlobalShortcuts. Wayland est traité dans #635.
+Ils ne couvrent que les builds de développement.

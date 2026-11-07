@@ -1,9 +1,15 @@
 //! Byte-level client of the Secret Service. A vault's items are found wherever they are, not
-//! only in the collection `default` points at now, and new ones go where the others already
-//! live. It never unlocks: a locked collection that holds any of them is `Unavailable`. A service may still ask the user to confirm a write or a
-//! deletion, and `secret-service` then waits for the answer with no limit, so these two
-//! operations are bounded and report `Unavailable` when no answer comes.
-use std::{collections::HashMap, sync::Arc, time::Duration};
+//! only in the collection `default` points at now. A write replaces the account's item where it
+//! is; a new account goes where the others already live. An account found twice is ambiguous and
+//! makes reads and writes `Unavailable`. It never unlocks: a locked collection that holds any of
+//! them is `Unavailable`. A service may still ask the user to confirm a write or a deletion, and
+//! `secret-service` then waits for the answer with no limit, so these two operations are bounded
+//! and report `Unavailable` when no answer comes.
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use secret_service::{
     blocking::{Collection as Native, Item, SecretService},
@@ -36,12 +42,13 @@ impl Collection {
             service,
             scope,
         };
-        collection.with_home(|_| Ok(()))?;
+        collection.with_home(None, |_| Ok(()))?;
         Ok(collection)
     }
 
     pub fn entries(&self) -> Result<Vec<(String, Vec<u8>)>, Unavailable> {
-        self.found(self.scope_attributes())?
+        let entries: Vec<(String, Vec<u8>)> = self
+            .found(self.scope_attributes())?
             .iter()
             .map(|item| {
                 let account = item.get_attributes()?.remove("account");
@@ -49,7 +56,15 @@ impl Collection {
             })
             .filter_map(Result::transpose)
             .collect::<Result<_, secret_service::Error>>()
-            .map_err(|_| Unavailable)
+            .map_err(|_| Unavailable)?;
+        let accounts: HashSet<&str> = entries
+            .iter()
+            .map(|(account, _)| account.as_str())
+            .collect();
+        match accounts.len() == entries.len() {
+            true => Ok(entries),
+            false => Err(Unavailable),
+        }
     }
 
     /// Replaces the item of this account, then reads it back and compares.
@@ -62,7 +77,7 @@ impl Collection {
         let this = self.clone();
         let (account, label, bytes) = (account.to_owned(), label.to_owned(), bytes.to_owned());
         self.confirmed(move || {
-            this.with_home(|collection| {
+            this.with_home(Some(&account), |collection| {
                 let attributes = this.attributes(&account);
                 collection
                     .create_item(&label, attributes, &bytes, true, CONTENT_TYPE)
@@ -128,12 +143,23 @@ impl Collection {
         Ok(found.unlocked)
     }
 
-    /// Where this vault's items live: the collection that already holds them, else `default`.
+    /// Where an account's item goes: the collection of its current item, else the one that holds
+    /// this vault's other items, else `default`.
     fn with_home<T>(
         &self,
+        account: Option<&str>,
         action: impl FnOnce(&Native<'_>) -> Result<T, secret_service::Error>,
     ) -> Result<T, Unavailable> {
-        let held = self.found(self.scope_attributes())?;
+        let mut held = match account {
+            Some(account) => self.found(self.attributes(account))?,
+            None => Vec::new(),
+        };
+        if held.len() > 1 {
+            return Err(Unavailable);
+        }
+        if held.is_empty() {
+            held = self.found(self.scope_attributes())?;
+        }
         let collection = match held.first() {
             Some(item) => self
                 .service

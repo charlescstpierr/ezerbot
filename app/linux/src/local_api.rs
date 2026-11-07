@@ -69,6 +69,11 @@ impl BackendOrigin {
             && !url.path().starts_with("/api/")
     }
 
+    /// The one address the floating panel may load or speak from.
+    pub fn is_panel(&self, raw: &str) -> bool {
+        raw.strip_prefix(&self.value) == Some("/floating")
+    }
+
     /// The page the default browser may open for a new-window request.
     pub fn external_link(&self, raw: &str) -> Option<Url> {
         let url = Url::parse(raw).ok()?;
@@ -147,6 +152,16 @@ impl LocalApi {
             agent,
             active: AtomicUsize::new(0),
         }
+    }
+
+    pub fn authorizes(&self, launch: &str) -> bool {
+        // Compared in constant time: the caller is page script.
+        launch.len() == self.identity.len()
+            && launch
+                .bytes()
+                .zip(self.identity.bytes())
+                .fold(0, |difference, (a, b)| difference | (a ^ b))
+                == 0
     }
 
     pub fn initialization_script(&self) -> String {
@@ -296,6 +311,25 @@ mod tests {
             "not a url",
         ] {
             assert!(origin.external_link(raw).is_none(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn only_the_exact_floating_address_is_the_panel() {
+        let origin = BackendOrigin::parse("http://127.0.0.1:32123").unwrap();
+        assert!(origin.is_panel("http://127.0.0.1:32123/floating"));
+        for raw in [
+            "http://127.0.0.1:32123/floating/",
+            "http://127.0.0.1:32123/floating?a=1",
+            "http://127.0.0.1:32123/floating#a",
+            "http://127.0.0.1:32123/floating2",
+            "http://127.0.0.1:32123/",
+            "http://127.0.0.1:32124/floating",
+            "http://user@127.0.0.1:32123/floating",
+            "https://127.0.0.1:32123/floating",
+            "http://127.0.0.1:32123.evil.example/floating",
+        ] {
+            assert!(!origin.is_panel(raw), "{raw}");
         }
     }
 

@@ -1428,6 +1428,9 @@ fn live_shot(screen: &Screen, variable: &str) {
 /// Enter neither stores a message nor starts a turn, so no draft can come back twice.
 #[test]
 fn a_locked_keyring_shows_the_banner_and_the_window_sends_nothing() {
+    if !grokbot_linux_desktop::testing::keyring_runs_here() {
+        return;
+    }
     use grokbot_linux_desktop::testing::Keyring;
     let keyring = Keyring::start();
     let home = migrated_state(&keyring, "ezerbot-locked-window");
@@ -1473,6 +1476,9 @@ fn a_locked_keyring_shows_the_banner_and_the_window_sends_nothing() {
 /// draft once.
 #[test]
 fn the_window_follows_the_keyring_and_sends_the_draft_once() {
+    if !grokbot_linux_desktop::testing::keyring_runs_here() {
+        return;
+    }
     use grokbot_linux_desktop::testing::Keyring;
     let mut keyring = Keyring::start();
     let home = migrated_state(&keyring, "ezerbot-relock-window");

@@ -40,6 +40,19 @@ fn on_path(tool: &str) -> bool {
         .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(tool).is_file()))
 }
 
+/// Whether a keyring test can run here. `linux-shell-build-test` (linux-shell.yml) installs no
+/// keyring and `linux-build-test` runs the same tests with one: only that job skips them, and
+/// only while the daemon is absent. Anywhere else a missing daemon still fails the test.
+pub fn keyring_runs_here() -> bool {
+    let shell_job = std::env::var("GITHUB_JOB").as_deref() == Ok("linux-shell-build-test");
+    if shell_job && !on_path("gnome-keyring-daemon") {
+        let test = std::thread::current().name().unwrap_or("test").to_owned();
+        eprintln!("SKIP {test}: gnome-keyring absent from linux-shell-build-test; linux-build-test runs it");
+        return false;
+    }
+    true
+}
+
 /// Fails the test when a tool is missing, on CI too: a test that returns early proves nothing.
 pub fn tools(names: &[&str]) {
     let test = std::thread::current().name().unwrap_or("test").to_owned();

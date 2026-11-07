@@ -27,10 +27,12 @@ fn launcher(exec: &Path) -> String {
     format!("#!/bin/sh\nexec '{quoted}' \"$@\"\n")
 }
 
-/// `exec` must be [`plain`], which is why it needs no escaping here.
+/// `exec` must be [`plain`], which is why it needs no escaping here. The entry only carries the
+/// link association: the menu shortcut is the installer's, and one written by a build would point
+/// at the checkout.
 pub fn desktop_entry(exec: &Path, icon: Option<&Path>) -> String {
     let mut entry = format!(
-        "[Desktop Entry]\nType=Application\nName=Ezerbot\nExec={} %u\nTerminal=false\nMimeType={SCHEME_MIME};\nStartupWMClass=Ezerbot\n",
+        "[Desktop Entry]\nType=Application\nName=Ezerbot\nExec={} %u\nTerminal=false\nNoDisplay=true\nMimeType={SCHEME_MIME};\nStartupWMClass=Ezerbot\n",
         exec.display()
     );
     if let Some(icon) = icon {

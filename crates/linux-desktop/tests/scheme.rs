@@ -17,7 +17,7 @@ fn the_entry_names_the_application_and_escapes_the_icon() {
     assert!(entry.contains("Terminal=false\n"));
     assert!(entry.contains("StartupWMClass=Ezerbot\n"));
     assert!(entry.contains("Name=Ezerbot\n"));
-    assert!(!entry.contains("NoDisplay"));
+    assert!(entry.contains("NoDisplay=true\n"));
     assert!(!desktop_entry(Path::new("/x"), None).contains("Icon="));
 }
 

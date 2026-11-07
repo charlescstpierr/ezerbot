@@ -8,9 +8,9 @@ tools/build-app-linux.sh
 "app/build/linux/Ouvrir Ezerbot.sh"
 ```
 
-Le script produit les deux exécutables, une icône et `ezerbot.desktop` dans `app/build/linux`.
-Le lanceur et le fichier desktop utilisent les exécutables de ce dossier.
-Après avoir déplacé le dépôt, relancez le script pour actualiser les chemins du fichier desktop.
+Le script produit les deux exécutables, une icône, un lanceur et l’installateur dans `app/build/linux`.
+Le lanceur utilise les exécutables de son dossier et reste utilisable après déplacement du bundle.
+Pour installer l’application et créer un raccourci dans le menu, suivez la [notice d’installation](../../docs/install-linux.md).
 Le script respecte `CARGO` et le dossier de compilation effectif de Cargo.
 `EZERBOT_BUILD_DEBUG=1` produit une version de développement.
 

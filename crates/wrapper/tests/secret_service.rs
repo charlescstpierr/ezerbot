@@ -432,3 +432,34 @@ fn a_send_refused_by_a_locked_keyring_keeps_nothing() {
         "the refused send was kept: its resend duplicates it"
     );
 }
+
+/// Les secrets restent là où la migration les a mis. Si l'alias `default` passe à une collection
+/// vide, le coffre les retrouve et les masque ; si leur collection se verrouille, le masquage
+/// refuse au lieu de traiter le coffre comme vide.
+#[test]
+fn moving_the_default_alias_to_an_empty_collection_keeps_the_secrets_masked() {
+    const SESSION: &str = "/org/freedesktop/secrets/collection/session";
+    let f = Fixture::new();
+    let value = ["valeur", "factice", "alias", "8841"].join("-");
+    f.vault().set("TOKEN", "Alias", &value).unwrap();
+    let origin = f.keyring.default_collection();
+    assert_ne!(origin, SESSION);
+    f.keyring.point_default_at(SESSION);
+    let vault = f.vault();
+    assert!(
+        vault.values_for_redaction().unwrap().contains(&value),
+        "the secret left masking when default moved"
+    );
+    assert!(
+        f.file().with_extension("keyring").exists(),
+        "the marker was dropped"
+    );
+    f.keyring.lock_collection(&origin);
+    let refused = Vault::open_test_keychain(&f.file(), f.keyring.address())
+        .unwrap()
+        .values_for_redaction()
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("Déverrouillez"), "{refused}");
+    assert!(!refused.contains(&value));
+}

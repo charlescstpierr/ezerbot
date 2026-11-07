@@ -245,11 +245,13 @@ impl Keyring {
     }
 
     fn locked(&self) -> Option<bool> {
-        let path = self.collection()?;
+        self.locked_at(&self.collection()?)
+    }
+    fn locked_at(&self, path: &OwnedObjectPath) -> Option<bool> {
         Proxy::new(
             &self.bus.connection(),
             SECRETS,
-            path,
+            path.clone(),
             "org.freedesktop.Secret.Collection",
         )
         .ok()?
@@ -257,12 +259,31 @@ impl Keyring {
         .ok()
     }
     pub fn lock(&self) {
-        let path = self.collection().unwrap();
+        self.lock_collection(&self.default_collection());
+    }
+
+    /// The collection the `default` alias points at now.
+    pub fn default_collection(&self) -> String {
+        self.collection().unwrap().as_str().to_owned()
+    }
+
+    /// Points `default` at another collection, as a user switching keyrings would.
+    pub fn point_default_at(&self, collection: &str) {
+        let path = ObjectPath::try_from(collection).unwrap();
+        let _: () = self
+            .service()
+            .call("SetAlias", &("default", &path))
+            .unwrap();
+        assert_eq!(self.default_collection(), collection);
+    }
+
+    pub fn lock_collection(&self, collection: &str) {
+        let path = OwnedObjectPath::try_from(collection).unwrap();
         let _: (Vec<OwnedObjectPath>, OwnedObjectPath) = self
             .service()
             .call("Lock", &(vec![ObjectPath::from(&path)],))
             .unwrap();
-        assert_eq!(self.locked(), Some(true));
+        assert_eq!(self.locked_at(&path), Some(true));
     }
 
     /// Restarts the daemon with the password: the `login` keyring file persists.

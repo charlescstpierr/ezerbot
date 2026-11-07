@@ -11,7 +11,8 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 empty_hooks!(tools, call_tool, context, entry);
 empty_hooks!(state, on_run_event, link_attachments);
@@ -19,7 +20,10 @@ empty_hooks!(state, on_run_event, link_attachments);
 const DAY_MS: u64 = 86_400_000;
 const MAX_TURNS: i64 = 20_000;
 const MAX_TOOLS: usize = 64;
-static LAST_PURGE: AtomicU64 = AtomicU64::new(0);
+#[derive(Default)]
+pub(crate) struct Purge {
+    last: Mutex<HashMap<PathBuf, u64>>,
+}
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     conn.execute_batch(
@@ -31,10 +35,37 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
 }
 
 pub fn tick(ctx: &Context<'_>) {
-    if purge_due(LAST_PURGE.load(Ordering::Relaxed), ctx.now_ms) {
-        LAST_PURGE.store(ctx.now_ms, Ordering::Relaxed);
-        let _ = purge_old(ctx.connection, ctx.now_ms);
+    let _ = tick_after_probe(
+        ctx.connection,
+        ctx.db_path,
+        ctx.now_ms,
+        &ctx.provider.turn_purge,
+        |_| {},
+    );
+}
+
+pub(super) fn tick_after_probe(
+    conn: &Connection,
+    path: &Path,
+    now: u64,
+    purge: &Purge,
+    after_probe: impl FnOnce(bool),
+) -> Result<(), ApiError> {
+    let last = purge
+        .last
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+        .copied()
+        .unwrap_or(0);
+    if purge_due(last, now) && purge_old_after_probe(conn, now, after_probe)? > 0 {
+        purge
+            .last
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_path_buf(), now);
     }
+    Ok(())
 }
 
 fn purge_due(last: u64, now: u64) -> bool {
@@ -42,11 +73,24 @@ fn purge_due(last: u64, now: u64) -> bool {
 }
 
 fn purge_old(conn: &Connection, now: u64) -> Result<(), ApiError> {
-    conn.execute(
-        "DELETE FROM wrapper_turn_log WHERE at_ms < ?1",
-        [now.saturating_sub(30 * DAY_MS) as i64],
-    )?;
-    Ok(())
+    purge_old_after_probe(conn, now, |_| {}).map(|_| ())
+}
+
+pub(super) const PURGE_WORK: &str =
+    "SELECT EXISTS(SELECT 1 FROM wrapper_turn_log WHERE at_ms < ?1)";
+
+pub(super) fn purge_old_after_probe(
+    conn: &Connection,
+    now: u64,
+    after_probe: impl FnOnce(bool),
+) -> Result<usize, ApiError> {
+    let cutoff = now.saturating_sub(30 * DAY_MS) as i64;
+    let available: bool = conn.query_row(PURGE_WORK, [cutoff], |r| r.get(0))?;
+    after_probe(available);
+    if !available {
+        return Ok(0);
+    }
+    Ok(conn.execute("DELETE FROM wrapper_turn_log WHERE at_ms < ?1", [cutoff])?)
 }
 
 /// Un nom venu du modèle n'entre dans le journal que sous une forme sûre ; sinon `-`.

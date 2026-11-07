@@ -3,6 +3,7 @@ import argparse
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -61,6 +62,16 @@ def install_bundle(bundle, destination, data_home):
         )
         staged_desktop.chmod(0o644)
         os.replace(staged_desktop, desktop)
+    try:
+        registered = subprocess.run(
+            [destination / "grokbot-wrapper", "--register-url-handler",
+             destination / "ezerbot-linux", destination / "ezerbot.png"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=False,
+        ).returncode == 0
+    except OSError:
+        registered = False
+    if not registered:
+        print("Les liens ezerbot:// ne sont pas enregistrés sur ce poste.", file=sys.stderr)
     return desktop
 
 

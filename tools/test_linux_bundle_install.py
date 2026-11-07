@@ -34,12 +34,14 @@ class LinuxBundleInstallTests(unittest.TestCase):
         self.script("pkg-config", "#!/bin/sh\nexit 0\n")
         self.script("cargo", '#!/bin/sh\nif [ "$1" = metadata ]; then\n  printf \'{"target_directory":"%s/target"}\\n\' "$PWD"\nfi\n')
         self.log = self.root / "launch.json"
+        self.registrations = self.root / "registrations.txt"
         self.env = {
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": str(self.home),
             "XDG_DATA_HOME": str(self.home / "desktop data"),
             "CARGO": str(self.bin / "cargo"),
             "LAUNCH_LOG": str(self.log),
+            "REGISTRATION_LOG": str(self.registrations),
         }
         self.executable = (
             "#!/usr/bin/python3\n"
@@ -51,7 +53,8 @@ class LinuxBundleInstallTests(unittest.TestCase):
             "'wrapper': pathlib.Path(sys.argv[0]).with_name('grokbot-wrapper').read_text()}))\n"
             "temporary.replace(log)\n"
         )
-        for name, content in (("ezerbot-linux", self.executable), ("grokbot-wrapper", "fixture wrapper v1")):
+        self.wrapper = "#!/bin/sh\n# fixture wrapper v1\nprintf '%s\\n' \"$@\" > \"$REGISTRATION_LOG\"\n"
+        for name, content in (("ezerbot-linux", self.executable), ("grokbot-wrapper", self.wrapper)):
             path = self.repo / "target/release" / name
             path.write_text(content)
             path.chmod(0o755)
@@ -63,6 +66,7 @@ class LinuxBundleInstallTests(unittest.TestCase):
         self.bundle = self.root / "download moved bundle"
         (self.repo / "app/build/linux").rename(self.bundle)
         shutil.rmtree(self.repo)
+        self.registrations.unlink()
 
     def script(self, name, content):
         path = self.bin / name
@@ -94,7 +98,7 @@ class LinuxBundleInstallTests(unittest.TestCase):
         self.assertTrue(self.log.exists(), "Desktop launcher did not execute the fixture")
         launched = json.loads(self.log.read_text())
         self.assertEqual(launched, {"executable": str(destination / "ezerbot-linux"),
-                                    "args": [], "wrapper": "fixture wrapper v1"})
+                                    "args": [], "wrapper": self.wrapper})
         self.assertIn("Icon=" + str(destination / "ezerbot.png").replace("\\", "\\\\") + "\n", desktop.read_text())
         self.assertEqual((destination / "ezerbot.png").read_bytes(), b"fixture icon")
 
@@ -105,6 +109,15 @@ class LinuxBundleInstallTests(unittest.TestCase):
         self.assertFalse((self.bundle / "ezerbot.desktop").exists())
         shutil.rmtree(self.bundle)
         self.launch(self.home / "desktop data/applications/ezerbot.desktop", destination)
+        self.assertEqual(self.registrations.read_text().splitlines(),
+                         ["--register-url-handler", str(destination / "ezerbot-linux"), str(destination / "ezerbot.png")])
+
+    def test_install_succeeds_when_links_cannot_be_registered(self):
+        self.wrapper = "#!/bin/sh\nexit 1\n"
+        (self.bundle / "grokbot-wrapper").write_text(self.wrapper)
+        result = self.install()
+        self.assertIn("ezerbot://", result.stderr)
+        self.launch(self.home / "desktop data/applications/ezerbot.desktop", self.home / ".local/opt/ezerbot")
 
     def test_desktop_launcher_handles_exec_metacharacters(self):
         destination = self.home / 'Apps =equals "quoted" $dollar `tick` \\slash 100%/Ezerbot'

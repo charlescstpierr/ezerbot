@@ -27,6 +27,8 @@ Les fonctions natives demandent aussi un bus D-Bus de session, un service Secret
 
 3. Ouvrez **Ezerbot** depuis le menu des applications. Le raccourci est enregistré dans `$XDG_DATA_HOME/applications/ezerbot.desktop`, ou `~/.local/share/applications/ezerbot.desktop` si la variable est vide ou relative.
 
+L'installateur enregistre aussi les liens `ezerbot://` vers le dossier installé, avec `xdg-mime` fourni par `xdg-utils`. Si l'enregistrement échoue, il l'indique et l'installation continue. Le raccourci du menu reste alors utilisable.
+
 Après installation, vous pouvez supprimer le dossier extrait. Gardez le dossier installé à sa place. Pour changer sa destination, relancez l'installateur avec le nouveau `--install-dir`. Il réécrit le raccourci et laisse l'ancien dossier en place.
 
 Pour réinstaller ou mettre à jour, quittez Ezerbot puis relancez l'installateur du nouveau bundle avec la même destination. Seuls les fichiers connus du bundle et le raccourci sont remplacés. Les conversations dans `$XDG_DATA_HOME/ezerbot`, le coffre et les autres fichiers ne sont pas supprimés.
@@ -43,6 +45,6 @@ La preuve d'installation se relance depuis la racine du dépôt.
 python3 -m unittest discover -s tools -p test_linux_bundle_install.py -v
 ```
 
-Sous Linux, ce test demande aussi `gio` fourni par `libglib2.0-bin` et `desktop-file-validate` fourni par `desktop-file-utils`. Il exécute le vrai script de packaging avec Cargo, pkg-config et l'espace disque simulés. Les exécutables sont des fixtures. Le test déplace le bundle, supprime son checkout temporaire, installe et lance le raccourci via GIO dans un profil temporaire. Il vérifie aussi les chemins avec espaces, les caractères réservés et la réinstallation sans perte des données synthétiques.
+Sous Linux, ce test demande aussi `gio` fourni par `libglib2.0-bin` et `desktop-file-validate` fourni par `desktop-file-utils`. Il exécute le vrai script de packaging avec Cargo, pkg-config et l'espace disque simulés. Les exécutables sont des fixtures. Le test déplace le bundle, supprime son checkout temporaire, installe et lance le raccourci via GIO dans un profil temporaire. Il vérifie aussi les chemins avec espaces, les caractères réservés, la réinstallation sans perte des données synthétiques et l'enregistrement des liens `ezerbot://` vers le dossier installé.
 
 Cette preuve ne compile ni ne lance une vraie coque GTK. Le workflow **Coque Linux** garde la preuve de compilation native. La vérification d'un binaire distribué sur une machine propre reste nécessaire.

@@ -113,7 +113,12 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
     if result is not None and not (isinstance(result.get("features"), list) and valid_features(result["features"])):
         problems.append("`result.json` : liste `features` invalide.")
         result = None
-    if manifest is None:
+    if manifest is not None and manifest.get("sha") != sha:
+        # Un manifeste d'un autre run n'atteste aucune capture de ce commit.
+        found = manifest.get("sha")
+        problems.append(f"`manifest.json` provient du commit `{found}`, pas de `{sha}` : captures non vérifiées." if isinstance(found, str) and PATCH_ID.fullmatch(found) else "`manifest.json` : `sha` absent ou invalide : captures non vérifiées.")
+        manifest, views = None, []
+    elif manifest is None:
         # Sans manifeste aucune empreinte n'est vérifiable : aucune vue ne peut être déclarée ok.
         problems.append("`manifest.json` absent ou illisible : captures non vérifiées.")
     recorded = {view["file"]: (view["sha256"], view["size"]) for view in views}
@@ -130,7 +135,7 @@ def verdict(evidence: Path, sha: str, drive_status: int = 0, patch: str | None =
         problems.append("`result.json` : `status` ou `error` absent ou invalide.")
         result = None
     ok = not problems and drive_status == 0 and result is not None and result["error"] is None and result["status"] == "pass"
-    ok = ok and manifest is not None and manifest.get("sha") == sha and manifest.get("complete", True) is True
+    ok = ok and manifest is not None and manifest.get("complete", True) is True
     entries: dict[str, bool] = {}
     reported = {(item.get("feature"), item.get("view")): item for item in (result or {}).get("features", [])}
     if result is not None and set(reported) != set(EXPECTED):

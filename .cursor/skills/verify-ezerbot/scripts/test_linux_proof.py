@@ -87,6 +87,25 @@ class VerdictTests(unittest.TestCase):
                 self.assertTrue(all(row.endswith("| non vérifié |") for row in rows), rows)
                 self.assertFalse(any(" ok" in line for line in lines if line.startswith(("| `", "Entrées"))), lines)
 
+    def test_manifest_from_another_commit_or_without_sha_explains_the_fix(self) -> None:
+        for case, expected in (("absent", "`manifest.json` : `sha` absent ou invalide : captures non vérifiées."), ("autre commit", f"`manifest.json` provient du commit `{'b' * 40}`, pas de `{SHA}` : captures non vérifiées.")):
+            with self.subTest(case=case):
+                evidence = self.evidence()
+                path = evidence / "captures" / "manifest.json"
+                manifest = json.loads(path.read_text())
+                if case == "absent":
+                    del manifest["sha"]
+                else:
+                    manifest["sha"] = "b" * 40
+                path.write_text(json.dumps(manifest))
+                status, lines = linux_verdict.verdict(evidence, SHA)
+                self.assertEqual(status, "FIX")
+                self.assertIn("## Erreur d’outil", lines)
+                self.assertIn(expected, lines)
+                rows = [line for line in lines if line.startswith("| `")]
+                self.assertTrue(all(row.endswith("| non vérifié |") for row in rows), rows)
+                self.assertFalse(any(" ok" in line for line in lines if line.startswith(("| `", "Entrées"))), lines)
+
     def test_partial_manifest_verifies_earlier_views_and_never_passes(self) -> None:
         evidence = self.evidence(error="thread-menu readiness failed.", failing="thread-menu")
         path = evidence / "captures" / "manifest.json"

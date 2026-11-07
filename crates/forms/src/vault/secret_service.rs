@@ -69,10 +69,12 @@ fn note_secrets_in_service(vault: &Vault) -> Result<()> {
     if !marker.exists() {
         // Durable before any native write: a power cut must not keep a secret in the
         // keyring and lose the marker, or a locked restart would mask with a partial list.
-        let temporary = marker.with_extension("keyring.tmp");
-        let file = fs::File::create(&temporary)?;
+        // Empty, so created in place: exclusive creation never follows a planted link.
+        let file = secure_options()?
+            .write(true)
+            .create_new(true)
+            .open(&marker)?;
         file.sync_all()?;
-        fs::rename(&temporary, &marker)?;
         fs::File::open(marker.parent().unwrap())?.sync_all()?;
         #[cfg(test)]
         tests::STEPS.with(|steps| steps.borrow_mut().push("marqueur durable".into()));
@@ -289,7 +291,8 @@ mod tests {
                 "{} was followed",
                 planted.display()
             );
-            fs::remove_file(&planted).unwrap();
+            let _ = fs::remove_file(&planted);
+            let _ = fs::remove_file(&marker);
         }
     }
     #[test]

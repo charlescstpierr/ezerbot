@@ -60,6 +60,8 @@ struct StoredSecret {
     public_name: Option<String>,
 }
 type Secrets = BTreeMap<String, StoredSecret>;
+mod privacy;
+pub use privacy::{privacy_fingerprints, PrivacyFingerprint, PrivacySnapshot};
 
 // Serialize threads on one vault before taking its stable companion-file lock,
 // which also protects against other wrapper processes and against another
@@ -166,13 +168,19 @@ impl Vault {
         // cost grows with the directory.
         drop(guard);
         vault.cleanup_temporaries()?;
-        let initialize = match checked_file(&vault.path, false) {
-            Ok(file) => file.metadata()?.len() == 0,
-            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => true,
+        let (initialize, complete) = match checked_file(&vault.path, false) {
+            Ok(file) => (file.metadata()?.len() == 0, false),
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => (true, true),
             Err(error) => return Err(error),
         };
         if initialize {
-            vault.write(&Secrets::new())?;
+            let secrets = Secrets::new();
+            vault.write_document(&privacy::Document {
+                ledger: Some(privacy::Ledger::new(&vault.path, &secrets, complete)?),
+                secrets,
+            })?;
+        } else {
+            vault.reconcile_privacy()?;
         }
         Ok(vault)
     }
@@ -359,54 +367,13 @@ impl Vault {
     pub(crate) fn known_values(&self) -> Result<Vec<String>> {
         let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
-        let mut values = Vec::new();
-        for (name, secret) in self.read()? {
-            // Connector envelopes preserve short/whitespace-sensitive values.
-            // Long values also belong to the GLOBAL redaction boundary: another
-            // connector or the provider must not echo a different server's key.
-            // Keep the > MASK-length invariant of redact.rs. Short values are
-            // masked by the connector host before persistence, never added to
-            // global substring redaction (which would corrupt IDs and prose).
-            if name.starts_with("MCP_")
-                && name.ends_with("_ENV")
-                && secret.purpose == MCP_ENV_PURPOSE
-            {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&secret.value) {
-                    if let Some(environment) = value["variables"].as_object() {
-                        values.extend(
-                            environment
-                                .values()
-                                .filter_map(|v| v.as_str())
-                                .filter(|v| v.encode_utf16().count() >= MIN_SECRET_VALUE_CHARACTERS)
-                                .map(str::to_owned),
-                        );
-                    }
-                }
-            }
-            // Site envelopes stay local; each field must also be masked alone.
-            if name.starts_with("SITE_") && secret.purpose == "Formulaire de site privé" {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&secret.value) {
-                    if let Some(fields) = value["values"].as_object() {
-                        values.extend(
-                            fields
-                                .values()
-                                .map(|v| match v {
-                                    serde_json::Value::String(text) => text.clone(),
-                                    other => other.to_string(),
-                                })
-                                .filter(|v| v.encode_utf16().count() >= MIN_SITE_MASK_CHARACTERS),
-                        );
-                    }
-                }
-            }
-            values.push(secret.value);
-        }
-        Ok(values)
+        Ok(values_from_secrets(self.read()?))
     }
 
     // Call only while holding this vault's VAULT_ACCESS entry and its companion-file lock. Parse
     // errors must not echo input: serde diagnostics can contain secret strings.
     fn read(&self) -> Result<Secrets> {
+        self.reconcile_privacy()?;
         READS.set(READS.get() + 1);
         #[cfg(target_os = "macos")]
         if let Some(target) = &self.keychain {
@@ -414,21 +381,46 @@ impl Vault {
         }
         self.read_file()
     }
+    fn read_strict(&self) -> Result<Secrets> {
+        READS.set(READS.get() + 1);
+        #[cfg(target_os = "macos")]
+        if let Some(target) = &self.keychain {
+            return keychain::strict_snapshot(self, target);
+        }
+        self.read_file()
+    }
     fn read_file(&self) -> Result<Secrets> {
+        Ok(self.read_document()?.secrets)
+    }
+    fn read_document(&self) -> Result<privacy::Document> {
         let file = checked_file(&self.path, false)?;
         let mut bytes = Vec::new();
         (&file).read_to_end(&mut bytes)?;
-        let secrets: Secrets =
+        let document: privacy::Document =
             serde_json::from_slice(&bytes).map_err(|_| invalid("secret vault data is invalid"))?;
-        for (name, secret) in &secrets {
+        for (name, secret) in &document.secrets {
             validate_stored(name, secret)?;
         }
-        Ok(secrets)
+        if let Some(ledger) = &document.ledger {
+            ledger.validate()?;
+        }
+        Ok(document)
     }
     fn write_secret(&self, key: String, mut secret: StoredSecret) -> Result<()> {
         let _guard = access(&self.path);
         let _file_guard = self.lock_file(true)?;
-        let mut secrets = self.read()?;
+        #[cfg(any(test, debug_assertions))]
+        if self.refuse_keychain {
+            return Err(invalid(
+                "Le trousseau macOS est indisponible ou son accès a été refusé.",
+            ));
+        }
+        self.reconcile_privacy()?;
+        let mut secrets = self.read_strict()?;
+        self.capture_privacy(&secrets, false)?;
+        let mut incoming = Secrets::new();
+        incoming.insert(key.clone(), secret.clone());
+        self.capture_privacy(&incoming, true)?;
         if secret.created_at == 0 {
             secret.created_at = secrets
                 .get(&key)
@@ -467,11 +459,19 @@ impl Vault {
                 "Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez.",
             ));
         }
+        self.reconcile_privacy()?;
+        let mut secrets = self.read_strict().map_err(|error| {
+            #[cfg(target_os = "macos")]
+            if self.keychain.is_some() {
+                return invalid("Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez.");
+            }
+            error
+        })?;
+        self.capture_privacy(&secrets, true)?;
         #[cfg(target_os = "macos")]
         if let Some(target) = &self.keychain {
             return keychain::remove(self, target, key);
         }
-        let mut secrets = self.read()?;
         if secrets.remove(key).is_some() {
             self.write(&secrets)?;
         }
@@ -536,6 +536,16 @@ impl Vault {
     }
 
     fn write(&self, secrets: &Secrets) -> Result<()> {
+        let mut document = self.read_document()?;
+        let ledger = document
+            .ledger
+            .as_mut()
+            .ok_or_else(|| invalid("secret vault privacy data is unavailable"))?;
+        ledger.update_file(secrets)?;
+        document.secrets = secrets.clone();
+        self.write_document(&document)
+    }
+    fn write_document(&self, document: &privacy::Document) -> Result<()> {
         let mut random = [0_u8; 16];
         getrandom::getrandom(&mut random)
             .map_err(|_| invalid("secret vault randomness is unavailable"))?;
@@ -549,7 +559,7 @@ impl Vault {
             .open(&temporary)?;
         let result = (|| -> Result<()> {
             owner_only(&file)?;
-            serde_json::to_writer(&mut file, secrets)?;
+            serde_json::to_writer(&mut file, document)?;
             file.sync_all()?;
             fs::rename(&temporary, &self.path)?;
             File::open(self.path.parent().unwrap())?.sync_all()?;
@@ -561,6 +571,49 @@ impl Vault {
         }
         result
     }
+}
+
+fn values_from_secrets(secrets: Secrets) -> Vec<String> {
+    let mut values = Vec::new();
+    for (name, secret) in secrets {
+        // Connector envelopes preserve short/whitespace-sensitive values.
+        // Long values also belong to the GLOBAL redaction boundary: another
+        // connector or the provider must not echo a different server's key.
+        // Keep the > MASK-length invariant of redact.rs. Short values are
+        // masked by the connector host before persistence, never added to
+        // global substring redaction (which would corrupt IDs and prose).
+        if name.starts_with("MCP_") && name.ends_with("_ENV") && secret.purpose == MCP_ENV_PURPOSE {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&secret.value) {
+                if let Some(environment) = value["variables"].as_object() {
+                    values.extend(
+                        environment
+                            .values()
+                            .filter_map(|v| v.as_str())
+                            .filter(|v| v.encode_utf16().count() >= MIN_SECRET_VALUE_CHARACTERS)
+                            .map(str::to_owned),
+                    );
+                }
+            }
+        }
+        // Site envelopes stay local; each field must also be masked alone.
+        if name.starts_with("SITE_") && secret.purpose == "Formulaire de site privé" {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&secret.value) {
+                if let Some(fields) = value["values"].as_object() {
+                    values.extend(
+                        fields
+                            .values()
+                            .map(|v| match v {
+                                serde_json::Value::String(text) => text.clone(),
+                                other => other.to_string(),
+                            })
+                            .filter(|v| v.encode_utf16().count() >= MIN_SITE_MASK_CHARACTERS),
+                    );
+                }
+            }
+        }
+        values.push(secret.value);
+    }
+    values
 }
 
 /// Record a verified keychain write by dropping the plaintext copy. A refusal

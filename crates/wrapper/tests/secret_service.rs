@@ -513,3 +513,25 @@ fn an_account_found_twice_refuses_masking_and_rotation_until_removed() {
     let masked = f.vault().values_for_redaction().unwrap();
     assert!(masked.contains(&value("alpha")), "alpha is not masked");
 }
+
+/// Un secret déjà lu ne survit pas au verrouillage en mémoire : tant que le trousseau refuse,
+/// la lecture refuse aussi, puis le secret revient au déverrouillage.
+#[test]
+fn a_keyring_locked_after_a_read_serves_no_secret_from_memory() {
+    let mut f = Fixture::new();
+    let value = ["valeur", "factice", "cache", "7319"].join("-");
+    let vault = f.vault();
+    vault.set("TOKEN", "Jeton", &value).unwrap();
+    assert_eq!(vault.get("TOKEN").unwrap().as_deref(), Some(value.as_str()));
+    f.keyring.lock();
+    match vault.get("TOKEN") {
+        Ok(Some(_)) => panic!("a locked keyring still served the secret from memory"),
+        Ok(None) => panic!("a locked keyring read as empty"),
+        Err(error) => assert!(error.to_string().contains("Déverrouillez"), "{error}"),
+    }
+    f.keyring.unlock();
+    assert!(
+        vault.get("TOKEN").unwrap().as_deref() == Some(value.as_str()),
+        "the secret did not come back after the unlock"
+    );
+}

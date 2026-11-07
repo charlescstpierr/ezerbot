@@ -463,3 +463,53 @@ fn moving_the_default_alias_to_an_empty_collection_keeps_the_secrets_masked() {
     assert!(refused.contains("Déverrouillez"), "{refused}");
     assert!(!refused.contains(&value));
 }
+
+/// Un coffre réparti sur deux collections : chaque rotation remplace le secret là où il vit,
+/// sans laisser l'ancienne valeur à côté de la nouvelle.
+#[test]
+fn rotating_secrets_split_across_collections_replaces_each_where_it_lives() {
+    const SESSION: &str = "/org/freedesktop/secrets/collection/session";
+    let f = Fixture::new();
+    let value = |name: &str| ["valeur", "factice", name, "5517"].join("-");
+    let vault = f.vault();
+    vault.set("ALPHA", "Alpha", &value("alpha")).unwrap();
+    vault.set("BETA", "Beta", &value("beta")).unwrap();
+    f.keyring.move_item("BETA", SESSION);
+    let vault = f.vault();
+    assert!(
+        vault.set("ALPHA", "Alpha", &value("alpha-2")).is_ok(),
+        "the rotation of ALPHA was refused"
+    );
+    assert!(
+        vault.set("BETA", "Beta", &value("beta-2")).is_ok(),
+        "the rotation of BETA was refused"
+    );
+    assert_eq!(f.stored(), ["ALPHA", "BETA"]);
+    let masked = f.vault().values_for_redaction().unwrap();
+    for name in ["alpha-2", "beta-2"] {
+        assert!(masked.contains(&value(name)), "{name} is not masked");
+    }
+}
+
+/// Deux éléments pour un même compte : la lecture ne choisit pas, elle refuse ; la rotation
+/// refuse aussi. Supprimer le secret efface toutes ses copies et rend le coffre lisible.
+#[test]
+fn an_account_found_twice_refuses_masking_and_rotation_until_removed() {
+    const SESSION: &str = "/org/freedesktop/secrets/collection/session";
+    let f = Fixture::new();
+    let value = |name: &str| ["valeur", "factice", name, "6623"].join("-");
+    let vault = f.vault();
+    vault.set("ALPHA", "Alpha", &value("alpha")).unwrap();
+    vault.set("BETA", "Beta", &value("beta")).unwrap();
+    f.keyring.copy_item("BETA", SESSION);
+    let vault = f.vault();
+    let refused = vault.values_for_redaction();
+    assert!(refused.is_err(), "masking chose one of two BETA items");
+    assert!(
+        vault.set("BETA", "Beta", &value("beta-2")).is_err(),
+        "a rotation wrote beside two BETA items"
+    );
+    vault.remove("BETA").unwrap();
+    let masked = f.vault().values_for_redaction().unwrap();
+    assert!(masked.contains(&value("alpha")), "alpha is not masked");
+}

@@ -14,6 +14,7 @@ use std::{
 };
 
 use grokbot_test_support::TestDir;
+use secret_service::{blocking::SecretService, EncryptionType};
 use zbus::{
     blocking::{connection::Builder, Connection, Proxy},
     message::Header,
@@ -275,6 +276,50 @@ impl Keyring {
             .call("SetAlias", &("default", &path))
             .unwrap();
         assert_eq!(self.default_collection(), collection);
+    }
+
+    /// Copies the item of `account` into another collection, as another client or an older
+    /// build that wrote to a different `default` would leave it.
+    pub fn copy_item(&self, account: &str, collection: &str) {
+        self.place_item(account, collection, false);
+    }
+
+    pub fn move_item(&self, account: &str, collection: &str) {
+        self.place_item(account, collection, true);
+    }
+
+    fn place_item(&self, account: &str, collection: &str, remove: bool) {
+        let service =
+            SecretService::connect_with_existing(EncryptionType::Plain, self.bus.connection())
+                .unwrap();
+        let found = service
+            .search_items(HashMap::from([("account", account)]))
+            .unwrap();
+        let [item] = found.unlocked.as_slice() else {
+            panic!("expected one unlocked {account} item");
+        };
+        let target = service
+            .get_all_collections()
+            .unwrap()
+            .into_iter()
+            .find(|target| target.collection_path.as_str() == collection)
+            .unwrap();
+        let attributes = item.get_attributes().unwrap();
+        target
+            .create_item(
+                &item.get_label().unwrap(),
+                attributes
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect(),
+                &item.get_secret().unwrap(),
+                false,
+                &item.get_secret_content_type().unwrap(),
+            )
+            .unwrap();
+        if remove {
+            item.delete().unwrap();
+        }
     }
 
     pub fn lock_collection(&self, collection: &str) {

@@ -1,10 +1,14 @@
-//! Byte-level client of the Secret Service default collection. It never unlocks: a locked
-//! collection is `Unavailable`. A service may still ask the user to confirm a write or a
+//! Byte-level client of the Secret Service. A vault's items are found wherever they are, not
+//! only in the collection `default` points at now, and new ones go where the others already
+//! live. It never unlocks: a locked collection that holds any of them is `Unavailable`. A service may still ask the user to confirm a write or a
 //! deletion, and `secret-service` then waits for the answer with no limit, so these two
 //! operations are bounded and report `Unavailable` when no answer comes.
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use secret_service::{blocking::SecretService, EncryptionType};
+use secret_service::{
+    blocking::{Collection as Native, Item, SecretService},
+    EncryptionType,
+};
 use zbus::blocking::Connection;
 
 use crate::{bus::bounded, Bus, Unavailable};
@@ -21,7 +25,7 @@ pub struct Collection {
 }
 
 impl Collection {
-    /// Checks that the default collection exists and is unlocked.
+    /// Checks that the collection that holds, or would hold, this vault's items is unlocked.
     pub fn open(bus: &Bus, scope: String) -> Result<Self, Unavailable> {
         let connection = bus.connect()?;
         let service = SecretService::connect_with_existing(EncryptionType::Dh, connection.clone())
@@ -32,24 +36,20 @@ impl Collection {
             service,
             scope,
         };
-        collection.with_default(|_| Ok(()))?;
+        collection.with_home(|_| Ok(()))?;
         Ok(collection)
     }
 
     pub fn entries(&self) -> Result<Vec<(String, Vec<u8>)>, Unavailable> {
-        self.with_default(|collection| {
-            let attributes =
-                HashMap::from([("application", APPLICATION), ("service", &self.scope)]);
-            collection
-                .search_items(attributes)?
-                .iter()
-                .map(|item| {
-                    let account = item.get_attributes()?.remove("account");
-                    Ok(account.zip(Some(item.get_secret()?)))
-                })
-                .filter_map(Result::transpose)
-                .collect()
-        })
+        self.found(self.scope_attributes())?
+            .iter()
+            .map(|item| {
+                let account = item.get_attributes()?.remove("account");
+                Ok(account.zip(Some(item.get_secret()?)))
+            })
+            .filter_map(Result::transpose)
+            .collect::<Result<_, secret_service::Error>>()
+            .map_err(|_| Unavailable)
     }
 
     /// Replaces the item of this account, then reads it back and compares.
@@ -62,15 +62,16 @@ impl Collection {
         let this = self.clone();
         let (account, label, bytes) = (account.to_owned(), label.to_owned(), bytes.to_owned());
         self.confirmed(move || {
-            this.with_default(|collection| {
+            this.with_home(|collection| {
                 let attributes = this.attributes(&account);
-                collection.create_item(&label, attributes, &bytes, true, CONTENT_TYPE)?;
-                let items = collection.search_items(this.attributes(&account))?;
-                match items.as_slice() {
-                    [item] if item.get_secret()? == bytes => Ok(()),
-                    _ => Err(secret_service::Error::NoResult),
-                }
-            })
+                collection
+                    .create_item(&label, attributes, &bytes, true, CONTENT_TYPE)
+                    .map(drop)
+            })?;
+            match this.found(this.attributes(&account))?.as_slice() {
+                [item] if item.get_secret().map_err(|_| Unavailable)? == bytes => Ok(()),
+                _ => Err(Unavailable),
+            }
         })
     }
 
@@ -79,18 +80,13 @@ impl Collection {
         let this = self.clone();
         let account = account.to_owned();
         self.confirmed(move || {
-            this.with_default(|collection| {
-                for item in collection.search_items(this.attributes(&account))? {
-                    item.delete()?;
-                }
-                match collection
-                    .search_items(this.attributes(&account))?
-                    .is_empty()
-                {
-                    true => Ok(()),
-                    false => Err(secret_service::Error::NoResult),
-                }
-            })
+            for item in this.found(this.attributes(&account))? {
+                item.delete().map_err(|_| Unavailable)?;
+            }
+            match this.found(this.attributes(&account))?.is_empty() {
+                true => Ok(()),
+                false => Err(Unavailable),
+            }
         })
     }
 
@@ -106,24 +102,56 @@ impl Collection {
         })
     }
 
-    fn attributes<'a>(&'a self, account: &'a str) -> HashMap<&'a str, &'a str> {
+    fn scope_attributes(&self) -> HashMap<&str, &str> {
         HashMap::from([
             ("application", APPLICATION),
-            ("service", &self.scope),
-            ("account", account),
+            ("service", self.scope.as_str()),
         ])
     }
 
-    fn with_default<T>(
-        &self,
-        action: impl FnOnce(
-            &secret_service::blocking::Collection<'_>,
-        ) -> Result<T, secret_service::Error>,
-    ) -> Result<T, Unavailable> {
-        let collection = self
+    fn attributes<'a>(&'a self, account: &'a str) -> HashMap<&'a str, &'a str> {
+        let mut attributes = self.scope_attributes();
+        attributes.insert("account", account);
+        attributes
+    }
+
+    /// Matching items in every collection. One in a locked collection makes any read partial,
+    /// so nothing is returned rather than the unlocked rest.
+    fn found(&self, attributes: HashMap<&str, &str>) -> Result<Vec<Item<'_>>, Unavailable> {
+        let found = self
             .service
-            .get_default_collection()
+            .search_items(attributes)
             .map_err(|_| Unavailable)?;
+        if !found.locked.is_empty() {
+            return Err(Unavailable);
+        }
+        Ok(found.unlocked)
+    }
+
+    /// Where this vault's items live: the collection that already holds them, else `default`.
+    fn with_home<T>(
+        &self,
+        action: impl FnOnce(&Native<'_>) -> Result<T, secret_service::Error>,
+    ) -> Result<T, Unavailable> {
+        let held = self.found(self.scope_attributes())?;
+        let collection = match held.first() {
+            Some(item) => self
+                .service
+                .get_all_collections()
+                .map_err(|_| Unavailable)?
+                .into_iter()
+                .find(|collection| {
+                    item.item_path
+                        .as_str()
+                        .strip_prefix(collection.collection_path.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+                })
+                .ok_or(Unavailable)?,
+            None => self
+                .service
+                .get_default_collection()
+                .map_err(|_| Unavailable)?,
+        };
         // Checked before every call so that a locked collection never reaches an unlock prompt.
         if collection.is_locked().map_err(|_| Unavailable)? {
             return Err(Unavailable);

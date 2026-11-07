@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { pendingReply } from "./thread-order.js";
-import { connectionMessages, composerConnectionState, signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
+import { connectionMessages, composerConnectionState, regenerable, signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
 
 test("an authoritative terminal snapshot releases loading without a final stream event", () => {
   const live = [{ role: "assistant", state: "streaming", body: "Début" }];
@@ -267,4 +267,46 @@ test("a disabled secondary button is dimmed and does not look actionable", () =>
   assert.ok(rule, "règle .secondary-button:disabled absente");
   assert.match(rule[0], /opacity:\s*\.5/);
   assert.match(rule[0], /cursor:\s*default/);
+});
+
+test("une réponse que /api/regenerate refuse ne propose ni Réessayer ni Relancer", () => {
+  const returned = { id: "reply-return", role: "assistant", kind: "message", state: "failed", error_kind: "other",
+    error: "OpenAI a renvoyé une erreur. Réessayez.", payload: { run_id: "return", regenerable: false } };
+  assert.equal(regenerable(returned), false);
+  const problem = replyProblemState(returned);
+  assert.equal(problem.retry, false);
+  assert.doesNotMatch(problem.error, /Réessayez/);
+  assert.equal(problem.advice, null, "la phrase du moteur dit déjà d’envoyer un nouveau message");
+  assert.equal(replyProblemState({ ...returned, error: "OpenAI a refusé la demande (erreur 500) : upstream connection reset" }).advice,
+    "Envoyez un nouveau message pour demander une nouvelle réponse.");
+  assert.equal(signInCardState({ message: { ...returned, error_kind: "signin" }, providerConnected: true, engineConnected: true }).showRetry, false);
+
+  const answer = { ...returned, id: "reply-question", payload: { run_id: "question", regenerable: true } };
+  assert.equal(replyProblemState(answer).retry, true);
+  assert.equal(signInCardState({ message: { ...answer, error_kind: "signin" }, providerConnected: true, engineConnected: true }).showRetry, true);
+});
+
+test("la carte de connexion d’une réponse non relançable dit d’envoyer un nouveau message, avant comme après la reconnexion", () => {
+  const message = { id: "reply-return", role: "assistant", kind: "message", state: "failed", error_kind: "signin", payload: { run_id: "return", regenerable: false } };
+  for (const providerConnected of [false, true]) {
+    const card = signInCardState({ message, providerConnected, engineConnected: true });
+    assert.match(card.copy, /envoyez un nouveau message/i, `connecté=${providerConnected}`);
+    assert.doesNotMatch(card.copy, /réessayez|question est conservée/i, `connecté=${providerConnected}`);
+    assert.equal(card.showRetry, false);
+  }
+  const question = { ...message, payload: { run_id: "question", regenerable: true } };
+  assert.equal(signInCardState({ message: question, providerConnected: true, engineConnected: true }).copy, "Votre question est conservée. Réessayez pour obtenir la réponse.");
+});
+
+test("une tâche non relançable garde « Poursuivez dans la conversation principale », jamais un nouveau message", () => {
+  const task = { id: "reply-task", role: "assistant", kind: "message", state: "failed", error_kind: "other", error: "OpenAI a refusé la demande (erreur 500).", payload: { run_id: "task", regenerable: false } };
+  const problem = replyProblemState(task, { isTask: true });
+  assert.equal(problem.retry, false);
+  assert.equal(problem.advice, "Poursuivez dans la conversation principale.");
+  for (const providerConnected of [false, true]) {
+    const card = signInCardState({ message: { ...task, error_kind: "signin" }, isTask: true, providerConnected, engineConnected: true });
+    assert.match(card.copy, /poursuivez dans la conversation principale/i, `connecté=${providerConnected}`);
+    assert.doesNotMatch(card.copy, /nouveau message|réessayez/i, `connecté=${providerConnected}`);
+    assert.equal(card.showRetry, false);
+  }
 });

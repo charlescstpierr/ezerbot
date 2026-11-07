@@ -84,16 +84,18 @@ fn state_revision(
     connection: &rusqlite::Connection,
     path: &std::path::Path,
     keyring_locked: bool,
+    silence_revision: u64,
 ) -> Result<String, ApiError> {
     let external: u64 = connection.pragma_query_value(None, "data_version", |row| row.get(0))?;
     Ok(format!(
-        "{}.{}.{}.{}.{}.{}",
+        "{}.{}.{}.{}.{}.{}.{}",
         std::process::id(),
         external,
         connection.total_changes(),
         super::screen::revision(path),
         super::updates::revision(),
         u8::from(keyring_locked),
+        silence_revision,
     ))
 }
 
@@ -101,7 +103,8 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     match path {
         "/api/ping" => {
             let locked = super::engine::keyring_locked(&app.connection);
-            Ok(json!({"revision": state_revision(&app.connection, &app.db_path, locked)?}))
+            let silence = app.provider.watchdog().revision();
+            Ok(json!({"revision": state_revision(&app.connection, &app.db_path, locked, silence)?}))
         }
         "/api/state" => {
             // Trousseau verrouillé : le coffre n'est lu qu'en partie, donc rien de l'historique
@@ -109,7 +112,12 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             let locked = super::engine::keyring_locked(&app.connection);
             // Capture before reading: a concurrent write during serialization
             // must cause another refresh, never be mistaken for observed data.
-            let revision = state_revision(&app.connection, &app.db_path, locked)?;
+            let revision = state_revision(
+                &app.connection,
+                &app.db_path,
+                locked,
+                app.provider.watchdog().revision(),
+            )?;
             let (theme, accent) = app.preferences()?;
             let provider = app.provider.status();
             let resolved = app.resolved_model()?;
@@ -128,6 +136,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     "model": resolved.as_ref().map(|(model, _, _)| model),
                     "effort": resolved.as_ref().and_then(|(_, effort, _)| effort.as_ref()), },
                 "provider": provider, "state_revision": revision,
+                "silence": app.provider.watchdog().silence(),
             });
             // Each capability is merged under its own fixed key.
             for (key, value) in super::state(&app.feature_context())
@@ -295,6 +304,10 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 return Err(ApiError::new(409, "Arrêtez ou supprimez la réunion en cours avant de supprimer cette conversation."));
             }
             tx.execute("UPDATE wrapper_conversations SET deleted = 1, updated_at = ?3 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, now()])?;
+            super::delegation::invalidate_background(&super::Context {
+                connection: &tx,
+                ..app.feature_context()
+            })?;
             super::storage::discard_conversation_draft(&tx, &input.id)?;
             super::storage::discard_conversation_images(&tx, &input.id)?;
             super::pages::anchors::discard_conversation(&tx, &input.id)?;

@@ -24,14 +24,19 @@ function signInCopy({ providerConnected, expired, group, isTask }) {
       : "Votre question est conservée. Connectez votre compte ChatGPT, puis réessayez.";
 }
 
+// The server says which replies `/api/regenerate` accepts; offer no button it would refuse.
+export function regenerable(message) {
+  return message.payload?.regenerable !== false;
+}
+
 export function signInCardState({ message, isGroup = false, isTask = false, providerConnected = false, engineConnected = false }) {
   const expired = message.error_kind === "signin_expired";
   const group = isGroup || Boolean(message.payload?.turn_id);
   return {
     title: providerConnected ? "Compte ChatGPT connecté" : expired ? "Votre session ChatGPT a expiré" : "Connectez votre compte ChatGPT",
-    copy: signInCopy({ providerConnected, expired, group, isTask }),
+    copy: signInCopy({ providerConnected, expired, group: group || (!isTask && !regenerable(message)), isTask }),
     signInLabel: expired ? "Se reconnecter" : "Se connecter",
-    showRetry: !group && !isTask,
+    showRetry: !group && !isTask && regenerable(message),
     retryDisabled: !providerConnected || !engineConnected,
     retryTitle: !engineConnected ? "Moteur local indisponible" : !providerConnected ? "Connectez votre compte ChatGPT avant de réessayer." : "Réessayer cette réponse",
     signInDisabled: !engineConnected,
@@ -61,11 +66,11 @@ export function replyProblemState(message, { isGroup = false, isTask = false, en
   const local = message.error_kind === "local_connection";
   const group = (isGroup || Boolean(message.payload?.turn_id)) && !signin && !local;
   const context = ["context", "context_budget"].includes(message.error_kind);
-  const retry = local || (!group && !isTask && !context);
+  const retry = local || (!group && !isTask && !context && regenerable(message));
   const error = presentedFailureText(message.error, { retry, replacement: isTask ? "Poursuivez dans la conversation principale." : "Envoyez un nouveau message." });
   const shown = `${message.error || ""} ${error}`.toLocaleLowerCase("fr");
   const advice = local || signin || context || shown.includes("envoyez un nouveau message") || shown.includes("poursuivez dans la conversation principale") ? null
-    : group ? "Envoyez un nouveau message pour demander une nouvelle réponse."
+    : group || (!isTask && !regenerable(message)) ? "Envoyez un nouveau message pour demander une nouvelle réponse."
       : isTask ? "Poursuivez dans la conversation principale." : null;
   return { signin, advice, error, retry, retryDisabled: !engineConnected,
     retryTitle: !engineConnected ? "Moteur local indisponible" : "Réessayer cette réponse" };

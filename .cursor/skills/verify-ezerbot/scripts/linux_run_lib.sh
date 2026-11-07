@@ -17,7 +17,7 @@ run_pids() {
     pid=${dir#/proc/}
     [[ $pid != "$$" && $pid != "$BASHPID" ]] || continue
     # Whole environment read into a variable first: no pipe, so no SIGPIPE under pipefail.
-    env=$(tr '\0' '\n' <"$dir/environ" 2>/dev/null) || continue
+    env=$(tr '\0' '\n' 2>/dev/null <"$dir/environ") || continue
     if grep -F -x -e "HOME=$run" -e "TMPDIR=$run/tmp" <<<"$env" >/dev/null \
       || grep -F -e "HOME=$run/" -e "TMPDIR=$run/" <<<"$env" >/dev/null; then
       printf '%s\n' "$pid"

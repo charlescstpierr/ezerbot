@@ -3,6 +3,8 @@
 //! separate from forgetting. Budgets/recovery policy are local reconstruction.
 //! Summary bounds follow RC06, with the 70% fallback from `compaction-runtimes.md`.
 
+pub mod watchdog;
+
 use crate::*;
 use grokbot_domain::{ConversationId, DeliveryReceipt, MessageId, Refusal, TranscriptEntryId};
 use grokbot_engine::contracts::{
@@ -159,6 +161,7 @@ pub(super) fn budget(conn: &Connection) -> grokbot_engine::contracts::Result<Con
 }
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
+    watchdog::migrate(conn)?;
     store::migrate(conn)?;
     compaction::migrate(conn)?;
     conn.execute_batch(
@@ -1141,21 +1144,51 @@ fn host_action_response(
 }
 
 pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Result<(), ApiError> {
-    super::delegation::stop_background(ctx, run)?;
+    stop_run_if(ctx, run, end, |_, _| Ok(true))
+}
+/// Signal before writing: a busy writer must not delay the cancellation of a blocked tool.
+/// Background delegations end in the same write, only when the stop applies.
+pub(crate) fn stop_run_if(
+    ctx: &super::Context<'_>,
+    run: &Run,
+    end: TurnEnd,
+    mut predicate: impl FnMut(&Connection, &Run) -> grokbot_engine::contracts::Result<bool>,
+) -> Result<(), ApiError> {
     ctx.provider.cancel_run(&run.run_id);
     let mut services = Services::new(ctx)?;
     let ended = store::get(ctx.connection, &run.run_id)?.is_some_and(|r| r.status.is_terminal());
-    run_loop::cancel(ctx.connection, &mut services, &run.run_id, end)?;
-    // Un tour suspendu n'a plus de worker pour l'écrire au journal.
-    if !ended {
+    let stopped = run_loop::cancel_if(
+        ctx.connection,
+        &mut services,
+        &run.run_id,
+        end,
+        |conn, current| {
+            let applies = predicate(conn, current)?;
+            if applies {
+                let inner = super::Context {
+                    connection: conn,
+                    ..*ctx
+                };
+                super::delegation::stop_background(&inner, current)?;
+            }
+            Ok(applies)
+        },
+    )?;
+    // Un tour suspendu n'a plus de worker pour l'écrire au journal. Un arrêt
+    // refusé laisse le tour ouvert : sa fin l'y écrira.
+    if !ended && stopped.status.is_terminal() {
         let _ = super::turns::record(ctx.connection, &run.run_id);
     }
     Ok(())
 }
 pub fn tick(ctx: &super::Context<'_>) {
+    let _ = watchdog::scan(ctx);
     tick_selected(ctx, false, false);
 }
-pub(crate) fn tick_routines(ctx: &super::Context<'_>) {
+/// Drive routine conversations and their children without admitting user chats.
+#[doc(hidden)]
+pub fn tick_routines(ctx: &super::Context<'_>) {
+    let _ = watchdog::scan(ctx);
     tick_selected(ctx, true, false);
 }
 /// Resume a run parked on an approval without starting queued child tasks.
@@ -1336,6 +1369,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
         [&run.run_id],
         |row| row.get(0),
     )?;
+    let seq = watchdog::latest_seq(ctx.connection, &run.run_id)?;
     let Some(cancel) = ctx.provider.claim_run(&run.run_id) else {
         return Ok(());
     };
@@ -1344,6 +1378,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
         id: run.run_id.clone(),
         titling: live,
     };
+    ctx.provider.watchdog().start(&run.run_id, seq);
     // Mark before the final event can stop UI polling; clear even on unwind.
     if live {
         ctx.provider.title_started();
@@ -1523,6 +1558,12 @@ impl<'a> Services<'a> {
     }
 }
 impl RunServices for Services<'_> {
+    fn on_activity(&mut self, id: &str, activity: run_loop::RunActivity<'_>) {
+        watchdog::activity(self.provider, id, activity);
+    }
+    fn on_run_committed(&mut self, run: &Run, through_seq: u64) {
+        self.provider.watchdog().committed(run, through_seq);
+    }
     fn is_wait_tool(&self, call: &ToolCall) -> bool {
         matches!(
             call.name.as_str(),
@@ -1916,6 +1957,7 @@ impl RunServices for Services<'_> {
             )
             .map_err(engine_error)?;
         }
+        watchdog::record(&self.ctx(conn, &run), event, &run).map_err(engine_error)?;
         // Check the forms reaction before the legacy void registry hook; any
         // invalidation/retargeting failure rolls back this event and is retried.
         let ctx = self.ctx(conn, &run);
@@ -2956,6 +2998,9 @@ pub fn reply(
     )?))
 }
 pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> {
+    if kind == "stalled" {
+        return watchdog::entry(ctx, id);
+    }
     if kind == "engine_reply" {
         let run = store::get(ctx.connection, id).ok()??;
         return run_reply(ctx.connection, &run, format!("reply-{id}")).ok();

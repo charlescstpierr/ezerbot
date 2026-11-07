@@ -6,6 +6,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -21,6 +23,8 @@ import linux_verdict  # noqa: E402
 
 SCRIPTS = Path(__file__).resolve().parent
 SHA = "a" * 40
+# Paths prove-linux.sh requires unchanged since the commit, read from the script itself.
+GUARDED = re.search(r"status --porcelain -- (.+)\)$", (SCRIPTS / "prove-linux.sh").read_text(), re.M).group(1).split()
 
 
 def png(width: int = 4, height: int = 3, raw: bytes | None = None) -> bytes:
@@ -505,7 +509,7 @@ class LinuxPrerequisitesTests(unittest.TestCase):
 
     def failing_build(self, tool: str, extra_env: dict[str, str]) -> tuple[subprocess.CompletedProcess[str], Path]:
         repo = SCRIPTS.parents[3]
-        dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", "crates", "app/ui", "app/web", "Cargo.toml", "Cargo.lock", "vendor", "tools/linux-captures.cjs", ".cursor/skills/verify-ezerbot/scripts"], capture_output=True, text=True, check=True).stdout
+        dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", *GUARDED], capture_output=True, text=True, check=True).stdout
         if dirty:
             self.skipTest("checkout modifié : prove-linux.sh refuse avant le build")
         scratch = Path(tempfile.mkdtemp(prefix="linux-build-"))
@@ -525,7 +529,7 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         import fcntl
 
         repo = SCRIPTS.parents[3]
-        dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", "crates", "app/ui", "app/web", "Cargo.toml", "Cargo.lock", "vendor", "tools/linux-captures.cjs", ".cursor/skills/verify-ezerbot/scripts"], capture_output=True, text=True, check=True).stdout
+        dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", *GUARDED], capture_output=True, text=True, check=True).stdout
         if dirty:
             self.skipTest("checkout modifié : prove-linux.sh refuse avant le verrou")
         target = repo / "target" / "verify-linux"
@@ -560,6 +564,31 @@ class LinuxPrerequisitesTests(unittest.TestCase):
         report = (evidence / "report.md").read_text().splitlines()
         self.assertTrue(report[-1].startswith("FIX "))
         self.assertIn("L’étape `cargo build` a échoué (code 9) ; aucune vue n’a été pilotée.", report)
+
+    def test_every_source_read_by_the_capture_driver_is_guarded(self) -> None:
+        driver = (SCRIPTS.parents[3] / "tools" / "linux-captures.cjs").read_text()
+        reads = re.findall(r'join\(source, "([^"]+)"', driver)
+        self.assertIn("app/linux/src/local-api.js", reads)
+        for read in reads:
+            with self.subTest(read=read):
+                self.assertTrue(any(read == path or read.startswith(f"{path}/") for path in GUARDED), f"{read} absent du contrôle de prove-linux.sh")
+
+    def test_modified_linux_shell_script_is_refused_before_the_build(self) -> None:
+        scratch = Path(tempfile.mkdtemp(prefix="linux-dirty-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(scratch)], check=True))
+        clone = scratch / "repo"
+        head = subprocess.run(["git", "-C", str(SCRIPTS), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", str(SCRIPTS.parents[3]), str(clone)], check=True)
+        subprocess.run(["git", "-C", str(clone), "checkout", "-q", "--detach", head], check=True)
+        shutil.copytree(SCRIPTS, clone / ".cursor/skills/verify-ezerbot/scripts", dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+        subprocess.run(["git", "-C", str(clone), "-c", "user.name=verify", "-c", "user.email=verify@localhost", "commit", "-qam", "scripts under test", "--allow-empty"], check=True)
+        with open(clone / "app/linux/src/local-api.js", "a") as script:
+            script.write("// modifié après le commit\n")
+        result = subprocess.run(["bash", str(clone / ".cursor/skills/verify-ezerbot/scripts/prove-linux.sh"), "--evidence", str(scratch / "ev")], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("sources compilées modifiées", result.stderr)
+        self.assertIn("app/linux/src/local-api.js", result.stderr)
+        self.assertFalse((clone / "target" / "verify-linux" / "debug").exists())
 
     def test_used_evidence_folder_is_refused(self) -> None:
         used = Path(tempfile.mkdtemp(prefix="linux-used-"))

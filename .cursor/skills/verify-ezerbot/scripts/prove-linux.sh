@@ -41,7 +41,7 @@ if ! python3 "$DIR/doctor.py" --prerequisites >"$evidence/doctor.txt"; then
   cat "$evidence/doctor.txt"; fail 'prérequis Linux manquants (voir doctor.txt).'
 fi
 tail -n 1 "$evidence/doctor.txt"
-dirty=$(git -C "$root" status --porcelain -- crates app/ui app/web Cargo.toml Cargo.lock vendor tools/linux-captures.cjs .cursor/skills/verify-ezerbot/scripts)
+dirty=$(git -C "$root" status --porcelain -- crates app/ui app/web Cargo.toml Cargo.lock vendor app/linux/src/local-api.js tools/linux-captures.cjs .cursor/skills/verify-ezerbot/scripts)
 [[ -z $dirty ]] || fail "sources compilées modifiées depuis $sha ; committer avant la preuve :
 $dirty"
 

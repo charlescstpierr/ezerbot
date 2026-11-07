@@ -33,7 +33,7 @@
     if (yolo.unavailable) { const blocked = node("p", yolo.unavailable, "yolo-error"); blocked.setAttribute("role", "alert"); settings.append(blocked); }
     const on = yolo.mode === "yolo";
     settings.append(node("p", on
-      ? "Activé : tous les outils sont ouverts (terminal et fichiers dans votre dossier personnel, connecteurs, écran du Mac, documents, délégation, routines, mémoire) et les approbations partent seules. Les actions restent dans le journal ci-dessous. La conversation montre les réponses du bot et les documents ou images qu’il vous remet."
+      ? (window.EzerbotShell?.platform === "linux" ? "Activé : tous les outils sont ouverts (terminal et fichiers dans votre dossier personnel, connecteurs, partage d’écran, documents, délégation, routines, mémoire) et les approbations partent seules. Les actions restent dans le journal ci-dessous. La conversation montre les réponses du bot et les documents ou images qu’il vous remet." : "Activé : tous les outils sont ouverts (terminal et fichiers dans votre dossier personnel, connecteurs, écran du Mac, documents, délégation, routines, mémoire) et les approbations partent seules. Les actions restent dans le journal ci-dessous. La conversation montre les réponses du bot et les documents ou images qu’il vous remet.")
       : "Désactivé : chaque action protégée affiche une carte d’approbation, et les outils puissants suivent leurs réglages un à un. Le Mode YOLO les ouvre tous d’un seul clic."));
     const modes = node("div", null, "yolo-modes"); modes.setAttribute("role", "group"); modes.setAttribute("aria-label", "Mode d’autorisation");
     modes.append(

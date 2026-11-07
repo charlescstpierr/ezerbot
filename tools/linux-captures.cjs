@@ -1,8 +1,10 @@
 const { createHash } = require("node:crypto");
 const { execFileSync, spawn, spawnSync } = require("node:child_process");
+const { once } = require("node:events");
 const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { dirname, join, resolve } = require("node:path");
+const { createInterface } = require("node:readline");
 const { launchFixture } = require("../app/ui/wrapper-chrome-fixture.cjs");
 
 const VIEWPORT = Object.freeze({ width: 1440, height: 900, device_scale_factor: 1 });
@@ -13,6 +15,9 @@ const VIEWS = Object.freeze([
   { id: "routines-dark", label: "Routines", action: "document.querySelector('[data-sidebar-destination=routines]').click()", ready: "document.querySelector('.routines-dialog')?.open && document.querySelector('.routines-content')?.textContent.includes('Aucune routine pour ce bot.')" },
   { id: "notifications-dark", label: "Notifications", action: "document.querySelector('[data-sidebar-destination=notifications]').click()", ready: "document.querySelector('.notifications-dialog')?.open && document.querySelector('.notifications-dialog .notification-item')?.textContent.includes('Préparer la semaine')" },
   { id: "conversation-tools-dark", label: "Conversation avec outils", action: "window.captureToolConversation()", ready: "window.captureToolRan?.() && document.getElementById('conversation-title')?.textContent === 'Ranger le dossier' && document.querySelector('.gb-thinking')?.textContent.includes('Réfléchit') && document.querySelector('.gb-conversation')?.textContent.includes('Je regarde ce qu’il y a dans le dossier.') && !document.querySelector('.gb-conversation [data-card-kind], .gb-conversation details, .gb-conversation-problem') && ![...document.querySelectorAll('.gb-conversation .gb-assistant')].some(element => /list_directory|\\/tmp/.test(element.textContent))" },
+  { id: "screen-consent-dark", label: "Accord de partage d’écran", action: "window.captureScreenConsent()", ready: "document.querySelector('.screen-dialog')?.open && document.querySelector('.screen-consent')?.textContent.includes('n’effectue aucun geste')" },
+  { id: "screen-overlay", label: "Superposition du partage d’écran", native: true },
+  { id: "screen-overlay-unproven", label: "Superposition en pause, bandeau non prouvé", native: true, compositor: true },
   { id: "settings-microphone-dark", label: "Paramètres › Micro", before: "Object.defineProperty(window, 'EzerbotShell', { value: { platform: 'linux', unavailablePanels: [] }, configurable: true })", action: "document.getElementById('settings-button').click()", step: "document.querySelector('.voice-microphone-settings')?.scrollIntoView({ block: 'center' })",
     ready: "document.getElementById('settings-dialog')?.open && ['Microphone par défaut du système', 'Microphone USB (test)'].every(text => [...document.querySelectorAll('.voice-microphone-settings .voice-microphone-name')].some(name => name.textContent === text && name.getClientRects().length))",
     settled: "['Microphone par défaut du système', 'Microphone USB (test)'].every(text => { const box = [...document.querySelectorAll('.voice-microphone-settings .voice-microphone-name')].find(name => name.textContent === text)?.getBoundingClientRect(); return box && box.top >= 0 && box.bottom <= innerHeight; })" },
@@ -59,6 +64,38 @@ function pngInfo(bytes) {
   const height = bytes.readUInt32BE(20);
   if (width !== VIEWPORT.width || height !== VIEWPORT.height) throw new Error(`Screenshot dimensions ${width}x${height} differ from the viewport.`);
   return { width, height, sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+
+function linuxShell(source) {
+  const script = readFileSync(join(source, "app/linux/src/local-api.js"), "utf8");
+  const panels = script.match(/unavailablePanels: Object\.freeze\(\[([^\]]*)\]/)[1];
+  return `window.EzerbotShell = Object.freeze({ platform: "linux", unavailablePanels: Object.freeze([${panels}]) });`;
+}
+
+async function overlayCapture(binary, file, signal, cleanup, compositor) {
+  if (compositor) {
+    const manager = spawn("picom", ["--backend", "xrender"], { stdio: "ignore" });
+    const stopped = once(manager, "exit").catch(() => {});
+    cleanup.push(async () => { manager.kill("SIGKILL"); await stopped; });
+    await new Promise(done => setTimeout(done, 1000));
+  }
+  const helper = spawn(join(dirname(binary), "ezerbot-linux"), ["--screen-helper", "60000"], {
+    stdio: ["pipe", "pipe", "ignore"],
+    env: { ...process.env, GDK_BACKEND: "x11", NO_AT_BRIDGE: "1", DBUS_SESSION_BUS_ADDRESS: "disabled:" },
+  });
+  const exited = once(helper, "exit").catch(() => {});
+  cleanup.push(async () => { helper.kill("SIGKILL"); await exited; });
+  const lines = createInterface({ input: helper.stdout })[Symbol.asyncIterator]();
+  const { value: ready } = await bounded(lines.next(), "Screen helper", signal);
+  if (ready !== '{"ready":true}') throw new Error("Screen helper refused the lease.");
+  if (compositor) {
+    const { value: paused } = await bounded(lines.next(), "Screen helper pause", signal);
+    if (paused !== '{"event":"paused","reason":"banner"}') throw new Error("The compositor did not pause the lease.");
+    await new Promise(done => setTimeout(done, 200));
+  }
+  execFileSync("import", ["-window", "root", file]);
+  helper.stdin.end();
+  await bounded(exited, "Screen helper exit", signal);
 }
 
 const stackingIds = text => [...text.matchAll(/0x[0-9a-f]+/gi)].map(match => match[0].toLowerCase());
@@ -186,6 +223,7 @@ async function capture(sha, binary, output, signal) {
     await send("Emulation.setTimezoneOverride", { timezoneId: "UTC" });
     await send("Emulation.setLocaleOverride", { locale: "fr-CA" });
     await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }, { name: "prefers-reduced-motion", value: "reduce" }] });
+    await send("Page.addScriptToEvaluateOnNewDocument", { source: linuxShell(source) });
     await send("Page.navigate", { url: fixture.url });
     const check = async expression => {
       if (browserFailure) throw new Error(browserFailure);
@@ -214,6 +252,12 @@ async function capture(sha, binary, output, signal) {
         await GrokbotPanels.refresh();
         GrokbotPanels.openConversation(conversation.id);
       };
+      window.captureScreenConsent = async () => {
+        await post('/api/screen/bot', {bot_id:'grokbot', enabled:true});
+        GrokbotPanels.openConversation(window.captureConversationId);
+        await GrokbotPanels.refresh();
+        document.querySelector('.screen-button').click();
+      };
     })()`), stage, cancelled.signal);
     await waitFor(() => evaluate(`(async () => {
       await GrokbotPanels.refresh();
@@ -226,6 +270,13 @@ async function capture(sha, binary, output, signal) {
       const style=document.createElement('style'); style.textContent='*,*::before,*::after { animation:none!important; transition:none!important; caret-color:transparent!important; }'; document.head.append(style);`);
     const views = [];
     for (const view of VIEWS) {
+      const file = `${view.id}.png`;
+      if (view.native) {
+        stage = `${view.id} helper`;
+        await overlayCapture(binary, join(output, file), cancelled.signal, cleanup, view.compositor);
+        views.push({ id: view.id, label: view.label, file, renderer: "gtk-screen-helper-xvfb", ...pngInfo(readFileSync(join(output, file))) });
+        continue;
+      }
       stage = `${view.id} readiness`;
       await bounded(evaluate(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); ${view.before ?? ''}; ${view.action}`), stage, cancelled.signal);
       await waitFor(() => check(view.ready), stage, cancelled.signal);
@@ -242,7 +293,6 @@ async function capture(sha, binary, output, signal) {
       if (browserFailure) throw new Error(browserFailure);
       stage = `${view.id} screenshot`;
       const { data } = await send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false });
-      const file = `${view.id}.png`;
       writeFileSync(join(output, file), Buffer.from(data, "base64"), { flag: "wx" });
       views.push({ id: view.id, label: view.label, file, renderer: "chromium-web-fallback", ...pngInfo(readFileSync(join(output, file))) });
     }

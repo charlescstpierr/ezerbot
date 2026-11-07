@@ -70,7 +70,7 @@
         }).then(response => response.json()),
       }),
       unavailablePanels: Object.freeze([
-        'voice-conversation', 'voice-call', 'meetings', 'screen', 'demonstrations',
+        'voice-conversation', 'voice-call', 'meetings', 'demonstrations',
       ]),
       floating: Object.freeze({postMessage: post}),
       settle,

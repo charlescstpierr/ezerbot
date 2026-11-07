@@ -1,0 +1,125 @@
+name: Bundle Linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/workflows/linux-bundle-artifact.yml
+      - tools/build-app-linux.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      CARGO_BUILD_JOBS: '3'
+      CARGO_INCREMENTAL: '0'
+      CARGO_TARGET_DIR: target
+      CARGO_TERM_COLOR: never
+      RUSTC_WRAPPER: ''
+      EZERBOT_BUILD_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Vérifier la source et le toolchain du dépôt
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          rustup show active-toolchain
+      - name: Libérer les SDK inutilisés de la VM éphémère
+        run: sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - name: Installer les dépendances de la coque Linux
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev openbox pulseaudio pulseaudio-utils pipewire pipewire-bin wireplumber libpipewire-0.3-dev libclang-dev
+      - name: Construire le bundle release
+        run: timeout 35m tools/build-app-linux.sh
+      - name: Archiver et vérifier le bundle complet
+        env:
+          DIST: ${{ runner.temp }}/linux-bundle
+        run: |
+          ulimit -f 1048576
+          mkdir -p "$DIST"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import stat
+          import subprocess
+          import tarfile
+
+          bundle = Path('app/build/linux')
+          for name in ('ezerbot-linux', 'grokbot-wrapper', 'Ouvrir Ezerbot.sh'):
+              path = bundle / name
+              if not path.is_file() or not os.access(path, os.X_OK) or path.stat().st_size == 0:
+                  raise SystemExit(f'Exécutable absent ou vide : {name}')
+          entries = {}
+          for path in sorted([bundle, *bundle.rglob('*')]):
+              if path.is_symlink() or not (path.is_dir() or path.is_file()):
+                  raise SystemExit('Le bundle contient un lien ou un fichier spécial')
+              info = path.stat()
+              entry = {'type': 'directory' if path.is_dir() else 'file',
+                       'mode': f'{stat.S_IMODE(info.st_mode):04o}',
+                       'size': 0 if path.is_dir() else info.st_size}
+              if path.is_file():
+                  with path.open('rb') as stream:
+                      entry['sha256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
+              entries[path.relative_to(bundle.parent).as_posix()] = entry
+          if sum(entry['size'] for entry in entries.values()) > 1024 ** 3:
+              raise SystemExit('Le bundle dépasse 1 Gio')
+
+          archive = Path(os.environ['DIST']) / f"ezerbot-linux-x86_64-ubuntu-24.04-{os.environ['SOURCE_SHA']}.tar.gz"
+          subprocess.run(['tar', '--sort=name', '--owner=0', '--group=0', '--numeric-owner',
+                          '-czf', str(archive), '-C', str(bundle.parent), bundle.name], check=True)
+          with tarfile.open(archive, 'r:gz') as packed:
+              members = packed.getmembers()
+              if len(members) != len(entries) or {member.name for member in members} != entries.keys():
+                  raise SystemExit('Le contenu de l’archive diffère du bundle')
+              for member in members:
+                  entry = entries[member.name]
+                  if (member.isdir() != (entry['type'] == 'directory')
+                          or not (member.isdir() or member.isfile())
+                          or member.size != entry['size'] or f'{member.mode:04o}' != entry['mode']):
+                      raise SystemExit(f'Type, taille ou mode différent : {member.name}')
+                  if member.isfile():
+                      with packed.extractfile(member) as stream:
+                          digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                      if digest != entry['sha256']:
+                          raise SystemExit(f'Empreinte différente : {member.name}')
+
+          release = platform.freedesktop_os_release()
+          with archive.open('rb') as stream:
+              archive_sha = hashlib.file_digest(stream, 'sha256').hexdigest()
+          run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          manifest = {'sourceSHA': os.environ['SOURCE_SHA'], 'profile': 'release', 'runUrl': run_url,
+                      'architecture': platform.machine(),
+                      'distribution': {'id': release['ID'], 'version': release['VERSION_ID']},
+                      'archive': {'name': archive.name, 'size': archive.stat().st_size, 'sha256': archive_sha},
+                      'entries': entries}
+          (archive.parent / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+          PY
+          cd "$DIST"
+          sha256sum *.tar.gz manifest.json > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          cat SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+      - name: Conserver le bundle vérifié
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ezerbot-linux-x86_64-ubuntu-24.04-${{ env.SOURCE_SHA }}
+          path: ${{ runner.temp }}/linux-bundle/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

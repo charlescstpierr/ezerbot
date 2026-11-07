@@ -6,6 +6,8 @@ Le rendu utilise le vrai wrapper, son interface compilée et un fournisseur fact
 
 Une étape native complète le pilote. Elle lance la vraie coque GTK de développement avec `EZERBOT_FAKE_SIGNIN=1` dans son propre Xvfb de 1440 × 900 pixels, sous openbox. Elle ouvre une autre fenêtre, envoie le raccourci global et vérifie que le panneau porte `_NET_WM_STATE_ABOVE`. Elle remonte l'autre fenêtre, constate que le panneau reste au-dessus, puis capture tout l'écran avec `import -window root`. Cette vue prouve la coque native, son panneau flottant et son premier plan. Elle ne prouve pas Wayland, dont le compositeur décide du premier plan.
 
+Le pilote injecte `EzerbotShell` avant le chargement, avec la liste de `app/linux/src/local-api.js`. Les vues web montrent donc les textes et les panneaux de Linux. `screen-overlay` lance le vrai `ezerbot-linux --screen-helper` de debug sur le Xvfb des vues web. Sa capture vient de la fenêtre racine. Ce binaire ne contient aucune capture réelle. `screen-overlay-unproven` exige `picom`.
+
 ## Prérequis
 
 La commande exige Linux, Git, Bash, Node avec WebSocket, npm, Rust, Chrome ou Chromium, Xvfb et xauth. Elle utilise aussi `flock` et `setsid`. L'étape native exige en plus openbox, xdotool, xprop et ImageMagick (`import`, `display`, `identify`). Un outil absent fait échouer l'étape avec son nom. Sur la box, Node 20 active WebSocket avec `--experimental-websocket`. Rust doit respecter `rust-toolchain.toml`. Sur la box, placez `/home/box/.cargo/bin` avant `/usr/bin` dans `PATH` pour utiliser rustup et Rust 1.99.1.
@@ -52,6 +54,9 @@ Le registre du pilote fournit ces vues, dans cet ordre. Le viewport est de 1440 
 | `routines-dark` | Dialogue des routines ouvert. |
 | `notifications-dark` | Dialogue ouvert avec la notification de la réponse synthétique. |
 | `conversation-tools-dark` | Tour actif après un vrai outil local : seulement la phrase du bot et « Réfléchit », sans aucune trace d'outil. |
+| `screen-consent-dark` | Carte d'accord du partage d'écran, ouverte dans la conversation synthétique. |
+| `screen-overlay` | Fenêtre racine de Xvfb avec la superposition du bail, au-dessus de Chromium. |
+| `screen-overlay-unproven` | La même fenêtre racine sous `picom` : le bail démarre en pause et le bandeau le dit. |
 | `settings-microphone-dark` | Réglages ouverts sur « Microphone » : la ligne « Microphone par défaut du système » et les micros factices de la fixture. |
 | `floating-panel-native` | Vraie coque native : le panneau flottant ouvert par son raccourci reste au-dessus d'une autre fenêtre remontée. |
 

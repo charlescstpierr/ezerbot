@@ -268,7 +268,7 @@ fn detail(ctx: &Context<'_>, call: &ToolCall) -> String {
             text(args, "content").len()
         ),
         "delegate" => format!("Délégation : {}", text(args, "objective")),
-        name if super::screen::is_tool(name) => format!("Écran du Mac : {name}"),
+        name if super::screen::is_tool(name) => format!("{} : {name}", super::screen::NAME),
         name if name.starts_with("mcp_") => super::mcp::display(ctx, name)
             .map(|label| {
                 format!(

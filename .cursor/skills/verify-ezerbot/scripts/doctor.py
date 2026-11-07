@@ -21,6 +21,7 @@ from verify_lib import (
     repo_root,
     resolve_commit,
     sha256_file,
+    worktree_changes,
 )
 
 
@@ -32,7 +33,28 @@ def check(name: str, passed: bool, detail: str) -> str | None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Contrôle en lecture seule de l'instance")
     parser.add_argument("--evidence", type=Path)
+    parser.add_argument(
+        "--prerequisites",
+        action="store_true",
+        help="Linux : vérifie Xvfb, Chrome, Node, cargo, disque, sans lancer d'instance",
+    )
+    parser.add_argument("--chrome", action="store_true", help="Linux : imprime le Chrome retenu")
+    parser.add_argument("--worktree", action="store_true", help="liste ce qui diffère du commit extrait ; code 1 si non vide")
     args = parser.parse_args()
+    if args.worktree:
+        changes = worktree_changes(repo_root())
+        print("\n".join(changes))
+        raise SystemExit(1 if changes else 0)
+    if args.chrome:
+        chrome = linux_chrome()
+        if not chrome:
+            raise SystemExit("chrome introuvable")
+        print(chrome)
+        raise SystemExit(0)
+    if args.prerequisites:
+        failed = [item for item in linux_prerequisites() if item]
+        print("doctor: echec" if failed else "doctor: ok")
+        raise SystemExit(1 if failed else 0)
     evidence = args.evidence or Path(os_evidence())
     run = load_run(evidence)
     failures: list[str] = []
@@ -54,7 +76,7 @@ def main() -> None:
     binary_ok = bool(digest) and digest == run.get("binary_sha256")
     failures.append(check("binaire", binary_ok, "empreinte inchangée depuis le lancement") or "")
     sources_ok = bool(run.get("sources_clean"))
-    failures.append(check("sources", sources_ok, "crates et interface identiques au commit") or "")
+    failures.append(check("sources", sources_ok, "checkout identique au commit au lancement") or "")
     home = Path(str(run.get("home") or "/"))
     try:
         assert_throwaway(home, "HOME")
@@ -96,6 +118,61 @@ def main() -> None:
         print("doctor: echec")
         raise SystemExit(1)
     print("doctor: ok")
+
+
+MIN_FREE_BYTES = 25 * 1024**3
+
+
+def linux_chrome() -> str | None:
+    """Single Chrome lookup for the Linux path: EZERBOT_VERIFY_CHROME, then CHROME_BIN, then PATH.
+
+    An explicit variable that is not an executable is an error, never a silent fallback.
+    """
+    import os
+    import shutil
+
+    for variable in ("EZERBOT_VERIFY_CHROME", "CHROME_BIN"):
+        value = os.environ.get(variable)
+        if value:
+            return value if os.path.isfile(value) and os.access(value, os.X_OK) else None
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        if found := shutil.which(name):
+            return found
+    return None
+
+
+def linux_prerequisites(repo: Path | None = None) -> list[str]:
+    """Read-only checks for the Xvfb path; each failing check returns its name."""
+    import os
+    import platform
+    import shutil
+    import subprocess
+
+    repo = repo or repo_root()
+    results: list[str | None] = []
+    results.append(check("plateforme", sys.platform.startswith("linux"), platform.system()))
+    for tool in ("git", "xvfb-run", "Xvfb", "xauth", "flock", "setsid", "nice", "node", "npm"):
+        found = shutil.which(tool)
+        results.append(check(tool, bool(found), found or "absent du PATH"))
+    chrome = linux_chrome()
+    results.append(check("chrome", bool(chrome), chrome or "EZERBOT_VERIFY_CHROME/CHROME_BIN invalide, ou google-chrome/chromium absent du PATH"))
+    node_ok, node_detail = False, "node absent"
+    if shutil.which("node"):
+        probe = subprocess.run(
+            ["node", "--experimental-websocket", "-e", "process.exit(typeof WebSocket === 'function' ? 0 : 1)"],
+            capture_output=True,
+            text=True,
+        )
+        version = subprocess.run(["node", "--version"], capture_output=True, text=True).stdout.strip()
+        node_ok, node_detail = probe.returncode == 0, f"{version} WebSocket {'présent' if probe.returncode == 0 else 'absent'}"
+    results.append(check("node-websocket", node_ok, node_detail))
+    pillow = subprocess.run([sys.executable, "-c", "import PIL; print(PIL.__version__)"], capture_output=True, text=True)
+    results.append(check("pillow", pillow.returncode == 0, f"Pillow {pillow.stdout.strip()}" if pillow.returncode == 0 else "Pillow absent (décodage des captures)"))
+    cargo = Path(os.environ.get("EZERBOT_VERIFY_CARGO", Path.home() / ".cargo/bin/cargo")).expanduser()
+    results.append(check("cargo", cargo.is_file() and os.access(cargo, os.X_OK), str(cargo)))
+    free = shutil.disk_usage(repo).free
+    results.append(check("disque", free >= MIN_FREE_BYTES, f"{free // 1024**3} Gio libres sous {repo} (minimum 25)"))
+    return [item for item in results if item]
 
 
 def os_evidence() -> str:

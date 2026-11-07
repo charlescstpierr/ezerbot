@@ -37,7 +37,6 @@ from verify_lib import (
     build_env,
     cargo_binary,
     commit_exists,
-    compiled_sources_clean,
     evidence_dir,
     proc_identity,
     repo_root,
@@ -48,6 +47,7 @@ from verify_lib import (
     session_id,
     sha256_file,
     sign_run_directory,
+    worktree_changes,
 )
 
 
@@ -136,10 +136,10 @@ def main() -> None:
 
 
 def launch_run(args: argparse.Namespace, repo: Path, session: str, evidence: Path) -> None:
-    if not compiled_sources_clean(repo):
+    if changes := worktree_changes(repo):
         raise SystemExit(
-            "refus: crates/, app/ui/, app/web/ ou Cargo.lock diffèrent du commit. "
-            "Le binaire doit correspondre au commit extrait."
+            "refus: le checkout diffère du commit extrait, le binaire ne lui correspondrait pas. "
+            "Committer, ou mettre de côté avec `git stash push -u -m verify`, puis relancer :\n" + "\n".join(changes)
         )
     cargo = cargo_binary()
     if not cargo.is_file():

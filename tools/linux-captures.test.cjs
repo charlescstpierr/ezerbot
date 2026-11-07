@@ -138,7 +138,7 @@ test("view registry matches the documented set and PNG metadata hashes actual by
   bytes.write("IHDR", 12);
   bytes.writeUInt32BE(VIEWPORT.width, 16);
   bytes.writeUInt32BE(VIEWPORT.height, 20);
-  assert.deepEqual(pngInfo(bytes), { width: 1440, height: 900, sha256: createHash("sha256").update(bytes).digest("hex") });
+  assert.deepEqual(pngInfo(bytes), { width: 1440, height: 900, sha256: createHash("sha256").update(bytes).digest("hex"), size: 33 });
   assert.throws(() => pngInfo(Buffer.from("not a PNG")), /not a PNG/);
   bytes.writeUInt32BE(1, 16);
   assert.throws(() => pngInfo(bytes), /dimensions/);
@@ -153,7 +153,7 @@ test("a native view names its renderer and hashes the exact PNG", () => {
   const [view] = NATIVE_VIEWS;
   assert.deepEqual(nativeEntry(view, bytes), {
     id: view.id, label: view.label, file: `${view.id}.png`, renderer: "webkitgtk-native-shell",
-    width: 1440, height: 900, sha256: createHash("sha256").update(bytes).digest("hex"),
+    width: 1440, height: 900, sha256: createHash("sha256").update(bytes).digest("hex"), size: 33,
   });
   bytes.writeUInt32BE(800, 16);
   assert.throws(() => nativeEntry(view, bytes), /dimensions/);

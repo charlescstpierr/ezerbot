@@ -8,6 +8,8 @@ Une étape native complète le pilote. Elle lance la vraie coque GTK de dévelop
 
 Le pilote injecte `EzerbotShell` avant le chargement, avec la liste de `app/linux/src/local-api.js`. Les vues web montrent donc les textes et les panneaux de Linux. `screen-overlay` lance le vrai `ezerbot-linux --screen-helper` de debug sur le Xvfb des vues web. Sa capture vient de la fenêtre racine. Ce binaire ne contient aucune capture réelle. `screen-overlay-unproven` exige `picom`.
 
+La skill `verify-ezerbot` réutilise ce pilote pour sa preuve Linux (`prove-linux.sh`, trois vues et un verdict `PASS`/`FIX`).
+
 ## Prérequis
 
 La commande exige Linux, Git, Bash, Node avec WebSocket, npm, Rust, Chrome ou Chromium, Xvfb et xauth. Elle utilise aussi `flock` et `setsid`. L'étape native exige en plus openbox, xdotool, xprop et ImageMagick (`import`, `display`, `identify`). Un outil absent fait échouer l'étape avec son nom. Sur la box, Node 20 active WebSocket avec `--experimental-websocket`. Rust doit respecter `rust-toolchain.toml`. Sur la box, placez `/home/box/.cargo/bin` avant `/usr/bin` dans `PATH` pour utiliser rustup et Rust 1.99.1.
@@ -66,6 +68,6 @@ Le registre du pilote fournit ces vues, dans cet ordre. Le viewport est de 1440 
 
 `platform` vaut `linux`. `renderer` vaut `chromium-web-fallback` et décrit les vues web. `chrome_version` indique la version réellement interrogée. `viewport` contient `width`, `height` et `device_scale_factor`.
 
-`views` est un tableau ordonné. Chaque entrée contient `id`, `label`, `file`, `renderer`, `sha256`, `width` et `height`. `renderer` vaut `chromium-web-fallback` pour une vue web et `webkitgtk-native-shell` pour la vue native. `file` est le nom relatif du PNG dans le même dossier. `sha256` est l'empreinte hexadécimale SHA-256 des octets du fichier. Une preuve complète contient exactement les vues documentées et tous leurs PNG valides.
+`views` est un tableau ordonné. Chaque entrée contient `id`, `label`, `file`, `renderer`, `sha256`, `size`, `width` et `height`. `renderer` vaut `chromium-web-fallback` pour une vue web et `webkitgtk-native-shell` pour la vue native. L'étape de capture calcule `sha256` et `size` sur les octets qu'elle écrit. `file` est le nom relatif du PNG dans le même dossier. `sha256` est l'empreinte hexadécimale SHA-256 des octets du fichier. Une preuve complète contient exactement les vues documentées et tous leurs PNG valides.
 
 Le script vérifie le SHA annoncé par le wrapper compilé. Il ne publie le nouveau manifeste qu'après la réussite de toutes les vues. Une nouvelle exécution peut avoir une autre date de capture. L'acceptation exige les mêmes vues. Elle ne suppose pas que des versions différentes de Chrome produisent les mêmes pixels.

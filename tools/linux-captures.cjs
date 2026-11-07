@@ -1,7 +1,7 @@
 const { createHash } = require("node:crypto");
 const { execFileSync, spawn, spawnSync } = require("node:child_process");
 const { once } = require("node:events");
-const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { dirname, join, resolve } = require("node:path");
 const { createInterface } = require("node:readline");
@@ -63,7 +63,17 @@ function pngInfo(bytes) {
   const width = bytes.readUInt32BE(16);
   const height = bytes.readUInt32BE(20);
   if (width !== VIEWPORT.width || height !== VIEWPORT.height) throw new Error(`Screenshot dimensions ${width}x${height} differ from the viewport.`);
-  return { width, height, sha256: createHash("sha256").update(bytes).digest("hex") };
+  return { width, height, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length };
+}
+
+// Evaluated in the page: centre of `element` only if it is really clickable, otherwise null.
+function pointerTarget(element) {
+  if (!element || element.disabled || !element.checkVisibility?.({ visibilityProperty: true, opacityProperty: true })) return null;
+  const box = element.getBoundingClientRect();
+  if (!(box.width > 0 && box.height > 0 && box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight)) return null;
+  const x = box.left + box.width / 2;
+  const y = box.top + box.height / 2;
+  return element.contains(document.elementFromPoint(x, y)) ? { x, y } : null;
 }
 
 function linuxShell(source) {
@@ -118,8 +128,7 @@ async function stop(child) {
 }
 
 // The real debug shell under openbox: another window, then the panel opened by its shortcut.
-async function captureNative(shellBinary, output, signal) {
-  const [view] = NATIVE_VIEWS;
+async function captureNative(shellBinary, output, signal, view = NATIVE_VIEWS[0]) {
   const cleanup = [];
   const root = mkdtempSync(join(tmpdir(), "ezcapn."));
   cleanup.push(() => rmSync(root, { recursive: true, force: true }));
@@ -189,7 +198,7 @@ async function captureNative(shellBinary, output, signal) {
   }
 }
 
-async function capture(sha, binary, output, signal) {
+async function capture(sha, binary, output, signal, views = VIEWS, nativeViews = NATIVE_VIEWS) {
   const source = resolve(__dirname, "..");
   if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error("Expected a full lowercase commit SHA.");
   const actual = execFileSync("git", ["-C", source, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -201,6 +210,7 @@ async function capture(sha, binary, output, signal) {
   const relay = () => cancelled.abort();
   signal?.addEventListener("abort", relay, { once: true });
   let stage = "fixture launch";
+  const captured = [];
   try {
     const fixture = await bounded(launchFixture({ after: callback => cleanup.push(callback) }, {
       documents: [], binary, headless: false, navigate: false, viewport: { width: VIEWPORT.width, height: VIEWPORT.height },
@@ -268,42 +278,58 @@ async function capture(sha, binary, output, signal) {
     })()`), stage, cancelled.signal);
     await evaluate(`document.documentElement.dataset.theme='dark';
       const style=document.createElement('style'); style.textContent='*,*::before,*::after { animation:none!important; transition:none!important; caret-color:transparent!important; }'; document.head.append(style);`);
-    const views = [];
-    for (const view of VIEWS) {
+    for (const view of views) {
       const file = `${view.id}.png`;
       if (view.native) {
         stage = `${view.id} helper`;
         await overlayCapture(binary, join(output, file), cancelled.signal, cleanup, view.compositor);
-        views.push({ id: view.id, label: view.label, file, renderer: "gtk-screen-helper-xvfb", ...pngInfo(readFileSync(join(output, file))) });
+        captured.push({ id: view.id, label: view.label, file, renderer: "gtk-screen-helper-xvfb", ...pngInfo(readFileSync(join(output, file))) });
         continue;
       }
       stage = `${view.id} readiness`;
-      await bounded(evaluate(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); ${view.before ?? ''}; ${view.action}`), stage, cancelled.signal);
-      await waitFor(() => check(view.ready), stage, cancelled.signal);
+      await bounded(evaluate(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); ${view.before ?? ""}; ${view.action ?? ""}`), stage, cancelled.signal);
+      // Every element interaction goes through one helper: proven visible (pointerTarget), then a real pointer click.
+      for (const target of [].concat(view.click ?? [])) {
+        await waitFor(() => evaluate(`Boolean((${pointerTarget})(${target}))`), `${view.id} visible target`, cancelled.signal, 5000)
+          .catch(() => { throw new Error(`${view.id} target not visible.`); });
+        const point = await evaluate(`(${pointerTarget})(${target})`);
+        if (!point) throw new Error(`${view.id} target not visible.`);
+        for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: type === "mouseMoved" ? "none" : "left", buttons: type === "mousePressed" ? 1 : 0, clickCount: type === "mouseMoved" ? 0 : 1 });
+      }
+      if (view.after) await bounded(evaluate(view.after), stage, cancelled.signal);
+      const shown = expression => view.visible ? `(${expression}) && (${pointerTarget})(${view.visible})` : expression;
+      await waitFor(() => check(shown(view.ready)), stage, cancelled.signal);
       stage = `${view.id} fonts, images and paint`;
       await bounded(evaluate(`(async () => {
         await document.fonts.ready;
         await Promise.all([...document.images].filter(image => image.getClientRects().length).map(async image => { await image.decode(); if (!image.naturalWidth) throw Error('Image did not decode'); }));
         document.activeElement?.blur();
-        window.scrollTo(0,0); document.querySelectorAll('dialog[open],#chat-scroll,#conversation-list').forEach(element => element.scrollTop=0);
-        ${view.step ?? ''};
+        ${view.keepScroll ? "" : "window.scrollTo(0,0); document.querySelectorAll('dialog[open],#chat-scroll,#conversation-list').forEach(element => element.scrollTop=0);"}
+        ${view.step ?? ""};
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       })()`), stage, cancelled.signal);
-      await waitFor(() => check(view.settled ?? view.ready), `${view.id} after paint`, cancelled.signal);
+      await waitFor(() => check(shown(view.settled ?? view.ready)), `${view.id} after paint`, cancelled.signal);
       if (browserFailure) throw new Error(browserFailure);
       stage = `${view.id} screenshot`;
       const { data } = await send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false });
-      writeFileSync(join(output, file), Buffer.from(data, "base64"), { flag: "wx" });
-      views.push({ id: view.id, label: view.label, file, renderer: "chromium-web-fallback", ...pngInfo(readFileSync(join(output, file))) });
+      const bytes = Buffer.from(data, "base64");
+      // The capture step owns the integrity record: hash and size of the exact bytes it writes.
+      const info = pngInfo(bytes);
+      writeFileSync(join(output, file), bytes, { flag: "wx" });
+      captured.push({ id: view.id, label: view.label, file, renderer: "chromium-web-fallback", ...info });
     }
-    stage = "native panel";
-    views.push(await captureNative(join(dirname(binary), "ezerbot-linux"), output, cancelled.signal));
+    for (const view of nativeViews) {
+      stage = `${view.id} native panel`;
+      captured.push(await captureNative(join(dirname(binary), "ezerbot-linux"), output, cancelled.signal, view));
+    }
     stage = "manifest";
     const version = await send("Browser.getVersion");
-    const manifest = { schema_version: 1, sha, captured_at: new Date().toISOString(), platform: "linux", renderer: "chromium-web-fallback", chrome_version: version.product, viewport: VIEWPORT, views };
+    const manifest = { schema_version: 1, sha, captured_at: new Date().toISOString(), platform: "linux", renderer: "chromium-web-fallback", chrome_version: version.product, viewport: VIEWPORT, views: captured };
     writeFileSync(join(output, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
     return manifest;
   } catch (error) {
+    // Partial manifest: the views already written keep the hash and size recorded at capture time.
+    if (captured.length && !existsSync(join(output, "manifest.json"))) writeFileSync(join(output, "manifest.json"), `${JSON.stringify({ schema_version: 1, sha, complete: false, platform: "linux", viewport: VIEWPORT, views: captured }, null, 2)}\n`, { flag: "wx" });
     throw new Error(`${stage} failed. ${error.message}`, { cause: error });
   } finally {
     cancelled.abort();
@@ -324,4 +350,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { VIEWS, NATIVE_VIEWS, VIEWPORT, bounded, waitFor, pngInfo, stackingIds, hasAbove, nativeEntry, captureNative, capture };
+module.exports = { VIEWS, NATIVE_VIEWS, VIEWPORT, bounded, waitFor, pngInfo, pointerTarget, stackingIds, hasAbove, nativeEntry, captureNative, capture };

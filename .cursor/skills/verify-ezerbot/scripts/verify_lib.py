@@ -260,10 +260,20 @@ def commit_exists(repo: Path, sha: str) -> bool:
     return result.returncode == 0
 
 
-def compiled_sources_clean(repo: Path) -> bool:
-    paths = ["crates", "app/ui", "app/web", "Cargo.toml", "Cargo.lock"]
-    status = git(repo, "status", "--porcelain", "--", *paths, check=False)
-    return status.returncode == 0 and status.stdout.strip() == ""
+# Ignored outputs the proof writes or reinstalls itself; nothing in them is compiled into the wrapper.
+PROOF_OUTPUTS = re.compile(r"(target|artifacts/captures-linux|(.+/)?(node_modules|__pycache__))/")
+
+
+def worktree_changes(repo: Path) -> list[str]:
+    """Every porcelain entry where the checkout differs from HEAD: modified, untracked or ignored.
+
+    No list of compiled paths: build.rs reads whole directories and crates embed files anywhere,
+    so the only exception is PROOF_OUTPUTS. A git failure is itself reported as a change.
+    """
+    status = git(repo, "status", "--porcelain", "--untracked-files=all", "--ignored=matching", check=False)
+    if status.returncode:
+        return [f"git status a échoué : {status.stderr.strip()}"]
+    return [line for line in status.stdout.splitlines() if not (line.startswith("!! ") and PROOF_OUTPUTS.fullmatch(line[3:]))]
 
 
 def sha256_file(path: Path) -> str:

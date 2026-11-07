@@ -1017,11 +1017,16 @@ fn plain_everyone_in_group_learns_without_changing_structured_routing() {
 fn responses_round_trip_recalls_an_old_fact_from_five_hundred_before_answering() {
     let mut f = Fixture::new();
     let c = f.conv("grokbot");
+    let mut old_id = String::new();
     for i in 0..500 {
-        facts::remember(
+        let saved = facts::remember(
             &f.db(),
             &facts::Fact {
-                fact_id: String::new(),
+                fact_id: if i == 499 {
+                    "fact_00000000000000000000000000004317".into()
+                } else {
+                    String::new()
+                },
                 bot_id: "grokbot".into(),
                 scope: Scope::Private,
                 text: if i == 0 {
@@ -1040,6 +1045,9 @@ fn responses_round_trip_recalls_an_old_fact_from_five_hundred_before_answering()
             },
         )
         .unwrap();
+        if i == 0 {
+            old_id = saved.fact_id;
+        }
     }
     {
         let mut seen = f.server.seen.lock().unwrap();
@@ -1058,7 +1066,9 @@ fn responses_round_trip_recalls_an_old_fact_from_five_hundred_before_answering()
         .filter(|b| b["tools"].is_array())
         .collect();
     assert_eq!(chat.len(), 2);
-    assert!(!chat[0].to_string().contains("4317"));
+    let initial = chat[0].to_string();
+    assert!(!initial.contains("port 4317"));
+    assert!(!initial.contains(&old_id));
     assert!(chat[0]["tools"]
         .as_array()
         .unwrap()
@@ -1069,7 +1079,10 @@ fn responses_round_trip_recalls_an_old_fact_from_five_hundred_before_answering()
         .unwrap()
         .iter()
         .any(|i| i["type"] == "function_call_output"
-            && i["output"].as_str().unwrap_or_default().contains("4317")));
+            && i["output"]
+                .as_str()
+                .is_some_and(|output| output.contains(&old_id)
+                    && output.contains("Le projet Boréal utilise le port 4317."))));
     drop(seen);
     assert!(f
         .messages(&c)

@@ -42,31 +42,15 @@ mkdir -p "$bundle"
 install -m 755 "$target_dir/$profile/ezerbot-linux" "$bundle/ezerbot-linux"
 install -m 755 "$target_dir/$profile/grokbot-wrapper" "$bundle/grokbot-wrapper"
 install -m 644 "$project_dir/app/ui/icon-192.png" "$bundle/ezerbot.png"
+install -m 644 "$project_dir/tools/install-app-linux.py" "$bundle/install-app-linux.py"
+install -m 644 "$project_dir/docs/install-linux.md" "$bundle/INSTALLATION.md"
 cat > "$bundle/Ouvrir Ezerbot.sh" <<'LAUNCHER'
 #!/usr/bin/env bash
 set -euo pipefail
 exec "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ezerbot-linux" "$@"
 LAUNCHER
 chmod 755 "$bundle/Ouvrir Ezerbot.sh"
-python3 - "$bundle" <<'PY'
-from pathlib import Path
-import sys
-bundle = Path(sys.argv[1])
-def desktop_value(value):
-    return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-def exec_argument(value):
-    value = str(value).replace("%", "%%")
-    for character in ("\\", '"', "`", "$"):
-        value = value.replace(character, "\\" + character)
-    return desktop_value('"' + value + '"')
-(bundle / "ezerbot.desktop").write_text(
-    "[Desktop Entry]\nType=Application\nName=Ezerbot\n"
-    "Comment=Conversations locales avec Ezerbot\n"
-    f"Exec={exec_argument(bundle / 'ezerbot-linux')}\n"
-    f"Icon={desktop_value(bundle / 'ezerbot.png')}\n"
-    "Terminal=false\nCategories=Utility;\nStartupWMClass=Ezerbot\n",
-    encoding="utf-8",
-)
-PY
-chmod 644 "$bundle/ezerbot.desktop"
-printf 'Application créée : %s\nLancer : "%s/Ouvrir Ezerbot.sh"\n' "$bundle" "$bundle"
+rm -f -- "$bundle/ezerbot.desktop"
+"$bundle/grokbot-wrapper" --register-url-handler "$bundle/ezerbot-linux" "$bundle/ezerbot.png" >/dev/null ||
+  printf 'Les liens ezerbot:// ne sont pas enregistrés sur ce poste.\n' >&2
+printf 'Application créée : %s\nLancer : "%s/Ouvrir Ezerbot.sh"\nInstaller : python3 "%s/install-app-linux.py"\n' "$bundle" "$bundle" "$bundle"

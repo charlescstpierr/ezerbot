@@ -29,6 +29,30 @@ INVENTORY_FAILURES = {
     "unsupported #[path] literal", "unsupported #[path] attribute", "unsupported test attribute",
     "unsupported test item", "unreachable platform module graph",
 }
+RUST_CAUSES = {
+    "assertion-failed": r"assertion(?: `[^`]+`)? failed",
+    "unwrap-error": r"called `Result::unwrap\(\)` on an `Err` value",
+    "permission-denied": r"PermissionDenied|Operation not permitted|Permission denied",
+    "not-found": r"NotFound|No such file or directory",
+    "timeout": r"TimedOut|timed out",
+    "namespace-unavailable": r"bwrap: .*namespace.*(?:[Pp]ermission denied|Operation not permitted)",
+    "disk-full": r"No space left on device",
+}
+
+
+def linux_environment():
+    values = {}
+    for name, path in (
+        ("apparmor_restrict_unprivileged_userns", "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"),
+        ("unprivileged_userns_clone", "/proc/sys/kernel/unprivileged_userns_clone"),
+        ("max_user_namespaces", "/proc/sys/user/max_user_namespaces"),
+    ):
+        try:
+            value = Path(path).read_text().strip()
+            values[name] = int(value) if re.fullmatch(r"[0-9]{1,10}", value) else None
+        except OSError:
+            values[name] = None
+    return values
 
 
 def now():
@@ -94,6 +118,57 @@ def rust_results(raw):
     return counts, failures, bool(summaries)
 
 
+def rust_diagnostics(raw, failures, exit_code):
+    diagnostics = {failure: {"failure": failure, "causes": [], "locations": [], "compiler_codes": []}
+                   for failure in failures}
+    command = {"failure": "rust:command-failed", "causes": [], "locations": [], "compiler_codes": []}
+    tracked = set(git("ls-files", "--", "crates/**/*.rs", "app/linux/**/*.rs").splitlines())
+    target, active = "suite", None
+    compiling, compiler_error = True, False
+    for line in raw.splitlines():
+        running = re.search(r"\bRunning .*\((?:[^()]*[/\\])?([A-Za-z0-9_-]+)-[a-f0-9]+\)", line)
+        doctest = re.fullmatch(r"\s*Doc-tests ([A-Za-z0-9_-]+)\s*", line)
+        if running or doctest:
+            target, active = (running or doctest).group(1), None
+            compiling = False
+        block = re.fullmatch(r"---- (" + SYMBOL + r") (?:stdout|stderr) ----", line)
+        if block:
+            active = diagnostics.get("rust:" + target + ":" + block[1])
+        if line == "failures:" or SUMMARY.match(line):
+            active = None
+        destination = active if active is not None else command
+        if active is not None:
+            destination["causes"].extend(key for key, pattern in RUST_CAUSES.items() if re.search(pattern, line))
+        if compiling:
+            code = re.match(r"error\[(E[0-9]{4})\]:", line)
+            if re.match(r"error(?:\[E[0-9]{4}\])?:", line):
+                compiler_error = True
+            elif re.match(r"warning(?:\[[^\]]+\])?:", line):
+                compiler_error = False
+            if code or line.startswith("error: could not compile "):
+                command["causes"].append("compile-error")
+            if code:
+                command["compiler_codes"].append(code[1])
+            if line.startswith("error: linking with "):
+                command["causes"].append("linker-error")
+            if line.startswith("error: failed to run custom build command for "):
+                command["causes"].append("build-script-failed")
+        location = re.search(r"(?:panicked at |^\s*(?:-->|:::)\s+)([^\n]+?):([0-9]{1,10}):([0-9]{1,10}):?\s*$", line)
+        if location and (active is not None or compiling and compiler_error):
+            path, row, column = location.group(1, 2, 3)
+            path = path.removeprefix(str(ROOT) + "/")
+            if path in tracked:
+                lines = (ROOT / path).read_text().splitlines()
+                if 0 < int(row) <= len(lines) and 0 < int(column) <= len(lines[int(row) - 1]) + 1:
+                    destination["locations"].append(path + ":" + row + ":" + column)
+    if exit_code:
+        diagnostics[command["failure"]] = command
+    for diagnostic in diagnostics.values():
+        for key in ("causes", "locations", "compiler_codes"):
+            diagnostic[key] = sorted(set(diagnostic[key]))
+    return list(diagnostics.values())
+
+
 def node_results(raw, phase, files, macos):
     totals = {key: re.findall(r"^# " + key + r" (\d+)\s*$", raw, re.M)
               for key in ("pass", "fail", "skipped", "tests", "todo", "cancelled")}
@@ -156,6 +231,8 @@ def main():
             raise RuntimeError("expected-sha")
         if args.macos and sys.platform != "darwin" or not args.macos and sys.platform != "linux":
             raise RuntimeError("platform")
+        if not args.macos:
+            report["linux_environment"] = linux_environment()
         git("diff", "--quiet", "HEAD", "--")
         spec = importlib.util.spec_from_file_location("suite_platform_inventory", ROOT / "tools/suite-platform-inventory.py")
         inventory = importlib.util.module_from_spec(spec)
@@ -212,6 +289,8 @@ def main():
                         report["failures"].append("rust:exclusion-mismatch")
                 if outcome["exit_code"] != 0:
                     report["failures"].append(phase + ":command-failed")
+                if phase == "rust":
+                    outcome["diagnostics"] = rust_diagnostics(raw, failures, outcome["exit_code"])
             except Exception:
                 report["failures"].append(phase + ":runner-error")
             save(output, report)

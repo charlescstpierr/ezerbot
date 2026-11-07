@@ -277,6 +277,7 @@ struct BlockedServices {
     provider: Provider,
     path: PathBuf,
     internal: bool,
+    approval: bool,
     cancel: Arc<AtomicBool>,
     started: Sender<()>,
     stopped: Sender<()>,
@@ -326,7 +327,7 @@ impl RunServices for BlockedServices {
             name: "slow".into(),
             description: String::new(),
             schema: json!({"type":"object"}),
-            requires_approval: false,
+            requires_approval: self.approval,
         }]
     }
 
@@ -353,11 +354,30 @@ impl RunServices for BlockedServices {
     }
 
     fn check_approval(&mut self, _: &Connection, _: &Run, _: &ToolCall) -> Result<ApprovalCheck> {
-        panic!("the test tool is not protected")
+        assert!(self.approval, "the test tool is not protected");
+        Ok(ApprovalCheck::Ask)
     }
 
-    fn request_approval(&mut self, _: &Connection, _: &Run, _: &ToolCall) -> Result<SuspendCause> {
-        panic!("the test tool does not request human input")
+    fn request_approval(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        _: &ToolCall,
+    ) -> Result<SuspendCause> {
+        assert!(self.approval, "the test tool does not request human input");
+        assert!(!conn.is_autocommit());
+        self.started.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !self.cancel.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "the watchdog never signalled during the approval request"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        Ok(SuspendCause::HumanInput {
+            id: format!("approval:{}", run.run_id),
+        })
     }
 
     fn is_cancelled(&self, _: &str) -> bool {
@@ -399,6 +419,10 @@ impl BlockedWorker {
     }
 
     fn start_tool(fixture: &Fixture, id: &str, internal: bool) -> Self {
+        Self::start_with(fixture, id, internal, false)
+    }
+
+    fn start_with(fixture: &Fixture, id: &str, internal: bool, approval: bool) -> Self {
         let provider = fixture.provider();
         let lease = provider.watchdog_test_claim_run(id);
         let path = fixture.dir.join("workspace.sqlite");
@@ -416,6 +440,7 @@ impl BlockedWorker {
                 provider,
                 path,
                 internal,
+                approval,
                 cancel: lease.cancel.clone(),
                 started: started_tx,
                 stopped: stopped_tx,
@@ -656,6 +681,32 @@ fn external_tool_is_signalled_while_another_connection_holds_the_writer() {
         "Arrêté : rien ne bougeait depuis 8 min (dernière étape : slow)."
     );
     assert_eq!(f.notification_count("external"), 1);
+}
+
+#[test]
+fn a_watchdog_signal_never_cancels_an_approval_wait_begun_after_its_claim() {
+    let mut f = Fixture::new();
+    f.run("approval", RunStatus::Running);
+    f.tick(0);
+    let worker = BlockedWorker::start_with(&f, "approval", false, true);
+    f.tick(540_000);
+    let progress = worker.finish();
+    assert!(
+        matches!(
+            progress,
+            RunProgress::Suspended(SuspendCause::HumanInput { .. })
+        ),
+        "the worker cancelled a run that began waiting for Charles: {progress:?}"
+    );
+    f.tick(1_200_000);
+    assert_eq!(
+        store::required(&f.conn, "approval").unwrap().status,
+        RunStatus::AwaitingApproval
+    );
+    assert_eq!(f.event_count("approval", RunEventKind::Cancelled), 0);
+    assert!(f.messages("stalled").is_empty());
+    assert_eq!(f.notification_count("approval"), 0);
+    assert_eq!(f.state()["silence"], json!({}));
 }
 
 #[test]

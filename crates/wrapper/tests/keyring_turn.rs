@@ -18,6 +18,19 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Attend les fils de fond du fournisseur avant que le faux serveur et le dossier ne tombent,
+/// y compris pendant l'unwinding d'une assertion qui échoue (CODING_STANDARDS.md).
+struct Settled(Provider);
+impl Drop for Settled {
+    fn drop(&mut self) {
+        match self.0.wait_for_background_work() {
+            Ok(()) => {}
+            Err(message) if std::thread::panicking() => eprintln!("{message}"),
+            Err(message) => panic!("{message}"),
+        }
+    }
+}
+
 #[test]
 fn a_tick_never_fails_a_turn_its_worker_still_owns() {
     let dir = grokbot_test_support::TestDir::new("keyring-turn");
@@ -25,6 +38,7 @@ fn a_tick_never_fails_a_turn_its_worker_still_owns() {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let server = FakeOpenAi::new(seen.clone());
     let provider = Provider::with_endpoints(&db, server.endpoints(), false);
+    let _settled = Settled(provider.clone());
     let mut app = App::open_with(&db, provider.clone()).unwrap();
     let expires = now_ms() / 1000 + 3600;
     std::fs::write(

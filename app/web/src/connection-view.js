@@ -34,7 +34,7 @@ export function signInCardState({ message, isGroup = false, isTask = false, prov
   const group = isGroup || Boolean(message.payload?.turn_id);
   return {
     title: providerConnected ? "Compte ChatGPT connecté" : expired ? "Votre session ChatGPT a expiré" : "Connectez votre compte ChatGPT",
-    copy: signInCopy({ providerConnected, expired, group, isTask }),
+    copy: signInCopy({ providerConnected, expired, group: group || !regenerable(message), isTask }),
     signInLabel: expired ? "Se reconnecter" : "Se connecter",
     showRetry: !group && !isTask && regenerable(message),
     retryDisabled: !providerConnected || !engineConnected,

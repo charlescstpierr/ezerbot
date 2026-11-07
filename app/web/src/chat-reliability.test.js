@@ -285,3 +285,15 @@ test("une réponse que /api/regenerate refuse ne propose ni Réessayer ni Relanc
   assert.equal(replyProblemState(answer).retry, true);
   assert.equal(signInCardState({ message: { ...answer, error_kind: "signin" }, providerConnected: true, engineConnected: true }).showRetry, true);
 });
+
+test("la carte de connexion d’une réponse non relançable dit d’envoyer un nouveau message, avant comme après la reconnexion", () => {
+  const message = { id: "reply-return", role: "assistant", kind: "message", state: "failed", error_kind: "signin", payload: { run_id: "return", regenerable: false } };
+  for (const providerConnected of [false, true]) {
+    const card = signInCardState({ message, providerConnected, engineConnected: true });
+    assert.match(card.copy, /envoyez un nouveau message/i, `connecté=${providerConnected}`);
+    assert.doesNotMatch(card.copy, /réessayez|question est conservée/i, `connecté=${providerConnected}`);
+    assert.equal(card.showRetry, false);
+  }
+  const question = { ...message, payload: { run_id: "question", regenerable: true } };
+  assert.equal(signInCardState({ message: question, providerConnected: true, engineConnected: true }).copy, "Votre question est conservée. Réessayez pour obtenir la réponse.");
+});

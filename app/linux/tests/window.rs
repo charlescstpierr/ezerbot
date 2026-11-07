@@ -1402,6 +1402,19 @@ fn migrated_state(keyring: &grokbot_linux_desktop::testing::Keyring, name: &str)
     home
 }
 
+/// The keyring banner sits right above the composer, which the layout pins to the bottom of the
+/// window: text in that band is the banner, never the welcome cards, the toast or the thread.
+fn banner_shown(screen: &Screen) -> bool {
+    let area = screen.web_area();
+    let band = Rectangle {
+        x: area.x + 360,
+        y: area.y + area.height as i32 - 188,
+        width: 340,
+        height: 30,
+    };
+    screen.text_lines(band) > 0
+}
+
 fn submissions(home: &TestDir) -> i64 {
     Connection::open_with_flags(
         home.join("state").join("ezerbot.sqlite"),
@@ -1456,6 +1469,7 @@ fn a_locked_keyring_shows_the_banner_and_the_window_sends_nothing() {
     screen.press(&["Return"]);
     screen.press(&["Return"]);
     std::thread::sleep(Duration::from_secs(3));
+    assert!(banner_shown(&screen), "the locked banner is not on screen");
     assert_eq!(submissions(&home), 0, "a message was sent while locked");
     let runs: i64 = Connection::open_with_flags(
         home.join("state").join("ezerbot.sqlite"),
@@ -1501,9 +1515,11 @@ fn the_window_follows_the_keyring_and_sends_the_draft_once() {
     screen.press(&["Control_L", "n"]);
     std::thread::sleep(Duration::from_millis(500));
     screen.type_text("un seul envoi malgre le verrou");
+    assert!(!banner_shown(&screen), "a banner showed before the lock");
     keyring.lock();
     screen.press(&["Return"]);
     std::thread::sleep(Duration::from_secs(3));
+    assert!(banner_shown(&screen), "the banner did not follow the lock");
     assert_eq!(submissions(&home), 0, "a message was kept while locked");
     live_shot(&screen, "LIVE_SHOT_LOCKED");
     keyring.unlock();
@@ -1516,6 +1532,7 @@ fn the_window_follows_the_keyring_and_sends_the_draft_once() {
     eprintln!("sent {:?} after the unlock", started.elapsed());
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(submissions(&home), 1, "the draft was sent twice");
+    assert!(!banner_shown(&screen), "the banner stayed after the unlock");
     live_shot(&screen, "LIVE_SHOT_UNLOCKED");
     app.quit();
 }

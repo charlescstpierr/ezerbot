@@ -34,7 +34,7 @@ async function composer() {
   await new Promise((resolve) => setImmediate(resolve));
   panels.register({ id: "attachments", composer: { discard: ({ conversation }) => discarded.push(conversation.id) } });
   removed.length = 0;
-  return { ctx, removed, discarded, mascots, panels, update: () => panels.composerChanged(), ui: { input, send: document.getElementById("send-button"), hint: document.getElementById("composer-hint") },
+  return { ctx, removed, discarded, mascots, panels, update: () => panels.composerChanged(), ui: { input, send: document.getElementById("send-button"), hint: document.getElementById("composer-hint"), banner: document.getElementById("vault-locked") },
     get conversation() { return panels.state.conversations.find((item) => item.id === storage.get("grokbot.selected")); } };
 }
 
@@ -95,4 +95,15 @@ test("a locked keyring blocks new sends but keeps Arrêter usable", async () => 
   c.conversation.kind = "chat"; c.update();
   assert.equal(c.ui.send.dataset.mode, "stop");
   assert.equal(c.ui.send.disabled, false, "the running reply can still be stopped");
+});
+
+test("the keyring banner shows while locked and leaves once unlocked", async () => {
+  const c = await composer(); c.ctx.active = false; c.update();
+  assert.equal(c.panels.openConversation("group"), true);
+  c.panels.state.vault = { locked: true, message: "Déverrouillez votre trousseau pour continuer." }; c.update();
+  assert.equal(c.ui.banner.hidden, false, "the banner is hidden while locked");
+  assert.equal(c.ui.banner.textContent, "Déverrouillez votre trousseau pour continuer.");
+  c.panels.state.vault = { locked: false }; c.update();
+  assert.equal(c.ui.banner.hidden, true, "the banner stayed after the unlock");
+  assert.equal(c.ui.banner.textContent, "");
 });

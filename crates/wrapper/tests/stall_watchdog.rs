@@ -16,7 +16,7 @@ use grokbot_wrapper::{
     },
     App, Provider,
 };
-use rusqlite::{params, Connection, StatementStatus};
+use rusqlite::{params, Connection, OptionalExtension, StatementStatus};
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
@@ -245,6 +245,26 @@ impl Fixture {
             .count()
     }
 
+    fn journal(&self, id: &str) {
+        self.conn
+            .execute(
+                "INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES (?1,'[]',0,'watchdog-test')",
+                [id],
+            )
+            .unwrap();
+    }
+
+    fn journaled_status(&self, id: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT json_extract(entry,'$.status') FROM wrapper_turn_log WHERE run_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    }
+
     fn notification_count(&self, id: &str) -> u32 {
         self.conn
             .query_row(
@@ -280,7 +300,7 @@ struct BlockedServices {
     approval: bool,
     cancel: Arc<AtomicBool>,
     started: Sender<()>,
-    stopped: Sender<()>,
+    stopped: Sender<Instant>,
     release: Receiver<()>,
     calls: Arc<AtomicUsize>,
 }
@@ -299,7 +319,7 @@ impl BlockedServices {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
-        self.stopped.send(()).unwrap();
+        self.stopped.send(Instant::now()).unwrap();
         if !self.internal {
             let _ = self.release.recv();
         }
@@ -408,7 +428,7 @@ impl RunServices for BlockedServices {
 
 struct BlockedWorker {
     release: Option<Sender<()>>,
-    stopped: Receiver<()>,
+    stopped: Receiver<Instant>,
     join: Option<JoinHandle<Result<RunProgress>>>,
     calls: Arc<AtomicUsize>,
 }
@@ -687,10 +707,23 @@ fn external_tool_is_signalled_while_another_connection_holds_the_writer() {
 fn a_watchdog_signal_never_cancels_an_approval_wait_begun_after_its_claim() {
     let mut f = Fixture::new();
     f.run("approval", RunStatus::Running);
+    f.run("plain", RunStatus::Running);
     f.tick(0);
+    f.journal("approval");
+    f.journal("plain");
     let worker = BlockedWorker::start_with(&f, "approval", false, true);
     f.tick(540_000);
     let progress = worker.finish();
+    assert_eq!(
+        f.journaled_status("plain").as_deref(),
+        Some("cancelled"),
+        "a stop the writer applied is journaled"
+    );
+    assert_eq!(
+        f.journaled_status("approval"),
+        None,
+        "a refused stop must not freeze an open turn in the journal"
+    );
     assert!(
         matches!(
             progress,
@@ -707,6 +740,43 @@ fn a_watchdog_signal_never_cancels_an_approval_wait_begun_after_its_claim() {
     assert!(f.messages("stalled").is_empty());
     assert_eq!(f.notification_count("approval"), 0);
     assert_eq!(f.state()["silence"], json!({}));
+}
+
+#[test]
+fn every_stalled_run_is_signalled_before_a_busy_writer_delays_the_first_write() {
+    let mut f = Fixture::new();
+    f.run("first", RunStatus::Running);
+    f.run("second", RunStatus::Running);
+    f.tick(0);
+    let workers = [
+        BlockedWorker::start(&f, "first"),
+        BlockedWorker::start(&f, "second"),
+    ];
+    let other = Connection::open(f.dir.join("workspace.sqlite")).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = Instant::now();
+    f.tick(540_000);
+    for worker in &workers {
+        let signalled = worker
+            .stopped
+            .recv_timeout(Duration::from_secs(3))
+            .expect("each blocked tool must receive the watchdog signal");
+        assert!(
+            signalled.duration_since(started) < Duration::from_secs(2),
+            "a signal waited for another run's write: {:?}",
+            signalled.duration_since(started)
+        );
+    }
+    other.execute_batch("ROLLBACK").unwrap();
+    for worker in workers {
+        assert_eq!(worker.finish(), RunProgress::Ended(TurnEnd::Stopped));
+    }
+    f.tick(555_000);
+    for id in ["first", "second"] {
+        assert_eq!(f.event_count(id, RunEventKind::Cancelled), 1);
+        assert_eq!(f.notification_count(id), 1);
+    }
+    assert_eq!(f.messages("stalled").len(), 2);
 }
 
 #[test]

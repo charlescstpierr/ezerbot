@@ -429,7 +429,7 @@ pub fn record(
         time,
     )?;
     let (notification_id, kind) = match &run.trigger {
-        Trigger::UserMessage { .. } => (id.clone(), "reply"),
+        Trigger::UserMessage { .. } | Trigger::DelegationReturn { .. } => (id.clone(), "reply"),
         Trigger::Delegation { .. } => (id.clone(), "delegation"),
         Trigger::Occurrence { occurrence_id } => (format!("routine:{occurrence_id}"), "routine"),
     };

@@ -911,6 +911,10 @@ pub fn delete_bot(app: &mut App, bot: &str) -> Result<(), ApiError> {
         "UPDATE wrapper_bots SET deleted=1,updated_at=?3 WHERE account_id=?1 AND id=?2",
         params![ACCOUNT, bot, now()],
     )?;
+    super::delegation::invalidate_background(&super::Context {
+        connection: &tx,
+        ..app.feature_context()
+    })?;
     for conversation in &groups {
         tx.execute("UPDATE wrapper_members SET active=0 WHERE account_id=?1 AND conversation_id=?2 AND bot_id=?3",params![ACCOUNT,conversation,bot])?;
         cancel(&app.feature_context(), &tx, conversation, Some(bot))?;

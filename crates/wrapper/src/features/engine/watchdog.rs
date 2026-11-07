@@ -353,10 +353,20 @@ pub(super) fn scan(ctx: &super::super::Context<'_>) -> Result<(), ApiError> {
     let parents = statement
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<HashMap<String, String>>>()?;
-    let stops: Vec<_> = registry
+    let claims: Vec<_> = registry
         .reconcile(&runs, parents, ctx.now_ms)
         .into_iter()
-        .map(|(run, candidate)| stop(ctx, &run, &candidate))
+        .map(|(run, candidate)| claim(ctx, &run, &candidate))
+        .collect();
+    let stops: Vec<_> = claims
+        .into_iter()
+        .map(|claim| {
+            claim.and_then(|run| {
+                run.map_or(Ok(()), |run| {
+                    super::stop_run_if(ctx, &run, TurnEnd::Stopped, stoppable)
+                })
+            })
+        })
         .collect();
     stops.into_iter().collect()
 }
@@ -367,26 +377,31 @@ fn stoppable(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<
         && !has_active_child(conn, &run.run_id)?)
 }
 
-/// The claim is decided on a read so the signal never waits for the writer,
-/// as with /api/stop. The writer only rechecks that no human wait began since.
-fn stop(ctx: &super::super::Context<'_>, run: &Run, candidate: &Watch) -> Result<(), ApiError> {
+/// Decided on reads and signalled at once, as with /api/stop: every claimed run
+/// gets its signal before any write can wait for a busy writer.
+fn claim(
+    ctx: &super::super::Context<'_>,
+    run: &Run,
+    candidate: &Watch,
+) -> Result<Option<Run>, ApiError> {
     let current = store::required(ctx.connection, &run.run_id)?;
     let seq = latest_seq(ctx.connection, &run.run_id)?;
     if !stoppable(ctx.connection, &current)? {
-        return Ok(());
+        return Ok(None);
     }
     if seq != candidate.seq {
         ctx.provider.watchdog().committed(&current, seq);
-        return Ok(());
+        return Ok(None);
     }
     if !ctx
         .provider
         .watchdog()
         .claim(&run.run_id, candidate, seq, ctx.now_ms)
     {
-        return Ok(());
+        return Ok(None);
     }
-    super::stop_run_if(ctx, &current, TurnEnd::Stopped, stoppable)
+    ctx.provider.cancel_run(&run.run_id);
+    Ok(Some(current))
 }
 
 pub fn record(

@@ -1142,9 +1142,10 @@ pub(crate) fn stop_run_if(
     ctx.provider.cancel_run(&run.run_id);
     let mut services = Services::new(ctx)?;
     let ended = store::get(ctx.connection, &run.run_id)?.is_some_and(|r| r.status.is_terminal());
-    run_loop::cancel_if(ctx.connection, &mut services, &run.run_id, end, predicate)?;
-    // Un tour suspendu n'a plus de worker pour l'écrire au journal.
-    if !ended {
+    let stopped = run_loop::cancel_if(ctx.connection, &mut services, &run.run_id, end, predicate)?;
+    // Un tour suspendu n'a plus de worker pour l'écrire au journal. Un arrêt
+    // refusé laisse le tour ouvert : sa fin l'y écrira.
+    if !ended && stopped.status.is_terminal() {
         let _ = super::turns::record(ctx.connection, &run.run_id);
     }
     Ok(())

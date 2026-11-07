@@ -473,7 +473,8 @@ pub const SOURCE_CALL: &str = "SELECT json_extract(payload,'$.arguments') FROM e
 /// Shown when the text a preview was drawn from is lost: nothing in it can be checked.
 const HIDDEN: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 320 144\"><rect width=\"320\" height=\"144\" fill=\"#fff\"/><text x=\"24\" y=\"76\" fill=\"#172033\" font-family=\"Arial,Helvetica,sans-serif\" font-size=\"14\">Aperçu indisponible</text></svg>";
 /// The stored preview is the bot's text once decoded, escaped, wrapped and cut: a secret the
-/// vault learned since no longer matches there. Each text is masked as drawn, then redrawn.
+/// vault learned since no longer matches there, and a phrase memory forgot is still drawn.
+/// Each text of the source is masked as drawn, then redrawn; the stored preview is never served.
 fn preview(conn: &Connection, file: &File) -> Result<String, ApiError> {
     super::disclosure::read(conn, |patterns| {
         if !patterns.covers_file(conn, &file.id)? {
@@ -485,19 +486,7 @@ fn preview(conn: &Connection, file: &File) -> Result<String, ApiError> {
         if request.is_mermaid() {
             return Ok(neutral(&patterns.text(&drawn(&patterns.text(&file.name)))));
         }
-        let mut found = false;
-        let masked = request.masked(|text| {
-            let masked = patterns.text(text);
-            found |= masked != text;
-            masked
-        });
-        if !found {
-            return Ok(conn.query_row(
-                "SELECT preview FROM attachments_generated WHERE id=?1",
-                [&file.id],
-                |r| r.get(0),
-            )?);
-        }
+        let masked = request.masked(|text| patterns.text(text));
         Ok(generation::generate(&masked).map_or_else(|_| HIDDEN.into(), |masked| masked.preview))
     })
 }

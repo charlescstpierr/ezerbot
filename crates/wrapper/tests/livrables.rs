@@ -753,6 +753,35 @@ fn a_mermaid_preview_masks_its_name_as_drawn() {
 }
 
 #[test]
+fn a_preview_is_drawn_from_its_source_once_memory_forgot_a_phrase() {
+    const PHRASE: &str = "souvenir-r15-phrase";
+    let mut f = Fixture::new();
+    let chat = f.chat("alpha");
+    f.call(
+        &chat,
+        "d1",
+        "create_document",
+        json!({"name":"Rapport","format":"md","content":format!("Public : {PHRASE}")}),
+    );
+    let url = link(&mut f, "document");
+    assert!(body(&mut f, "GET", &url, json!(null)).contains(PHRASE));
+    let forgotten = f
+        .db()
+        .execute(
+            "UPDATE engine_run_events SET payload=json_set(payload,'$.arguments.content','Public : [redacted]') WHERE kind='tool_call' AND json_extract(payload,'$.name')='create_document'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(forgotten, 1);
+    let after = body(&mut f, "GET", &url, json!(null));
+    assert!(!after.contains(PHRASE), "{after}");
+    assert!(after.contains("Public : [redacted]"), "{after}");
+    vault(&f, "SOUVENIR", "Secret de test", PHRASE);
+    let after = body(&mut f, "GET", &url, json!(null));
+    assert!(!after.contains(PHRASE), "{after}");
+}
+
+#[test]
 fn a_secret_absent_from_the_text_leaves_the_preview_untouched() {
     let (before, after) = previews("md", "Été à Québec", "font-family");
     assert!(before.contains("font-family="), "{before}");

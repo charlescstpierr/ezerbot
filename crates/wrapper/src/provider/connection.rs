@@ -5,6 +5,7 @@ use super::*;
 #[derive(Clone)]
 pub struct Provider {
     primary: Session,
+    pub(crate) turn_purge: Arc<crate::features::turns::Purge>,
 }
 
 /// Small streamed probe. No output cap: a reasoning model would spend 16 tokens
@@ -35,6 +36,7 @@ impl Provider {
     pub fn new(db: &Path) -> Self {
         Self {
             primary: Session::with_endpoints(db, Endpoints::codex(), true, true),
+            turn_purge: Arc::default(),
         }
     }
 
@@ -47,6 +49,7 @@ impl Provider {
         }
         Self {
             primary: Session::with_endpoints(db, endpoints, open_browser, false),
+            turn_purge: Arc::default(),
         }
     }
 
@@ -58,6 +61,7 @@ impl Provider {
     ) -> Self {
         Self {
             primary: Session::with_endpoints(db, codex, open_browser, true),
+            turn_purge: Arc::default(),
         }
     }
 

@@ -196,15 +196,22 @@ pub(crate) fn finish(db: &Path, run_id: &str, call_id: &str) {
     tasks.remove(&key(db, run_id, call_id));
 }
 
-pub(crate) fn kill_group(pgid: u32) {
+/// SIGKILL to the whole group, sent by this process: no process to launch, so
+/// a full process table cannot refuse it. A group already gone is killed.
+pub(crate) fn kill_group(pgid: u32) -> std::io::Result<()> {
+    let Ok(pgid) = i32::try_from(pgid) else {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    };
     if pgid == 0 {
-        return;
+        return Ok(());
     }
-    let _ = Command::new("/bin/kill")
-        .args(["-KILL", "--", &format!("-{pgid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    match nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(pgid),
+        nix::sys::signal::Signal::SIGKILL,
+    ) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+        Err(error) => Err(std::io::Error::from(error)),
+    }
 }
 
 fn redact_outcome(
@@ -603,7 +610,7 @@ pub(crate) fn startup(conn: &Connection) -> Result<(), ApiError> {
         };
         if let Ok(pgid) = u32::try_from(pgid) {
             if proven_leader(pgid, &leader, &started) {
-                kill_group(pgid);
+                let _ = kill_group(pgid);
             }
         }
     }
@@ -626,7 +633,7 @@ pub(crate) fn shutdown(conn: &Connection, db: &Path) -> Result<(), String> {
     };
     for task in &mine {
         task.stop.store(true, Ordering::SeqCst);
-        kill_group(task.pgid);
+        let _ = kill_group(task.pgid);
     }
     let start = std::time::Instant::now();
     while mine.iter().any(|task| !task.done.load(Ordering::SeqCst))
@@ -678,7 +685,7 @@ pub(crate) fn stop(conn: &Connection, db: &Path, body: &[u8]) -> Result<Value, A
         .map(|task| (task.stop.clone(), task.pgid));
     if let Some((stop, pgid)) = live {
         stop.store(true, Ordering::SeqCst);
-        kill_group(pgid);
+        let _ = kill_group(pgid);
     }
     mark_stopped(conn, Some((&input.run_id, &input.call_id)))?;
     Ok(json!({"status":"arrêtée"}))
